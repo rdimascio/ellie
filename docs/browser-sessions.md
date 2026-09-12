@@ -13,6 +13,14 @@ read or changed by this module. The private browser file contains only SHA-256 c
 server-generated IDs, roles, private device labels, grants, and lifecycle timestamps. Raw invitation
 codes and session tokens are never persisted.
 
+The browser state file must be a regular, single-link file owned by the current user with mode
+`0600`. Its directory must be a real directory owned by the current user with mode `0700`. Reads are
+limited to 1 MiB and reject symbolic links, hard links, other file types, invalid UTF-8, malformed or
+unsupported schemas, and unexpected ownership or permissions. Writes validate the same boundary,
+create a `0600` temporary file with exclusive creation, fsync its contents, atomically rename it over
+the checked state file, and fsync the parent directory. Temporary files are removed after failures
+when possible.
+
 An invitation fixes all authority before it is issued:
 
 - `phone_controller` requires one or more explicit target and capability grants. A browser pairing
@@ -30,7 +38,15 @@ minutes and sessions after 14 days; the exact expiry instant is no longer valid.
 invitations and 128 active sessions are accepted. Expired records are pruned on successful state
 mutations. Pairing consumes one invitation and stores the new session verifier in one serialized
 mutation. The session token is issued only after that state is durably saved. Revocation and logout
-also become visible only after their state update succeeds.
+also become visible only after that state update succeeds. A save can fail after the rename has
+already taken effect, so any reported save failure permanently disables authentication and mutation
+on that in-memory `BrowserAuth` instance. The coordinator must reopen and revalidate the file before
+continuing.
+
+`BrowserAuth` deliberately has no cross-process lock. The future coordinator process must be its only
+writer and must own it under the coordinator's existing lifetime lock. CLI management must go
+through authenticated coordinator routes instead of opening the file as a second writer. Parallel
+file writers and last-write-wins reconciliation are outside this design.
 
 ## Future HTTP boundary
 
@@ -66,7 +82,8 @@ Relevant platform specifications:
 - [RFC 10025: Cookies](https://auth48-transition.rfc-editor.org/authors/rfc10025.html)
 - [RFC 9110: HTTP Semantics](https://www.rfc-editor.org/info/rfc9110/)
 
-Automated tests use only in-memory state and synthetic private directories. They do not start a
-listener, write to `~/.ellie`, access Keychain, install a certificate, contact a phone or TV, or
-execute a desktop action. Trusted HTTPS and session behavior in Safari and a target TV browser remain
-physical acceptance checks for later slices.
+Automated tests use only in-memory state and synthetic private directories. They exercise fsynced
+publication through temporary files and reject unsafe synthetic paths, but do not start a listener,
+write to `~/.ellie`, access Keychain, install a certificate, contact a phone or TV, or execute a
+desktop action. Trusted HTTPS and session behavior in Safari and a target TV browser remain physical
+acceptance checks for later slices.

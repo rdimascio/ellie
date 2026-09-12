@@ -1,15 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  link,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { save } from "@ellie/config";
 import {
   BROWSER_AUTH_FILE,
   BROWSER_INVITATION_TTL_MS,
   BROWSER_SESSION_COOKIE,
   BROWSER_SESSION_TTL_MS,
   BrowserAuth,
+  MAX_BROWSER_AUTH_BYTES,
   MAX_BROWSER_INVITATIONS,
   MAX_BROWSER_SESSIONS,
   browserAuthState,
@@ -31,27 +42,27 @@ const tv: BrowserInvitationSpec = { role: "tv_viewer", label: "Living room TV", 
 function memoryFixture(initial: BrowserAuthState = BrowserAuth.empty()) {
   let now = 1_000;
   let sequence = 1;
-  let fail = false;
+  let failure: "none" | "before" | "after" = "none";
   let persisted = structuredClone(initial);
-  const auth = new BrowserAuth(
-    initial,
-    async (state) => {
-      if (fail) throw new Error("private path and secret must not escape");
-      persisted = structuredClone(state);
-    },
-    {
-      now: () => now,
-      token: () => (sequence++).toString(16).padStart(64, "0"),
-      id: () => `browser-${sequence++}`,
-    },
-  );
+  const persist = async (state: BrowserAuthState) => {
+    if (failure === "before") throw new Error("private path and secret must not escape");
+    persisted = structuredClone(state);
+    if (failure === "after") throw new Error("private path and secret must not escape");
+  };
+  const options = {
+    now: () => now,
+    token: () => (sequence++).toString(16).padStart(64, "0"),
+    id: () => `browser-${sequence++}`,
+  };
+  const auth = new BrowserAuth(initial, persist, options);
   return {
     auth,
+    reopen: () => new BrowserAuth(persisted, persist, options),
     now: (value: number) => {
       now = value;
     },
-    fail: (value: boolean) => {
-      fail = value;
+    fail: (value: "none" | "before" | "after") => {
+      failure = value;
     },
     persisted: () => structuredClone(persisted),
   };
@@ -139,7 +150,7 @@ test("browser invitation and session expiry use closed upper boundaries", async 
 test("pairing persists invitation consumption before issuing a session", async () => {
   const f = memoryFixture();
   const invitation = await f.auth.invite(phone);
-  f.fail(true);
+  f.fail("before");
   await assert.rejects(
     f.auth.pair({ code: invitation.code }),
     (error: Error) =>
@@ -148,11 +159,31 @@ test("pairing persists invitation consumption before issuing a session", async (
   );
   assert.equal(f.persisted().invitations.length, 1);
   assert.equal(f.persisted().sessions.length, 0);
-  f.fail(false);
-  const session = await f.auth.pair({ code: invitation.code });
-  assert.equal(f.auth.authenticate(session.token)?.id, session.client.id);
+  assert.throws(() => f.auth.authenticate(invitation.code), /must be reopened/);
+  f.fail("none");
+  const reopened = f.reopen();
+  const session = await reopened.pair({ code: invitation.code });
+  assert.equal(reopened.authenticate(session.token)?.id, session.client.id);
   assert.equal(f.persisted().invitations.length, 0);
   assert.equal(f.persisted().sessions.length, 1);
+});
+
+test("an uncertain write poisons stale in-memory authorization until reopen", async () => {
+  const f = memoryFixture();
+  const invitation = await f.auth.invite(phone);
+  f.fail("after");
+  await assert.rejects(
+    f.auth.pair({ code: invitation.code }),
+    /Browser authorization state could not be saved/,
+  );
+  assert.equal(f.persisted().invitations.length, 0);
+  assert.equal(f.persisted().sessions.length, 1);
+  assert.throws(() => f.auth.listClients(), /must be reopened/);
+  await assert.rejects(f.auth.invite(phone), /must be reopened/);
+
+  f.fail("none");
+  const reopened = f.reopen();
+  assert.equal(reopened.listClients().length, 1);
 });
 
 test("revocation and logout invalidate sessions only after durable state succeeds", async () => {
@@ -160,22 +191,23 @@ test("revocation and logout invalidate sessions only after durable state succeed
   const first = await f.auth.pair({ code: (await f.auth.invite(phone)).code });
   const second = await f.auth.pair({ code: (await f.auth.invite(tv)).code });
 
-  f.fail(true);
+  f.fail("after");
   await assert.rejects(
     f.auth.revoke(first.client.id),
     (error: Error) =>
       error.message === "Browser authorization state could not be saved." &&
       !error.message.includes("private path"),
   );
-  assert.equal(f.auth.authenticate(first.token)?.id, first.client.id);
-  f.fail(false);
-  assert.equal(await f.auth.revoke(first.client.id), true);
-  assert.equal(f.auth.authenticate(first.token), undefined);
-  assert.equal(await f.auth.revoke(first.client.id), false);
+  assert.throws(() => f.auth.authenticate(first.token), /must be reopened/);
 
-  assert.equal(await f.auth.logout(second.token), true);
-  assert.equal(f.auth.authenticate(second.token), undefined);
-  assert.equal(await f.auth.logout(second.token), false);
+  f.fail("none");
+  const reopened = f.reopen();
+  assert.equal(reopened.authenticate(first.token), undefined);
+  assert.equal(await reopened.revoke(first.client.id), false);
+
+  assert.equal(await reopened.logout(second.token), true);
+  assert.equal(reopened.authenticate(second.token), undefined);
+  assert.equal(await reopened.logout(second.token), false);
 });
 
 test("browser state is versioned, bounded and stores fixed lifetimes", async () => {
@@ -212,7 +244,9 @@ test("browser auth persistence uses its own private file", async () => {
       ["server-cert.pem", "existing pinned certificate"],
     ]);
     for (const [name, value] of existing) await writeFile(join(dir, name), value, { mode: 0o600 });
-    await save(BROWSER_AUTH_FILE, BrowserAuth.empty(), dir);
+    await writeFile(join(dir, BROWSER_AUTH_FILE), JSON.stringify(BrowserAuth.empty()), {
+      mode: 0o600,
+    });
     const auth = await BrowserAuth.open(dir);
     const invitation = await auth.invite(tv);
 
@@ -222,9 +256,50 @@ test("browser auth persistence uses its own private file", async () => {
     const stored = await readFile(join(dir, BROWSER_AUTH_FILE), "utf8");
     assert.doesNotMatch(stored, new RegExp(invitation.code));
     assert.equal(browserAuthState(JSON.parse(stored)).invitations.length, 1);
+    assert.deepEqual(
+      (await readdir(dir)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("browser auth rejects unsafe or oversized private state files", async () => {
+  async function expectUnsafe(setup: (dir: string, path: string) => Promise<void>): Promise<void> {
+    const dir = await mkdtemp(join(tmpdir(), "ellie-browser-unsafe-"));
+    try {
+      const path = join(dir, BROWSER_AUTH_FILE);
+      await setup(dir, path);
+      await assert.rejects(BrowserAuth.open(dir), /could not be opened safely/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  await expectUnsafe(async (_dir, path) => {
+    await writeFile(path, JSON.stringify(BrowserAuth.empty()), { mode: 0o644 });
+  });
+  await expectUnsafe(async (dir, path) => {
+    await writeFile(path, JSON.stringify(BrowserAuth.empty()), { mode: 0o600 });
+    await chmod(dir, 0o755);
+  });
+  await expectUnsafe(async (dir, path) => {
+    const target = join(dir, "target.json");
+    await writeFile(target, JSON.stringify(BrowserAuth.empty()), { mode: 0o600 });
+    await symlink(target, path);
+  });
+  await expectUnsafe(async (dir, path) => {
+    const target = join(dir, "target.json");
+    await writeFile(target, JSON.stringify(BrowserAuth.empty()), { mode: 0o600 });
+    await link(target, path);
+  });
+  await expectUnsafe(async (_dir, path) => {
+    await mkdir(path, { mode: 0o700 });
+  });
+  await expectUnsafe(async (_dir, path) => {
+    await writeFile(path, Buffer.alloc(MAX_BROWSER_AUTH_BYTES + 1), { mode: 0o600 });
+  });
 });
 
 test("browser session cookies are host-only, strict and inaccessible to script", () => {

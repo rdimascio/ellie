@@ -1,5 +1,10 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { load, save } from "@ellie/config";
+import { constants } from "node:fs";
+import { lstat, open, rename, rm } from "node:fs/promises";
+import type { Stats } from "node:fs";
+import { join } from "node:path";
+import { TextDecoder } from "node:util";
+import { stateDir } from "@ellie/config";
 import { capabilities, identifier, record } from "@ellie/protocol";
 import type { Capability } from "@ellie/protocol";
 
@@ -9,6 +14,7 @@ export const BROWSER_INVITATION_TTL_MS = 10 * 60_000;
 export const BROWSER_SESSION_TTL_MS = 14 * 24 * 60 * 60_000;
 export const MAX_BROWSER_INVITATIONS = 32;
 export const MAX_BROWSER_SESSIONS = 128;
+export const MAX_BROWSER_AUTH_BYTES = 1024 * 1024;
 export const BROWSER_SESSION_COOKIE = "__Host-ellie-session";
 
 export type BrowserRole = "phone_controller" | "tv_viewer";
@@ -62,6 +68,7 @@ const TOKEN_PATTERN = /^[a-f0-9]{64}$/;
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_LABEL_CODE_POINTS = 64;
 const MAX_GRANTS = 16;
+const decoder = new TextDecoder("utf-8", { fatal: true });
 
 const newToken = (): string => randomBytes(32).toString("hex");
 const hash = (token: string): string => createHash("sha256").update(token).digest("hex");
@@ -189,6 +196,117 @@ export function browserAuthState(value: unknown): BrowserAuthState {
   return { version: BROWSER_AUTH_VERSION, invitations, sessions };
 }
 
+function browserStateError(action: "opened" | "saved"): Error {
+  return new Error(
+    `Browser authorization state could not be ${action} safely. Stop Ellie, preserve the file for diagnosis, and restore a supported private copy or move it aside before restarting.`,
+  );
+}
+
+function assertPrivateStat(stat: Stats, kind: "directory" | "file"): void {
+  const expectedMode = kind === "directory" ? 0o700 : 0o600;
+  if (
+    stat.isSymbolicLink() ||
+    (kind === "directory" ? !stat.isDirectory() : !stat.isFile()) ||
+    (stat.mode & 0o777) !== expectedMode ||
+    (process.getuid && stat.uid !== process.getuid()) ||
+    (kind === "file" && stat.nlink !== 1)
+  )
+    throw new Error("private state check failed");
+}
+
+async function privateStatePath(
+  dir: string,
+): Promise<{ directory: Stats; path: string; file: Stats }> {
+  const directory = await lstat(dir);
+  assertPrivateStat(directory, "directory");
+  const path = join(dir, BROWSER_AUTH_FILE);
+  const file = await lstat(path);
+  assertPrivateStat(file, "file");
+  if (file.size > MAX_BROWSER_AUTH_BYTES) throw new Error("private state is oversized");
+  return { directory, path, file };
+}
+
+async function boundedRead(path: string, expected: Stats): Promise<string> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const actual = await handle.stat();
+    assertPrivateStat(actual, "file");
+    if (
+      actual.dev !== expected.dev ||
+      actual.ino !== expected.ino ||
+      actual.size > MAX_BROWSER_AUTH_BYTES
+    )
+      throw new Error("private state changed while opening");
+    const bytes = Buffer.allocUnsafe(MAX_BROWSER_AUTH_BYTES + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const result = await handle.read(bytes, offset, bytes.length - offset, null);
+      if (result.bytesRead === 0) break;
+      offset += result.bytesRead;
+    }
+    if (offset > MAX_BROWSER_AUTH_BYTES) throw new Error("private state is oversized");
+    return decoder.decode(bytes.subarray(0, offset));
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function readBrowserAuthState(dir = stateDir): Promise<BrowserAuthState> {
+  try {
+    const checked = await privateStatePath(dir);
+    return browserAuthState(JSON.parse(await boundedRead(checked.path, checked.file)));
+  } catch {
+    throw browserStateError("opened");
+  }
+}
+
+export async function writeBrowserAuthState(
+  value: BrowserAuthState,
+  dir = stateDir,
+): Promise<void> {
+  let temp: string | undefined;
+  try {
+    const state = browserAuthState(value);
+    const checked = await privateStatePath(dir);
+    const encoded = Buffer.from(`${JSON.stringify(state, null, 2)}\n`);
+    if (encoded.length > MAX_BROWSER_AUTH_BYTES) throw new Error("private state is oversized");
+    temp = join(dir, `.${BROWSER_AUTH_FILE}.${randomBytes(8).toString("hex")}.tmp`);
+    const handle = await open(
+      temp,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.chmod(0o600);
+      await handle.writeFile(encoded);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temp, checked.path);
+    temp = undefined;
+    const published = await lstat(checked.path);
+    assertPrivateStat(published, "file");
+    const directoryHandle = await open(dir, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const actualDirectory = await directoryHandle.stat();
+      assertPrivateStat(actualDirectory, "directory");
+      if (
+        actualDirectory.dev !== checked.directory.dev ||
+        actualDirectory.ino !== checked.directory.ino
+      )
+        throw new Error("private directory changed while saving");
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+  } catch {
+    throw browserStateError("saved");
+  } finally {
+    if (temp) await rm(temp, { force: true }).catch(() => {});
+  }
+}
+
 function publicClient(value: StoredBrowserCredential): BrowserClient {
   return {
     id: value.id,
@@ -232,6 +350,7 @@ export class BrowserAuth {
   private readonly now: () => number;
   private readonly token: () => string;
   private readonly id: () => string;
+  private poisoned = false;
   private lock: Promise<void> = Promise.resolve();
 
   constructor(
@@ -251,9 +370,14 @@ export class BrowserAuth {
   }
 
   static async open(dir?: string): Promise<BrowserAuth> {
-    return new BrowserAuth(await load<unknown>(BROWSER_AUTH_FILE, dir), (state) =>
-      save(BROWSER_AUTH_FILE, state, dir),
+    return new BrowserAuth(await readBrowserAuthState(dir), (state) =>
+      writeBrowserAuthState(state, dir),
     );
+  }
+
+  private assertUsable(): void {
+    if (this.poisoned)
+      throw new Error("Browser authorization state must be reopened after a failed save.");
   }
 
   private async mutate<T>(fn: () => Promise<T>): Promise<T> {
@@ -264,6 +388,7 @@ export class BrowserAuth {
     });
     await previous;
     try {
+      this.assertUsable();
       return await fn();
     } finally {
       release();
@@ -274,6 +399,7 @@ export class BrowserAuth {
     try {
       await this.persist(state);
     } catch {
+      this.poisoned = true;
       throw new Error("Browser authorization state could not be saved.");
     }
   }
@@ -300,6 +426,7 @@ export class BrowserAuth {
   }
 
   async invite(value: unknown): Promise<BrowserInvitation> {
+    this.assertUsable();
     const spec = browserInvitationSpec(value);
     return this.mutate(async () => {
       const now = this.now();
@@ -322,6 +449,7 @@ export class BrowserAuth {
   }
 
   async pair(value: unknown): Promise<BrowserSessionIssue> {
+    this.assertUsable();
     const code = pairingCode(value);
     return this.mutate(async () => {
       const now = this.now();
@@ -351,6 +479,7 @@ export class BrowserAuth {
   }
 
   authenticate(token: unknown): BrowserClient | undefined {
+    this.assertUsable();
     if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) return undefined;
     const tokenHash = hash(token);
     const now = this.now();
@@ -361,15 +490,18 @@ export class BrowserAuth {
   }
 
   authenticateCookie(header?: string | string[]): BrowserClient | undefined {
+    this.assertUsable();
     return this.authenticate(browserSessionToken(header));
   }
 
   listClients(): BrowserClient[] {
+    this.assertUsable();
     const now = this.now();
     return this.state.sessions.filter((item) => item.expiresAt > now).map(publicClient);
   }
 
   async revoke(id: unknown): Promise<boolean> {
+    this.assertUsable();
     const checkedId = identifier(id);
     return this.mutate(async () => {
       const current = pruned(this.state, this.now());
@@ -384,6 +516,7 @@ export class BrowserAuth {
   }
 
   async logout(token: unknown): Promise<boolean> {
+    this.assertUsable();
     if (typeof token !== "string" || !TOKEN_PATTERN.test(token)) return false;
     return this.mutate(async () => {
       const current = pruned(this.state, this.now());
