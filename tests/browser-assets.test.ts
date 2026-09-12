@@ -63,6 +63,7 @@ test("asset loader fails closed on traversal, missing dependencies, malformed or
     "writable-file",
     "writable-directory",
     "unknown-type",
+    "inherited-type",
   ] as const) {
     const f = await fixture();
     try {
@@ -83,9 +84,11 @@ test("asset loader fails closed on traversal, missing dependencies, malformed or
       } else if (kind === "writable-directory") {
         await chmod(join(f.dir, "assets"), 0o777);
       } else {
-        f.manifest["pair/index.html"].file = "assets/private-123.json";
+        const name =
+          kind === "inherited-type" ? "assets/private-123.constructor" : "assets/private-123.json";
+        f.manifest["pair/index.html"].file = name;
         await writeFile(join(f.dir, ".vite/manifest.json"), JSON.stringify(f.manifest));
-        await writeFile(join(f.dir, "assets/private-123.json"), "{}");
+        await writeFile(join(f.dir, name), "{}");
       }
       await assert.rejects(loadBrowserAssets(f.dir), {
         message: "Pairing page is unavailable. Run bun run demo:build and restart the coordinator.",

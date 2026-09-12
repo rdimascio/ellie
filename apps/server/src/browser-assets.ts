@@ -116,8 +116,9 @@ export async function loadBrowserAssets(build = DEFAULT_BUILD): Promise<BrowserA
     ]);
     let total = html.length;
     for (const name of names) {
-      const contentType = types[name.split(".").at(-1)!];
-      if (!contentType) throw new Error();
+      const extension = name.split(".").at(-1)!;
+      if (!Object.hasOwn(types, extension)) throw new Error();
+      const contentType = types[extension]!;
       const body = await boundedFile(join(build, name), MAX_FILE);
       total += body.length;
       if (total > MAX_TOTAL) throw new Error();
