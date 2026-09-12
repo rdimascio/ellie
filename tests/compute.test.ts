@@ -16,7 +16,7 @@ import type { ComputeCapabilities, NodeInfo, Telemetry } from "@ellie/protocol";
 import { fixture } from "./helpers.ts";
 import { LocalInferenceWorker } from "../apps/node/src/inference.ts";
 import { runNode } from "../apps/node/src/index.ts";
-import { batteryState } from "../apps/node/src/telemetry.ts";
+import { batteryState, memoryForAdmission } from "../apps/node/src/telemetry.ts";
 
 const GiB = 1024 ** 3;
 const compute: ComputeCapabilities = {
@@ -163,6 +163,21 @@ test("compute protocol validates metrics and preserves old configs; only local r
     batteryPercent: null,
   });
   assert.deepEqual(batteryState("unavailable"), { source: "unknown", batteryPercent: null });
+});
+
+test("macOS memory admission uses bounded native availability and fails closed to free pages", () => {
+  assert.equal(memoryForAdmission({ availableMemoryBytes: 6 * GiB }, GiB, 16 * GiB), 6 * GiB);
+  assert.equal(memoryForAdmission({ availableMemoryBytes: 0 }, GiB, 16 * GiB), 0);
+  for (const nativeHealth of [
+    {},
+    null,
+    { availableMemoryBytes: -1 },
+    { availableMemoryBytes: 20 * GiB },
+    { availableMemoryBytes: 1.5 },
+    { availableMemoryBytes: "6 GiB" },
+  ]) {
+    assert.equal(memoryForAdmission(nativeHealth, GiB, 16 * GiB), GiB);
+  }
 });
 
 test("server reserves different workers for concurrent inference, preserves authorization and refuses busy pool", async () => {
