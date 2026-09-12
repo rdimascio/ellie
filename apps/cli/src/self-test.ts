@@ -1,5 +1,6 @@
-import { capabilities, identifier, record, result, string } from "@ellie/protocol";
+import { capabilities, identifier, record, string } from "@ellie/protocol";
 import type { Capability, Result } from "@ellie/protocol";
+import { coordinatorResult } from "./errors.ts";
 
 interface TestClient {
   call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
@@ -122,6 +123,7 @@ export async function runServiceTest(
   client: TestClient,
   options: ServiceTestOptions,
   now = Date.now(),
+  lifecycle: { submit?: () => void; settle?: () => void } = {},
 ): Promise<{ nodeId: string; result?: Result; lines: string[] }> {
   const nodes = await client.call("GET", "/v1/nodes");
   const selected = selectExecutionNode(nodes, options.nodeId, now);
@@ -133,12 +135,14 @@ export async function runServiceTest(
     lines.push("INFO Read-only test complete; no job or desktop action was submitted.");
     return { nodeId: selected.id, lines };
   }
-  const outcome = result(
+  lifecycle.submit?.();
+  const outcome = coordinatorResult(
     await client.call("POST", "/v1/commands", {
       nodeId: selected.id,
       text: `open app ${options.desktopApp}`,
     }),
   );
+  lifecycle.settle?.();
   if (!outcome.ok) throw new Error(`Desktop service test failed: ${outcome.message}`);
   lines.push(`PASS Desktop job completed: ${outcome.message}`);
   return { nodeId: selected.id, result: outcome, lines };

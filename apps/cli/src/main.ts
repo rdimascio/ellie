@@ -7,14 +7,13 @@ import {
   stateDir,
   ensureState,
   save,
-  load,
   defaults,
   serverConfig,
   nodeConfig,
   serverUrl,
   Keychain,
 } from "@ellie/config";
-import { identifier, jobMetadata, record, string, result } from "@ellie/protocol";
+import { identifier, jobMetadata, record, string } from "@ellie/protocol";
 import { Client, discoverCertificate, fingerprint } from "@ellie/transport";
 import { MacOSExecutor } from "@ellie/macos";
 import { Auth, newToken } from "../../server/src/auth.ts";
@@ -34,10 +33,12 @@ import {
   selectExecutionNode,
   serviceTestOptions,
 } from "./self-test.ts";
+import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
 let serviceLog: ServiceLog | undefined;
+let commandOutcomeMayBeUnknown = false;
 async function exists(name: string): Promise<boolean> {
   try {
     await access(join(stateDir, name));
@@ -67,7 +68,7 @@ async function ask(prompt: string, secret = false): Promise<string> {
   }
 }
 async function controller(): Promise<Client> {
-  const config = serverConfig(await load("server.json"));
+  const config = serverConfig(await privateConfig("server.json"));
   return new Client(
     `https://127.0.0.1:${config.port}`,
     await readFile(join(stateDir, "server-cert.pem"), "utf8"),
@@ -105,7 +106,15 @@ async function main(): Promise<void> {
           `Desktop test requested: Ellie will open the allowed app “${options.desktopApp}” on the selected node.`,
         );
       await withController(async (client) => {
-        const report = await runServiceTest(client, options);
+        const report = await runServiceTest(client, options, Date.now(), {
+          submit: () => {
+            commandOutcomeMayBeUnknown = true;
+          },
+          settle: () => {
+            commandOutcomeMayBeUnknown = false;
+          },
+        });
+        commandOutcomeMayBeUnknown = false;
         report.lines.forEach((line) => console.log(line));
       });
       return;
@@ -170,7 +179,7 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "server" && args[1] === "start") {
-    const config = serverConfig(await load("server.json"));
+    const config = serverConfig(await privateConfig("server.json"));
     const cert = await readFile(join(stateDir, "server-cert.pem"), "utf8");
     const jobStore = new JobStore(join(stateDir, "jobs.sqlite"));
     let app: ReturnType<typeof createEllieServer> | undefined;
@@ -249,7 +258,7 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "node" && args[1] === "start") {
-    const config = nodeConfig(await load("node.json"));
+    const config = nodeConfig(await privateConfig("node.json"));
     const client = new Client(
       config.serverUrl,
       await readFile(join(stateDir, "node-server-cert.pem"), "utf8"),
@@ -324,9 +333,11 @@ async function main(): Promise<void> {
     await withController(async (client) => {
       const interrupt = interruptSignal();
       try {
-        const response = result(
+        commandOutcomeMayBeUnknown = true;
+        const response = coordinatorResult(
           await client.call("POST", "/v1/inference", { model, prompt }, interrupt),
         );
+        commandOutcomeMayBeUnknown = false;
         console.log(response.message);
         if (!response.ok) process.exitCode = 1;
       } finally {
@@ -344,7 +355,7 @@ async function main(): Promise<void> {
       words = args.slice(3);
       client = await controller();
     } else if (implicitSayTarget(await exists("server.json")) === "node") {
-      const config = nodeConfig(await load("node.json"));
+      const config = nodeConfig(await privateConfig("node.json"));
       nodeId = config.id;
       words = args.slice(1);
       client = new Client(
@@ -359,7 +370,8 @@ async function main(): Promise<void> {
     }
     const interrupt = interruptSignal();
     try {
-      const response = result(
+      commandOutcomeMayBeUnknown = true;
+      const response = coordinatorResult(
         await client.call(
           "POST",
           "/v1/commands",
@@ -367,6 +379,7 @@ async function main(): Promise<void> {
           interrupt,
         ),
       );
+      commandOutcomeMayBeUnknown = false;
       console.log(response.message);
       if (!response.ok) process.exitCode = 1;
     } finally {
@@ -390,17 +403,6 @@ main().catch((error) => {
     process.exitCode = 1;
     return;
   }
-  const code = (error as NodeJS.ErrnoException).code;
-  console.error(
-    code === "ENOENT"
-      ? "Private configuration is missing. Run server init or node pair first."
-      : error instanceof SyntaxError
-        ? "Private configuration is invalid JSON. Review the local configuration file."
-        : code
-          ? "Could not access a required local resource. Run doctor for diagnostics."
-          : error instanceof Error
-            ? error.message
-            : "Ellie could not complete the request.",
-  );
+  console.error(cliErrorMessage(error, commandOutcomeMayBeUnknown));
   process.exitCode = 1;
 });

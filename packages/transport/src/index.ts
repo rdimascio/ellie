@@ -4,6 +4,15 @@ import { X509Certificate, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { OPERATION_REGISTRY, VERSION } from "@ellie/protocol";
 
+export class TransportError extends Error {
+  readonly code: "ELLIE_TRANSPORT_TIMEOUT" | "ELLIE_INVALID_RESPONSE";
+  constructor(code: "ELLIE_TRANSPORT_TIMEOUT" | "ELLIE_INVALID_RESPONSE", message: string) {
+    super(message);
+    this.name = "TransportError";
+    this.code = code;
+  }
+}
+
 export function fingerprint(cert: string | Buffer): string {
   return new X509Certificate(cert).fingerprint256;
 }
@@ -102,7 +111,13 @@ export class Client {
         ? AbortSignal.any([options.signal, deadline.signal])
         : deadline.signal;
       const timer = setTimeout(
-        () => deadline.abort(new Error("Server request exceeded its absolute deadline.")),
+        () =>
+          deadline.abort(
+            new TransportError(
+              "ELLIE_TRANSPORT_TIMEOUT",
+              "Server request exceeded its absolute deadline.",
+            ),
+          ),
         options.timeoutMs ?? 40_000,
       );
       const settle = <T>(callback: (value: T) => void, value: T): void => {
@@ -137,12 +152,22 @@ export class Client {
                 );
               else settle(resolve, value);
             },
-            (error) => settle(reject, error),
+            (error) =>
+              settle(
+                reject,
+                error instanceof SyntaxError ||
+                  (error instanceof Error && error.message === "Request body too large.")
+                  ? new TransportError(
+                      "ELLIE_INVALID_RESPONSE",
+                      "The coordinator returned an invalid response.",
+                    )
+                  : error,
+              ),
           );
         },
       );
       req.setTimeout(options.timeoutMs ?? 40_000, () =>
-        req.destroy(new Error("Server request timed out. Check job status before repeating it.")),
+        req.destroy(new TransportError("ELLIE_TRANSPORT_TIMEOUT", "Server request timed out.")),
       );
       req.on("error", (error) =>
         settle(
@@ -152,8 +177,9 @@ export class Client {
                 "Request cancelled. A native side effect that already started may still finish; cancellation does not undo it.",
               )
             : deadline.signal.aborted
-              ? new Error(
-                  "Server request exceeded its absolute deadline. Check job status before repeating it.",
+              ? new TransportError(
+                  "ELLIE_TRANSPORT_TIMEOUT",
+                  "Server request exceeded its absolute deadline.",
                 )
               : error,
         ),
