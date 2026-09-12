@@ -419,8 +419,18 @@ export function createEllieServer(options: {
           if (identity.role === "node" && identity.id !== target)
             return send(res, 403, { error: "Nodes can only control themselves." });
           const node = sessions.get(target);
-          if (!node || Date.now() - node.info.lastSeen > 60_000)
-            return send(res, 409, { error: "Node is offline. Start its agent." });
+          if (!node) {
+            const paired = auth.hasNode(target);
+            return send(res, paired ? 409 : 404, {
+              error: paired
+                ? "Node is paired but offline. Start its node service."
+                : "Unknown node ID. Run `bun run ellie nodes` and use the exact ID shown there.",
+            });
+          }
+          if (Date.now() - node.info.lastSeen > 60_000)
+            return send(res, 409, {
+              error: "Node is registered but offline or stale. Start its node service.",
+            });
           if (node.pending)
             return send(res, 409, { error: "Node is busy. Wait for the current command." });
           const plan = route(string(body.text, 500), node.context, options.preferences);

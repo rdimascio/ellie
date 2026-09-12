@@ -43,7 +43,23 @@ bun run ellie service uninstall node
 
 `doctor` retains the original native-tool check. `doctor coordinator` and `doctor node` additionally check private configuration permissions, certificate dates, existing Keychain access, helper signature, GUI and LaunchAgent state, pinned authenticated reachability, and the node's registration freshness. Optional local model availability is a warning and does not fail a working desktop node. Unlock the login Keychain and allow the existing helper if macOS requests access. A terminal's successful Accessibility check does not establish permission for launchd: verify a harmless desktop command through the running service on each execution Mac and grant the service's responsible executable if System Settings requires it.
 
-`nodes` lists registered node processes. A coordinator-only Mac does not appear in that list: a MacBook coordinator and one Mac mini node should produce one entry. `doctor node` reports terminal helper tools separately from registered node tools and fails when a desktop-enabled node has not advertised all four capabilities. If the terminal sees window tools but the node advertises only app/URL opening, check that `~/.ellie/bin/ellie-macos` is enabled in the execution Mac's Accessibility settings, then stop/start the node service to refresh its registration. If the mismatch persists, the LaunchAgent's Accessibility context still needs investigation; the terminal result alone is not a service acceptance pass.
+From the coordinator Mac, use the read-only readiness test after starting both services:
+
+```sh
+bun run ellie service test
+```
+
+This checks the coordinator's pinned authenticated endpoint and confirms that one fresh node registration advertises desktop app control. It does not submit a job or run a desktop action. Ellie selects the node automatically only when exactly one eligible node is online. If several are online, copy an exact ID from `bun run ellie nodes` and pass `--node ACTUAL_ID`; do not type the documentation placeholder literally.
+
+Testing the complete job/result path requires an explicit desktop opt-in and an explicit app name. This example opens Arc:
+
+```sh
+bun run ellie service test --node ACTUAL_ID --desktop --app Arc
+```
+
+Omit `--node ACTUAL_ID` when exactly one eligible node is online. The command prints the desktop effect before submitting it. Because the read-only check uses current registrations, an explicit ID absent from that list is reported conservatively as unknown or not currently registered; it cannot distinguish a paired offline node without submitting work. When a real command is submitted, the coordinator uses persisted pairing state to distinguish an unknown ID from a paired offline node, and reports stale registered nodes separately. The ordinary `say` command uses the same single-node selection whenever `server.json` exists, even if that Mac also retains a `node.json`; a node-only Mac targets its own paired identity. Use `say --node ACTUAL_ID` when several execution nodes are online.
+
+`nodes` lists registered node processes. A coordinator-only Mac does not appear in that list: a MacBook coordinator and one Mac mini node should produce one entry. `doctor node` reports terminal helper tools separately from registered node tools and fails when a desktop-enabled node service has not advertised all four capabilities. A terminal that sees fewer tools produces a warning when the fresh service registration has all four because the running service registration controls background commands. If the terminal sees window tools but the node advertises only app/URL opening, check that `~/.ellie/bin/ellie-macos` is enabled in the execution Mac's Accessibility settings, then stop/start the node service to refresh its registration. If the mismatch persists, the LaunchAgent's Accessibility context still needs investigation; the terminal result alone is not a service acceptance pass.
 
 For this source-checkout installation, macOS can list the LaunchAgent's Node.js runtime as **node** in Accessibility. If the helper is enabled but that runtime entry is disabled, enable the runtime used by this service and stop/start the node again. The installed runtime path can be inspected locally with `/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' ~/Library/LaunchAgents/org.ellie.assistant.node.plist`. This grant applies to that Node executable, including other code run through it; a dedicated Ellie application identity remains part of signed distribution work. Confirm the service's registered capabilities before accepting window control as working.
 
@@ -59,7 +75,7 @@ The node owns network recovery; the plist deliberately has no network-dependent 
 
 ## Validation record and acceptance
 
-Automated tests use synthetic private directories, injected launchctl results, synthetic certificates, fake Keychain access, and fake capabilities. They check lifecycle idempotency, persistent disable/enable, missing GUI sessions, failed stops, unmanaged files, permissions, log rotation/redaction, optional-model warnings, and stale nodes. These tests do not grant Accessibility or execute native desktop actions.
+Automated tests use synthetic private directories, injected launchctl results, synthetic certificates, fake Keychain access, fake capabilities, and fake coordinator responses. They check lifecycle idempotency, persistent disable/enable, missing GUI sessions, failed stops, unmanaged files, permissions, log rotation/redaction, optional-model warnings, stale nodes, automatic single-node selection, placeholder rejection, and the read-only/desktop-test boundary. These tests do not grant Accessibility, contact a physical second Mac, submit a live job, or execute native desktop actions.
 
 `bun run smoke:services` (Node 24 on macOS) uses a uniquely named, inert temporary LaunchAgent to verify the generated plist, GUI startup, relaunch after SIGKILL, and removal with bootout. It does not use `~/.ellie`, Keychain, the real service labels, or native actions. This smoke passed on macOS 26.6.2 with Node 24.21.0 and Bun 1.4.2. It proves the launchd process policy, not household service acceptance.
 
