@@ -229,3 +229,21 @@ test("command target errors distinguish unknown IDs from paired offline nodes", 
     await f.close();
   }
 });
+
+test("explicit app grammar never falls through to a matching site alias", async () => {
+  const f = await fixture();
+  try {
+    const node = await f.pair("explicit-app");
+    await node.call("POST", "/v1/register", { capabilities: [...CAPABILITIES] });
+    const response = record(
+      await f.controller.call("POST", "/v1/commands", {
+        nodeId: "explicit-app",
+        text: "open app Netflix",
+      }),
+    );
+    assert.equal(response.ok, false);
+    assert.deepEqual(await f.controller.call("GET", "/v1/jobs"), []);
+  } finally {
+    await f.close();
+  }
+});

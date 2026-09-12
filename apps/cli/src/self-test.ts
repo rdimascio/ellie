@@ -24,6 +24,13 @@ export function nodeIdArgument(value: unknown): string {
   return identifier(value);
 }
 
+function appAliasArgument(value: unknown): string {
+  const alias = string(value, 100);
+  if (!/^[a-z0-9 -]+$/i.test(alias))
+    throw new Error("App aliases may contain only letters, numbers, spaces, and hyphens.");
+  return alias.toLowerCase().trim().replace(/ +/g, " ");
+}
+
 export function serviceTestOptions(args: string[]): ServiceTestOptions {
   let nodeId: string | undefined;
   let desktop = false;
@@ -40,7 +47,7 @@ export function serviceTestOptions(args: string[]): ServiceTestOptions {
     } else if (argument === "--app") {
       if (desktopApp !== undefined || !args[index + 1] || args[index + 1]!.startsWith("--"))
         throw new Error("Use --app once followed by an allowed app name.");
-      desktopApp = string(args[++index], 100);
+      desktopApp = appAliasArgument(args[++index]);
     } else {
       throw new Error("Use: bun run ellie service test [--node ID] [--desktop --app ALLOWED_NAME]");
     }
@@ -125,7 +132,7 @@ export async function runServiceTest(
   const outcome = result(
     await client.call("POST", "/v1/commands", {
       nodeId: selected.id,
-      text: `open ${options.desktopApp}`,
+      text: `open app ${options.desktopApp}`,
     }),
   );
   if (!outcome.ok) throw new Error(`Desktop service test failed: ${outcome.message}`);

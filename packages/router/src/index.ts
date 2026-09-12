@@ -20,6 +20,11 @@ export function route(
   const resolve = (name: string): string | undefined =>
     ["it", "that", "the window"].includes(name) ? context.lastApp : appAlias(name);
   let m: RegExpMatchArray | null;
+  if ((m = text.match(/^open app ([a-z0-9 -]+)$/))) {
+    const app = appAlias(m[1]!);
+    if (!app) return undefined;
+    return { actions: [action({ tool: "app.open", app })], nextContext: { lastApp: app } };
+  }
   if ((m = text.match(/^(?:open|launch|start) ([a-z0-9 -]+)$/))) {
     const name = m[1]!;
     const app = appAlias(name);

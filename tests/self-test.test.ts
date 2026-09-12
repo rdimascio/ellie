@@ -20,7 +20,10 @@ test("service test flags require explicit, complete desktop authorization", () =
   assert.deepEqual(serviceTestOptions([]), {});
   assert.deepEqual(serviceTestOptions(["--node", "node-a"]), { nodeId: "node-a" });
   assert.deepEqual(serviceTestOptions(["--desktop", "--app", "Arc"]), {
-    desktopApp: "Arc",
+    desktopApp: "arc",
+  });
+  assert.deepEqual(serviceTestOptions(["--desktop", "--app", "  Google   Chrome  "]), {
+    desktopApp: "google chrome",
   });
   assert.throws(() => serviceTestOptions(["--desktop"]), /both --desktop and --app/);
   assert.throws(() => serviceTestOptions(["--app", "Arc"]), /both --desktop and --app/);
@@ -29,6 +32,11 @@ test("service test flags require explicit, complete desktop authorization", () =
   assert.throws(() => serviceTestOptions(["--app", "Arc", "--app", "Calculator"]), /once/);
   assert.throws(() => serviceTestOptions(["--node", "--desktop"]), /node ID/);
   assert.throws(() => serviceTestOptions(["--desktop", "--app", "--node"]), /app name/);
+  for (const invalid of ["Arc\nMessages", "Arc\tMessages", "Arc; Messages", "Arc_Messages"])
+    assert.throws(
+      () => serviceTestOptions(["--desktop", "--app", invalid]),
+      /only letters, numbers, spaces, and hyphens/,
+    );
   assert.throws(() => serviceTestOptions(["--unknown"]), /service test/);
 });
 
@@ -93,13 +101,13 @@ test("desktop service test submits only the explicitly named app-open command", 
         return path === "/v1/nodes" ? [node("only")] : { ok: true, message: "Done." };
       },
     },
-    { desktopApp: "Arc" },
+    { desktopApp: "arc" },
     now,
   );
   assert.deepEqual(calls[1], {
     method: "POST",
     path: "/v1/commands",
-    body: { nodeId: "only", text: "open Arc" },
+    body: { nodeId: "only", text: "open app arc" },
   });
   assert.equal(report.result?.ok, true);
 });
