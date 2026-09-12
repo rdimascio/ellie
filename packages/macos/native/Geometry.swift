@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 func accessibilityRect(_ rect: CGRect, primaryTop: CGFloat) -> CGRect {
     CGRect(x: rect.minX, y: primaryTop - rect.maxY, width: rect.width, height: rect.height)

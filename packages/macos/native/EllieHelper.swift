@@ -181,7 +181,7 @@ enum EllieHelper {
                     guard let primary = NSScreen.screens.first else { throw fail("No display available.") }
                     let area = accessibilityRect(screen.visibleFrame, primaryTop: primary.frame.maxY)
                     try move(anchorWindow, to: tileRect(area, layout: "left"))
-                    _ = app.activate(options: [.activateIgnoringOtherApps])
+                    _ = app.activate(options: [])
                     let target = try window(app)
                     try fullscreen(target, false)
                     try move(target, to: tileRect(area, layout: "right"))
