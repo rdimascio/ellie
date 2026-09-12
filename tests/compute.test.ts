@@ -218,8 +218,11 @@ test("server reserves different workers for concurrent inference, preserves auth
   }
 });
 
-test("inference timeout is not retried and late results cannot finish subsequent jobs", async () => {
-  const f = await fixture(100);
+test("inference timeout is not retried and late results cannot finish subsequent jobs", async (t) => {
+  const f = await fixture(30_000);
+  // Advance expiry only after delivery. A short wall-clock deadline can expire
+  // while a loaded CI runner is still establishing the polling connection.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   try {
     const a = await f.pair("a");
     await a.call("POST", "/v1/register", registration());
@@ -228,6 +231,7 @@ test("inference timeout is not retried and late results cannot finish subsequent
       prompt: "hello",
     });
     const task = inferenceJob(record(await a.call("GET", "/v1/poll")).job);
+    t.mock.timers.tick(30_000);
     assert.equal(record(await pending).ok, false);
     await assert.rejects(
       a.call("POST", "/v1/result", { id: task.id, result: { ok: true, message: "late" } }),

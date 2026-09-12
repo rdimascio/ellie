@@ -66,7 +66,7 @@ For additional Macs, create a fresh invitation and repeat node pairing. On the s
 
 The coordinator keeps payload-free job lifecycle metadata in `~/.ellie/jobs.sqlite`. Use `bun run ellie jobs`, `bun run ellie job JOB_ID`, and `bun run ellie cancel JOB_ID` on the server Mac to inspect or cancel work. Pressing Control-C while `say` or `infer` is waiting also requests cancellation. Once native execution begins, cancellation asks the helper or model request to stop but cannot undo a side effect that already happened.
 
-After foreground setup, [install per-user background services](docs/services.md) to run without terminal tabs. Stop the foreground process, then run `bun run ellie service install coordinator` and `bun run ellie service start coordinator` on the server; use `node` instead of `coordinator` on the execution Mac. Use `service status`, `service logs`, and the native `doctor` check for diagnostics. Both roles require graphical login. The existing identities and Keychain credentials are preserved; physical two-Mac service acceptance is still pending.
+After foreground setup, [install per-user background services](docs/services.md) to run without terminal tabs. Stop the foreground process, then run `bun run ellie service install coordinator` and `bun run ellie service start coordinator` on the server; use `node` instead of `coordinator` on the execution Mac. Run `bun run ellie doctor coordinator` or `bun run ellie doctor node` for service diagnostics. Both roles require graphical login. The existing identities and Keychain credentials are preserved; physical two-Mac service acceptance is still pending.
 
 ## Workspace
 
