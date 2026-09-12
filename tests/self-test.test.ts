@@ -85,8 +85,10 @@ test("read-only service test checks readiness without submitting a job", async (
     },
     {},
     now,
-    () => {
-      submitted = true;
+    {
+      submit: () => {
+        submitted = true;
+      },
     },
   );
   assert.equal(report.nodeId, "only");
@@ -100,6 +102,7 @@ test("read-only service test checks readiness without submitting a job", async (
 test("desktop service test submits only the explicitly named app-open command", async () => {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   let submitted = false;
+  let settled = false;
   const report = await runServiceTest(
     {
       call: async (method, path, body) => {
@@ -109,8 +112,13 @@ test("desktop service test submits only the explicitly named app-open command", 
     },
     { desktopApp: "arc" },
     now,
-    () => {
-      submitted = true;
+    {
+      submit: () => {
+        submitted = true;
+      },
+      settle: () => {
+        settled = true;
+      },
     },
   );
   assert.deepEqual(calls[1], {
@@ -120,4 +128,22 @@ test("desktop service test submits only the explicitly named app-open command", 
   });
   assert.equal(report.result?.ok, true);
   assert.equal(submitted, true);
+  assert.equal(settled, true);
+});
+
+test("a valid failed desktop result settles before reporting the failure", async () => {
+  let settled = false;
+  await assert.rejects(
+    runServiceTest(
+      {
+        call: async (_method, path) =>
+          path === "/v1/nodes" ? [node("only")] : { ok: false, message: "App missing." },
+      },
+      { desktopApp: "arc" },
+      now,
+      { settle: () => (settled = true) },
+    ),
+    /Desktop service test failed: App missing/,
+  );
+  assert.equal(settled, true);
 });
