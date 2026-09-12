@@ -1,0 +1,227 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ellie.local/contracts/protocol.v1.schema.json",
+  "title": "Ellie protocol version 1 desktop job",
+  "$ref": "#/$defs/Job",
+  "$defs": {
+    "Identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+    },
+    "Capability": {
+      "type": "string",
+      "enum": [
+        "app.open",
+        "url.open",
+        "window.place",
+        "window.adjacent"
+      ]
+    },
+    "Layout": {
+      "type": "string",
+      "enum": [
+        "top-left",
+        "top-right",
+        "bottom-left",
+        "bottom-right",
+        "left",
+        "right",
+        "maximize",
+        "fullscreen"
+      ]
+    },
+    "Monitor": {
+      "type": "string",
+      "enum": [
+        "current",
+        "largest",
+        "primary"
+      ]
+    },
+    "Action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "tool",
+            "app"
+          ],
+          "properties": {
+            "tool": {
+              "const": "app.open"
+            },
+            "app": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "tool",
+            "app",
+            "url"
+          ],
+          "properties": {
+            "tool": {
+              "const": "url.open"
+            },
+            "app": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 2048,
+              "format": "uri",
+              "pattern": "^https://[^/@]+(?:[/?#]|$)",
+              "x-ellie-https-no-credentials": true,
+              "description": "An absolute HTTPS URL without embedded credentials."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "tool",
+            "app",
+            "layout",
+            "monitor"
+          ],
+          "properties": {
+            "tool": {
+              "const": "window.place"
+            },
+            "app": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            },
+            "layout": {
+              "type": "string",
+              "enum": [
+                "top-left",
+                "top-right",
+                "bottom-left",
+                "bottom-right",
+                "left",
+                "right",
+                "maximize",
+                "fullscreen"
+              ]
+            },
+            "monitor": {
+              "type": "string",
+              "enum": [
+                "current",
+                "largest",
+                "primary"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": [
+            "tool",
+            "app",
+            "anchor"
+          ],
+          "properties": {
+            "tool": {
+              "const": "window.adjacent"
+            },
+            "app": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            },
+            "anchor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
+          }
+        }
+      ]
+    },
+    "Result": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "ok",
+        "message"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "Job": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "version",
+        "id",
+        "expiresAt",
+        "actions"
+      ],
+      "properties": {
+        "version": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Identifier"
+        },
+        "expiresAt": {
+          "type": "number"
+        },
+        "actions": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": {
+            "$ref": "#/$defs/Action"
+          }
+        }
+      }
+    }
+  }
+}

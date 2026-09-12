@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 @main
 enum GeometryTests {
     static func main() {

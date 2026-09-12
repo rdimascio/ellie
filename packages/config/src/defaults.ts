@@ -5,8 +5,14 @@ export interface Preferences {
   sites: Record<string, string>;
 }
 export const defaults: Preferences = {
-  personality: 'ellie',
-  browser: 'company.thebrowser.Browser',
-  apps: { arc: 'company.thebrowser.Browser', messages: 'com.apple.MobileSMS', safari: 'com.apple.Safari', notes: 'com.apple.Notes', calendar: 'com.apple.iCal' },
-  sites: { netflix: 'https://www.netflix.com/', youtube: 'https://www.youtube.com/' },
+  personality: "ellie",
+  browser: "company.thebrowser.Browser",
+  apps: {
+    arc: "company.thebrowser.Browser",
+    messages: "com.apple.MobileSMS",
+    safari: "com.apple.Safari",
+    notes: "com.apple.Notes",
+    calendar: "com.apple.iCal",
+  },
+  sites: { netflix: "https://www.netflix.com/", youtube: "https://www.youtube.com/" },
 };

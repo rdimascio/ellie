@@ -1,0 +1,301 @@
+{
+  "version": 1,
+  "schemaDialect": "ellie-operation-schema-1",
+  "limits": {
+    "maxActionsPerJob": 4,
+    "maxRequestBodyBytes": 32768,
+    "maxResultMessageLength": 4000
+  },
+  "values": {
+    "layouts": [
+      "top-left",
+      "top-right",
+      "bottom-left",
+      "bottom-right",
+      "left",
+      "right",
+      "maximize",
+      "fullscreen"
+    ],
+    "monitors": [
+      "current",
+      "largest",
+      "primary"
+    ]
+  },
+  "errors": {
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "error"
+      ],
+      "properties": {
+        "error": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "operationFailure": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "ok",
+        "message"
+      ],
+      "properties": {
+        "ok": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "pattern": "\\S"
+        }
+      }
+    }
+  },
+  "operations": [
+    {
+      "id": "app.open",
+      "requiredCapability": "app.open",
+      "description": "Open an application from the configured local app allowlist.",
+      "localPolicy": {
+        "appFields": [
+          "app"
+        ],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "tool",
+          "app"
+        ],
+        "properties": {
+          "tool": {
+            "const": "app.open"
+          },
+          "app": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "url.open",
+      "requiredCapability": "url.open",
+      "description": "Open a configured HTTPS site in an allowed application.",
+      "localPolicy": {
+        "appFields": [
+          "app"
+        ],
+        "urlFields": [
+          "url"
+        ]
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "tool",
+          "app",
+          "url"
+        ],
+        "properties": {
+          "tool": {
+            "const": "url.open"
+          },
+          "app": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "format": "ellie-https-url",
+            "description": "An absolute HTTPS URL without embedded credentials."
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "window.place",
+      "requiredCapability": "window.place",
+      "description": "Place an allowed application window in a fixed layout.",
+      "localPolicy": {
+        "appFields": [
+          "app"
+        ],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "tool",
+          "app",
+          "layout",
+          "monitor"
+        ],
+        "properties": {
+          "tool": {
+            "const": "window.place"
+          },
+          "app": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "layout": {
+            "type": "string",
+            "enum": [
+              "top-left",
+              "top-right",
+              "bottom-left",
+              "bottom-right",
+              "left",
+              "right",
+              "maximize",
+              "fullscreen"
+            ]
+          },
+          "monitor": {
+            "type": "string",
+            "enum": [
+              "current",
+              "largest",
+              "primary"
+            ]
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "window.adjacent",
+      "requiredCapability": "window.adjacent",
+      "description": "Place one allowed application window next to another.",
+      "localPolicy": {
+        "appFields": [
+          "app",
+          "anchor"
+        ],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "tool",
+          "app",
+          "anchor"
+        ],
+        "properties": {
+          "tool": {
+            "const": "window.adjacent"
+          },
+          "app": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "anchor": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    }
+  ]
+}

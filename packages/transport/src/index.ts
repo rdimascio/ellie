@@ -1,69 +1,130 @@
-import { request, Agent } from 'node:https';
-import { connect } from 'node:tls';
-import { X509Certificate, timingSafeEqual } from 'node:crypto';
-import type { IncomingMessage } from 'node:http';
+import { request, Agent } from "node:https";
+import { connect } from "node:tls";
+import { X509Certificate, timingSafeEqual } from "node:crypto";
+import type { IncomingMessage } from "node:http";
+import { OPERATION_REGISTRY, VERSION } from "@ellie/protocol";
 
-export function fingerprint(cert: string | Buffer): string { return new X509Certificate(cert).fingerprint256; }
+export function fingerprint(cert: string | Buffer): string {
+  return new X509Certificate(cert).fingerprint256;
+}
 export function sameFingerprint(a: string, b: string): boolean {
-  const normalize = (s: string) => s.replaceAll(':', '').toUpperCase();
-  const x = normalize(a); const y = normalize(b);
-  return /^[0-9A-F]{64}$/.test(x) && /^[0-9A-F]{64}$/.test(y) && timingSafeEqual(Buffer.from(x), Buffer.from(y));
+  const normalize = (s: string) => s.replaceAll(":", "").toUpperCase();
+  const x = normalize(a);
+  const y = normalize(b);
+  return (
+    /^[0-9A-F]{64}$/.test(x) &&
+    /^[0-9A-F]{64}$/.test(y) &&
+    timingSafeEqual(Buffer.from(x), Buffer.from(y))
+  );
 }
 /** Certificate-only bootstrap: sends no HTTP request, pairing code, or credentials. */
-export async function discoverCertificate(origin: string, expectedFingerprint: string): Promise<string> {
+export async function discoverCertificate(
+  origin: string,
+  expectedFingerprint: string,
+): Promise<string> {
   const url = new URL(origin);
-  if (url.protocol !== 'https:') throw new Error('HTTPS required.');
+  if (url.protocol !== "https:") throw new Error("HTTPS required.");
   return new Promise((resolve, reject) => {
-    const socket = connect({ host: url.hostname, port: Number(url.port || 443), servername: 'ellie.local', rejectUnauthorized: false, minVersion: 'TLSv1.2' });
-    socket.setTimeout(5000, () => socket.destroy(new Error('Certificate lookup timed out.')));
-    socket.once('error', reject);
-    socket.once('secureConnect', () => {
+    const socket = connect({
+      host: url.hostname,
+      port: Number(url.port || 443),
+      servername: "ellie.local",
+      rejectUnauthorized: false,
+      minVersion: "TLSv1.2",
+    });
+    socket.setTimeout(5000, () => socket.destroy(new Error("Certificate lookup timed out.")));
+    socket.once("error", reject);
+    socket.once("secureConnect", () => {
       try {
         const cert = new X509Certificate(socket.getPeerCertificate().raw);
-        if (!sameFingerprint(cert.fingerprint256, expectedFingerprint)) throw new Error('Server fingerprint does not match. No credentials were sent.');
+        if (!sameFingerprint(cert.fingerprint256, expectedFingerprint))
+          throw new Error("Server fingerprint does not match. No credentials were sent.");
         resolve(cert.toString());
-      } catch (error) { reject(error); }
-      finally { socket.end(); }
+      } catch (error) {
+        reject(error);
+      } finally {
+        socket.end();
+      }
     });
   });
 }
-export async function readJson(stream: IncomingMessage, maxBytes = 32_768): Promise<unknown> {
-  const chunks: Buffer[] = []; let bytes = 0;
+export async function readJson(
+  stream: IncomingMessage,
+  maxBytes: number = OPERATION_REGISTRY.limits.maxRequestBodyBytes,
+): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
   for await (const chunk of stream) {
     bytes += chunk.length;
-    if (bytes > maxBytes) throw new Error('Request body too large.');
+    if (bytes > maxBytes) throw new Error("Request body too large.");
     chunks.push(Buffer.from(chunk));
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+  return JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
 }
 export class Client {
   private agent: Agent;
   private origin: string;
   private token: string;
-  constructor(origin: string, cert: string, token = '') {
+  constructor(origin: string, cert: string, token = "") {
     const url = new URL(origin);
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('HTTPS origin required.');
-    this.origin = url.origin; this.token = token;
+    if (url.protocol !== "https:" || url.username || url.password)
+      throw new Error("HTTPS origin required.");
+    this.origin = url.origin;
+    this.token = token;
     const pin = fingerprint(cert);
-    this.agent = new Agent({ keepAlive: true, maxSockets: 4, ca: cert, servername: 'ellie.local', minVersion: 'TLSv1.2', rejectUnauthorized: true,
+    this.agent = new Agent({
+      keepAlive: true,
+      maxSockets: 4,
+      ca: cert,
+      servername: "ellie.local",
+      minVersion: "TLSv1.2",
+      rejectUnauthorized: true,
       // The operator-verified certificate is the authority, independent of LAN hostname/IP.
-      checkServerIdentity: (_host, peer) => sameFingerprint(peer.fingerprint256, pin) ? undefined : new Error('Server certificate changed. Pair again.') });
+      checkServerIdentity: (_host, peer) =>
+        sameFingerprint(peer.fingerprint256, pin)
+          ? undefined
+          : new Error("Server certificate changed. Pair again."),
+    });
   }
-  close(): void { this.agent.destroy(); }
-  async call(method: 'GET' | 'POST', path: string, body?: unknown): Promise<unknown> {
+  close(): void {
+    this.agent.destroy();
+  }
+  async call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const data = body === undefined ? undefined : JSON.stringify(body);
-      const req = request(new URL(path, this.origin), { method, agent: this.agent, headers: {
-        'x-ellie-version': '1', ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
-        ...(data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {}),
-      } }, res => {
-        void readJson(res).then(value => {
-          if (res.statusCode !== 200) reject(new Error(typeof (value as { error?: unknown })?.error === 'string' ? (value as { error: string }).error : 'Server request failed.'));
-          else resolve(value);
-        }, reject);
-      });
-      req.setTimeout(40_000, () => req.destroy(new Error('Server request timed out. Check status before repeating a command.')));
-      req.on('error', reject);
+      const req = request(
+        new URL(path, this.origin),
+        {
+          method,
+          agent: this.agent,
+          headers: {
+            "x-ellie-version": String(VERSION),
+            ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
+            ...(data
+              ? { "content-type": "application/json", "content-length": Buffer.byteLength(data) }
+              : {}),
+          },
+        },
+        (res) => {
+          void readJson(res).then((value) => {
+            if (res.statusCode !== 200)
+              reject(
+                new Error(
+                  typeof (value as { error?: unknown })?.error === "string"
+                    ? (value as { error: string }).error
+                    : "Server request failed.",
+                ),
+              );
+            else resolve(value);
+          }, reject);
+        },
+      );
+      req.setTimeout(40_000, () =>
+        req.destroy(
+          new Error("Server request timed out. Check status before repeating a command."),
+        ),
+      );
+      req.on("error", reject);
       req.end(data);
     });
   }

@@ -2,23 +2,32 @@
   "name": "ellie-workspace",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "engines": {
-    "node": ">=24.0.0 <25"
-  },
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
+  "type": "module",
   "scripts": {
     "ellie": "node apps/cli/src/main.ts",
+    "lint": "oxlint . --deny-warnings",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
-    "check": "npm run typecheck && npm test",
-    "build:macos": "node scripts/build-macos.mjs"
+    "check": "bun run lint && bun run format:check && bun run contracts:check && bun run typecheck && bun run test",
+    "build:macos": "node scripts/build-macos.mjs",
+    "contracts:generate": "node scripts/generate-contracts.ts",
+    "contracts:check": "node scripts/generate-contracts.ts --check",
+    "smoke:macos": "node scripts/smoke-macos.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "oxfmt": "0.67.0",
+    "oxlint": "1.82.0",
     "typescript": "^5.9.0"
-  }
+  },
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "packageManager": "bun@1.4.2"
 }

@@ -1,0 +1,1264 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ellie local coordinator API",
+    "version": "1.0.0",
+    "description": "Contracts for the routes implemented by the Ellie V1 HTTPS coordinator. Bearer identity roles and local capability/app/site allowlists are runtime authorization checks; this document describes them but cannot enforce them."
+  },
+  "servers": [
+    {
+      "url": "https://127.0.0.1:7437",
+      "description": "Default loopback coordinator; paired nodes may use the configured trusted-LAN origin."
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "paths": {
+    "/v1/pair": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "pairNode",
+        "summary": "Pair a node with a single-use invitation",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PairRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Node credential issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PairResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/invite": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "createInvitation",
+        "summary": "Create a pairing invitation",
+        "description": "Controller bearer identity required.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Single-use invitation created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Invitation"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/revoke": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "revokeNode",
+        "summary": "Revoke a node identity",
+        "description": "Controller bearer identity required.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NodeIdRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Node revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/nodes": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "listNodes",
+        "summary": "List visible connected nodes",
+        "description": "The controller sees all nodes; a node bearer identity sees only itself.",
+        "responses": {
+          "200": {
+            "description": "Visible node state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/NodeInfo"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/register": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "registerNode",
+        "summary": "Register node capabilities",
+        "description": "Node bearer identity required. `capabilities` is the optional V1 legacy execution field; `executionCapabilities` takes precedence when both are present. Compute capability requires telemetry.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Registration"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Node registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/heartbeat": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "heartbeatNode",
+        "summary": "Refresh node liveness and optional compute state",
+        "description": "Node bearer identity required and the node must already be registered. Compute capability requires telemetry.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Heartbeat"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Heartbeat accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/poll": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "pollNodeJob",
+        "summary": "Wait for one node job",
+        "description": "Node bearer identity required and the node must already be registered.",
+        "responses": {
+          "200": {
+            "description": "A desktop job, inference job, or null after the long-poll interval.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PollResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/result": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "reportNodeResult",
+        "summary": "Report the matching in-flight job result",
+        "description": "Node bearer identity required. The ID must match that node’s delivered job.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResultRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Result accepted.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/inference": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "runInference",
+        "summary": "Run bounded inference on one eligible independent worker",
+        "description": "Controller bearer identity required. Worker selection and local admission are semantic runtime checks.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InferenceRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Inference outcome and selected worker.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InferenceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/commands": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "submitCommand",
+        "summary": "Route and deliver a deterministic desktop command",
+        "description": "A controller can target any visible node. A node identity can target only itself. Required operation capability and the coordinator and node app/site allowlists are semantic runtime checks.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CommandRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command outcome, including unsupported deterministic input as `ok: false`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Result"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "64 lowercase hexadecimal characters"
+      }
+    },
+    "parameters": {
+      "ProtocolVersion": {
+        "name": "x-ellie-version",
+        "in": "header",
+        "required": true,
+        "description": "Exact wire protocol version.",
+        "schema": {
+          "type": "string",
+          "const": "1"
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Request rejected. Check input, pairing, and granted capabilities.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "Authentication required. Pair this node first.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Identity role, node ownership, origin, or revocation rejected the request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Endpoint unavailable for this identity.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "Current node or job state rejected the request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "UnsupportedMediaType": {
+        "description": "JSON required.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      },
+      "ServiceUnavailable": {
+        "description": "The coordinator is stopping.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorResponse"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Identifier": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+      },
+      "Capability": {
+        "type": "string",
+        "enum": [
+          "app.open",
+          "url.open",
+          "window.place",
+          "window.adjacent"
+        ]
+      },
+      "Layout": {
+        "type": "string",
+        "enum": [
+          "top-left",
+          "top-right",
+          "bottom-left",
+          "bottom-right",
+          "left",
+          "right",
+          "maximize",
+          "fullscreen"
+        ]
+      },
+      "Monitor": {
+        "type": "string",
+        "enum": [
+          "current",
+          "largest",
+          "primary"
+        ]
+      },
+      "Action": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "tool",
+              "app"
+            ],
+            "properties": {
+              "tool": {
+                "const": "app.open"
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "tool",
+              "app",
+              "url"
+            ],
+            "properties": {
+              "tool": {
+                "const": "url.open"
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+              },
+              "url": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2048,
+                "format": "uri",
+                "pattern": "^https://[^/@]+(?:[/?#]|$)",
+                "x-ellie-https-no-credentials": true,
+                "description": "An absolute HTTPS URL without embedded credentials."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "tool",
+              "app",
+              "layout",
+              "monitor"
+            ],
+            "properties": {
+              "tool": {
+                "const": "window.place"
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+              },
+              "layout": {
+                "type": "string",
+                "enum": [
+                  "top-left",
+                  "top-right",
+                  "bottom-left",
+                  "bottom-right",
+                  "left",
+                  "right",
+                  "maximize",
+                  "fullscreen"
+                ]
+              },
+              "monitor": {
+                "type": "string",
+                "enum": [
+                  "current",
+                  "largest",
+                  "primary"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": true,
+            "required": [
+              "tool",
+              "app",
+              "anchor"
+            ],
+            "properties": {
+              "tool": {
+                "const": "window.adjacent"
+              },
+              "app": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+              },
+              "anchor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+              }
+            }
+          }
+        ]
+      },
+      "Result": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "version",
+          "id",
+          "expiresAt",
+          "actions"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "expiresAt": {
+            "type": "number"
+          },
+          "actions": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/Action"
+            }
+          }
+        }
+      },
+      "PairRequest": {
+        "type": "object",
+        "required": [
+          "code",
+          "id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "PairResponse": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        }
+      },
+      "Invitation": {
+        "type": "object",
+        "required": [
+          "code",
+          "expiresAt"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "expiresAt": {
+            "type": "number"
+          }
+        }
+      },
+      "NodeIdRequest": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "OkResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "InstalledModel": {
+        "type": "object",
+        "required": [
+          "id",
+          "requiredFreeMemoryBytes"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "\\S"
+          },
+          "requiredFreeMemoryBytes": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        }
+      },
+      "ComputeCapabilities": {
+        "type": "object",
+        "required": [
+          "kind",
+          "backend",
+          "mode",
+          "models"
+        ],
+        "properties": {
+          "kind": {
+            "const": "inference-worker"
+          },
+          "backend": {
+            "const": "local-openai"
+          },
+          "mode": {
+            "const": "independent"
+          },
+          "models": {
+            "type": "array",
+            "maxItems": 32,
+            "items": {
+              "$ref": "#/components/schemas/InstalledModel"
+            }
+          }
+        }
+      },
+      "Power": {
+        "type": "object",
+        "required": [
+          "source",
+          "batteryPercent",
+          "lowPowerMode"
+        ],
+        "properties": {
+          "source": {
+            "enum": [
+              "ac",
+              "battery",
+              "unknown"
+            ]
+          },
+          "batteryPercent": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 100
+          },
+          "lowPowerMode": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          }
+        }
+      },
+      "Network": {
+        "type": "object",
+        "required": [
+          "roundTripMs",
+          "quality"
+        ],
+        "properties": {
+          "roundTripMs": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 3600000
+          },
+          "quality": {
+            "enum": [
+              "good",
+              "poor",
+              "unknown"
+            ]
+          }
+        }
+      },
+      "Telemetry": {
+        "type": "object",
+        "required": [
+          "freeMemoryBytes",
+          "totalMemoryBytes",
+          "activeJobs",
+          "load",
+          "power",
+          "thermal",
+          "network"
+        ],
+        "properties": {
+          "freeMemoryBytes": {
+            "type": "number",
+            "minimum": 0
+          },
+          "totalMemoryBytes": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          },
+          "activeJobs": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1024
+          },
+          "load": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 10000
+          },
+          "power": {
+            "$ref": "#/components/schemas/Power"
+          },
+          "thermal": {
+            "enum": [
+              "nominal",
+              "fair",
+              "serious",
+              "critical",
+              "unknown"
+            ]
+          },
+          "network": {
+            "$ref": "#/components/schemas/Network"
+          }
+        }
+      },
+      "Registration": {
+        "type": "object",
+        "dependentRequired": {
+          "computeCapabilities": [
+            "telemetry"
+          ]
+        },
+        "properties": {
+          "capabilities": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            }
+          },
+          "executionCapabilities": {
+            "type": "array",
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            }
+          },
+          "computeCapabilities": {
+            "$ref": "#/components/schemas/ComputeCapabilities"
+          },
+          "telemetry": {
+            "$ref": "#/components/schemas/Telemetry"
+          }
+        }
+      },
+      "Heartbeat": {
+        "type": "object",
+        "dependentRequired": {
+          "computeCapabilities": [
+            "telemetry"
+          ]
+        },
+        "properties": {
+          "computeCapabilities": {
+            "$ref": "#/components/schemas/ComputeCapabilities"
+          },
+          "telemetry": {
+            "$ref": "#/components/schemas/Telemetry"
+          }
+        }
+      },
+      "NodeInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "capabilities",
+          "executionCapabilities",
+          "lastSeen"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            }
+          },
+          "executionCapabilities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Capability"
+            }
+          },
+          "computeCapabilities": {
+            "$ref": "#/components/schemas/ComputeCapabilities"
+          },
+          "telemetry": {
+            "$ref": "#/components/schemas/Telemetry"
+          },
+          "telemetryReceivedAt": {
+            "type": "number"
+          },
+          "lastSeen": {
+            "type": "number"
+          }
+        }
+      },
+      "InferenceRequest": {
+        "type": "object",
+        "required": [
+          "model",
+          "prompt"
+        ],
+        "properties": {
+          "mode": {
+            "const": "independent",
+            "default": "independent"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "\\S"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          },
+          "maxTokens": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 2048,
+            "default": 256
+          }
+        }
+      },
+      "InferenceJob": {
+        "type": "object",
+        "required": [
+          "version",
+          "kind",
+          "id",
+          "expiresAt",
+          "request"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "kind": {
+            "const": "inference"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "expiresAt": {
+            "type": "number"
+          },
+          "request": {
+            "$ref": "#/components/schemas/InferenceRequest"
+          }
+        }
+      },
+      "PollResponse": {
+        "type": "object",
+        "required": [
+          "job"
+        ],
+        "properties": {
+          "job": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Job"
+              },
+              {
+                "$ref": "#/components/schemas/InferenceJob"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ResultRequest": {
+        "type": "object",
+        "required": [
+          "id",
+          "result"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "result": {
+            "$ref": "#/components/schemas/Result"
+          }
+        }
+      },
+      "InferenceResponse": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message",
+          "workerId"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          },
+          "workerId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "CommandRequest": {
+        "type": "object",
+        "required": [
+          "nodeId",
+          "text"
+        ],
+        "properties": {
+          "nodeId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "\\S"
+          }
+        }
+      }
+    }
+  }
+}

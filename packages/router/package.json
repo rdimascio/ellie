@@ -7,7 +7,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@ellie/protocol": "*",
-    "@ellie/config": "*"
+    "@ellie/config": "*",
+    "@ellie/protocol": "*"
   }
 }
