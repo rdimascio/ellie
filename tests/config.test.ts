@@ -3,7 +3,15 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureState, save, load, defaults, serverConfig, nodeConfig } from "@ellie/config";
+import {
+  browserConfig,
+  ensureState,
+  save,
+  load,
+  defaults,
+  serverConfig,
+  nodeConfig,
+} from "@ellie/config";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 
 test("private state has restricted permissions and credentials are stored only as hashes", async () => {
@@ -42,6 +50,15 @@ test("config validates transport and version before use", () => {
   );
   assert.throws(() =>
     nodeConfig({ version: 2, id: "test", serverUrl: "https://localhost", preferences: defaults }),
+  );
+  assert.throws(() =>
+    browserConfig({
+      version: 1,
+      hostname: "Other.local",
+      port: 8444,
+      createdAt: new Date().toISOString(),
+      caFingerprint: "AA",
+    }),
   );
 });
 test("pairing is single-use even under concurrency, and invitation replacement invalidates the old code", async () => {

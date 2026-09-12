@@ -1,0 +1,208 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { X509Certificate } from "node:crypto";
+import type { MutableSecretStore } from "@ellie/config";
+import { generateBrowserTlsIdentity } from "../apps/cli/src/certificate.ts";
+import {
+  BROWSER_CA_CERT,
+  BROWSER_CA_KEY,
+  BROWSER_CONFIG,
+  BROWSER_SERVER_CERT,
+  BROWSER_SERVER_KEY,
+  browserStatus,
+  exportBrowserCa,
+  initializeBrowser,
+  loadBrowserServerIdentity,
+} from "../apps/cli/src/browser-setup.ts";
+
+class MemorySecrets implements MutableSecretStore {
+  readonly values = new Map<string, string>();
+  fail?: "has" | "server-add" | "delete";
+  async get(account: string): Promise<string> {
+    const value = this.values.get(account);
+    if (value === undefined) throw new Error("missing");
+    return value;
+  }
+  async set(account: string, value: string): Promise<void> {
+    this.values.set(account, value);
+  }
+  async has(account: string): Promise<boolean> {
+    if (this.fail === "has") throw new Error("private machine detail");
+    return this.values.has(account);
+  }
+  async add(account: string, value: string): Promise<void> {
+    if (this.fail === "server-add" && account === BROWSER_SERVER_KEY) throw new Error("denied");
+    if (this.values.has(account)) throw new Error("duplicate");
+    this.values.set(account, value);
+  }
+  async delete(account: string): Promise<void> {
+    if (this.fail === "delete") throw new Error("private delete detail");
+    this.values.delete(account);
+  }
+}
+
+async function fixture() {
+  const stateDir = await mkdtemp(join(tmpdir(), "ellie-browser-setup-"));
+  const secrets = new MemorySecrets();
+  let hostname = "living-room.local";
+  let generations = 0;
+  return {
+    stateDir,
+    secrets,
+    setHostname(value: string) {
+      hostname = value;
+    },
+    generations: () => generations,
+    environment: {
+      stateDir,
+      secrets,
+      localHostname: async () => hostname,
+      generate: async (name: string) => {
+        generations += 1;
+        return generateBrowserTlsIdentity(name);
+      },
+      now: () => Date.now(),
+    },
+  };
+}
+
+test("browser init is private, idempotent, and status detects hostname drift", async () => {
+  const setup = await fixture();
+  try {
+    const created = await initializeBrowser(setup.environment);
+    assert.equal(created.hostname, "living-room.local");
+    assert.equal(created.port, 8444);
+    assert.equal(setup.generations(), 1);
+    assert.deepEqual(await initializeBrowser(setup.environment), created);
+    assert.equal(setup.generations(), 1);
+    for (const name of [BROWSER_CONFIG, BROWSER_CA_CERT, BROWSER_SERVER_CERT])
+      assert.equal((await stat(join(setup.stateDir, name))).mode & 0o777, 0o600);
+    assert.deepEqual(
+      [...setup.secrets.values.keys()].sort(),
+      [BROWSER_CA_KEY, BROWSER_SERVER_KEY].sort(),
+    );
+    assert.deepEqual(await browserStatus(setup.environment), {
+      initialized: true,
+      ready: true,
+      hostname: "living-room.local",
+      port: 8444,
+      caFingerprint: created.caFingerprint,
+      issues: [],
+    });
+    const listener = await loadBrowserServerIdentity(setup.environment);
+    assert.deepEqual(listener.config, created);
+    assert.equal(listener.cert, await readFile(join(setup.stateDir, BROWSER_SERVER_CERT), "utf8"));
+    assert.equal(listener.caCert, await readFile(join(setup.stateDir, BROWSER_CA_CERT), "utf8"));
+    assert.equal(listener.key, setup.secrets.values.get(BROWSER_SERVER_KEY));
+    assert.equal("rootKey" in listener, false);
+    setup.setHostname("new-name.local");
+    const drifted = await browserStatus(setup.environment);
+    assert.equal(drifted.ready, false);
+    assert.match(drifted.issues.join(" "), /LocalHostName changed/);
+    assert.equal(setup.generations(), 1);
+    setup.setHostname("living-room.local");
+    setup.environment.now = () => Date.now() + 500 * 86_400_000;
+    const expired = await browserStatus(setup.environment);
+    assert.equal(expired.ready, false);
+    assert.match(expired.issues.join(" "), /server certificate is not currently valid/);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("CA export writes only the public root and does not overwrite by default", async () => {
+  const setup = await fixture();
+  const outputDir = await mkdtemp(join(tmpdir(), "ellie-browser-export-"));
+  const output = join(outputDir, "ellie-ca.pem");
+  try {
+    await initializeBrowser(setup.environment);
+    await exportBrowserCa(setup.environment, output);
+    const exported = await readFile(output, "utf8");
+    assert.equal(exported, await readFile(join(setup.stateDir, BROWSER_CA_CERT), "utf8"));
+    assert.equal((await stat(output)).mode & 0o777, 0o644);
+    assert.equal(new X509Certificate(exported).ca, true);
+    assert.ok(!exported.includes("PRIVATE KEY"));
+    await assert.rejects(exportBrowserCa(setup.environment, output), /already exists/);
+    await writeFile(output, "replace me");
+    await exportBrowserCa(setup.environment, output, true);
+    assert.equal(new X509Certificate(await readFile(output, "utf8")).ca, true);
+  } finally {
+    await Promise.all([
+      rm(setup.stateDir, { recursive: true, force: true }),
+      rm(outputDir, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test("partial state and unavailable Keychain fail closed without generation", async () => {
+  const setup = await fixture();
+  try {
+    setup.secrets.values.set(BROWSER_CA_KEY, "existing");
+    await assert.rejects(initializeBrowser(setup.environment), /incomplete.*preserved/);
+    assert.equal(setup.generations(), 0);
+    setup.secrets.values.clear();
+    setup.secrets.fail = "has";
+    await assert.rejects(initializeBrowser(setup.environment), (error) => {
+      assert.match(String(error), /could not inspect Keychain.*build/);
+      assert.doesNotMatch(String(error), /private machine detail/);
+      return true;
+    });
+    assert.equal(setup.generations(), 0);
+    assert.deepEqual(await readdir(setup.stateDir), []);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a rollback failure reports partial state without touching an agent credential", async () => {
+  const setup = await fixture();
+  try {
+    setup.secrets.values.set("server.key", "agent identity");
+    const originalAdd = setup.secrets.add.bind(setup.secrets);
+    setup.secrets.add = async (account, value) => {
+      await originalAdd(account, value);
+      if (account === BROWSER_CA_KEY) setup.secrets.fail = "server-add";
+    };
+    setup.secrets.delete = async () => {
+      throw new Error("private delete detail");
+    };
+    await assert.rejects(initializeBrowser(setup.environment), (error) => {
+      assert.match(String(error), /cleanup was incomplete.*Do not retry/);
+      assert.doesNotMatch(String(error), /private delete detail/);
+      return true;
+    });
+    assert.equal(setup.secrets.values.get("server.key"), "agent identity");
+    assert.equal(setup.secrets.values.has(BROWSER_CA_KEY), true);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("failed initialization deletes only keys and files added by that invocation", async () => {
+  const setup = await fixture();
+  try {
+    setup.secrets.values.set("server.key", "agent identity");
+    setup.secrets.fail = "server-add";
+    await assert.rejects(initializeBrowser(setup.environment), /rolled back safely/);
+    assert.deepEqual([...setup.secrets.values.entries()], [["server.key", "agent identity"]]);
+    assert.deepEqual(await readdir(setup.stateDir), []);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("an exclusive setup lock rejects concurrent initialization without removing the lock", async () => {
+  const setup = await fixture();
+  const lock = join(setup.stateDir, "browser-setup.lock");
+  try {
+    await writeFile(lock, "", { flag: "wx", mode: 0o600 });
+    await assert.rejects(initializeBrowser(setup.environment), /Another browser initialization/);
+    assert.equal((await stat(lock)).mode & 0o777, 0o600);
+    assert.equal(setup.generations(), 0);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
