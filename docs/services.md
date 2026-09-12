@@ -91,6 +91,8 @@ The node owns network recovery; the plist deliberately has no network-dependent 
 
 ## Validation record and acceptance
 
+See the [dated two-Mac results and remaining hardware checks](validation/2026-09-12-services.md).
+
 Automated tests use synthetic private directories, injected launchctl results, synthetic certificates, fake Keychain access, and fake capabilities. Application tests cover separate roles, repeated installs, stale runtime/checkout paths, damaged signature repair, registration retries, rollback on registration or plist publication failure, and preservation of unmanaged bundles. The macOS test also compiles and verifies a real temporary bundle and its full-resolution icon without registering it or requesting privacy access. They check lifecycle idempotency, persistent disable/enable, missing GUI sessions, failed stops, unmanaged files, permissions, log rotation/redaction, optional-model warnings, stale nodes, automatic single-node selection, placeholder rejection, and the read-only/desktop-test boundary. These tests do not grant Accessibility, contact a physical second Mac, submit a live job, or execute native desktop actions.
 
 `bun run smoke:services` (Node 24 on macOS) uses a uniquely named, inert temporary LaunchAgent and native app bundle to verify the generated plist, GUI startup, relaunch after SIGKILL, and removal with bootout. It skips LaunchServices registration and never requests privacy access. It does not use `~/.ellie`, Keychain, the real service labels, or native actions. This smoke passed on macOS 26.6.2 with Node 24.21.0 and Bun 1.4.2. It proves the native launcher and launchd process policy, not household service acceptance.
