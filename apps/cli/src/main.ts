@@ -19,6 +19,7 @@ import { MacOSExecutor } from "@ellie/macos";
 import { Auth, newToken } from "../../server/src/auth.ts";
 import { createEllieServer } from "../../server/src/index.ts";
 import { JobStore } from "../../server/src/jobs.ts";
+import { loadBrowserAssets } from "../../server/src/browser-assets.ts";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
 
@@ -30,6 +31,7 @@ import {
   initializeBrowser,
   systemLocalHostname,
 } from "./browser-setup.ts";
+import { createBrowserRuntime } from "./browser-runtime.ts";
 import { parseBrowserCommand, runBrowserCommand } from "./browser-commands.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
@@ -45,6 +47,13 @@ import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
+const browserEnvironment = {
+  stateDir,
+  secrets,
+  localHostname: systemLocalHostname,
+  generate: (hostname: string) => generateBrowserTlsIdentity(hostname),
+  now: Date.now,
+};
 let serviceLog: ServiceLog | undefined;
 let commandOutcomeMayBeUnknown = false;
 async function exists(name: string): Promise<boolean> {
@@ -106,13 +115,7 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
 }
 async function main(): Promise<void> {
   if (args[0] === "browser") {
-    const environment = {
-      stateDir,
-      secrets,
-      localHostname: systemLocalHostname,
-      generate: (hostname: string) => generateBrowserTlsIdentity(hostname),
-      now: Date.now,
-    };
+    const environment = browserEnvironment;
     if (args[1] === "init" && args.length === 2) {
       const config = await initializeBrowser(environment);
       console.log(
@@ -228,6 +231,12 @@ async function main(): Promise<void> {
     const config = serverConfig(await privateConfig("server.json"));
     const cert = await readFile(join(stateDir, "server-cert.pem"), "utf8");
     const jobStore = new JobStore(join(stateDir, "jobs.sqlite"));
+    // The coordinator lifetime lock also owns the single browser authorization writer.
+    const browser = createBrowserRuntime({
+      setup: browserEnvironment,
+      bindHost: config.host,
+      loadAssets: loadBrowserAssets,
+    });
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
       const created = createEllieServer({
@@ -236,6 +245,7 @@ async function main(): Promise<void> {
         auth: await Auth.open(),
         preferences: config.preferences,
         jobStore,
+        browser,
       });
       app = created;
       await new Promise<void>((resolve, reject) => {
@@ -243,6 +253,7 @@ async function main(): Promise<void> {
         created.server.listen(config.port, config.host, () => resolve());
       });
     } catch (error) {
+      await browser.shutdown();
       if (app) app.shutdown();
       else jobStore.close();
       throw error;
@@ -250,14 +261,34 @@ async function main(): Promise<void> {
     if (!app) throw new Error("Coordinator failed to initialize.");
     console.log(`Ellie server ready on port ${config.port}. No model or cloud API is required.`);
     serviceLog?.write("ready");
+    let stopping = false;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      try {
+        serviceLog?.write("stopping");
+      } finally {
+        // Stop accepting browser mutations and drain persistence before releasing the lock.
+        try {
+          await browser.shutdown();
+        } finally {
+          app!.shutdown();
+        }
+      }
+    };
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.once(signal, () => {
-        try {
-          serviceLog?.write("stopping");
-        } finally {
-          app.shutdown();
-        }
+        void stop().catch(() => {
+          process.exitCode = 1;
+        });
       });
+    // Agent readiness and signal handlers precede optional browser Keychain access.
+    await browser.start();
+    if (!stopping) {
+      const status = browser.current().status;
+      if (status === "ready") serviceLog?.write("browser_ready");
+      else if (status === "unavailable") serviceLog?.write("browser_unavailable");
+    }
     return;
   }
   if (args[0] === "server" && args[1] === "pair") {

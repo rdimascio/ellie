@@ -265,6 +265,59 @@ test("browser auth persistence uses its own private file", async () => {
   }
 });
 
+test("browser auth initializes an absent file once without replacing existing state", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ellie-browser-auth-init-"));
+  try {
+    const previous = process.umask(0o777);
+    try {
+      await BrowserAuth.openOrInitialize(dir);
+    } finally {
+      process.umask(previous);
+    }
+    const path = join(dir, BROWSER_AUTH_FILE);
+    assert.deepEqual(
+      browserAuthState(JSON.parse(await readFile(path, "utf8"))),
+      BrowserAuth.empty(),
+    );
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+
+    await writeFile(path, "corrupt", { mode: 0o600 });
+    await assert.rejects(BrowserAuth.openOrInitialize(dir), /could not be opened safely/);
+    assert.equal(await readFile(path, "utf8"), "corrupt");
+    assert.deepEqual(
+      (await readdir(dir)).filter((name) => name.endsWith(".tmp")),
+      [],
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("browser auth close drains an active save and rejects queued and later mutations", async () => {
+  let saveStarted!: () => void;
+  let finishSave!: () => void;
+  const saving = new Promise<void>((resolve) => {
+    saveStarted = resolve;
+  });
+  const releaseSave = new Promise<void>((resolve) => {
+    finishSave = resolve;
+  });
+  const auth = new BrowserAuth(BrowserAuth.empty(), async () => {
+    saveStarted();
+    await releaseSave;
+  });
+  const active = auth.invite(tv);
+  await saving;
+  const queued = auth.invite(tv);
+  const closing = auth.close();
+  await assert.rejects(auth.invite(tv), /closed/);
+  finishSave();
+  await active;
+  await assert.rejects(queued, /closed/);
+  await closing;
+  assert.throws(() => auth.listClients(), /closed/);
+});
+
 test("browser auth rejects unsafe or oversized private state files", async () => {
   async function expectUnsafe(setup: (dir: string, path: string) => Promise<void>): Promise<void> {
     const dir = await mkdtemp(join(tmpdir(), "ellie-browser-unsafe-"));

@@ -106,4 +106,9 @@ Open the loopback URL printed by the command. The phone-sized remote and TV view
 
 `bun run check` includes the production UI build. For browser checks, run `node node_modules/@playwright/test/cli.js install chromium`, then `bun run demo:build` and `bun run demo:test`. The browser suite emulates phone, laptop, and TV viewport sizes; it does not claim physical phone or TV acceptance.
 
+An optional coordinator HTTPS pairing page can connect a phone or shared display, show its own
+identity, and disconnect it. Controller CLI commands manage invitations and revocation. It exposes
+no household data or commands yet. See [browser setup and acceptance](docs/browser-pairing.md) for
+the separate TLS identity, service startup, and physical phone trust checks.
+
 The preview binds only to loopback and uses a production build with network connections blocked by its content policy. Re-run `bun run demo` after source changes. See [the design and acceptance notes](docs/command-center-design.md).

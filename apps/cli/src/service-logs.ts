@@ -15,6 +15,8 @@ import type { ServiceRole } from "./services.ts";
 export const SERVICE_EVENTS = [
   "starting",
   "ready",
+  "browser_ready",
+  "browser_unavailable",
   "connected",
   "reconnecting",
   "stopping",
