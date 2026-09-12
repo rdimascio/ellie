@@ -18,7 +18,8 @@
     "build:macos": "node scripts/build-macos.mjs",
     "contracts:generate": "node scripts/generate-contracts.ts",
     "contracts:check": "node scripts/generate-contracts.ts --check",
-    "smoke:macos": "node scripts/smoke-macos.mjs"
+    "smoke:macos": "node scripts/smoke-macos.mjs",
+    "smoke:services": "node scripts/smoke-services.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

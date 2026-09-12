@@ -31,9 +31,12 @@ import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
 
 import { generateCertificate } from "./certificate.ts";
+import { Services, serviceRole } from "./services.ts";
+import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
+let serviceLog: ServiceLog | undefined;
 async function exists(name: string): Promise<boolean> {
   try {
     await access(join(stateDir, name));
@@ -91,6 +94,47 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
   };
 }
 async function main(): Promise<void> {
+  if (args[0] === "service") {
+    const action = args[1];
+    const role = serviceRole(args[2]);
+    if (args.length !== 3)
+      throw new Error(
+        "Use: bun run ellie service install|start|stop|status|uninstall|logs coordinator|node",
+      );
+    const services = new Services();
+    if (action === "run") {
+      process.umask(0o077);
+      serviceLog = await ServiceLog.open(stateDir, role);
+      serviceLog.write("starting");
+      await services.validate(role);
+      args.splice(0, args.length, role === "coordinator" ? "server" : "node", "start");
+    } else {
+      if (action === "status") console.log(JSON.stringify(await services.status(role), null, 2));
+      else if (action === "logs")
+        console.log(JSON.stringify(await serviceLogs(stateDir, role), null, 2));
+      else if (
+        action === "install" ||
+        action === "start" ||
+        action === "stop" ||
+        action === "uninstall"
+      ) {
+        await services[action](role);
+        console.log(
+          action === "install"
+            ? "Service installed. Run service start to enable it now; installation uses the existing identity."
+            : action === "start"
+              ? "Service start requested. Check service status and doctor for readiness."
+              : action === "stop"
+                ? "Service stopped and disabled for future logins."
+                : "Service uninstalled. Private state, logs, and Keychain credentials were preserved.",
+        );
+      } else
+        throw new Error(
+          "Use: bun run ellie service install|start|stop|status|uninstall|logs coordinator|node",
+        );
+      return;
+    }
+  }
   if (args[0] === "server" && args[1] === "init") {
     if (await exists("server.json"))
       throw new Error("Server is already initialized. Existing identity was preserved.");
@@ -136,7 +180,15 @@ async function main(): Promise<void> {
     }
     if (!app) throw new Error("Coordinator failed to initialize.");
     console.log(`Ellie server ready on port ${config.port}. No model or cloud API is required.`);
-    for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => app.shutdown());
+    serviceLog?.write("ready");
+    for (const signal of ["SIGINT", "SIGTERM"] as const)
+      process.once(signal, () => {
+        try {
+          serviceLog?.write("stopping");
+        } finally {
+          app.shutdown();
+        }
+      });
     return;
   }
   if (args[0] === "server" && args[1] === "pair") {
@@ -192,8 +244,12 @@ async function main(): Promise<void> {
     const abort = new AbortController();
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.once(signal, () => {
-        abort.abort();
-        client.close();
+        try {
+          serviceLog?.write("stopping");
+        } finally {
+          abort.abort();
+          client.close();
+        }
       });
     const native = new MacOSExecutor();
     try {
@@ -206,7 +262,8 @@ async function main(): Promise<void> {
         health: () => native.health(),
         preferences: config.preferences,
         signal: abort.signal,
-        onStatus: console.log,
+        onStatus: serviceLog ? undefined : console.log,
+        onEvent: (event) => serviceLog?.write(event),
       });
     } finally {
       client.close();
@@ -306,17 +363,31 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  doctor                Check native helper and Accessibility\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  doctor                Check native helper and Accessibility\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {
+  if (serviceLog) {
+    try {
+      serviceLog.write(failureEvent(error));
+    } catch {
+      /* Stderr is discarded by launchd; never fall back to raw errors. */
+    }
+    console.error("Service failed. Run doctor and service logs for diagnostics.");
+    process.exitCode = 1;
+    return;
+  }
   const code = (error as NodeJS.ErrnoException).code;
   console.error(
     code === "ENOENT"
       ? "Private configuration is missing. Run server init or node pair first."
-      : error instanceof Error
-        ? error.message
-        : "Ellie could not complete the request.",
+      : error instanceof SyntaxError
+        ? "Private configuration is invalid JSON. Review the local configuration file."
+        : code
+          ? "Could not access a required local resource. Run doctor for diagnostics."
+          : error instanceof Error
+            ? error.message
+            : "Ellie could not complete the request.",
   );
   process.exitCode = 1;
 });

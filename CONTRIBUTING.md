@@ -6,4 +6,4 @@ Keep deterministic actions free of model dependencies. Validate every network pa
 
 Never commit installation state or realistic personal fixtures. Keep private state in `~/.ellie/` and secrets in Keychain or the owning application. Review `git diff --cached` before committing. Remove personal paths, addresses, usernames, cookies, and tokens from issue/PR text and logs. Use synthetic fixtures and no external analytics. Resource telemetry is limited to explicitly enabled compute workers and their paired coordinator.
 
-The packages are private Bun workspaces for source development; the repository is MIT licensed. Publishing packages, releasing binaries, and installing background services are separate future milestones.
+The packages are private Bun workspaces for source development; the repository is MIT licensed. Source-checkout LaunchAgents are documented in `docs/services.md`; packaged binaries, signing/notarization, and automatic updates remain future milestones. Service tests must use synthetic state and must never change an existing household identity or Keychain credential.
