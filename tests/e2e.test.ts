@@ -119,8 +119,30 @@ test("timeouts do not replay commands, failed actions do not advance pronoun con
   try {
     const node = await f.pair("node");
     await node.call("POST", "/v1/register", { capabilities: [...CAPABILITIES] });
+    const beginPoll = () => {
+      let observed!: () => void;
+      let failed!: (error: unknown) => void;
+      const started = new Promise<void>((resolve, reject) => {
+        observed = resolve;
+        failed = reject;
+      });
+      const onRequest = (request: { method?: string; url?: string }) => {
+        if (request.method !== "GET" || request.url !== "/v1/poll") return;
+        f.app.server.off("request", onRequest);
+        setImmediate(observed);
+      };
+      f.app.server.on("request", onRequest);
+      const reply = node.call("GET", "/v1/poll");
+      void reply.catch((error) => {
+        f.app.server.off("request", onRequest);
+        failed(error);
+      });
+      return { started, reply };
+    };
+    const firstPoll = beginPoll();
+    await firstPoll.started;
     const pending = node.call("POST", "/v1/commands", { nodeId: "node", text: "open Arc" });
-    const task = job(record(await node.call("GET", "/v1/poll")).job);
+    const task = job(record(await firstPoll.reply).job);
     assert.equal(record(await pending).ok, false);
     await assert.rejects(
       node.call("POST", "/v1/result", { id: task.id, result: { ok: true, message: "Late." } }),
@@ -132,8 +154,10 @@ test("timeouts do not replay commands, failed actions do not advance pronoun con
       ).ok,
       false,
     );
+    const secondPoll = beginPoll();
+    await secondPoll.started;
     const failure = node.call("POST", "/v1/commands", { nodeId: "node", text: "open Arc" });
-    const next = job(record(await node.call("GET", "/v1/poll")).job);
+    const next = job(record(await secondPoll.reply).job);
     assert.notEqual(next.id, task.id);
     await node.call("POST", "/v1/result", {
       id: next.id,
