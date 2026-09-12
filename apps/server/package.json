@@ -5,10 +5,11 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
+    "@ellie/compute": "*",
     "@ellie/config": "*",
+    "@ellie/permissions": "*",
     "@ellie/protocol": "*",
     "@ellie/router": "*",
-    "@ellie/permissions": "*",
     "@ellie/transport": "*"
   }
 }

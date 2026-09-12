@@ -138,6 +138,19 @@ enum EllieHelper {
             guard data.count <= 32768, let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw fail("Invalid helper request.") }
             if let command = request["command"] as? String {
                 if command == "keychain.get" || command == "keychain.set" { try keychain(request, command: command); return }
+                if command == "telemetry" {
+                    let thermal: String
+                    switch ProcessInfo.processInfo.thermalState {
+                    case .nominal: thermal = "nominal"
+                    case .fair: thermal = "fair"
+                    case .serious: thermal = "serious"
+                    case .critical: thermal = "critical"
+                    @unknown default: thermal = "unknown"
+                    }
+                    var status: [String: Any] = ["thermal": thermal]
+                    if #available(macOS 12.0, *) { status["lowPowerMode"] = ProcessInfo.processInfo.isLowPowerModeEnabled }
+                    emit(status); return
+                }
                 if command == "doctor" { emit(["accessibility": AXIsProcessTrusted(), "ok": true]); return }
                 throw fail("Unsupported helper command.")
             }

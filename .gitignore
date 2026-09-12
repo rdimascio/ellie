@@ -18,3 +18,6 @@ coverage/
 config.json
 state.json
 pairing.json
+
+# Legacy LibreSSL init may have treated -keyout - as a literal filename.
+/-
