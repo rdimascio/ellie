@@ -64,7 +64,7 @@ export async function generateBrowserTlsIdentity(
       leafCert: join(dir, "leaf-cert.pem"),
       serial: join(dir, "root-cert.srl"),
     };
-    const rootConfig = `[req]\nprompt = no\ndistinguished_name = subject\nx509_extensions = root_ext\n[subject]\nCN = Ellie Local Browser CA\n[root_ext]\nbasicConstraints = critical,CA:true,pathlen:0\nkeyUsage = critical,keyCertSign,cRLSign\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\nnameConstraints = critical,permitted;DNS:${canonicalHostname}\n`;
+    const rootConfig = `[req]\nprompt = no\ndistinguished_name = subject\nx509_extensions = root_ext\n[subject]\nCN = Ellie Local Browser CA\n[root_ext]\nbasicConstraints = critical,CA:true,pathlen:0\nkeyUsage = critical,keyCertSign,cRLSign\nsubjectKeyIdentifier = hash\nauthorityKeyIdentifier = keyid:always\nnameConstraints = critical,permitted;DNS:${canonicalHostname},excluded;IP:0.0.0.0/0.0.0.0,excluded;IP:0:0:0:0:0:0:0:0/0:0:0:0:0:0:0:0\n`;
     const leafConfig = `[req]\nprompt = no\ndistinguished_name = subject\nreq_extensions = leaf_ext\n[subject]\nCN = ${canonicalHostname}\n[leaf_ext]\nbasicConstraints = critical,CA:false\nkeyUsage = critical,digitalSignature,keyEncipherment\nextendedKeyUsage = serverAuth\nsubjectAltName = DNS:${canonicalHostname}\nsubjectKeyIdentifier = hash\n`;
     await Promise.all([
       writeFile(paths.rootConfig, rootConfig, { mode: 0o600 }),
@@ -140,12 +140,24 @@ export async function generateBrowserTlsIdentity(
       readFile(paths.leafCert, "utf8"),
     ]);
     try {
-      if (!new X509Certificate(rootCert).checkPrivateKey(createPrivateKey(rootKey)))
-        throw new Error();
+      const root = new X509Certificate(rootCert);
       const leaf = new X509Certificate(leafCert);
+      const now = Date.now();
+      const leafStart = leaf.validFromDate.getTime();
+      const leafEnd = leaf.validToDate.getTime();
       if (
+        !root.ca ||
+        !root.checkPrivateKey(createPrivateKey(rootKey)) ||
+        !root.verify(root.publicKey) ||
+        leaf.ca ||
         !leaf.checkPrivateKey(createPrivateKey(leafKey)) ||
-        leaf.checkHost(canonicalHostname) !== canonicalHostname
+        !leaf.verify(root.publicKey) ||
+        leaf.subjectAltName !== `DNS:${canonicalHostname}` ||
+        leaf.checkHost(canonicalHostname) !== canonicalHostname ||
+        !leaf.keyUsage?.includes("1.3.6.1.5.5.7.3.1") ||
+        leafStart > now + 5 * 60_000 ||
+        leafEnd <= now ||
+        leafEnd - leafStart > 397 * 86_400_000
       )
         throw new Error();
     } catch {

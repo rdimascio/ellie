@@ -19,12 +19,15 @@ test("browser TLS generation creates a constrained CA and one server leaf", asyn
       tempDir: parent,
     });
     assert.equal(identity.hostname, "living-room.local");
-    assert.ok(
-      new X509Certificate(identity.rootCert).checkPrivateKey(createPrivateKey(identity.rootKey)),
-    );
-    assert.ok(
-      new X509Certificate(identity.leafCert).checkPrivateKey(createPrivateKey(identity.leafKey)),
-    );
+    const generatedRoot = new X509Certificate(identity.rootCert);
+    const generatedLeaf = new X509Certificate(identity.leafCert);
+    assert.equal(generatedRoot.ca, true);
+    assert.ok(generatedRoot.checkPrivateKey(createPrivateKey(identity.rootKey)));
+    assert.ok(generatedRoot.verify(generatedRoot.publicKey));
+    assert.equal(generatedLeaf.ca, false);
+    assert.ok(generatedLeaf.checkPrivateKey(createPrivateKey(identity.leafKey)));
+    assert.ok(generatedLeaf.verify(generatedRoot.publicKey));
+    assert.deepEqual(generatedLeaf.keyUsage, ["1.3.6.1.5.5.7.3.1"]);
 
     const inspectDir = await mkdtemp(join(tmpdir(), "ellie-browser-tls-inspect-"));
     try {
@@ -42,6 +45,8 @@ test("browser TLS generation creates a constrained CA and one server leaf", asyn
       assert.match(rootText, /Certificate Sign, CRL Sign/);
       assert.match(rootText, /X509v3 Name Constraints: critical/);
       assert.match(rootText, /DNS:living-room\.local/);
+      assert.match(rootText, /IP:0\.0\.0\.0\/0\.0\.0\.0/);
+      assert.match(rootText, /IP:0:0:0:0:0:0:0:0\/0:0:0:0:0:0:0:0/);
       assert.match(leafText, /Signature Algorithm: sha256WithRSAEncryption/);
       assert.match(leafText, /Public-Key: \(2048 bit\)/);
       assert.match(leafText, /CA:FALSE/);
@@ -53,9 +58,108 @@ test("browser TLS generation creates a constrained CA and one server leaf", asyn
       assert.equal(leaf.checkHost("other.local"), undefined);
       assert.ok((Date.parse(leaf.validTo) - Date.parse(leaf.validFrom)) / 86_400_000 <= 397);
       await execute(openssl, ["verify", "-CAfile", rootPath, "-purpose", "sslserver", leafPath]);
+
+      const verifyRejectedSan = async (name: string, san: string) => {
+        const configPath = join(inspectDir, `${name}.cnf`);
+        const keyPath = join(inspectDir, `${name}-key.pem`);
+        const requestPath = join(inspectDir, `${name}.csr`);
+        const certPath = join(inspectDir, `${name}.pem`);
+        const serialPath = join(inspectDir, `${name}.srl`);
+        await writeFile(
+          configPath,
+          `[req]\nprompt=no\ndistinguished_name=subject\nreq_extensions=leaf_ext\n[subject]\nCN=rejected.local\n[leaf_ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName=${san}\n`,
+          { mode: 0o600 },
+        );
+        await execute(openssl, [
+          "req",
+          "-new",
+          "-newkey",
+          "rsa:2048",
+          "-sha256",
+          "-nodes",
+          "-keyout",
+          keyPath,
+          "-out",
+          requestPath,
+          "-config",
+          configPath,
+        ]);
+        await execute(openssl, [
+          "x509",
+          "-req",
+          "-sha256",
+          "-in",
+          requestPath,
+          "-CA",
+          rootPath,
+          "-CAkey",
+          join(inspectDir, "root-key.pem"),
+          "-CAserial",
+          serialPath,
+          "-CAcreateserial",
+          "-out",
+          certPath,
+          "-days",
+          "30",
+          "-extfile",
+          configPath,
+          "-extensions",
+          "leaf_ext",
+        ]);
+        await assert.rejects(
+          execute(openssl, ["verify", "-CAfile", rootPath, "-purpose", "sslserver", certPath]),
+        );
+      };
+      await writeFile(join(inspectDir, "root-key.pem"), identity.rootKey, { mode: 0o600 });
+      await verifyRejectedSan("dns", "DNS:other.local");
+      await verifyRejectedSan("ipv4", "IP:127.0.0.1");
+      await verifyRejectedSan("ipv6", "IP:::1");
     } finally {
       await rm(inspectDir, { recursive: true, force: true });
     }
+    assert.deepEqual(await readdir(parent), []);
+  } finally {
+    await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("browser TLS generation rejects a matching leaf key signed by a different CA", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "ellie-browser-tls-chain-"));
+  try {
+    await assert.rejects(
+      generateBrowserTlsIdentity("host.local", {
+        openssl,
+        tempDir: parent,
+        run: async (file, args) => {
+          if (args[0] !== "x509") return execute(file, args);
+          const outputPath = args[args.indexOf("-out") + 1]!;
+          const dir = dirname(outputPath);
+          const rogueKey = join(dir, "rogue-key.pem");
+          const rogueCert = join(dir, "rogue-cert.pem");
+          await execute(file, [
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-sha256",
+            "-nodes",
+            "-keyout",
+            rogueKey,
+            "-out",
+            rogueCert,
+            "-days",
+            "30",
+            "-subj",
+            "/CN=Rogue CA",
+          ]);
+          const changed = [...args];
+          changed[changed.indexOf("-CA") + 1] = rogueCert;
+          changed[changed.indexOf("-CAkey") + 1] = rogueKey;
+          return execute(file, changed);
+        },
+      }),
+      /invalid browser TLS identity/,
+    );
     assert.deepEqual(await readdir(parent), []);
   } finally {
     await rm(parent, { recursive: true, force: true });
