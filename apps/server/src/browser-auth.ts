@@ -559,7 +559,7 @@ export function browserSessionToken(header?: string | string[]): string | undefi
   return matches[0];
 }
 
-function exactBrowserOrigin(value: string): URL {
+export function browserOrigin(value: string): URL {
   const url = new URL(value);
   if (
     url.protocol !== "https:" ||
@@ -579,7 +579,7 @@ export function browserRequestMatchesOrigin(
   expectedOrigin: string,
   request: { method: string; host?: string; origin?: string },
 ): boolean {
-  const expected = exactBrowserOrigin(expectedOrigin);
+  const expected = browserOrigin(expectedOrigin);
   if (request.host !== expected.host) return false;
   if (request.origin !== undefined && request.origin !== expected.origin) return false;
   const method = request.method.toUpperCase();

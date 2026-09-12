@@ -1,9 +1,9 @@
 # Browser session foundation
 
-Ellie's browser authorization state is implemented as an isolated foundation. It is not connected
-to a network listener, UI, CLI command, certificate, node credential, or desktop operation yet.
-The next slice must establish trusted local HTTPS and wire only the bootstrap routes before any
-household data or actions become available.
+Ellie's browser authorization state and an optional HTTPS listener factory are implemented as
+isolated foundations. They are not connected to a live service, UI, CLI command, certificate
+installer, node credential, or desktop operation yet. The next slice must supply a trusted local
+HTTPS identity and explicitly start the listener before any browser can connect.
 
 ## State and roles
 
@@ -48,20 +48,44 @@ writer and must own it under the coordinator's existing lifetime lock. CLI manag
 through authenticated coordinator routes instead of opening the file as a second writer. Parallel
 file writers and last-write-wins reconciliation are outside this design.
 
-## Future HTTP boundary
+## HTTPS listener boundary
 
-The foundation provides a cookie formatter and a pure request-boundary guard for the next listener.
+The foundation provides a cookie formatter, a pure request-boundary guard, and
+`createBrowserServer({ key, cert, origin, auth })`. The factory validates one canonical HTTPS origin
+when it is created and returns `{ server, shutdown }`; it does not open a socket, persist or close
+the injected authorization state, or change the existing agent listener. Its future owner must
+explicitly call `server.listen(...)` while holding the coordinator lifetime lock and call
+`shutdown()` during service teardown.
+
 The session cookie is named `__Host-ellie-session` and always carries `Secure`, `HttpOnly`,
 `SameSite=Strict`, `Path=/`, and the fixed session lifetime. It has no `Domain` attribute. Browsers
 still share cookies across ports on the same host, including cookies with the `__Host-` prefix. The
 existing agent listener must therefore continue to ignore cookie credentials and require its Bearer
 credential, while the future browser listener must never accept an agent Bearer credential.
 
-The future browser listener must have one canonical HTTPS origin. Its Host header must exactly match
-the configured host and port. Every supplied Origin must exactly match that origin, and every method
-other than GET or HEAD must supply the matching Origin. GET and HEAD must remain free of side effects.
-The listener should serve its UI and API from that origin, emit no cross-origin credential policy,
-and retain bounded JSON bodies, `Cache-Control: no-store`, and restrictive content security headers.
+The browser listener requires its Host header to exactly match the configured host and port. Every
+supplied Origin must exactly match that origin, and every method other than GET or HEAD must supply
+the matching Origin. Duplicate Host, Origin, and Authorization fields are rejected, and every
+Authorization header is rejected so an agent Bearer credential cannot cross into the cookie-auth
+boundary. Mutations accept only JSON bodies up to 4 KiB. The listener emits no cross-origin
+credential policy and adds `Cache-Control: no-store`, a same-origin resource policy, frame denial,
+content-type sniffing protection, no referrer, and a restrictive content security policy to every
+application response.
+
+The initial API has four routes:
+
+- `GET /browser/v1/health` returns `{ "ok": true }` without household or identity data.
+- `POST /browser/v1/pair` accepts only `{ "code": "..." }`, consumes the invitation through the
+  injected single writer, sets the strict session cookie, and returns only the new public client.
+- `GET /browser/v1/session` returns only the authenticated client's public identity and grants.
+- `POST /browser/v1/logout` accepts `{}`, durably removes the session, and clears the cookie.
+
+Errors use fixed JSON messages and do not include request values, credentials, file paths, URLs, or
+internal exceptions. Unknown routes return 404. Invalid headers or bodies return 400, origin and
+Authorization failures return 403, non-JSON mutations return 415, missing sessions return 401, and
+authorization-state failures return 503. The listener supports TLS 1.2 or newer, caps headers at
+8 KiB, caps concurrent connections at 32, caps requests per socket at 100, and bounds the TLS
+handshake, headers, request, keep-alive, and inactive socket phases to between 5 and 10 seconds.
 
 These helpers do not make a LAN origin trustworthy. The next slice needs a separate browser TLS
 identity and an optional listener. It must preserve the existing certificate pinned by paired nodes.
@@ -83,7 +107,10 @@ Relevant platform specifications:
 - [RFC 9110: HTTP Semantics](https://www.rfc-editor.org/info/rfc9110/)
 
 Automated tests use only in-memory state and synthetic private directories. They exercise fsynced
-publication through temporary files and reject unsafe synthetic paths, but do not start a listener,
-write to `~/.ellie`, access Keychain, install a certificate, contact a phone or TV, or execute a
-desktop action. Trusted HTTPS and session behavior in Safari and a target TV browser remain physical
-acceptance checks for later slices.
+publication through temporary files and reject unsafe synthetic paths. Listener tests open only a
+loopback socket with a short-lived synthetic CA that the Node test client trusts explicitly. They
+cover TLS hostname validation, origin and header rejection, JSON limits, role escalation, invitation
+replay, session projection, revocation, logout, static error redaction, and the configured connection
+and timeout bounds. Tests do not write to `~/.ellie`, access Keychain, install a certificate, contact
+a phone or TV, or execute a desktop action. Trusted HTTPS and session behavior in Safari and a target
+TV browser remain physical acceptance checks for later slices.
