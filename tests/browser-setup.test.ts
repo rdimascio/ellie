@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import {
   chmod,
   link,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -122,6 +123,13 @@ test("browser init is private, idempotent, and status detects hostname drift", a
     assert.equal(listener.caCert, await readFile(join(setup.stateDir, BROWSER_CA_CERT), "utf8"));
     assert.equal(listener.key, setup.secrets.values.get(BROWSER_SERVER_KEY));
     assert.equal("rootKey" in listener, false);
+    const get = setup.secrets.get.bind(setup.secrets);
+    setup.secrets.get = async (account) => {
+      if (account === BROWSER_CA_KEY) throw new Error("CA key must remain sealed");
+      return get(account);
+    };
+    assert.equal((await loadBrowserServerIdentity(setup.environment)).key, listener.key);
+    setup.secrets.get = get;
     setup.setHostname("new-name.local");
     const drifted = await browserStatus(setup.environment);
     assert.equal(drifted.ready, false);
@@ -173,8 +181,17 @@ test("CA export canonicalizes the certificate and rejects protected destinations
     await exportBrowserCa(setup.environment, output);
     assert.equal(await readFile(output, "utf8"), new X509Certificate(ca).toString());
     assert.ok(!(await readFile(output, "utf8")).includes("PRIVATE KEY"));
+    const listener = await loadBrowserServerIdentity(setup.environment);
+    assert.equal(listener.caCert, new X509Certificate(ca).toString());
+    assert.ok(!listener.caCert.includes("PRIVATE KEY"));
     await assert.rejects(
       exportBrowserCa(setup.environment, join(setup.stateDir, "server-cert.pem"), true),
+      /outside Ellie private state/,
+    );
+    const hidden = join(setup.stateDir, "..export");
+    await mkdir(hidden, { mode: 0o700 });
+    await assert.rejects(
+      exportBrowserCa(setup.environment, join(hidden, "ca.pem"), true),
       /outside Ellie private state/,
     );
     await assert.rejects(

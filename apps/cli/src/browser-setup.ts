@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { constants } from "node:fs";
 import { chmod, link, lstat, open, realpath, rename, rm } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { createPrivateKey, randomBytes, X509Certificate } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import type { BrowserConfig, MutableSecretStore } from "@ellie/config";
@@ -41,7 +41,7 @@ export interface BrowserServerIdentity {
   key: string;
 }
 interface BrowserIdentitySnapshot extends BrowserServerIdentity {
-  caKey: string;
+  caKey?: string;
 }
 class BrowserSnapshotError extends Error {
   readonly issue: string;
@@ -69,7 +69,7 @@ export async function systemLocalHostname(): Promise<string> {
 
 function within(root: string, target: string): boolean {
   const rel = relative(root, target);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 function ownedByCurrentUser(uid: number): boolean {
   return process.getuid === undefined || uid === process.getuid();
@@ -119,11 +119,17 @@ async function secureRead(path: string, maximum: number): Promise<string> {
       opened.ino !== named.ino
     )
       throw new Error();
-    const contents = await handle.readFile();
-    if (contents.length > maximum) throw new Error();
+    const contents = Buffer.alloc(maximum + 1);
+    let length = 0;
+    while (length < contents.length) {
+      const { bytesRead } = await handle.read(contents, length, contents.length - length, null);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maximum) throw new Error();
     const after = await lstat(path);
     if (opened.dev !== after.dev || opened.ino !== after.ino) throw new Error();
-    return contents.toString("utf8");
+    return contents.subarray(0, length).toString("utf8");
   } catch {
     throw new Error("Browser private files are missing, unsafe, or invalid.");
   } finally {
@@ -157,21 +163,24 @@ function inventoryCount(found: Awaited<ReturnType<typeof inventory>>): number {
 
 async function readSnapshot(
   environment: BrowserSetupEnvironment,
+  includeCaKey = true,
 ): Promise<BrowserIdentitySnapshot> {
   await validateStateDirectory(environment.stateDir);
-  let values: [string, string, string, string, string];
+  let values: [string, string, string, string] | [string, string, string, string, string];
   try {
-    values = await Promise.all([
+    const publicAndServer = [
       secureRead(join(environment.stateDir, BROWSER_CONFIG), 16 * 1024),
       secureRead(join(environment.stateDir, BROWSER_CA_CERT), 64 * 1024),
       secureRead(join(environment.stateDir, BROWSER_SERVER_CERT), 64 * 1024),
-      environment.secrets.get(BROWSER_CA_KEY),
       environment.secrets.get(BROWSER_SERVER_KEY),
-    ]);
+    ] as const;
+    values = includeCaKey
+      ? await Promise.all([...publicAndServer, environment.secrets.get(BROWSER_CA_KEY)])
+      : await Promise.all(publicAndServer);
   } catch {
     throw new BrowserSnapshotError("Browser identity material is unavailable or unsafe.");
   }
-  const [rawConfig, caCert, cert, caKey, key] = values;
+  const [rawConfig, caCert, cert, key, caKey] = values;
   let config: BrowserConfig;
   let root: X509Certificate;
   let leaf: X509Certificate;
@@ -213,7 +222,7 @@ async function readSnapshot(
     throw new BrowserSnapshotError("Browser server certificate is not currently valid.");
   try {
     if (
-      !root.checkPrivateKey(createPrivateKey(caKey)) ||
+      (caKey !== undefined && !root.checkPrivateKey(createPrivateKey(caKey))) ||
       !leaf.checkPrivateKey(createPrivateKey(key))
     )
       throw new Error();
@@ -222,7 +231,7 @@ async function readSnapshot(
       "Browser private keys do not match the configured public certificates.",
     );
   }
-  return { config, caCert, cert, caKey, key };
+  return { config, caCert: root.toString(), cert: leaf.toString(), caKey, key };
 }
 
 async function syncDirectory(path: string): Promise<void> {
@@ -408,7 +417,7 @@ export async function browserStatus(environment: BrowserSetupEnvironment): Promi
 export async function loadBrowserServerIdentity(
   environment: BrowserSetupEnvironment,
 ): Promise<BrowserServerIdentity> {
-  const snapshot = await readSnapshot(environment);
+  const snapshot = await readSnapshot(environment, false);
   if ((await environment.localHostname()) !== snapshot.config.hostname)
     throw new Error("Browser identity no longer matches this Mac LocalHostName.");
   return {
