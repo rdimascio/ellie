@@ -40,7 +40,11 @@ export interface BrowserServerIdentity {
   cert: string;
   key: string;
 }
-interface BrowserIdentitySnapshot extends BrowserServerIdentity {
+interface BrowserIdentitySnapshot {
+  config: BrowserConfig;
+  caCert: string;
+  cert: string;
+  key?: string;
   caKey?: string;
 }
 class BrowserSnapshotError extends Error {
@@ -163,24 +167,20 @@ function inventoryCount(found: Awaited<ReturnType<typeof inventory>>): number {
 
 async function readSnapshot(
   environment: BrowserSetupEnvironment,
-  includeCaKey = true,
+  privateKeys: "both" | "server" | "none" = "both",
 ): Promise<BrowserIdentitySnapshot> {
   await validateStateDirectory(environment.stateDir);
-  let values: [string, string, string, string] | [string, string, string, string, string];
+  let publicValues: [string, string, string];
   try {
-    const publicAndServer = [
+    publicValues = await Promise.all([
       secureRead(join(environment.stateDir, BROWSER_CONFIG), 16 * 1024),
       secureRead(join(environment.stateDir, BROWSER_CA_CERT), 64 * 1024),
       secureRead(join(environment.stateDir, BROWSER_SERVER_CERT), 64 * 1024),
-      environment.secrets.get(BROWSER_SERVER_KEY),
-    ] as const;
-    values = includeCaKey
-      ? await Promise.all([...publicAndServer, environment.secrets.get(BROWSER_CA_KEY)])
-      : await Promise.all(publicAndServer);
+    ]);
   } catch {
     throw new BrowserSnapshotError("Browser identity material is unavailable or unsafe.");
   }
-  const [rawConfig, caCert, cert, key, caKey] = values;
+  const [rawConfig, caCert, cert] = publicValues;
   let config: BrowserConfig;
   let root: X509Certificate;
   let leaf: X509Certificate;
@@ -220,10 +220,25 @@ async function readSnapshot(
     leaf.validToDate.getTime() - leaf.validFromDate.getTime() > 397 * 86_400_000
   )
     throw new BrowserSnapshotError("Browser server certificate is not currently valid.");
+  let key: string | undefined;
+  let caKey: string | undefined;
+  try {
+    [key, caKey] =
+      privateKeys === "both"
+        ? await Promise.all([
+            environment.secrets.get(BROWSER_SERVER_KEY),
+            environment.secrets.get(BROWSER_CA_KEY),
+          ])
+        : privateKeys === "server"
+          ? [await environment.secrets.get(BROWSER_SERVER_KEY), undefined]
+          : [undefined, undefined];
+  } catch {
+    throw new BrowserSnapshotError("Browser identity material is unavailable or unsafe.");
+  }
   try {
     if (
       (caKey !== undefined && !root.checkPrivateKey(createPrivateKey(caKey))) ||
-      !leaf.checkPrivateKey(createPrivateKey(key))
+      (key !== undefined && !leaf.checkPrivateKey(createPrivateKey(key)))
     )
       throw new Error();
   } catch {
@@ -250,6 +265,7 @@ async function exclusiveAtomic(
   const parent = dirname(path);
   const temporary = join(parent, `.${basename(path)}.${randomBytes(8).toString("hex")}.tmp`);
   let handle;
+  let temporaryRemoved = false;
   try {
     handle = await open(
       temporary,
@@ -257,15 +273,26 @@ async function exclusiveAtomic(
       0o600,
     );
     await handle.writeFile(contents);
+    await handle.chmod(0o600);
     await handle.sync();
     await handle.close();
     handle = undefined;
     await link(temporary, path);
     published();
+    await rm(temporary);
+    temporaryRemoved = true;
+    const final = await lstat(path);
+    if (
+      !final.isFile() ||
+      final.nlink !== 1 ||
+      !ownedByCurrentUser(final.uid) ||
+      (final.mode & 0o777) !== 0o600
+    )
+      throw new Error("Published browser state is unsafe.");
     await syncDirectory(parent);
   } finally {
     await handle?.close();
-    await rm(temporary, { force: true });
+    if (!temporaryRemoved) await rm(temporary, { force: true });
   }
 }
 async function removePublished(path: string): Promise<void> {
@@ -417,14 +444,14 @@ export async function browserStatus(environment: BrowserSetupEnvironment): Promi
 export async function loadBrowserServerIdentity(
   environment: BrowserSetupEnvironment,
 ): Promise<BrowserServerIdentity> {
-  const snapshot = await readSnapshot(environment, false);
+  const snapshot = await readSnapshot(environment, "server");
   if ((await environment.localHostname()) !== snapshot.config.hostname)
     throw new Error("Browser identity no longer matches this Mac LocalHostName.");
   return {
     config: snapshot.config,
     caCert: snapshot.caCert,
     cert: snapshot.cert,
-    key: snapshot.key,
+    key: snapshot.key!,
   };
 }
 
@@ -453,7 +480,7 @@ export async function exportBrowserCa(
   force = false,
 ): Promise<void> {
   const target = await safeExportPath(environment, outputPath);
-  const snapshot = await readSnapshot(environment);
+  const snapshot = await readSnapshot(environment, "none");
   if ((await environment.localHostname()) !== snapshot.config.hostname)
     throw new Error("Browser identity no longer matches this Mac LocalHostName.");
   const cert = new X509Certificate(snapshot.caCert).toString();

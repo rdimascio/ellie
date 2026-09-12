@@ -145,6 +145,25 @@ test("browser init is private, idempotent, and status detects hostname drift", a
   }
 });
 
+test("browser init publishes exact file modes under a restrictive umask", async () => {
+  const setup = await fixture();
+  const identity = await generateBrowserTlsIdentity("living-room.local");
+  setup.environment.generate = async () => identity;
+  const previous = process.umask(0o777);
+  try {
+    await initializeBrowser(setup.environment);
+  } finally {
+    process.umask(previous);
+  }
+  try {
+    for (const name of [BROWSER_CONFIG, BROWSER_CA_CERT, BROWSER_SERVER_CERT])
+      assert.equal((await stat(join(setup.stateDir, name))).mode & 0o777, 0o600);
+    assert.equal((await browserStatus(setup.environment)).ready, true);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
 test("CA export writes only the public root and does not overwrite by default", async () => {
   const setup = await fixture();
   const outputDir = await mkdtemp(join(tmpdir(), "ellie-browser-export-"));
@@ -157,6 +176,9 @@ test("CA export writes only the public root and does not overwrite by default", 
     assert.equal((await stat(output)).mode & 0o777, 0o644);
     assert.equal(new X509Certificate(exported).ca, true);
     assert.ok(!exported.includes("PRIVATE KEY"));
+    setup.secrets.get = async () => {
+      throw new Error("public export must not read Keychain");
+    };
     await assert.rejects(exportBrowserCa(setup.environment, output), /already exists/);
     await writeFile(output, "replace me");
     await exportBrowserCa(setup.environment, output, true);
@@ -247,6 +269,25 @@ test("status rejects unsafe private directories and files before accepting their
     await unlink(configPath);
     await rename(savedConfig, configPath);
     assert.equal((await browserStatus(setup.environment)).ready, true);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("public identity validation precedes private Keychain reads", async () => {
+  const setup = await fixture();
+  try {
+    await initializeBrowser(setup.environment);
+    await writeFile(join(setup.stateDir, BROWSER_SERVER_CERT), "invalid certificate", {
+      mode: 0o600,
+    });
+    let reads = 0;
+    setup.secrets.get = async () => {
+      reads += 1;
+      throw new Error("must not be reached");
+    };
+    await assert.rejects(loadBrowserServerIdentity(setup.environment), /certificates are invalid/);
+    assert.equal(reads, 0);
   } finally {
     await rm(setup.stateDir, { recursive: true, force: true });
   }
