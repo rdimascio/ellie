@@ -104,7 +104,7 @@ bun run demo
 
 Open the loopback URL printed by the command. The phone-sized remote and TV view use only synthetic household fixtures. Commands are simulated in browser memory; no authentication, calendar sync, analytics, or live coordinator connection is present. Use the Demo scenario selector to inspect loading, offline, empty, running, completed, failed, cancelled, and unknown outcomes.
 
-`bun run check` includes the production UI build. For browser checks, run `node node_modules/@playwright/test/cli.js install chromium`, then `bun run demo:build` and `bun run demo:test`. The browser suite emulates phone, laptop, and TV viewport sizes; it does not claim physical phone or TV acceptance.
+`bun run check` includes the production UI build. For browser checks, run `node node_modules/@playwright/test/cli.js install chromium webkit`, then `bun run demo:build` and `bun run demo:test`. The browser suite emulates phone, laptop, and TV viewport sizes in Chromium and checks manual and QR pairing in WebKit at phone size; it does not claim physical phone or TV acceptance.
 
 An optional coordinator HTTPS pairing page can connect a phone or shared display, show its own
 identity, and disconnect it. Controller CLI commands display single-use QR invitations with a manual

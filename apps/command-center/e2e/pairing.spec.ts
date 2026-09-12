@@ -126,12 +126,15 @@ test("revocation and outages change the page using bounded read-only retries", a
 
 test("read-only shared display identity and narrow phone layouts remain usable", async ({
   page,
+  browserName,
 }) => {
   await connection(page, { paired: true, role: "tv_viewer" });
   await page.goto("/pair/");
   await expect(page.getByText("Shared display · read only", { exact: true })).toBeVisible();
   expect(await page.getByRole("button").allTextContents()).toEqual(["Disconnect this device"]);
-  await page.keyboard.press("Tab");
+  await page.keyboard.press(
+    browserName === "webkit" && process.platform === "darwin" ? "Alt+Tab" : "Tab",
+  );
   await expect(page.getByRole("link", { name: "Skip to content" })).toBeFocused();
   await page.screenshot({ path: test.info().outputPath("paired-tv.png"), fullPage: true });
   await page.setViewportSize({ width: 320, height: 720 });

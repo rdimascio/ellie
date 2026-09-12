@@ -13,6 +13,17 @@ check is recorded separately in [browser pairing validation](2026-09-12-browser-
 - The full Chromium suite passed 57 checks across emulated phone, laptop and TV viewports. This
   includes 24 QR checks using synthetic camera streams and mocked API responses. The focused
   24-check QR suite passed again after strengthening the camera-before-POST assertion.
+- Follow-up WebKit 26.6 checks passed all 14 manual and QR pairing cases on macOS with an emulated
+  phone viewport. The expanded regular browser suite passed 71 checks; CI now includes that
+  WebKit project. Camera cleanup
+  assertions inspect each retained track's actual `ended` state instead of replacing its `stop`
+  method. This verifies cleanup across both engines, including before the pairing POST.
+  The keyboard check uses macOS WebKit's Option-Tab navigation for links, as described in
+  [Apple's Safari shortcuts](https://support.apple.com/en-gb/guide/safari/cpsh003/mac).
+- A separate private QR candidate harness passed strict loopback TLS and page readiness, then
+  stopped and removed its temporary runtime. It used memory-only keys and no installed identity,
+  helper, Keychain item or LaunchAgent. Its preflight certificate artifacts are stale and must
+  not be installed; an attended phone session requires a fresh active harness and profile.
 - QR tests render real encoder output into camera frames and run the production decoder under
   the browser listener's CSP and Permissions Policy. They cover a single pairing POST, camera
   shutdown before that POST, response-loss recovery without resubmission, rejection of URL QR

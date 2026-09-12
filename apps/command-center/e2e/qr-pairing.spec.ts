@@ -55,7 +55,13 @@ async function syntheticCamera(
   });
   await page.addInitScript(
     ({ matrix, pending, denied }) => {
-      const state: CameraState = { calls: 0, stops: 0 };
+      const tracks: MediaStreamTrack[] = [];
+      const state: CameraState = {
+        calls: 0,
+        get stops() {
+          return tracks.filter((track) => track.readyState === "ended").length;
+        },
+      };
       let resolvePermission = () => {};
 
       const stream = () => {
@@ -74,12 +80,7 @@ async function syntheticCamera(
           }
         }
         const captured = canvas.captureStream(10);
-        const track = captured.getVideoTracks()[0]!;
-        const stop = track.stop.bind(track);
-        track.stop = () => {
-          state.stops += 1;
-          stop();
-        };
+        tracks.push(...captured.getVideoTracks());
         return captured;
       };
 

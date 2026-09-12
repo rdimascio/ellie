@@ -115,6 +115,7 @@ profile, passcode, and trust prompts remain attended OS interactions.
 `bun run check` exercises temporary authorization files, mocked runtime failures, real loopback
 HTTPS with synthetic CA verification, controller invitation through browser pairing and revocation,
 coordinator availability during browser failure, and exclusive state ownership. It builds the UI.
-`bun run demo:test` adds synthetic browser responses at phone, laptop, and TV viewports, including
+`bun run demo:test` adds synthetic browser responses at phone, laptop, and TV viewports in Chromium,
+plus manual and QR pairing at phone size in WebKit, including
 interrupted pairing/logout, reconnects, revocation, code handling, and a 320 px layout.
 These tests never install trust, access Keychain, alter a live service, or execute a desktop action.
