@@ -213,7 +213,10 @@ export class Keychain implements MutableSecretStore {
     await this.call({ command: "keychain.set", account, value });
   }
   async has(account: string): Promise<boolean> {
-    return (await this.call({ command: "keychain.has", account })) === "true";
+    const value = await this.call({ command: "keychain.has", account });
+    if (value !== "true" && value !== "false")
+      throw new Error("Keychain returned an invalid presence response.");
+    return value === "true";
   }
   async add(account: string, value: string): Promise<void> {
     await this.call({ command: "keychain.add", account, value });

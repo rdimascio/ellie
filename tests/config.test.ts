@@ -11,6 +11,7 @@ import {
   defaults,
   serverConfig,
   nodeConfig,
+  Keychain,
 } from "@ellie/config";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 
@@ -36,6 +37,14 @@ test("private state has restricted permissions and credentials are stored only a
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+test("Keychain presence checks reject unknown helper responses", async () => {
+  class InvalidPresenceKeychain extends Keychain {
+    override async call(): Promise<string> {
+      return "unexpected";
+    }
+  }
+  await assert.rejects(new InvalidPresenceKeychain().has("browser-ca-key"), /invalid presence/);
 });
 test("private state cannot be written into the checkout or traversed through a file name", async () => {
   await assert.rejects(ensureState(join(process.cwd(), ".ellie")), /outside/);

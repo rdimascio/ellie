@@ -1,6 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  chmod,
+  link,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  symlink,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { X509Certificate } from "node:crypto";
@@ -41,6 +55,16 @@ class MemorySecrets implements MutableSecretStore {
   async delete(account: string): Promise<void> {
     if (this.fail === "delete") throw new Error("private delete detail");
     this.values.delete(account);
+  }
+}
+
+async function pathMissing(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    throw error;
   }
 }
 
@@ -137,6 +161,80 @@ test("CA export writes only the public root and does not overwrite by default", 
   }
 });
 
+test("CA export canonicalizes the certificate and rejects protected destinations", async () => {
+  const setup = await fixture();
+  const outputDir = await mkdtemp(join(tmpdir(), "ellie-browser-safe-export-"));
+  try {
+    await initializeBrowser(setup.environment);
+    const caPath = join(setup.stateDir, BROWSER_CA_CERT);
+    const ca = await readFile(caPath, "utf8");
+    await writeFile(caPath, ca + setup.secrets.values.get(BROWSER_CA_KEY));
+    const output = join(outputDir, "public.pem");
+    await exportBrowserCa(setup.environment, output);
+    assert.equal(await readFile(output, "utf8"), new X509Certificate(ca).toString());
+    assert.ok(!(await readFile(output, "utf8")).includes("PRIVATE KEY"));
+    await assert.rejects(
+      exportBrowserCa(setup.environment, join(setup.stateDir, "server-cert.pem"), true),
+      /outside Ellie private state/,
+    );
+    await assert.rejects(
+      exportBrowserCa(setup.environment, join(process.cwd(), "should-not-exist.pem"), true),
+      /outside Ellie private state and the source checkout/,
+    );
+    const linkedState = join(outputDir, "linked-state");
+    await symlink(setup.stateDir, linkedState);
+    await assert.rejects(
+      exportBrowserCa(setup.environment, join(linkedState, "server-cert.pem"), true),
+      /outside Ellie private state/,
+    );
+  } finally {
+    await Promise.all([
+      rm(setup.stateDir, { recursive: true, force: true }),
+      rm(outputDir, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test("status rejects unsafe private directories and files before accepting their contents", async () => {
+  const setup = await fixture();
+  try {
+    await initializeBrowser(setup.environment);
+    await chmod(setup.stateDir, 0o755);
+    await assert.rejects(initializeBrowser(setup.environment), /mode 0700/);
+    assert.equal((await stat(setup.stateDir)).mode & 0o777, 0o755);
+    await chmod(setup.stateDir, 0o700);
+
+    const configPath = join(setup.stateDir, BROWSER_CONFIG);
+    const extraLink = join(setup.stateDir, "browser-config-link");
+    await link(configPath, extraLink);
+    assert.equal((await browserStatus(setup.environment)).ready, false);
+    await unlink(extraLink);
+
+    const caPath = join(setup.stateDir, BROWSER_CA_CERT);
+    const savedCa = join(setup.stateDir, "saved-ca.pem");
+    await rename(caPath, savedCa);
+    await symlink(savedCa, caPath);
+    assert.equal((await browserStatus(setup.environment)).ready, false);
+    await unlink(caPath);
+    await rename(savedCa, caPath);
+
+    const originalConfig = await readFile(configPath, "utf8");
+    await writeFile(configPath, "x".repeat(17 * 1024), { mode: 0o600 });
+    assert.equal((await browserStatus(setup.environment)).ready, false);
+    await writeFile(configPath, originalConfig, { mode: 0o600 });
+
+    const savedConfig = join(setup.stateDir, "saved-config.json");
+    await rename(configPath, savedConfig);
+    await promisify(execFile)("/usr/bin/mkfifo", [configPath]);
+    assert.equal((await browserStatus(setup.environment)).ready, false);
+    await unlink(configPath);
+    await rename(savedConfig, configPath);
+    assert.equal((await browserStatus(setup.environment)).ready, true);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
 test("partial state and unavailable Keychain fail closed without generation", async () => {
   const setup = await fixture();
   try {
@@ -178,6 +276,45 @@ test("a rollback failure reports partial state without touching an agent credent
     assert.equal(setup.secrets.values.has(BROWSER_CA_KEY), true);
   } finally {
     await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("an ambiguous Keychain add and a publication race fail closed", async () => {
+  const ambiguous = await fixture();
+  try {
+    ambiguous.secrets.values.set("server.key", "agent identity");
+    ambiguous.secrets.add = async (account, value) => {
+      ambiguous.secrets.values.set(account, value);
+      throw new Error("timeout after write");
+    };
+    await assert.rejects(initializeBrowser(ambiguous.environment), /incomplete or uncertain/);
+    assert.equal(ambiguous.secrets.values.get("server.key"), "agent identity");
+    assert.equal(ambiguous.secrets.values.has(BROWSER_CA_KEY), true);
+  } finally {
+    await rm(ambiguous.stateDir, { recursive: true, force: true });
+  }
+
+  const raced = await fixture();
+  try {
+    raced.secrets.values.set("server.key", "agent identity");
+    const add = raced.secrets.add.bind(raced.secrets);
+    raced.secrets.add = async (account, value) => {
+      await add(account, value);
+      if (account === BROWSER_SERVER_KEY)
+        await writeFile(join(raced.stateDir, BROWSER_SERVER_CERT), "competing file", {
+          flag: "wx",
+          mode: 0o600,
+        });
+    };
+    await assert.rejects(initializeBrowser(raced.environment), /incomplete or uncertain/);
+    assert.equal(
+      await readFile(join(raced.stateDir, BROWSER_SERVER_CERT), "utf8"),
+      "competing file",
+    );
+    assert.equal(await pathMissing(join(raced.stateDir, BROWSER_CA_CERT)), true);
+    assert.deepEqual([...raced.secrets.values.entries()], [["server.key", "agent identity"]]);
+  } finally {
+    await rm(raced.stateDir, { recursive: true, force: true });
   }
 });
 
