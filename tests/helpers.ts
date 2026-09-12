@@ -7,6 +7,7 @@ import { Client } from "@ellie/transport";
 import { record } from "@ellie/protocol";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 import { createEllieServer } from "../apps/server/src/index.ts";
+import { JobStore } from "../apps/server/src/jobs.ts";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 
 export async function fixture(timeout = 2000) {
@@ -15,11 +16,13 @@ export async function fixture(timeout = 2000) {
   const token = newToken();
   await Auth.initialize(token, dir);
   const auth = await Auth.open(dir);
+  const jobStore = new JobStore(join(dir, "jobs.sqlite"));
   const app = createEllieServer({
     key,
     cert,
     auth,
     preferences: defaults,
+    jobStore,
     commandTimeout: timeout,
   });
   await new Promise<void>((resolve) => app.server.listen(0, "127.0.0.1", resolve));
@@ -39,6 +42,8 @@ export async function fixture(timeout = 2000) {
     app,
     origin,
     cert,
+    dir,
+    jobStore,
     controller,
     pair,
     async close() {

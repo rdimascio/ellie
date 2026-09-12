@@ -11,10 +11,11 @@
 | Credential hashes, single-use invitation hash and expiry              | `~/.ellie/auth.json`                                              |
 | Server TLS private key, controller credential, node bearer credential | macOS Keychain, service `org.ellie.assistant`                     |
 | Native helper                                                         | `~/.ellie/bin/ellie-macos`                                        |
-| Command text and pronoun context                                      | Process memory, cleared on restart; context removed on revocation |
+| Job ID, target, lifecycle timestamps and enum outcome                 | `~/.ellie/jobs.sqlite`, mode `0600`                               |
+| Command text, actions, prompts, responses and pronoun context         | Process memory, cleared on restart; context removed on revocation |
 | Browser cookies and authenticated sessions                            | Browser-owned profiles only                                       |
 
-State directories are created with mode `0700`; JSON writes use atomic replacement and mode `0600`. Initialization refuses to overwrite existing configuration. Private configuration cannot be directed into the checkout. The default `.gitignore` is a backstop, not a substitute for reviewing what you commit. Never commit actual machine names, addresses, accounts, paths, credentials, recordings, histories, or memories. Public examples contain only generic defaults.
+State directories are created with mode `0700`; JSON writes use atomic replacement and mode `0600`. The job database is a regular, single-link file owned by the current user with mode `0600`; its directory must be owned by the current user with mode `0700`. Startup and lifecycle writes prune terminal metadata older than 30 days and cap terminal history at 10,000 rows; a stopped or completely idle coordinator prunes on its next startup or lifecycle write. Initialization refuses to overwrite existing configuration. Private configuration cannot be directed into the checkout. The default `.gitignore` is a backstop, not a substitute for reviewing what you commit. Never commit actual machine names, addresses, accounts, paths, credentials, recordings, histories, or memories. Public examples contain only generic defaults.
 
 ## Pairing and authentication
 
@@ -29,6 +30,8 @@ The discovery handshake intentionally skips CA validation because trust is estab
 Use a trusted local network. Do not expose this initial service directly to the internet or forward its port. Connection, body, and header limits exist, but this milestone is not an internet-facing, independently audited service. Any enrolled node is trusted to accurately report its own execution results and capabilities. A compromised server can invoke already granted actions, but cannot expand a node's local allowlist. An account with control of the local OS is outside this boundary.
 
 ## Revocation, changes, and recovery
+
+On startup, Ellie never reconstructs job payloads from SQLite because no payload is stored. It marks previously delivered, running, or cancellation-requested work `unknown`; it expires overdue queued work and safely abandons other queued records. Inspect metadata with `bun run ellie jobs` or `bun run ellie job JOB_ID` before deciding whether to repeat an action. Corrupt databases and schemas from newer Ellie versions fail closed with instructions to preserve the file for diagnosis and restore a supported backup or move it aside. Cancellation is best effort after delivery: the client and node receive the request, and Ellie aborts the native helper or inference request when possible, but an already applied side effect is not rolled back.
 
 On the server Mac, run `bun run ellie nodes` to find the node ID, then `bun run ellie server revoke NODE_ID`. It rejects future requests, ends a waiting poll, and clears server context. A native action already in progress may still complete. Removing a server credential does not erase a node's Keychain item; remove obsolete `org.ellie.assistant` items through Keychain Access when decommissioning.
 

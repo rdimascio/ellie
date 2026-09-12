@@ -4,7 +4,7 @@ export const newToken = (): string => randomBytes(32).toString("hex");
 const hash = (token: string): string => createHash("sha256").update(token).digest("hex");
 const equal = (a: string, b: string): boolean =>
   a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
-interface Identity {
+export interface Identity {
   id: string;
   role: "controller" | "node";
   tokenHash: string;

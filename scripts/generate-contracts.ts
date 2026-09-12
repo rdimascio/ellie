@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { OPERATION_REGISTRY } from "../packages/protocol/src/operations.ts";
+import { JOB_OUTCOME_CODES, JOB_STATES } from "../packages/protocol/src/index.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -205,7 +206,10 @@ function openApi(): Json {
             "Node bearer identity required and the node must already be registered. Compute capability requires telemetry.",
           requestBody: request(ref("Heartbeat")),
           responses: {
-            "200": response("Heartbeat accepted.", ref("OkResponse")),
+            "200": response(
+              "Heartbeat accepted with cancellation requests.",
+              ref("HeartbeatResponse"),
+            ),
             ...errors("400", "401", "403", "404", "415"),
           },
         }),
@@ -233,6 +237,19 @@ function openApi(): Json {
           requestBody: request(ref("ResultRequest")),
           responses: {
             "200": response("Result accepted.", ref("OkResponse")),
+            ...errors("400", "401", "403", "404", "409", "415"),
+          },
+        }),
+      },
+      "/v1/start": {
+        post: operation({
+          operationId: "startNodeJob",
+          summary: "Commit that a delivered job is starting",
+          description:
+            "Node bearer identity required. The response prevents execution when cancellation won the delivery/start race.",
+          requestBody: request(ref("JobIdRequest")),
+          responses: {
+            "200": response("Start decision committed.", ref("StartResponse")),
             ...errors("400", "401", "403", "404", "409", "415"),
           },
         }),
@@ -266,6 +283,42 @@ function openApi(): Json {
           },
         }),
       },
+      "/v1/jobs": {
+        get: operation({
+          operationId: "listJobs",
+          summary: "List recent payload-free job metadata",
+          responses: {
+            "200": response("Recent visible job metadata.", {
+              type: "array",
+              maxItems: 100,
+              items: ref("JobMetadata"),
+            }),
+            ...errors("400", "401", "403"),
+          },
+        }),
+      },
+      "/v1/jobs/{id}": {
+        get: operation({
+          operationId: "getJob",
+          summary: "Inspect payload-free job metadata",
+          parameters: [...versionHeader, { $ref: "#/components/parameters/JobId" }],
+          responses: {
+            "200": response("Visible job metadata.", ref("JobMetadata")),
+            ...errors("400", "401", "403", "404"),
+          },
+        }),
+        post: operation({
+          operationId: "cancelJob",
+          summary: "Request cancellation of queued or running work",
+          description: "Cancellation does not undo native side effects that already started.",
+          parameters: [...versionHeader, { $ref: "#/components/parameters/JobId" }],
+          requestBody: request({ type: "object" }),
+          responses: {
+            "200": response("Current job metadata after the request.", ref("JobMetadata")),
+            ...errors("400", "401", "403", "404", "415"),
+          },
+        }),
+      },
     },
     components: {
       securitySchemes: {
@@ -283,6 +336,7 @@ function openApi(): Json {
           description: "Exact wire protocol version.",
           schema: { type: "string", const: String(OPERATION_REGISTRY.version) },
         },
+        JobId: { name: "id", in: "path", required: true, schema: identifier },
       },
       responses: Object.fromEntries(
         (
@@ -406,6 +460,40 @@ function openApi(): Json {
           properties: {
             computeCapabilities: ref("ComputeCapabilities"),
             telemetry: ref("Telemetry"),
+          },
+        },
+        HeartbeatResponse: {
+          type: "object",
+          required: ["ok", "cancelJobIds"],
+          properties: {
+            ok: { const: true },
+            cancelJobIds: { type: "array", maxItems: 1, items: identifier },
+          },
+        },
+        JobIdRequest: {
+          type: "object",
+          required: ["id"],
+          properties: { id: identifier },
+        },
+        StartResponse: {
+          type: "object",
+          required: ["cancel"],
+          properties: { cancel: { type: "boolean" } },
+        },
+        JobMetadata: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "kind", "target", "state", "createdAt", "updatedAt", "expiresAt"],
+          properties: {
+            id: identifier,
+            kind: { enum: ["desktop", "inference"] },
+            target: identifier,
+            state: { enum: [...JOB_STATES] },
+            createdAt: finiteNumber,
+            updatedAt: finiteNumber,
+            expiresAt: finiteNumber,
+            outcomeOk: { type: "boolean" },
+            outcomeCode: { enum: [...JOB_OUTCOME_CODES] },
           },
         },
         NodeInfo: {

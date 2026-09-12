@@ -265,11 +265,11 @@
         },
         "responses": {
           "200": {
-            "description": "Heartbeat accepted.",
+            "description": "Heartbeat accepted with cancellation requests.",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OkResponse"
+                  "$ref": "#/components/schemas/HeartbeatResponse"
                 }
               }
             }
@@ -361,6 +361,58 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/OkResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
+    },
+    "/v1/start": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "startNodeJob",
+        "summary": "Commit that a delivered job is starting",
+        "description": "Node bearer identity required. The response prevents execution when cancellation won the delivery/start race.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/JobIdRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Start decision committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartResponse"
                 }
               }
             }
@@ -486,6 +538,130 @@
           }
         }
       }
+    },
+    "/v1/jobs": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "listJobs",
+        "summary": "List recent payload-free job metadata",
+        "responses": {
+          "200": {
+            "description": "Recent visible job metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "$ref": "#/components/schemas/JobMetadata"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      }
+    },
+    "/v1/jobs/{id}": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          },
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "operationId": "getJob",
+        "summary": "Inspect payload-free job metadata",
+        "responses": {
+          "200": {
+            "description": "Visible job metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobMetadata"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          },
+          {
+            "$ref": "#/components/parameters/JobId"
+          }
+        ],
+        "operationId": "cancelJob",
+        "summary": "Request cancellation of queued or running work",
+        "description": "Cancellation does not undo native side effects that already started.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Current job metadata after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobMetadata"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -505,6 +681,17 @@
         "schema": {
           "type": "string",
           "const": "1"
+        }
+      },
+      "JobId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
         }
       }
     },
@@ -1068,6 +1255,124 @@
           },
           "telemetry": {
             "$ref": "#/components/schemas/Telemetry"
+          }
+        }
+      },
+      "HeartbeatResponse": {
+        "type": "object",
+        "required": [
+          "ok",
+          "cancelJobIds"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "cancelJobIds": {
+            "type": "array",
+            "maxItems": 1,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
+          }
+        }
+      },
+      "JobIdRequest": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "StartResponse": {
+        "type": "object",
+        "required": [
+          "cancel"
+        ],
+        "properties": {
+          "cancel": {
+            "type": "boolean"
+          }
+        }
+      },
+      "JobMetadata": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "target",
+          "state",
+          "createdAt",
+          "updatedAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "kind": {
+            "enum": [
+              "desktop",
+              "inference"
+            ]
+          },
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "state": {
+            "enum": [
+              "queued",
+              "delivered",
+              "running",
+              "cancellation_requested",
+              "completed",
+              "failed",
+              "cancelled",
+              "expired",
+              "unknown"
+            ]
+          },
+          "createdAt": {
+            "type": "number"
+          },
+          "updatedAt": {
+            "type": "number"
+          },
+          "expiresAt": {
+            "type": "number"
+          },
+          "outcomeOk": {
+            "type": "boolean"
+          },
+          "outcomeCode": {
+            "enum": [
+              "succeeded",
+              "operation_failed",
+              "timed_out",
+              "cancelled_by_caller",
+              "expired_before_delivery",
+              "abandoned_after_restart",
+              "unknown_after_restart",
+              "node_revoked",
+              "coordinator_stopped"
+            ]
           }
         }
       },

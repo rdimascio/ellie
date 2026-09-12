@@ -11,14 +11,14 @@ The repository currently provides a developer milestone, not a household product
 - Pairing, per-node credentials, revocation, capability checks, local allowlists, bounded messages, and ephemeral command context are implemented.
 - Optional, explicitly configured Macs can advertise installed local models and resource telemetry. The coordinator schedules a non-streaming inference probe on one eligible independent worker. Separate Macs run concurrently but do not pool memory.
 - Portable certificate generation and basic independent-worker admission, reservation, and scheduling are implemented with regression coverage.
-- A canonical registry drives the four desktop operations, their types, validation, and capability policy. Generated JSON Schema and OpenAPI document the existing protocol and ten coordinator routes; drift checks run in CI.
+- A canonical registry drives the four desktop operations, their types, validation, and capability policy. Generated JSON Schema and OpenAPI document the existing protocol and thirteen coordinator route paths; drift checks run in CI.
 - A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. Physical two-Mac acceptance is still pending.
 
 There is no dashboard, phone or TV client, calendar or routine engine, household profile store, voice path, MCP server, packaged installer, background-service installer, analytics service, or automatic updater yet. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
 
 ## Foundation sequence and current queue
 
-The first three implementation slices are complete locally. GitHub publication and physical-Mac acceptance remain pending. Queue job state and cancellation next, then background services; the synthetic command-center demo can proceed independently. Each change should preserve the deterministic fast path and use synthetic public fixtures.
+The first four implementation slices are complete locally. GitHub publication and physical-Mac acceptance remain pending. Background services are next; the synthetic command-center demo can proceed independently. Each change should preserve the deterministic fast path and use synthetic public fixtures.
 
 ### 1. Foundation and macOS smoke gate
 
@@ -46,7 +46,7 @@ The first three implementation slices are complete locally. GitHub publication a
 
 ### 3. Operation registry and OpenAPI contracts
 
-**Status:** implemented for all four existing operations and ten coordinator routes, with generated artifact checks and runtime boundary tests. CLI and MCP adapter generation remain later work.
+**Status:** implemented for all four existing operations and the original ten coordinator route paths, with generated artifact checks and runtime boundary tests. Slice 4 adds three job lifecycle paths to the same generated OpenAPI document. CLI and MCP adapter generation remain later work.
 
 **Depends on:** the existing protocol and router. Coordinate merge order with PR 2's formatting changes; the contract design can proceed independently.
 
@@ -57,6 +57,8 @@ The first three implementation slices are complete locally. GitHub publication a
 **Accepted when:** changing a synthetic operation fixture updates every generated artifact; malformed, unknown, oversized, and unauthorized calls fail consistently at the coordinator and node; all existing end-to-end commands still pass.
 
 ### 4. Minimal SQLite job state and cancellation
+
+**Status:** implemented with payload-free lifecycle metadata, fail-closed delivery commits, restart recovery, cancellation propagation, and bounded reconnect behavior; physical sleep/wake and native cancellation validation remain pending.
 
 **Depends on:** the implemented operation registry (slice 3).
 

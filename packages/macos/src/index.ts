@@ -5,14 +5,15 @@ import type { Action, Capability, Result } from "@ellie/protocol";
 import { CAPABILITIES, record, result } from "@ellie/protocol";
 export interface Executor {
   capabilities(): Promise<Capability[]>;
-  execute(action: Action): Promise<Result>;
+  execute(action: Action, signal?: AbortSignal): Promise<Result>;
 }
 export class MacOSExecutor implements Executor {
-  private async call(payload: unknown): Promise<unknown> {
+  private async call(payload: unknown, signal?: AbortSignal): Promise<unknown> {
     if (process.platform !== "darwin") throw new Error("The native executor requires macOS.");
     return new Promise((resolve, reject) => {
       const child = spawn(join(homedir(), ".ellie", "bin", "ellie-macos"), [], {
         stdio: ["pipe", "pipe", "pipe"],
+        signal,
       });
       let output = "";
       const timer = setTimeout(() => {
@@ -26,7 +27,13 @@ export class MacOSExecutor implements Executor {
       child.stderr.resume();
       child.on("error", () => {
         clearTimeout(timer);
-        reject(new Error("Native helper missing. Run bun run build:macos."));
+        reject(
+          signal?.aborted
+            ? new Error(
+                "Native action cancellation was requested; a side effect may still have finished.",
+              )
+            : new Error("Native helper missing or could not start. Run bun run build:macos."),
+        );
       });
       child.on("close", () => {
         clearTimeout(timer);
@@ -47,7 +54,7 @@ export class MacOSExecutor implements Executor {
     const status = record(await this.call({ command: "doctor" }));
     return status.accessibility === true ? [...CAPABILITIES] : ["app.open", "url.open"];
   }
-  async execute(action: Action): Promise<Result> {
-    return result(await this.call(action));
+  async execute(action: Action, signal?: AbortSignal): Promise<Result> {
+    return result(await this.call(action, signal));
   }
 }

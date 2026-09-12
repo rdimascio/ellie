@@ -89,14 +89,32 @@ export class Client {
   close(): void {
     this.agent.destroy();
   }
-  async call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown> {
+  async call(
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  ): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const data = body === undefined ? undefined : JSON.stringify(body);
+      const deadline = new AbortController();
+      const signal = options.signal
+        ? AbortSignal.any([options.signal, deadline.signal])
+        : deadline.signal;
+      const timer = setTimeout(
+        () => deadline.abort(new Error("Server request exceeded its absolute deadline.")),
+        options.timeoutMs ?? 40_000,
+      );
+      const settle = <T>(callback: (value: T) => void, value: T): void => {
+        clearTimeout(timer);
+        callback(value);
+      };
       const req = request(
         new URL(path, this.origin),
         {
           method,
           agent: this.agent,
+          signal,
           headers: {
             "x-ellie-version": String(VERSION),
             ...(this.token ? { authorization: `Bearer ${this.token}` } : {}),
@@ -106,25 +124,40 @@ export class Client {
           },
         },
         (res) => {
-          void readJson(res).then((value) => {
-            if (res.statusCode !== 200)
-              reject(
-                new Error(
-                  typeof (value as { error?: unknown })?.error === "string"
-                    ? (value as { error: string }).error
-                    : "Server request failed.",
-                ),
-              );
-            else resolve(value);
-          }, reject);
+          void readJson(res).then(
+            (value) => {
+              if (res.statusCode !== 200)
+                settle(
+                  reject,
+                  new Error(
+                    typeof (value as { error?: unknown })?.error === "string"
+                      ? (value as { error: string }).error
+                      : "Server request failed.",
+                  ),
+                );
+              else settle(resolve, value);
+            },
+            (error) => settle(reject, error),
+          );
         },
       );
-      req.setTimeout(40_000, () =>
-        req.destroy(
-          new Error("Server request timed out. Check status before repeating a command."),
+      req.setTimeout(options.timeoutMs ?? 40_000, () =>
+        req.destroy(new Error("Server request timed out. Check job status before repeating it.")),
+      );
+      req.on("error", (error) =>
+        settle(
+          reject,
+          options.signal?.aborted
+            ? new Error(
+                "Request cancelled. A native side effect that already started may still finish; cancellation does not undo it.",
+              )
+            : deadline.signal.aborted
+              ? new Error(
+                  "Server request exceeded its absolute deadline. Check job status before repeating it.",
+                )
+              : error,
         ),
       );
-      req.on("error", reject);
       req.end(data);
     });
   }

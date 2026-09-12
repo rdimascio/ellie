@@ -19,12 +19,26 @@ import { route } from "@ellie/router";
 import { authorize } from "@ellie/permissions";
 import { readJson } from "@ellie/transport";
 import { selectWorker } from "@ellie/compute";
-import type { Auth } from "./auth.ts";
+import type { Auth, Identity } from "./auth.ts";
+import type { JobMetadata, JobOutcomeCode, JobState, JobStore } from "./jobs.ts";
+
+const cancellationMessage =
+  "Cancelled. A native side effect that already started may still finish; cancellation does not undo it.";
 
 interface Pending {
   job: Job | InferenceJob;
   delivered: boolean;
-  finish: (result: Result) => void;
+  running: boolean;
+  cancelRequested: boolean;
+  response?: ServerResponse;
+  finish: (
+    outcome: Result,
+    terminal?: {
+      state: Extract<JobState, "completed" | "failed" | "cancelled" | "expired" | "unknown">;
+      code: JobOutcomeCode;
+    },
+  ) => boolean;
+  cancel: () => JobMetadata;
 }
 interface Session {
   info: NodeInfo;
@@ -38,23 +52,177 @@ function send(res: ServerResponse, status: number, body: unknown): void {
       .writeHead(status, { "content-type": "application/json", "cache-control": "no-store" })
       .end(JSON.stringify(body));
 }
+function canAccess(identity: Identity, stored: JobMetadata): boolean {
+  return identity.role === "controller" || stored.target === identity.id;
+}
+
 export function createEllieServer(options: {
   key: string;
   cert: string;
   auth: Auth;
   preferences: Preferences;
+  jobStore: JobStore;
   commandTimeout?: number;
 }) {
   const sessions = new Map<string, Session>();
   const auth = options.auth;
+
   const deliver = (session: Session): void => {
-    if (session.poll && session.pending && !session.pending.delivered) {
-      session.pending.delivered = true;
+    if (!session.poll || !session.pending || session.pending.delivered) return;
+    const pending = session.pending;
+    if (pending.cancelRequested) {
       clearTimeout(session.poll.timer);
-      send(session.poll.response, 200, { job: session.pending.job });
+      send(session.poll.response, 503, { error: "Cancellation state could not be committed." });
       delete session.poll;
+      return;
     }
+    if (pending.job.expiresAt <= Date.now()) {
+      pending.finish(
+        { ok: false, message: "Job expired before delivery." },
+        { state: "expired", code: "expired_before_delivery" },
+      );
+      return;
+    }
+    // Delivery is committed before a payload is written to the network.
+    try {
+      options.jobStore.markDelivered(pending.job.id);
+    } catch {
+      clearTimeout(session.poll.timer);
+      send(session.poll.response, 503, { error: "Job delivery could not be committed." });
+      delete session.poll;
+      pending.finish(
+        { ok: false, message: "Coordinator storage failed; no action was sent." },
+        { state: "failed", code: "operation_failed" },
+      );
+      return;
+    }
+    pending.delivered = true;
+    clearTimeout(session.poll.timer);
+    send(session.poll.response, 200, { job: pending.job });
+    delete session.poll;
   };
+
+  const makePending = (
+    session: Session,
+    wireJob: Job | InferenceJob,
+    kind: "desktop" | "inference",
+    response: ServerResponse,
+    onFinished?: (state: JobState) => void,
+  ): Pending => {
+    const now = Date.now();
+    options.jobStore.create({
+      id: wireJob.id,
+      kind,
+      target: session.info.id,
+      createdAt: now,
+      expiresAt: wireJob.expiresAt,
+    });
+    let timer: NodeJS.Timeout;
+    const pending: Pending = {
+      job: wireJob,
+      delivered: false,
+      running: false,
+      cancelRequested: false,
+      response,
+      finish: (outcome, terminal) => {
+        if (session.pending !== pending) return false;
+        const resolved =
+          terminal ??
+          (pending.cancelRequested
+            ? { state: "cancelled" as const, code: "cancelled_by_caller" as const }
+            : outcome.ok
+              ? { state: "completed" as const, code: "succeeded" as const }
+              : { state: "failed" as const, code: "operation_failed" as const });
+        try {
+          options.jobStore.finish(
+            wireJob.id,
+            resolved.state,
+            resolved.code,
+            outcome.ok && !pending.cancelRequested,
+          );
+        } catch {
+          clearTimeout(timer);
+          if (pending.response)
+            send(pending.response, 503, { error: "Job outcome could not be committed." });
+          pending.response = undefined;
+          return false;
+        }
+        clearTimeout(timer);
+        delete session.pending;
+        onFinished?.(resolved.state);
+        if (pending.response)
+          send(
+            pending.response,
+            200,
+            pending.cancelRequested
+              ? { ok: false, message: cancellationMessage }
+              : kind === "inference"
+                ? { ...outcome, workerId: session.info.id }
+                : outcome,
+          );
+        pending.response = undefined;
+        return true;
+      },
+      cancel: () => {
+        pending.cancelRequested = true;
+        let stored: JobMetadata | undefined;
+        try {
+          stored = options.jobStore.requestCancellation(wireJob.id);
+        } catch (error) {
+          if (pending.response)
+            send(pending.response, 503, { error: "Cancellation state could not be committed." });
+          pending.response = undefined;
+          throw error;
+        }
+        if (!stored) throw new Error("Job no longer exists.");
+        if (!pending.delivered) {
+          clearTimeout(timer);
+          delete session.pending;
+        }
+        if (pending.response)
+          send(pending.response, 200, { ok: false, message: cancellationMessage });
+        pending.response = undefined;
+        return stored;
+      },
+    };
+    timer = setTimeout(
+      () => {
+        const terminal = pending.cancelRequested
+          ? { state: "cancelled" as const, code: "cancelled_by_caller" as const }
+          : !pending.delivered
+            ? { state: "expired" as const, code: "expired_before_delivery" as const }
+            : kind === "desktop"
+              ? { state: "unknown" as const, code: "timed_out" as const }
+              : { state: "failed" as const, code: "timed_out" as const };
+        pending.finish(
+          {
+            ok: false,
+            message:
+              kind === "inference"
+                ? "Inference timed out. It was not retried on another Mac."
+                : "Command timed out; completion is unknown. Check the Mac before repeating it.",
+          },
+          terminal,
+        );
+      },
+      Math.max(1, wireJob.expiresAt - now),
+    );
+    session.pending = pending;
+    response.once("close", () => {
+      if (!response.writableEnded && session.pending === pending) {
+        try {
+          pending.cancel();
+        } catch {}
+      }
+    });
+    if (response.destroyed && !response.writableEnded) {
+      try {
+        pending.cancel();
+      } catch {}
+    }
+    return pending;
+  };
+
   const server = createServer(
     { key: options.key, cert: options.cert, minVersion: "TLSv1.2", maxHeaderSize: 8192 },
     (req, res) => {
@@ -65,7 +233,7 @@ export function createEllieServer(options: {
           return send(res, 400, { error: "Unsupported protocol version." });
         if (req.method === "POST" && !req.headers["content-type"]?.startsWith("application/json"))
           return send(res, 415, { error: "JSON required." });
-        const path = req.url;
+        const path = new URL(req.url ?? "/", "https://ellie.local").pathname;
         if (req.method === "POST" && path === "/v1/pair") {
           const body = record(await readJson(req));
           const token = await auth.pair(string(body.code, 64), identifier(body.id));
@@ -84,12 +252,37 @@ export function createEllieServer(options: {
             clearTimeout(session.poll.timer);
             send(session.poll.response, 403, { error: "Node revoked." });
           }
-          session?.pending?.finish({
-            ok: false,
-            message: "Node revoked. An already running native action may have completed.",
-          });
+          session?.pending?.finish(
+            {
+              ok: false,
+              message: "Node revoked. An already running native action may have completed.",
+            },
+            session.pending.delivered
+              ? { state: "unknown", code: "node_revoked" }
+              : { state: "cancelled", code: "node_revoked" },
+          );
           sessions.delete(id);
           return send(res, 200, { ok: true });
+        }
+        if (req.method === "GET" && path === "/v1/jobs")
+          return send(
+            res,
+            200,
+            options.jobStore.list(identity.role === "node" ? identity.id : undefined),
+          );
+        const jobRoute = /^\/v1\/jobs\/([a-zA-Z0-9][a-zA-Z0-9._-]*)$/.exec(path);
+        if (jobRoute) {
+          const id = identifier(jobRoute[1]);
+          const stored = options.jobStore.get(id);
+          if (!stored || !canAccess(identity, stored))
+            return send(res, 404, { error: "Job not found." });
+          if (req.method === "GET") return send(res, 200, stored);
+          if (req.method === "POST") {
+            await readJson(req);
+            const session = sessions.get(stored.target);
+            if (session?.pending?.job.id === id) return send(res, 200, session.pending.cancel());
+            return send(res, 200, options.jobStore.requestCancellation(id) ?? stored);
+          }
         }
         if (req.method === "GET" && path === "/v1/nodes")
           return send(
@@ -148,7 +341,10 @@ export function createEllieServer(options: {
           session.info.computeCapabilities = compute;
           session.info.telemetryReceivedAt = metrics ? Date.now() : undefined;
           session.info.lastSeen = Date.now();
-          return send(res, 200, { ok: true });
+          return send(res, 200, {
+            ok: true,
+            cancelJobIds: session.pending?.cancelRequested ? [session.pending.job.id] : [],
+          });
         }
         if (req.method === "GET" && path === "/v1/poll" && identity.role === "node" && session) {
           if (session.poll)
@@ -170,6 +366,14 @@ export function createEllieServer(options: {
           deliver(session);
           return;
         }
+        if (req.method === "POST" && path === "/v1/start" && identity.role === "node" && session) {
+          const id = identifier(record(await readJson(req)).id);
+          if (!session.pending || !session.pending.delivered || id !== session.pending.job.id)
+            return send(res, 409, { error: "No matching delivered job." });
+          if (!session.pending.cancelRequested)
+            session.pending.running = options.jobStore.markRunning(id);
+          return send(res, 200, { cancel: session.pending.cancelRequested });
+        }
         if (req.method === "POST" && path === "/v1/result" && identity.role === "node" && session) {
           const body = record(await readJson(req));
           if (
@@ -178,7 +382,8 @@ export function createEllieServer(options: {
             identifier(body.id) !== session.pending.job.id
           )
             return send(res, 409, { error: "No matching in-flight command." });
-          session.pending.finish(result(body.result));
+          if (!session.pending.finish(result(body.result)))
+            return send(res, 503, { error: "Job outcome could not be committed." });
           return send(res, 200, { ok: true });
         }
         if (req.method === "POST" && path === "/v1/inference" && identity.role === "controller") {
@@ -202,26 +407,9 @@ export function createEllieServer(options: {
             expiresAt: Date.now() + timeout,
             request,
           };
-          const timer = setTimeout(
-            () =>
-              node.pending?.finish({
-                ok: false,
-                message: "Inference timed out. It was not retried on another Mac.",
-              }),
-            timeout,
-          );
-          // Reservation happens synchronously before another request can select this worker.
-          node.pending = {
-            job: task,
-            delivered: false,
-            finish: (outcome) => {
-              clearTimeout(timer);
-              delete node.pending;
-              // Require a fresh heartbeat before reusing a worker after completion/timeout.
-              delete node.info.telemetryReceivedAt;
-              send(res, 200, { ...outcome, workerId: node.info.id });
-            },
-          };
+          makePending(node, task, "inference", res, () => {
+            delete node.info.telemetryReceivedAt;
+          });
           deliver(node);
           return;
         }
@@ -245,31 +433,15 @@ export function createEllieServer(options: {
           const validatedActions = actions(plan.actions);
           authorize(validatedActions, node.info.capabilities, options.preferences);
           const timeout = options.commandTimeout ?? 30_000;
-          const job: Job = {
+          const task: Job = {
             version: VERSION,
             id: randomUUID(),
             expiresAt: Date.now() + timeout,
             actions: validatedActions,
           };
-          const timer = setTimeout(
-            () =>
-              node.pending?.finish({
-                ok: false,
-                message:
-                  "Command timed out; completion is unknown. Check the Mac before repeating it.",
-              }),
-            timeout,
-          );
-          node.pending = {
-            job,
-            delivered: false,
-            finish: (outcome) => {
-              clearTimeout(timer);
-              delete node.pending;
-              if (outcome.ok) node.context = plan.nextContext;
-              send(res, 200, outcome);
-            },
-          };
+          makePending(node, task, "desktop", res, (state) => {
+            if (state === "completed") node.context = plan.nextContext;
+          });
           deliver(node);
           return;
         }
@@ -288,19 +460,25 @@ export function createEllieServer(options: {
   server.headersTimeout = 10_000;
   server.maxConnections = 64;
   server.on("error", () => {});
+  let stopped = false;
   const shutdown = (): void => {
+    if (stopped) return;
+    stopped = true;
     for (const session of sessions.values()) {
       if (session.poll) {
         clearTimeout(session.poll.timer);
         send(session.poll.response, 503, { error: "Server stopping." });
       }
-      session.pending?.finish({
-        ok: false,
-        message: "Server stopping; check the Mac before repeating the command.",
-      });
+      session.pending?.finish(
+        { ok: false, message: "Server stopping; check the Mac before repeating the command." },
+        session.pending.delivered
+          ? { state: "unknown", code: "coordinator_stopped" }
+          : { state: "cancelled", code: "coordinator_stopped" },
+      );
     }
-    server.close();
+    if (server.listening) server.close();
     server.closeAllConnections();
+    options.jobStore.close();
   };
   return { server, shutdown };
 }
