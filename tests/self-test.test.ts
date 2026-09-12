@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { CAPABILITIES } from "@ellie/protocol";
 import {
+  implicitSayTarget,
   nodeIdArgument,
   runServiceTest,
   selectExecutionNode,
@@ -71,6 +72,19 @@ test("one fresh capable node is selected automatically and ambiguity stays expli
     () => selectExecutionNode([node("known", now - 60_001)], "known", now),
     /registered but offline or stale/,
   );
+});
+
+test("coordinator targeting wins when an inactive local node identity also exists", () => {
+  assert.equal(implicitSayTarget(true), "coordinator");
+  assert.equal(
+    selectExecutionNode(
+      [node("inactive-local", now - 60_001), node("execution-mini")],
+      undefined,
+      now,
+    ).id,
+    "execution-mini",
+  );
+  assert.equal(implicitSayTarget(false), "node");
 });
 
 test("read-only service test checks readiness without submitting a job", async () => {
