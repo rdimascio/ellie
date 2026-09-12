@@ -60,6 +60,13 @@ async function fixture() {
     node: process.execPath,
     platform: "darwin",
     run: fake,
+    application: {
+      matches: async () => true,
+      install: async (_role, _checkout, _node, commit) => {
+        await commit?.();
+      },
+      uninstall: async () => {},
+    },
   });
   return {
     home,
@@ -157,6 +164,9 @@ test("service definitions escape paths and bind only to the GUI user with no sec
   assert.throws(() => serviceRole("server"), /coordinator or node/);
   const plist = servicePlist("node", "/Users/synthetic", "/source & <checkout>", "/runtime/node");
   assert.match(plist, /Aqua/);
+  assert.match(plist, /Ellie Node\.app\/Contents\/MacOS\/EllieService/);
+  assert.match(plist, /AssociatedBundleIdentifiers/);
+  assert.match(plist, /org\.ellie\.assistant\.node\.app/);
   assert.match(plist, /source &amp; &lt;checkout&gt;/);
   assert.match(plist, /<key>Umask<\/key><integer>63<\/integer>/);
   assert.match(plist, /<key>ThrottleInterval<\/key><integer>30<\/integer>/);
@@ -165,6 +175,25 @@ test("service definitions escape paths and bind only to the GUI user with no sec
   assert.throws(() => servicePlist("node", "/home", "/source\x01", "/node"), /control character/);
   await assert.rejects(new Services({ platform: "linux" }).status("node"), /macOS/);
   await assert.rejects(new Services({ platform: "darwin", uid: 0 }).status("node"), /without sudo/);
+});
+
+test("competing lifecycle commands fail without modifying the active service", async () => {
+  const f = await fixture();
+  try {
+    await f.service.install("coordinator");
+    const before = await readFile(f.service.path("coordinator"), "utf8");
+    const lock = join(f.dir, "service-coordinator.lock");
+    await writeFile(lock, "synthetic active owner", { mode: 0o600 });
+    await assert.rejects(f.service.start("coordinator"), /Another service command/);
+    await assert.rejects(f.service.uninstall("coordinator"), /Another service command/);
+    assert.equal(await readFile(f.service.path("coordinator"), "utf8"), before);
+    assert.equal((await f.service.status("coordinator")).state, "stopped");
+    await rm(lock);
+    await f.service.start("coordinator");
+    assert.equal((await f.service.status("coordinator")).state, "running");
+  } finally {
+    await f.close();
+  }
 });
 
 test("generated plist passes macOS plutil", { skip: process.platform !== "darwin" }, async () => {

@@ -7,12 +7,14 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { label, servicePlist } from "../apps/cli/src/services.ts";
+import { applicationId, MacOSServiceApplication } from "../apps/cli/src/service-application.ts";
 
 if (process.platform !== "darwin" || !process.getuid?.())
   throw new Error("Run this smoke as a logged-in macOS user, without sudo.");
 if (!process.versions.node.startsWith("24.")) throw new Error("Node.js 24 required.");
 const domain = `gui/${process.getuid()}`;
 const smokeLabel = `org.ellie.assistant.smoke.${randomUUID()}`;
+const suffix = `.smoke.${randomUUID()}`;
 const target = `${domain}/${smokeLabel}`;
 const launchctl = (...args) =>
   execFileSync("/bin/launchctl", args, {
@@ -45,9 +47,15 @@ process.on('SIGTERM', () => process.exit(0));
 `,
   );
   const plistPath = join(dir, "smoke.plist");
+  const app = new MacOSServiceApplication(dir, process.getuid(), undefined, suffix, {
+    register: false,
+  });
+  await app.install("node", dir, process.execPath);
   await writeFile(
     plistPath,
-    servicePlist("node", dir, dir, process.execPath).replace(label("node"), smokeLabel),
+    servicePlist("node", dir, dir, process.execPath)
+      .replace(label("node"), smokeLabel)
+      .replace(applicationId("node"), applicationId("node") + suffix),
     { mode: 0o600 },
   );
   execFileSync("/usr/bin/plutil", ["-lint", plistPath], { stdio: "ignore" });
