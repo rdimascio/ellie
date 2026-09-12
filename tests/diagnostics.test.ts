@@ -59,7 +59,10 @@ async function fixture(role: "coordinator" | "node") {
       pid: 123,
     }),
     client: () => ({
-      call: async () => (role === "node" ? [{ id: nodeId, lastSeen: now }] : []),
+      call: async () =>
+        role === "node"
+          ? [{ id: nodeId, lastSeen: now, executionCapabilities: [...CAPABILITIES] }]
+          : [],
       close: () => {
         closed = true;
       },
@@ -193,4 +196,57 @@ test("node diagnostics fail when the authenticated registration is stale", async
         line === "FAIL The coordinator is unavailable or this node's registration is stale.",
     ),
   );
+});
+
+test("terminal Accessibility cannot mask missing window tools in the running node", async () => {
+  const f = await fixture("node");
+  const report = await doctorService("node", {
+    ...f.deps,
+    client: () => ({
+      call: async () => [
+        {
+          id: "synthetic-node",
+          lastSeen: Date.now(),
+          capabilities: [...CAPABILITIES],
+          executionCapabilities: ["app.open", "url.open"],
+        },
+      ],
+      close: () => {},
+    }),
+  });
+  assert.equal(report.ok, false);
+  assert.ok(
+    report.lines.includes(
+      "Terminal helper tools: app.open, url.open, window.place, window.adjacent",
+    ),
+  );
+  assert.ok(report.lines.includes("Registered node tools: app.open, url.open"));
+  assert.ok(
+    report.lines.some((line) =>
+      line.startsWith("FAIL The running node has not advertised every desktop tool."),
+    ),
+  );
+});
+
+test("compute-only node does not require desktop registration and unknown tool names stay redacted", async () => {
+  const f = await fixture("node");
+  const read = f.deps.readFile!;
+  const config = JSON.parse(await read("/synthetic/.ellie/node.json"));
+  config.executionEnabled = false;
+  const client = (executionCapabilities: string[]) => ({
+    call: async () => [{ id: "synthetic-node", lastSeen: Date.now(), executionCapabilities }],
+    close: () => {},
+  });
+  const compute = await doctorService("node", {
+    ...f.deps,
+    readFile: async (path) => (path.endsWith("node.json") ? JSON.stringify(config) : read(path)),
+    client: () => client([]),
+  });
+  assert.equal(compute.ok, true, compute.lines.join("\n"));
+  const malformed = await doctorService("node", {
+    ...f.deps,
+    client: () => client(["PRIVATE-token"]),
+  });
+  assert.equal(malformed.ok, false);
+  assert.doesNotMatch(malformed.lines.join("\n"), /PRIVATE-token/);
 });

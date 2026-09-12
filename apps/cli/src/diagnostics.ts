@@ -2,8 +2,13 @@ import { X509Certificate, createPrivateKey } from "node:crypto";
 import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { CAPABILITIES, operationDefinition, record } from "@ellie/protocol";
-import type { Capability, NodeInfo } from "@ellie/protocol";
+import {
+  CAPABILITIES,
+  capabilities as parseCapabilities,
+  operationDefinition,
+  record,
+} from "@ellie/protocol";
+import type { Capability } from "@ellie/protocol";
 import { Keychain, nodeConfig, serverConfig, stateDir } from "@ellie/config";
 import type { InferenceWorkerConfig, NodeConfig, ServerConfig } from "@ellie/config";
 import { MacOSExecutor } from "@ellie/macos";
@@ -112,18 +117,23 @@ function statusHealthy(status: ServiceStatus): boolean {
   );
 }
 
-function freshNode(value: unknown, id: string, now: number): boolean {
-  if (!Array.isArray(value)) return false;
-  return value.some((item) => {
+function freshNode(value: unknown, id: string, now: number): Record<string, unknown> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  for (const item of value) {
     try {
-      const node = record(item) as unknown as NodeInfo;
-      return (
-        node.id === id && Number.isFinite(node.lastSeen) && Math.abs(now - node.lastSeen) <= 60_000
-      );
+      const node = record(item);
+      if (
+        node.id === id &&
+        typeof node.lastSeen === "number" &&
+        Number.isFinite(node.lastSeen) &&
+        Math.abs(now - node.lastSeen) <= 60_000
+      )
+        return node;
     } catch {
-      return false;
+      /* Ignore malformed registrations without exposing their contents. */
     }
-  });
+  }
+  return undefined;
 }
 
 async function within<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
@@ -234,13 +244,13 @@ export async function doctorService(
   let capabilities: Capability[] | undefined;
   try {
     capabilities = await environment.capabilities();
-    lines.push(availableTools(capabilities));
+    lines.push(`Terminal helper tools: ${capabilities.join(", ")}`);
     const missing = CAPABILITIES.some((capability) => !capabilities!.includes(capability));
     if (!coordinator && (config as NodeConfig | undefined)?.executionEnabled !== false && missing)
       fail("Desktop execution is enabled but Accessibility does not provide every tool.");
     else if (missing)
       warn("Accessibility is incomplete; this role does not require every desktop tool.");
-    else pass("The native helper reports every desktop capability.");
+    else pass("The terminal-launched helper reports every desktop capability.");
   } catch {
     fail("Native helper capabilities could not be checked.");
   }
@@ -268,13 +278,36 @@ export async function doctorService(
     try {
       client = environment.client(origin, cert, token);
       const nodes = await within(client.call("GET", "/v1/nodes"), 5_000);
-      if (!coordinator && !freshNode(nodes, (config as NodeConfig).id, environment.now()))
-        throw new Error("node is stale");
+      const registered = coordinator
+        ? undefined
+        : freshNode(nodes, (config as NodeConfig).id, environment.now());
+      if (!coordinator && !registered) throw new Error("node is stale");
       pass(
         coordinator
           ? "The coordinator's pinned authenticated endpoint is reachable."
           : "The coordinator is reachable and this node's registration is fresh.",
       );
+      if (registered) {
+        try {
+          // This is the helper result reported by the node process. A helper
+          // spawned from this terminal can have different Accessibility trust.
+          const advertised = parseCapabilities(
+            registered.executionCapabilities ?? registered.capabilities,
+          );
+          lines.push(`Registered node tools: ${advertised.join(", ")}`);
+          if (
+            (config as NodeConfig).executionEnabled &&
+            CAPABILITIES.some((capability) => !advertised.includes(capability))
+          )
+            fail(
+              "The running node has not advertised every desktop tool. Check Accessibility for the service and restart the node; terminal permissions alone do not establish service permissions.",
+            );
+          else if ((config as NodeConfig).executionEnabled)
+            pass("The running node advertises every desktop capability.");
+        } catch {
+          fail("The running node's advertised capabilities are invalid or unavailable.");
+        }
+      }
     } catch {
       fail(
         coordinator
