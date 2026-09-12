@@ -19,7 +19,7 @@ A synthetic phone/TV command-center prototype is available for interface testing
 
 ## Foundation sequence and current queue
 
-The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery and all four desktop tools have partial physical acceptance; physical sleep/wake, login/reboot, and actual inference acceptance remain pending. The synthetic command-center demo is the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
+The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery and all four desktop tools have partial physical acceptance; physical sleep/wake, login/reboot, and sustained inference acceptance remain pending. Bounded hardware checks are recorded separately from release acceptance. The synthetic command-center demo is the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
 
 ### 1. Foundation and macOS smoke gate
 
