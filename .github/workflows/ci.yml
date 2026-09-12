@@ -52,3 +52,10 @@ jobs:
       - run: bun run demo:build
       - run: node node_modules/@playwright/test/cli.js install --with-deps chromium webkit
       - run: bun run demo:test
+      - name: Preserve browser failure traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-traces
+          path: test-results/
+          retention-days: 3

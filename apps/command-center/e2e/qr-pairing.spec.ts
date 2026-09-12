@@ -70,17 +70,26 @@ async function syntheticCamera(
         const canvas = document.createElement("canvas");
         canvas.width = canvas.height = (matrix.size + margin * 2) * scale;
         const context = canvas.getContext("2d")!;
-        context.fillStyle = "white";
-        context.fillRect(0, 0, canvas.width, canvas.height);
-        context.fillStyle = "black";
-        for (let row = 0; row < matrix.size; row++) {
-          for (let column = 0; column < matrix.size; column++) {
-            if (matrix.data[row * matrix.size + column])
-              context.fillRect((column + margin) * scale, (row + margin) * scale, scale, scale);
+        const paint = () => {
+          context.fillStyle = "white";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.fillStyle = "black";
+          for (let row = 0; row < matrix.size; row++) {
+            for (let column = 0; column < matrix.size; column++) {
+              if (matrix.data[row * matrix.size + column])
+                context.fillRect((column + margin) * scale, (row + margin) * scale, scale, scale);
+            }
           }
-        }
+        };
+        paint();
         const captured = canvas.captureStream(10);
-        tracks.push(...captured.getVideoTracks());
+        const capturedTracks = captured.getVideoTracks();
+        tracks.push(...capturedTracks);
+        // Produce camera-like frames even if video attachment misses the initial canvas frame.
+        const frames = setInterval(() => {
+          if (capturedTracks.every((track) => track.readyState === "ended")) clearInterval(frames);
+          else paint();
+        }, 100);
         return captured;
       };
 
