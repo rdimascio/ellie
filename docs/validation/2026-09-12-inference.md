@@ -23,6 +23,11 @@ The latency values are single observations on a lightly loaded machine with a sh
 
 ## Household-LAN inference
 
+| Role                             | Hardware and runtime                                        | Ellie revision                                                                                   |
+| -------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| MacBook coordinator and worker   | Apple M4 Pro, 24 GB RAM, arm64; macOS 15.1; Node.js 24.21.0 | Stable coordinator at foundation commit `004d8ef`; temporary inference worker at PR 8 `a82b3d3`  |
+| Mac mini worker and desktop node | Apple M4, 32 GB RAM, arm64; macOS 26.6.2; Node.js 24.21.0   | Stable desktop node at foundation commit `004d8ef`; temporary inference worker at PR 8 `a82b3d3` |
+
 The MacBook coordinator scheduled a temporary compute-only node on the Mac mini over the authenticated household LAN. The worker used the official Apple Silicon archive from the [`llama.cpp` b10900 prerelease](https://github.com/ggml-org/llama.cpp/releases/tag/b10900), reported as `0.4.0-dev` at commit `50182a53f`. The downloaded runner archive matched GitHub's published SHA-256 digest and remained in a private temporary directory.
 
 The already-cached 3B instruction GGUF was copied over authenticated SSH. Its source and destination SHA-256 digests matched; no model was downloaded from the internet. The 2,019,377,440-byte Q4_K_M file and the runner were removed from the Mac mini after the check.
