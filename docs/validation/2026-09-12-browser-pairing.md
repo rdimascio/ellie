@@ -26,3 +26,25 @@ interaction, or inference test was performed for this slice. Existing hardware i
 service evidence remains in its separate dated records. Safari certificate import/trust, physical
 cookie persistence, and target TV behavior remain pending under the
 [phone acceptance and rollback procedure](../browser-pairing.md).
+
+## Bounded physical LAN check
+
+A subsequent check used a Node 24 HTTPS client on a physical MacBook and the candidate browser
+listener on a physical Mac mini over their household LAN. The listener used an isolated temporary
+coordinator, its own JobStore lock and authorization state, in-memory keys, and a temporary public
+CA. The existing household coordinator and node continued running.
+
+The peer resolved the mini's actual `.local` hostname, verified its TLS identity against the
+explicitly supplied test CA, loaded the pairing HTML and three referenced script/style assets,
+observed an unauthenticated session rejection, and paired a zero-grant shared-display identity.
+The returned cookie carried Secure, HttpOnly, and SameSite=Strict attributes. Session access
+succeeded, invitation replay and an agent route were rejected, and a controller revocation made
+the next peer session request return 401. The temporary client supplied the cookie explicitly;
+this was not a browser cookie-policy or Safari trust-store test.
+
+Before/after snapshots of the existing Ellie configuration, certificates, authorization files,
+installed helper, and listed service processes matched on both Macs. The harness stopped and
+removed temporary runtime credentials and state; port 8444 was free afterward. The test installed
+no certificate or trust profile and performed no household action. Physical iPhone and TV
+acceptance remain pending. Private hostnames, credentials, and detailed reports stay outside the
+repository.
