@@ -75,6 +75,7 @@ test("one fresh capable node is selected automatically and ambiguity stays expli
 
 test("read-only service test checks readiness without submitting a job", async () => {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+  let submitted = false;
   const report = await runServiceTest(
     {
       call: async (method, path, body) => {
@@ -84,16 +85,21 @@ test("read-only service test checks readiness without submitting a job", async (
     },
     {},
     now,
+    () => {
+      submitted = true;
+    },
   );
   assert.equal(report.nodeId, "only");
   assert.equal(report.result, undefined);
   assert.equal(calls.length, 1);
+  assert.equal(submitted, false);
   assert.deepEqual(calls[0], { method: "GET", path: "/v1/nodes", body: undefined });
   assert.ok(report.lines.some((line) => line.includes("no job or desktop action")));
 });
 
 test("desktop service test submits only the explicitly named app-open command", async () => {
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
+  let submitted = false;
   const report = await runServiceTest(
     {
       call: async (method, path, body) => {
@@ -103,6 +109,9 @@ test("desktop service test submits only the explicitly named app-open command", 
     },
     { desktopApp: "arc" },
     now,
+    () => {
+      submitted = true;
+    },
   );
   assert.deepEqual(calls[1], {
     method: "POST",
@@ -110,4 +119,5 @@ test("desktop service test submits only the explicitly named app-open command", 
     body: { nodeId: "only", text: "open app arc" },
   });
   assert.equal(report.result?.ok, true);
+  assert.equal(submitted, true);
 });

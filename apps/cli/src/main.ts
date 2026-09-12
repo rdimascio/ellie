@@ -33,10 +33,12 @@ import {
   selectExecutionNode,
   serviceTestOptions,
 } from "./self-test.ts";
+import { cliErrorMessage } from "./errors.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
 let serviceLog: ServiceLog | undefined;
+let commandOutcomeMayBeUnknown = false;
 async function exists(name: string): Promise<boolean> {
   try {
     await access(join(stateDir, name));
@@ -103,7 +105,10 @@ async function main(): Promise<void> {
           `Desktop test requested: Ellie will open the allowed app “${options.desktopApp}” on the selected node.`,
         );
       await withController(async (client) => {
-        const report = await runServiceTest(client, options);
+        const report = await runServiceTest(client, options, Date.now(), () => {
+          commandOutcomeMayBeUnknown = true;
+        });
+        commandOutcomeMayBeUnknown = false;
         report.lines.forEach((line) => console.log(line));
       });
       return;
@@ -322,9 +327,11 @@ async function main(): Promise<void> {
     await withController(async (client) => {
       const interrupt = interruptSignal();
       try {
+        commandOutcomeMayBeUnknown = true;
         const response = result(
           await client.call("POST", "/v1/inference", { model, prompt }, interrupt),
         );
+        commandOutcomeMayBeUnknown = false;
         console.log(response.message);
         if (!response.ok) process.exitCode = 1;
       } finally {
@@ -357,6 +364,7 @@ async function main(): Promise<void> {
     }
     const interrupt = interruptSignal();
     try {
+      commandOutcomeMayBeUnknown = true;
       const response = result(
         await client.call(
           "POST",
@@ -365,6 +373,7 @@ async function main(): Promise<void> {
           interrupt,
         ),
       );
+      commandOutcomeMayBeUnknown = false;
       console.log(response.message);
       if (!response.ok) process.exitCode = 1;
     } finally {
@@ -388,17 +397,6 @@ main().catch((error) => {
     process.exitCode = 1;
     return;
   }
-  const code = (error as NodeJS.ErrnoException).code;
-  console.error(
-    code === "ENOENT"
-      ? "Private configuration is missing. Run server init or node pair first."
-      : error instanceof SyntaxError
-        ? "Private configuration is invalid JSON. Review the local configuration file."
-        : code
-          ? "Could not access a required local resource. Run doctor for diagnostics."
-          : error instanceof Error
-            ? error.message
-            : "Ellie could not complete the request.",
-  );
+  console.error(cliErrorMessage(error, commandOutcomeMayBeUnknown));
   process.exitCode = 1;
 });
