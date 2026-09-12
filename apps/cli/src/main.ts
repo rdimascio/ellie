@@ -28,6 +28,7 @@ import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
 import {
+  implicitSayTarget,
   nodeIdArgument,
   runServiceTest,
   selectExecutionNode,
@@ -41,8 +42,9 @@ async function exists(name: string): Promise<boolean> {
   try {
     await access(join(stateDir, name));
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
   }
 }
 async function ask(prompt: string, secret = false): Promise<string> {
@@ -341,7 +343,7 @@ async function main(): Promise<void> {
       nodeId = nodeIdArgument(args[2]);
       words = args.slice(3);
       client = await controller();
-    } else if (await exists("node.json")) {
+    } else if (implicitSayTarget(await exists("server.json")) === "node") {
       const config = nodeConfig(await load("node.json"));
       nodeId = config.id;
       words = args.slice(1);
