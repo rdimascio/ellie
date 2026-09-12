@@ -1,8 +1,10 @@
 # Browser pairing acceptance
 
 This developer slice pairs a browser and displays its own revocable identity. Household data and
-commands remain unavailable. Browser trust on a physical iPhone and the target TV browser is still
-unvalidated. The [session boundary](browser-sessions.md) and [TLS setup](security.md) describe the
+commands remain unavailable. An attended physical iPhone check covers manual profile setup,
+pairing, refresh persistence, private-tab isolation and revocation; see the
+[dated validation record](validation/2026-09-12-browser-pairing.md). Production browser service setup
+and target TV acceptance remain pending. The [session boundary](browser-sessions.md) and [TLS setup](security.md) describe the
 separate credentials and certificate identity.
 
 ## Coordinator preparation
