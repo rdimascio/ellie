@@ -1,0 +1,11 @@
+{
+  "name": "@ellie/command-center",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@ellie/protocol": "workspace:*",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}
