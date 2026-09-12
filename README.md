@@ -92,3 +92,18 @@ Run `bun run check` for Oxlint, Oxfmt verification, generated-contract drift che
 Read [architecture](docs/architecture.md), [operation and API contracts](docs/contracts.md), [security and private state](docs/security.md), [Ellie's personality](docs/personality.md), and [manual macOS validation](docs/testing.md). See [CONTRIBUTING.md](CONTRIBUTING.md) before sharing logs or fixtures. MIT licensed.
 
 The [roadmap](docs/roadmap.md) separates the current developer prototype from the work required for an installable household command center, with ordered changes and acceptance criteria.
+
+## Command-center preview
+
+With Node 24 and Bun 1.4.2 selected, run:
+
+```sh
+bun install --frozen-lockfile --ignore-scripts
+bun run demo
+```
+
+Open the loopback URL printed by the command. The phone-sized remote and TV view use only synthetic household fixtures. Commands are simulated in browser memory; no authentication, calendar sync, analytics, or live coordinator connection is present. Use the Demo scenario selector to inspect loading, offline, empty, running, completed, failed, cancelled, and unknown outcomes.
+
+`bun run check` includes the production UI build. For browser checks, run `node node_modules/@playwright/test/cli.js install chromium`, then `bun run demo:build` and `bun run demo:test`. The browser suite emulates phone, laptop, and TV viewport sizes; it does not claim physical phone or TV acceptance.
+
+The preview binds only to loopback and uses a production build with network connections blocked by its content policy. Re-run `bun run demo` after source changes. See [the design and acceptance notes](docs/command-center-design.md).

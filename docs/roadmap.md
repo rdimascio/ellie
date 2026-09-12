@@ -6,7 +6,7 @@ Ellie is working toward a local-first, open-source household command center: a M
 
 The repository currently provides a developer milestone, not a household product:
 
-- A foreground TypeScript server and outbound-polling node communicate over authenticated, certificate-pinned HTTPS on a trusted local network.
+- A TypeScript coordinator and outbound-polling node communicate over authenticated, certificate-pinned HTTPS on a trusted local network.
 - The deterministic router can open allowed macOS apps and HTTPS sites and can place or tile windows through an isolated Swift Accessibility helper.
 - Pairing, per-node credentials, revocation, capability checks, local allowlists, bounded messages, and ephemeral command context are implemented.
 - Optional, explicitly configured Macs can advertise installed local models and resource telemetry. The coordinator schedules a non-streaming inference probe on one eligible independent worker. Separate Macs run concurrently but do not pool memory.
@@ -15,11 +15,11 @@ The repository currently provides a developer milestone, not a household product
 - A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. The operator has validated a MacBook coordinator and LAN-paired Mac mini for foreground app opening, window tiling, Netflix, and Messages beside Arc. Direct model inference and same-Mac coordinator scheduling have bounded hardware validation; LAN inference, multiple workers, and distributed MLX remain unvalidated. See [the dated inference record](validation/2026-09-12-inference.md).
 - Per-user GUI LaunchAgents provide source-checkout service lifecycle commands and bounded redacted logs. Role-specific diagnostics inspect configuration, Keychain, certificates, helper permissions, service state, and connectivity. Dedicated Ellie app identities and icons are implemented. Two-Mac native commands, queued cancellation, delivered-job crash recovery, and coordinator endpoint reconnection have partial physical acceptance; sleep/wake and active native cancellation remain pending. See [the dated service validation record](validation/2026-09-12-services.md).
 
-There is no dashboard, phone or TV client, calendar or routine engine, household profile store, voice path, MCP server, packaged installer, analytics service, or automatic updater yet. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
+A synthetic phone/TV command-center prototype is available for interface testing. There is no authenticated household dashboard, live phone or TV client, calendar or routine engine, household profile store, voice path, MCP server, packaged installer, analytics service, or automatic updater yet. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
 
 ## Foundation sequence and current queue
 
-The first three implementation slices were merged in PR #1 with passing CI. The next changes separate durable job safety, LaunchAgent lifecycle/logs, and service diagnostics into dependent review slices. Foreground desktop actions have partial physical two-Mac acceptance; full service recovery and optional inference acceptance remain pending. The synthetic command-center demo can proceed independently. Each change should preserve the deterministic fast path and use synthetic public fixtures.
+The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery and all four desktop tools have partial physical acceptance; physical sleep/wake, login/reboot, and actual inference acceptance remain pending. The synthetic command-center demo is the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
 
 ### 1. Foundation and macOS smoke gate
 
@@ -72,7 +72,7 @@ The first three implementation slices were merged in PR #1 with passing CI. The 
 
 ### 5. LaunchAgent lifecycle and doctor
 
-**Status:** implemented as source-checkout LaunchAgents and a separate diagnostic slice. Simulated lifecycle/diagnostic tests and a real inert launchd crash/relaunch smoke pass. Real Ellie service Accessibility, Keychain, LAN outage, and sleep/wake acceptance on the paired Macs remains pending.
+**Status:** merged source-checkout LaunchAgents, diagnostics, branded app identities, and safe service testing. Real two-Mac Accessibility, Keychain, native commands, queued cancellation, delivered-job recovery, coordinator endpoint outage, and coordinator uninstall/reinstall passed. Physical sleep/wake, login/reboot, and active native cancellation remain pending; see the dated service validation record.
 
 **Depends on:** physical-Mac acceptance (slice 1) and job state/cancellation (slice 4).
 
@@ -83,6 +83,8 @@ The first three implementation slices were merged in PR #1 with passing CI. The 
 **Accepted when:** a physical two-Mac test recovers from an injected process failure and sleep/wake; repeated install and uninstall are safe; actionable checks distinguish required failures from optional model-worker issues; logs contain no credentials or command content.
 
 ### 6. Synthetic command-center demo
+
+**Status:** implemented as an isolated React prototype with sample devices and agenda, simulated actions, honest job states, responsive remote/TV layouts, and browser regression checks. It does not connect to a household coordinator. See [the design and acceptance notes](command-center-design.md).
 
 **Depends on:** the implemented contracts (slice 3) for generated display types; it does not depend on a live server.
 
