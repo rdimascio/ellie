@@ -12,18 +12,18 @@ The repository currently provides a developer milestone, not a household product
 - Optional, explicitly configured Macs can advertise installed local models and resource telemetry. The coordinator schedules a non-streaming inference probe on one eligible independent worker. Separate Macs run concurrently but do not pool memory.
 - Portable certificate generation and basic independent-worker admission, reservation, and scheduling are implemented with regression coverage.
 - A canonical registry drives the four desktop operations, their types, validation, and capability policy. Generated JSON Schema and OpenAPI document the existing protocol and thirteen coordinator route paths; drift checks run in CI.
-- A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. The operator has validated a MacBook coordinator and LAN-paired Mac mini for foreground app opening, window tiling, Netflix, and Messages beside Arc. Direct model inference and same-Mac coordinator scheduling have bounded hardware validation; LAN inference, multiple workers, and distributed MLX remain unvalidated. See [the dated inference record](validation/2026-09-12-inference.md).
+- A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. The operator has validated a MacBook coordinator and LAN-paired Mac mini for foreground app opening, window tiling, Netflix, and Messages beside Arc. Direct model inference, same-Mac scheduling, one LAN request, distinct two-worker placement, and inference cancellation have bounded hardware validation. Sustained load, runner or network interruption, sleep/wake, and distributed MLX remain unvalidated. See [the dated inference record](validation/2026-09-12-inference.md).
 - Per-user GUI LaunchAgents provide source-checkout service lifecycle commands and bounded redacted logs. Role-specific diagnostics inspect configuration, Keychain, certificates, helper permissions, service state, and connectivity. Dedicated Ellie app identities and icons are implemented. Two-Mac native commands, queued cancellation, delivered-job crash recovery, and coordinator endpoint reconnection have partial physical acceptance; sleep/wake and active native cancellation remain pending. See [the dated service validation record](validation/2026-09-12-services.md).
 
 A synthetic phone/TV command-center prototype is available for interface testing. There is no authenticated household dashboard, live phone or TV client, calendar or routine engine, household profile store, voice path, MCP server, packaged installer, analytics service, or automatic updater yet. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
 
 ## Foundation sequence and current queue
 
-The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery and all four desktop tools have partial physical acceptance; physical sleep/wake, login/reboot, and sustained inference acceptance remain pending. Bounded hardware checks are recorded separately from release acceptance. The synthetic command-center demo is the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
+The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery, all four desktop tools, and bounded local and LAN inference scenarios have partial physical acceptance. Physical sleep/wake, login/reboot, sustained inference, and repeatable installed-worker acceptance remain pending. Bounded hardware checks are recorded separately from release acceptance. The synthetic command-center demo is implemented as the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
 
 ### 1. Foundation and macOS smoke gate
 
-**Status:** script, checklist, and automated regression coverage implemented; foreground two-Mac desktop actions validated by the operator. Full acceptance, including service recovery and optional inference, remains pending. Exact hardware models and macOS versions were not supplied for the operator record.
+**Status:** script, checklist, and automated regression coverage implemented; foreground two-Mac desktop actions and bounded local and LAN inference scenarios validated on physical Macs. Full service recovery and repeatable installed inference acceptance remain pending. See [the dated inference record](validation/2026-09-12-inference.md) for hardware and software scope.
 
 **Depends on:** the prepared certificate and independent-worker changes.
 
@@ -59,7 +59,7 @@ The first three implementation slices were merged in PR #1 with passing CI. The 
 
 ### 4. Minimal SQLite job state and cancellation
 
-**Status:** implemented with payload-free lifecycle metadata, fail-closed delivery commits, restart recovery, cancellation propagation, and bounded reconnect behavior; physical sleep/wake and native cancellation validation remain pending.
+**Status:** implemented with payload-free lifecycle metadata, fail-closed delivery commits, restart recovery, cancellation propagation, and bounded reconnect behavior. A bounded inference cancellation completed on hardware; physical sleep/wake and native desktop cancellation validation remain pending.
 
 **Depends on:** the implemented operation registry (slice 3).
 

@@ -1,8 +1,8 @@
 # Local inference validation — 2026-09-12
 
-This records a bounded development check on one physical MacBook at PR 8 commit `5cbfddf`. It is not multi-Mac inference or household-alpha acceptance. Personal paths, addresses, node and job IDs, credentials, configuration, prompts, and model output are intentionally excluded.
+This records bounded development checks on a physical MacBook and Mac mini at PR 8 commits `5cbfddf` and `a82b3d3`. It is not household-alpha acceptance. Personal paths, addresses, node and job IDs, credentials, configuration, prompts, and model output are intentionally excluded.
 
-## Environment and safeguards
+## Single-Mac baseline
 
 - A cached 3B instruction model in GGUF Q4_K_M format was loaded by its existing local runner with a 2,048-token context. No model or runner download occurred.
 - The runner listened only on literal loopback. Its first observed load completed in about 17 seconds.
@@ -21,8 +21,33 @@ This records a bounded development check on one physical MacBook at PR 8 commit 
 
 The latency values are single observations on a lightly loaded machine with a short deterministic request. They are not throughput, tail-latency, long-context, or sustained-load measurements.
 
+## Household-LAN inference
+
+| Role                             | Hardware and runtime                                        | Ellie revision                                                                                   |
+| -------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| MacBook coordinator and worker   | Apple M4 Pro, 24 GB RAM, arm64; macOS 15.1; Node.js 24.21.0 | Stable coordinator at foundation commit `004d8ef`; temporary inference worker at PR 8 `a82b3d3`  |
+| Mac mini worker and desktop node | Apple M4, 32 GB RAM, arm64; macOS 26.6.2; Node.js 24.21.0   | Stable desktop node at foundation commit `004d8ef`; temporary inference worker at PR 8 `a82b3d3` |
+
+The MacBook coordinator scheduled a temporary compute-only node on the Mac mini over the authenticated household LAN. The worker used the official Apple Silicon archive from the [`llama.cpp` b10900 prerelease](https://github.com/ggml-org/llama.cpp/releases/tag/b10900), reported as `0.4.0-dev` at commit `50182a53f`. The downloaded runner archive matched GitHub's published SHA-256 digest and remained in a private temporary directory.
+
+The already-cached 3B instruction GGUF was copied over authenticated SSH. Its source and destination SHA-256 digests matched; no model was downloaded from the internet. The 2,019,377,440-byte Q4_K_M file and the runner were removed from the Mac mini after the check.
+
+The runner listened on literal loopback with a 2,048-token context, one parallel slot, and Metal acceleration. After model load, its resident set was about 2.22 GiB and the PR 8 Mach free-plus-inactive estimate was about 12.94 GiB. The temporary worker used a 4 GiB additional-memory threshold for this test. Thermal state was nominal and Low Power Mode was off. This observed headroom and threshold are not general model-sizing guidance.
+
+| Check                        | Observed result                                                                                                                                                                                                                                                                                                             |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single LAN request           | The coordinator selected the temporary Mac mini worker, the expected synthetic marker was returned, and durable metadata recorded `completed` with outcome `succeeded`. The controller observed 662 ms end to end; the durable job interval was 642 ms.                                                                     |
+| Two-worker placement         | Two short requests were submitted together while exactly two eligible workers were registered. The coordinator placed them on distinct physical Macs, both durable records completed successfully, and their coordinator lifecycle intervals overlapped. Controller time was 299 ms; durable intervals were 231 and 288 ms. |
+| Inference cancellation       | A longer request was observed in durable state `running`, then cancellation was requested after a 150 ms delay. It reached `cancelled` with outcome `cancelled_by_caller` in 1,041 ms; the worker reported zero active jobs and the runner's only slot was idle.                                                            |
+| Desktop service preservation | A new transient identity advertised compute only. The existing Mac mini desktop node stayed online with all four desktop capabilities throughout.                                                                                                                                                                           |
+
+The placement check proves concurrent coordinator scheduling on distinct physical workers with overlapping job lifecycles. It does not establish simultaneous GPU utilization or compare parallel throughput. The cancellation check observed the coordinator, worker, and runner return to idle, but did not measure when runner-side GPU work stopped.
+
+Cleanup stopped both temporary workers and runners, revoked the transient identity, and removed the copied model, runner, worktrees, LaunchAgents, plists, and logs. The MacBook runner was restored to stopped with zero loaded models. Existing Ellie configuration, Keychain credentials, the installed native helper, and privacy grants were unchanged; the original Mac mini desktop node remained healthy with all four capabilities.
+
 ## Limits
 
-- The coordinator and inference worker ran on the same physical Mac. LAN inference and cross-Mac model execution were not exercised.
-- Multiple workers, concurrent placement, sustained load, cancellation during generation, coordinator or runner interruption, and sleep/wake were not exercised on hardware.
-- No model was installed or transferred to the Mac mini, and optional distributed MLX remains untested.
+- The LAN result covers one short request, one pair of short simultaneously submitted requests, and one cancellation on two physical Macs. It is not a sustained-load, throughput, tail-latency, or long-context measurement.
+- Physical network interruption, coordinator or runner crashes during inference, and sleep/wake were not exercised.
+- The model and runner were temporary test assets on the Mac mini; no permanent runner or model installation was validated.
+- Optional distributed MLX remains untested.
