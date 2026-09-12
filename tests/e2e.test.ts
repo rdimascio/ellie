@@ -114,35 +114,27 @@ test("node credentials cannot control another Mac, issue invites, or spoof its r
     await f.close();
   }
 });
-test("timeouts do not replay commands, failed actions do not advance pronoun context", async () => {
+test("timeouts do not replay commands, failed actions do not advance pronoun context", async (t) => {
   const f = await fixture(150);
   try {
     const node = await f.pair("node");
     await node.call("POST", "/v1/register", { capabilities: [...CAPABILITIES] });
-    const beginPoll = () => {
-      let observed!: () => void;
-      let failed!: (error: unknown) => void;
-      const started = new Promise<void>((resolve, reject) => {
-        observed = resolve;
-        failed = reject;
-      });
-      const onRequest = (request: { method?: string; url?: string }) => {
-        if (request.method !== "GET" || request.url !== "/v1/poll") return;
-        f.app.server.off("request", onRequest);
-        setImmediate(observed);
-      };
-      f.app.server.on("request", onRequest);
-      const reply = node.call("GET", "/v1/poll");
-      void reply.catch((error) => {
-        f.app.server.off("request", onRequest);
-        failed(error);
-      });
-      return { started, reply };
-    };
-    const firstPoll = beginPoll();
-    await firstPoll.started;
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const storageWait = new Int32Array(new SharedArrayBuffer(4));
+    const delayDurableWrite = () => Atomics.wait(storageWait, 0, 0, 175);
+    const create = f.jobStore.create.bind(f.jobStore);
+    const markDelivered = f.jobStore.markDelivered.bind(f.jobStore);
+    t.mock.method(f.jobStore, "create", (input: Parameters<typeof create>[0]) => {
+      delayDurableWrite();
+      create(input);
+    });
+    t.mock.method(f.jobStore, "markDelivered", (id: string, now?: number) => {
+      delayDurableWrite();
+      markDelivered(id, now);
+    });
     const pending = node.call("POST", "/v1/commands", { nodeId: "node", text: "open Arc" });
-    const task = job(record(await firstPoll.reply).job);
+    const task = job(record(await node.call("GET", "/v1/poll")).job);
+    t.mock.timers.tick(151);
     assert.equal(record(await pending).ok, false);
     await assert.rejects(
       node.call("POST", "/v1/result", { id: task.id, result: { ok: true, message: "Late." } }),
@@ -154,10 +146,8 @@ test("timeouts do not replay commands, failed actions do not advance pronoun con
       ).ok,
       false,
     );
-    const secondPoll = beginPoll();
-    await secondPoll.started;
     const failure = node.call("POST", "/v1/commands", { nodeId: "node", text: "open Arc" });
-    const next = job(record(await secondPoll.reply).job);
+    const next = job(record(await node.call("GET", "/v1/poll")).job);
     assert.notEqual(next.id, task.id);
     await node.call("POST", "/v1/result", {
       id: next.id,
