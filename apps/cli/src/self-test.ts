@@ -17,6 +17,10 @@ interface ExecutionNode {
   capabilities: Capability[];
 }
 
+export function implicitSayTarget(coordinatorConfigured: boolean): "coordinator" | "node" {
+  return coordinatorConfigured ? "coordinator" : "node";
+}
+
 export function nodeIdArgument(value: unknown): string {
   if (typeof value === "string" && /^<?(?:your[-_ ]?)?node[-_ ]?id>?$/i.test(value.trim()))
     throw new Error(
