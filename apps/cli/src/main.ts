@@ -14,14 +14,7 @@ import {
   serverUrl,
   Keychain,
 } from "@ellie/config";
-import {
-  identifier,
-  jobMetadata,
-  operationDefinition,
-  record,
-  string,
-  result,
-} from "@ellie/protocol";
+import { identifier, jobMetadata, record, string, result } from "@ellie/protocol";
 import { Client, discoverCertificate, fingerprint } from "@ellie/transport";
 import { MacOSExecutor } from "@ellie/macos";
 import { Auth, newToken } from "../../server/src/auth.ts";
@@ -33,6 +26,7 @@ import { runNode } from "../../node/src/index.ts";
 import { generateCertificate } from "./certificate.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
+import { doctor, doctorService } from "./diagnostics.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
@@ -271,14 +265,9 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "doctor") {
-    const capabilities = await new MacOSExecutor().capabilities();
-    console.log(`Available tools: ${capabilities.join(", ")}`);
-    if (!capabilities.includes(operationDefinition("window.place").requiredCapability)) {
-      console.log(
-        "Enable your terminal and ~/.ellie/bin/ellie-macos in System Settings > Privacy & Security > Accessibility. Restart the node afterward.",
-      );
-      process.exitCode = 1;
-    }
+    const report = args[1] ? await doctorService(serviceRole(args[1])) : await doctor();
+    report.lines.forEach((line) => console.log(line));
+    if (!report.ok) process.exitCode = 1;
     return;
   }
   if (args[0] === "nodes") {
@@ -363,7 +352,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  doctor                Check native helper and Accessibility\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {

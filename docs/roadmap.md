@@ -12,17 +12,18 @@ The repository currently provides a developer milestone, not a household product
 - Optional, explicitly configured Macs can advertise installed local models and resource telemetry. The coordinator schedules a non-streaming inference probe on one eligible independent worker. Separate Macs run concurrently but do not pool memory.
 - Portable certificate generation and basic independent-worker admission, reservation, and scheduling are implemented with regression coverage.
 - A canonical registry drives the four desktop operations, their types, validation, and capability policy. Generated JSON Schema and OpenAPI document the existing protocol and thirteen coordinator route paths; drift checks run in CI.
-- A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. Physical two-Mac acceptance is still pending.
+- A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. The operator has validated a MacBook coordinator and LAN-paired Mac mini for foreground app opening, window tiling, Netflix, and Messages beside Arc. Model inference and distributed scheduling have not been hardware-validated.
+- Per-user GUI LaunchAgents provide source-checkout service lifecycle commands and bounded redacted logs. Role-specific diagnostics inspect configuration, Keychain, certificates, helper permissions, service state, and connectivity. Physical two-Mac service crash and sleep/wake acceptance remains pending; see [the service validation record](services.md).
 
-There is no dashboard, phone or TV client, calendar or routine engine, household profile store, voice path, MCP server, packaged installer, background-service installer, analytics service, or automatic updater yet. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
+There is no dashboard, phone or TV client, calendar or routine engine, household profile store, voice path, MCP server, packaged installer, analytics service, or automatic updater yet. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
 
 ## Foundation sequence and current queue
 
-The first four implementation slices are complete locally. GitHub publication and physical-Mac acceptance remain pending. Background services are next; the synthetic command-center demo can proceed independently. Each change should preserve the deterministic fast path and use synthetic public fixtures.
+The first three implementation slices were merged in PR #1 with passing CI. The next changes separate durable job safety, LaunchAgent lifecycle/logs, and service diagnostics into dependent review slices. Foreground desktop actions have partial physical two-Mac acceptance; full service recovery and optional inference acceptance remain pending. The synthetic command-center demo can proceed independently. Each change should preserve the deterministic fast path and use synthetic public fixtures.
 
 ### 1. Foundation and macOS smoke gate
 
-**Status:** script, checklist, and automated regression coverage implemented; physical two-Mac acceptance pending.
+**Status:** script, checklist, and automated regression coverage implemented; foreground two-Mac desktop actions validated by the operator. Full acceptance, including service recovery and optional inference, remains pending. Exact hardware models and macOS versions were not supplied for the operator record.
 
 **Depends on:** the prepared certificate and independent-worker changes.
 
@@ -70,6 +71,8 @@ The first four implementation slices are complete locally. GitHub publication an
 **Accepted when:** restart tests cover queued, delivered, completed, failed, cancelled, and expired jobs; no case executes a delivered operation twice; cancellation reaches a waiting client and node; the result states that native side effects may still finish once execution has begun; corrupt or unsupported schemas fail with recovery guidance.
 
 ### 5. LaunchAgent lifecycle and doctor
+
+**Status:** implemented as source-checkout LaunchAgents and a separate diagnostic slice. Simulated lifecycle/diagnostic tests and a real inert launchd crash/relaunch smoke pass. Real Ellie service Accessibility, Keychain, LAN outage, and sleep/wake acceptance on the paired Macs remains pending.
 
 **Depends on:** physical-Mac acceptance (slice 1) and job state/cancellation (slice 4).
 
