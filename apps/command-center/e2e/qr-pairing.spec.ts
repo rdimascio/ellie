@@ -144,7 +144,7 @@ async function browserConnection(
 test("a real QR frame pairs once, stops the camera first, and leaves no browser-visible code", async ({
   page,
 }) => {
-  await syntheticCamera(page);
+  await syntheticCamera(page, { pending: true });
   const connection = await browserConnection(page);
   const urls: string[] = [];
   page.on("request", (request) => urls.push(request.url()));
@@ -153,6 +153,8 @@ test("a real QR frame pairs once, stops the camera first, and leaves no browser-
 
   await page.getByRole("button", { name: "Scan QR code" }).click();
   await expect(page.getByLabel("Camera preview")).toBeVisible();
+  await expect.poll(() => page.evaluate(() => window.qrCameraTest.state.calls)).toBe(1);
+  await page.evaluate(() => window.qrCameraTest.resolvePermission());
   await expect(page.getByRole("heading", { name: "Connected to Ellie" })).toBeVisible();
 
   expect(connection.posts).toBe(1);
