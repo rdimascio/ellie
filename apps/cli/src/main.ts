@@ -1,5 +1,5 @@
 import { access, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
@@ -23,6 +23,13 @@ import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
 
 import { generateCertificate } from "./certificate.ts";
+import { generateBrowserTlsIdentity } from "./certificate.ts";
+import {
+  browserStatus,
+  exportBrowserCa,
+  initializeBrowser,
+  systemLocalHostname,
+} from "./browser-setup.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
@@ -97,6 +104,40 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
   };
 }
 async function main(): Promise<void> {
+  if (args[0] === "browser") {
+    const environment = {
+      stateDir,
+      secrets,
+      localHostname: systemLocalHostname,
+      generate: (hostname: string) => generateBrowserTlsIdentity(hostname),
+      now: Date.now,
+    };
+    if (args[1] === "init" && args.length === 2) {
+      const config = await initializeBrowser(environment);
+      console.log(
+        `Browser identity ready for https://${config.hostname}:${config.port}. No listener was started and no trust setting was changed.`,
+      );
+      return;
+    }
+    if (args[1] === "status" && args.length === 2) {
+      const status = await browserStatus(environment);
+      console.log(JSON.stringify(status, null, 2));
+      if (!status.ready) process.exitCode = 1;
+      return;
+    }
+    if (args[1] === "export-ca") {
+      const force = args[3] === "--force";
+      if (!args[2] || args.length !== (force ? 4 : 3))
+        throw new Error("Use: bun run ellie browser export-ca PATH [--force]");
+      const output = resolve(args[2]);
+      await exportBrowserCa(environment, output, force);
+      console.log(
+        `Public browser CA exported to ${output}. Transfer only this public certificate through an existing trusted local channel; installation does not enable trust automatically.`,
+      );
+      return;
+    }
+    throw new Error("Use: bun run ellie browser init|status|export-ca PATH [--force]");
+  }
   if (args[0] === "service") {
     const action = args[1];
     if (action === "test") {
@@ -389,7 +430,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {
