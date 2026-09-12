@@ -2,7 +2,6 @@ import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import {
   access,
-  chmod,
   lstat,
   mkdir,
   readFile,
@@ -16,6 +15,12 @@ import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { ensureState, nodeConfig, serverConfig } from "@ellie/config";
+import {
+  applicationExecutable,
+  applicationId,
+  MacOSServiceApplication,
+} from "./service-application.ts";
+import type { ServiceApplication } from "./service-application.ts";
 
 export type ServiceRole = "coordinator" | "node";
 export function serviceRole(value: unknown): ServiceRole {
@@ -37,6 +42,13 @@ export const run: Run = (file, args) =>
     );
   });
 export const label = (role: ServiceRole) => `org.ellie.assistant.${role}`;
+export function serviceEnabled(output: string, role: ServiceRole): boolean {
+  const name = label(role).replaceAll(".", "\\.");
+  const value = output.match(new RegExp(`^\\s*"${name}"\\s*=>[ \t]*(.*?)[ \t]*$`, "m"))?.[1];
+  if (value === undefined || value === "enabled" || value === "false") return true;
+  if (value === "disabled" || value === "true") return false;
+  throw new Error("Cannot interpret service enablement. Check the logged-in GUI session.");
+}
 const marker = "<!-- Managed by Ellie service install; version 1. -->";
 function xml(value: string): string {
   if (
@@ -64,13 +76,15 @@ export function servicePlist(
 ${marker}
 <plist version="1.0"><dict>
 <key>Label</key>${str(label(role))}
-<key>ProgramArguments</key><array>${[node, join(checkout, "apps/cli/src/main.ts"), "service", "run", role].map(str).join("")}</array>
+<key>ProgramArguments</key><array>${[applicationExecutable(home, role), "--launch-agent"].map(str).join("")}</array>
+<key>AssociatedBundleIdentifiers</key><array>${str(applicationId(role))}</array>
 <key>WorkingDirectory</key>${str(checkout)}
 <key>EnvironmentVariables</key><dict><key>HOME</key>${str(home)}<key>PATH</key>${str(`${dirname(node)}:/usr/bin:/bin:/usr/sbin:/sbin`)}</dict>
 <key>LimitLoadToSessionType</key><string>Aqua</string>
 <key>ProcessType</key>${str(role === "node" ? "Interactive" : "Standard")}
 <key>RunAtLoad</key><true/>
 <key>KeepAlive</key><true/>
+<key>AbandonProcessGroup</key><false/>
 <key>ThrottleInterval</key><integer>30</integer>
 <key>ExitTimeOut</key><integer>15</integer>
 <key>Umask</key><integer>63</integer>
@@ -116,6 +130,7 @@ export class Services {
   readonly node: string;
   private platform: string;
   private run: Run;
+  private application: ServiceApplication;
   constructor(
     options: {
       home?: string;
@@ -124,6 +139,7 @@ export class Services {
       node?: string;
       platform?: string;
       run?: Run;
+      application?: ServiceApplication;
     } = {},
   ) {
     this.home = options.home ?? homedir();
@@ -134,6 +150,7 @@ export class Services {
     this.node = options.node ?? process.execPath;
     this.platform = options.platform ?? process.platform;
     this.run = options.run ?? run;
+    this.application = options.application ?? new MacOSServiceApplication(this.home, this.uid);
   }
   private guard(): void {
     if (this.platform !== "darwin") throw new Error("Services require macOS.");
@@ -166,6 +183,26 @@ export class Services {
       throw error;
     }
   }
+  private async locked<T>(role: ServiceRole, action: () => Promise<T>): Promise<T> {
+    this.guard();
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    await privatePath(this.dir, true, this.uid);
+    const lock = join(this.dir, `service-${role}.lock`);
+    try {
+      await writeFile(lock, `${process.pid}\n`, { mode: 0o600, flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST")
+        throw new Error(
+          "Another service command is running or was interrupted. See docs/services.md for lifecycle lock recovery.",
+        );
+      throw error;
+    }
+    try {
+      return await action();
+    } finally {
+      await unlink(lock);
+    }
+  }
   async status(role: ServiceRole): Promise<ServiceStatus> {
     this.guard();
     const installed = (await this.managed(role)) !== undefined;
@@ -175,7 +212,7 @@ export class Services {
     const disabled = await this.run("/bin/launchctl", ["print-disabled", this.domain]);
     if (disabled.code !== 0)
       throw new Error("Cannot inspect service enablement. Check the logged-in GUI session.");
-    const enabled = !disabled.stdout.includes(`"${label(role)}" => true`);
+    const enabled = serviceEnabled(disabled.stdout, role);
     const response = await this.run("/bin/launchctl", ["print", this.target(role)]);
     // 113 is launchctl's missing-service result; other failures must not look stopped.
     if (response.code !== 0 && response.code !== 113)
@@ -218,6 +255,9 @@ export class Services {
     await access(join(this.dir, "bin", "ellie-macos"), constants.X_OK);
   }
   async install(role: ServiceRole): Promise<void> {
+    return this.locked(role, () => this.installUnlocked(role));
+  }
+  private async installUnlocked(role: ServiceRole): Promise<void> {
     await this.validate(role);
     const previous = await this.managed(role);
     const plist = servicePlist(
@@ -226,9 +266,16 @@ export class Services {
       await realpath(this.checkout),
       await realpath(this.node),
     );
-    if (previous === plist) return;
+    const checkout = await realpath(this.checkout);
+    const node = await realpath(this.node);
+    if (previous === plist && (await this.application.matches(role, checkout, node))) {
+      await this.application.install(role, checkout, node);
+      return;
+    }
     if ((await this.status(role)).loaded)
-      throw new Error("Stop the service before installing changed runtime or checkout paths.");
+      throw new Error(
+        "Stop the service before installing changed application, runtime, or checkout paths.",
+      );
     await ensureState(this.dir);
     await mkdir(this.agents, { recursive: true, mode: 0o700 });
     const info = await lstat(this.agents);
@@ -238,8 +285,7 @@ export class Services {
     try {
       await writeFile(temp, plist, { mode: 0o600, flag: "wx" });
       await this.callPlutil(temp);
-      await rename(temp, this.path(role));
-      await chmod(this.path(role), 0o600);
+      await this.application.install(role, checkout, node, () => rename(temp, this.path(role)));
     } finally {
       await unlink(temp).catch(() => {});
     }
@@ -251,6 +297,9 @@ export class Services {
       );
   }
   async start(role: ServiceRole): Promise<void> {
+    return this.locked(role, () => this.startUnlocked(role));
+  }
+  private async startUnlocked(role: ServiceRole): Promise<void> {
     await this.validate(role);
     const status = await this.status(role);
     if (!status.installed) throw new Error("Install this service first.");
@@ -259,10 +308,15 @@ export class Services {
     // A changed checkout or Node upgrade requires install again, not a stale executable.
     if (
       (await this.managed(role)) !==
-      servicePlist(role, this.home, await realpath(this.checkout), await realpath(this.node))
+        servicePlist(role, this.home, await realpath(this.checkout), await realpath(this.node)) ||
+      !(await this.application.matches(
+        role,
+        await realpath(this.checkout),
+        await realpath(this.node),
+      ))
     )
       throw new Error(
-        "Service paths changed. Stop and install the service again from the intended checkout.",
+        "Service application or paths changed. Stop and install the service again from the intended checkout.",
       );
     await this.call(["enable", this.target(role)], "Could not enable the service.");
     if (!status.loaded)
@@ -277,6 +331,9 @@ export class Services {
       );
   }
   async stop(role: ServiceRole): Promise<void> {
+    return this.locked(role, () => this.stopUnlocked(role));
+  }
+  private async stopUnlocked(role: ServiceRole): Promise<void> {
     const status = await this.status(role);
     if (!status.installed && !status.loaded) return;
     if (!status.guiSession)
@@ -292,7 +349,10 @@ export class Services {
       );
   }
   async uninstall(role: ServiceRole): Promise<void> {
-    await this.stop(role);
-    if ((await this.managed(role)) !== undefined) await unlink(this.path(role));
+    return this.locked(role, async () => {
+      await this.stopUnlocked(role);
+      if ((await this.managed(role)) !== undefined) await unlink(this.path(role));
+      await this.application.uninstall(role);
+    });
   }
 }

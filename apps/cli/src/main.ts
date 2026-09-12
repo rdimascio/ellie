@@ -135,7 +135,7 @@ async function main(): Promise<void> {
         await services[action](role);
         console.log(
           action === "install"
-            ? "Service installed. Run service start to enable it now; installation uses the existing identity."
+            ? `Service installed with its Ellie app name and icon. Run service start, then doctor; existing pairing and Keychain credentials were preserved.${role === "node" ? " Enable Ellie Node in Accessibility for window control." : ""}`
             : action === "start"
               ? "Service start requested. Check service status and doctor for readiness."
               : action === "stop"
