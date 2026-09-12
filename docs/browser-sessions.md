@@ -3,8 +3,7 @@
 Ellie's coordinator can optionally serve a pairing page over a separate browser HTTPS identity.
 The page pairs a phone or shared display, confirms its own identity, and disconnects it. Controller
 CLI commands issue invitations, inspect connection status, list clients, and revoke sessions.
-Household data and desktop operations are not exposed through this listener. Physical phone trust
-remains an acceptance gate; see [setup and validation](browser-pairing.md).
+Household data and desktop operations are not exposed through this listener. Bounded attended iPhone pairing and session checks are recorded; see [setup and validation](browser-pairing.md).
 
 ## State and roles
 
@@ -76,7 +75,8 @@ Authorization header is rejected so an agent Bearer credential cannot cross into
 boundary. Mutations accept only JSON bodies up to 4 KiB. The listener emits no cross-origin
 credential policy and adds `Cache-Control: no-store`, a same-origin resource policy, frame denial,
 content-type sniffing protection, no referrer, and a restrictive content security policy to every
-application response.
+application response. Permissions Policy allows only same-origin camera use and disables
+microphone and geolocation. The pairing page requests video only after a deliberate Scan action.
 
 The browser API has four routes:
 
@@ -126,5 +126,5 @@ loopback socket with a short-lived synthetic CA that the Node test client trusts
 cover TLS hostname validation, origin and header rejection, JSON limits, role escalation, invitation
 replay, session projection, revocation, logout, static error redaction, and the configured connection
 and timeout bounds. Tests do not write to `~/.ellie`, access Keychain, install a certificate, contact
-a phone or TV, or execute a desktop action. Trusted HTTPS and session behavior in Safari and a target
-TV browser remain physical acceptance checks for later slices.
+a phone or TV, or execute a desktop action. The separate attended iPhone record covers manual trust setup and session behavior. Physical QR
+scanning, production browser installation and target TV acceptance remain pending.

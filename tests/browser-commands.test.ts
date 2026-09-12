@@ -80,6 +80,9 @@ test("browser CLI prints only a deliberate invitation code and validates its aut
   };
   const lines = await runBrowserCommand(client, command);
   assert.equal(lines.filter((line) => line.includes(code)).length, 1);
+  assert.match(lines[0]!, /trusted Ellie pairing page.*Scan QR code/);
+  assert.match(lines[1]!, /\n/);
+  assert.equal(lines[2], `Manual pairing code: ${code}`);
   assert.doesNotMatch(lines.join("\n"), /https?:.*code|tokenHash|session/i);
 
   const escalated = {

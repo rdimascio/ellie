@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ellieIcon from "../../../packages/macos/assets/Ellie.png";
+import { QrScanner } from "./qr-scanner.tsx";
 import "./tokens.css";
 import "./pairing.css";
 
@@ -249,7 +250,16 @@ function Pairing() {
   const { connection, pair, disconnect, refresh } = useConnection();
   const [code, setCode] = useState("");
   const [visible, setVisible] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanNote, setScanNote] = useState<string | undefined>();
+  const scanButton = useRef<HTMLButtonElement>(null);
   const { phase, client } = connection;
+  useEffect(() => {
+    if (phase !== "unpaired") {
+      setScanning(false);
+      setScanNote(undefined);
+    }
+  }, [phase]);
   const connected = phase === "connected" && client;
   const waiting = phase === "checking" || phase === "pairing" || phase === "disconnecting";
   const heading = connected
@@ -264,7 +274,9 @@ function Pairing() {
         ? "Connecting this device…"
         : phase === "disconnecting"
           ? "Disconnecting this device…"
-          : (connection.note ?? (connected ? "Connection confirmed." : undefined));
+          : ((phase === "unpaired" ? scanNote : undefined) ??
+            connection.note ??
+            (connected ? "Connection confirmed." : undefined));
   return (
     <div className={`pairing-page ${client?.role === "tv_viewer" ? "shared-display" : ""}`}>
       <a className="pairing-skip" href="#pairing-main">
@@ -316,52 +328,95 @@ function Pairing() {
         ) : phase === "unpaired" ? (
           <>
             <p className="pairing-intro">
-              Ask the person who manages Ellie for a pairing code for this phone or TV.
+              Scan the QR code shown by Ellie on your Mac, or enter a pairing code.
             </p>
-            <form
-              onSubmit={(event) => {
-                event.preventDefault();
-                const submitted = code.trim();
-                setCode("");
-                setVisible(false);
-                void pair(submitted);
-              }}
-            >
-              <label htmlFor="pairing-code">Pairing code</label>
-              <div className="code-input">
-                <input
-                  id="pairing-code"
-                  name="pairing-code"
-                  type={visible ? "text" : "password"}
-                  autoComplete="off"
-                  autoCapitalize="none"
-                  spellCheck={false}
-                  value={code}
-                  onChange={(event) => setCode(event.target.value)}
-                  maxLength={64}
-                  pattern="[a-f0-9]{64}"
-                  required
-                  aria-describedby="code-help"
-                />
+            {scanning ? (
+              <QrScanner
+                onCode={(decoded) => {
+                  setScanning(false);
+                  setCode("");
+                  setVisible(false);
+                  setScanNote(undefined);
+                  void pair(decoded);
+                }}
+                onCancel={(note) => {
+                  setScanning(false);
+                  setScanNote(note);
+                  requestAnimationFrame(() => scanButton.current?.focus());
+                }}
+              />
+            ) : (
+              <>
                 <button
+                  ref={scanButton}
+                  className="pairing-button scan-button"
                   type="button"
-                  aria-label={visible ? "Hide pairing code" : "Show pairing code"}
-                  onClick={() => setVisible(!visible)}
+                  onClick={() => {
+                    setCode("");
+                    setVisible(false);
+                    setScanNote(undefined);
+                    setScanning(true);
+                  }}
                 >
-                  {visible ? "Hide" : "Show"}
+                  <svg viewBox="0 0 24 24" width="22" height="22" fill="none" aria-hidden="true">
+                    <path
+                      d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                    />
+                    <path d="M7 7h3v3H7zm7 0h3v3h-3zm-7 7h3v3H7zm7 0h3v3h-3z" fill="currentColor" />
+                  </svg>
+                  Scan QR code
                 </button>
-              </div>
-              <p id="code-help" className="code-help">
-                Codes work once and expire after 10 minutes.
-              </p>
-              <button
-                className="pairing-button"
-                type="submit"
-                disabled={!/^[a-f0-9]{64}$/.test(code.trim())}
-              >
-                Connect to Ellie
-              </button>
-            </form>
+                <p className="pairing-alternative">or enter a code</p>
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    const submitted = code.trim();
+                    setCode("");
+                    setVisible(false);
+                    setScanNote(undefined);
+                    void pair(submitted);
+                  }}
+                >
+                  <label htmlFor="pairing-code">Pairing code</label>
+                  <div className="code-input">
+                    <input
+                      id="pairing-code"
+                      name="pairing-code"
+                      type={visible ? "text" : "password"}
+                      autoComplete="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={code}
+                      onChange={(event) => setCode(event.target.value)}
+                      maxLength={64}
+                      pattern="[a-f0-9]{64}"
+                      required
+                      aria-describedby="code-help"
+                    />
+                    <button
+                      type="button"
+                      aria-label={visible ? "Hide pairing code" : "Show pairing code"}
+                      onClick={() => setVisible(!visible)}
+                    >
+                      {visible ? "Hide" : "Show"}
+                    </button>
+                  </div>
+                  <p id="code-help" className="code-help">
+                    Codes work once and expire after 10 minutes.
+                  </p>
+                  <button
+                    className="pairing-button secondary"
+                    type="submit"
+                    disabled={!/^[a-f0-9]{64}$/.test(code.trim())}
+                  >
+                    Connect to Ellie
+                  </button>
+                </form>
+              </>
+            )}
           </>
         ) : phase === "unavailable" ? (
           <button className="pairing-button" onClick={() => void refresh()}>

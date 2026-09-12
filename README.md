@@ -6,7 +6,7 @@ Ellie is at its first developer milestone: text commands → deterministic routi
 
 ## Try the first milestone
 
-You need macOS, Node.js 24, Bun 1.4.2, Xcode Command Line Tools (`xcode-select --install`), and `openssl` on each Mac (the macOS-provided LibreSSL is supported). Node remains the production runtime and test runner; Bun installs the workspace and runs its scripts. The execution Mac needs a logged-in graphical session. Install Arc for the default browser commands. There are no runtime dependencies beyond the workspace packages.
+You need macOS, Node.js 24, Bun 1.4.2, Xcode Command Line Tools (`xcode-select --install`), and `openssl` on each Mac (the macOS-provided LibreSSL is supported). Node remains the production runtime and test runner; Bun installs the workspace and runs its scripts. The execution Mac needs a logged-in graphical session. Install Arc for the default browser commands. Bun installs the local runtime dependencies with the workspace.
 
 Clone this repository using GitHub's **Code → HTTPS** clone URL, then run on **both Macs** from the repository root:
 
@@ -107,7 +107,9 @@ Open the loopback URL printed by the command. The phone-sized remote and TV view
 `bun run check` includes the production UI build. For browser checks, run `node node_modules/@playwright/test/cli.js install chromium`, then `bun run demo:build` and `bun run demo:test`. The browser suite emulates phone, laptop, and TV viewport sizes; it does not claim physical phone or TV acceptance.
 
 An optional coordinator HTTPS pairing page can connect a phone or shared display, show its own
-identity, and disconnect it. Controller CLI commands manage invitations and revocation. It exposes
+identity, and disconnect it. Controller CLI commands display single-use QR invitations with a manual
+code fallback and manage revocation. The phone pairing page scans QR codes locally after camera
+permission. It exposes
 no household data or commands yet. See [browser setup and acceptance](docs/browser-pairing.md) for
 the separate TLS identity, service startup, and physical phone trust checks.
 

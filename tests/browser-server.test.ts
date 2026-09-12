@@ -356,11 +356,16 @@ test("browser health is minimal and every application response has restrictive h
   assert.match(String(response.headers["content-security-policy"]), /frame-ancestors 'none'/);
   assert.equal(response.headers["x-content-type-options"], "nosniff");
   assert.equal(response.headers["x-frame-options"], "DENY");
+  assert.equal(
+    response.headers["permissions-policy"],
+    "camera=(self), microphone=(), geolocation=()",
+  );
   assert.equal(response.headers["access-control-allow-origin"], undefined);
   assert.doesNotMatch(response.text, /household|node|target|label/i);
 
   const missing = await f.request("GET", "/browser/v1/missing");
   assert.equal(missing.status, 404);
+  assert.equal(missing.headers["permissions-policy"], response.headers["permissions-policy"]);
   assert.deepEqual(missing.body, { error: "Browser route not found." });
 });
 
@@ -427,6 +432,10 @@ test("browser boundary rejects duplicate Host, Origin, and Authorization fields"
   for (const lines of requests) {
     const response = await rawRequest(f, lines);
     assert.match(response, /^HTTP\/1\.1 400 /);
+    assert.match(
+      response,
+      /permissions-policy: camera=\(self\), microphone=\(\), geolocation=\(\)/i,
+    );
     assert.doesNotMatch(response, /first-secret|second-secret/);
   }
 });

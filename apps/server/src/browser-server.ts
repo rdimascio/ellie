@@ -19,6 +19,7 @@ const SECURITY_HEADERS = {
     "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
   "cross-origin-resource-policy": "same-origin",
   "referrer-policy": "no-referrer",
+  "permissions-policy": "camera=(self), microphone=(), geolocation=()",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 } as const;
@@ -105,6 +106,7 @@ function invalidRequest(socket: Duplex): void {
       `Content-Security-Policy: ${SECURITY_HEADERS["content-security-policy"]}`,
       "Cross-Origin-Resource-Policy: same-origin",
       "Referrer-Policy: no-referrer",
+      `Permissions-Policy: ${SECURITY_HEADERS["permissions-policy"]}`,
       "X-Content-Type-Options: nosniff",
       "X-Frame-Options: DENY",
       "",

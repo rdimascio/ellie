@@ -48,11 +48,31 @@ bun run ellie browser revoke CLIENT_ID
 ```
 
 `CLIENT_ID` is the real ID returned by `browser clients`. Invitations are issued only by the
-authenticated controller. Their displayed codes work once and expire after ten minutes. Share a
-code privately and enter it in the pairing page; never put it in a URL, issue, log, or screenshot.
+authenticated controller. Their displayed codes work once and expire after ten minutes. The CLI displays a QR code with the same invitation, plus a manual fallback code. Show it
+privately to the intended device; anyone who can scan or copy it can consume that invitation.
+Keep codes and QR captures out of URLs, issues, logs and shared screenshots.
 Session revocation is durable. Unused invitations currently cannot be listed or revoked: issue one
 only when the recipient is ready, and let it expire if pairing is abandoned. An interrupted invite
 may have persisted even if its code was lost; wait ten minutes before issuing a replacement.
+
+### Scan the QR code
+
+First open the exact trusted HTTPS origin reported by `browser connection` on the phone. On the
+pairing page, tap **Scan QR code**, allow camera access, and point the phone at the QR displayed
+in the coordinator's terminal. Use Ellie's in-page scanner; the QR contains a versioned invitation,
+not a web address for the standalone Camera app. If scanning is unavailable, the manual code
+field remains available. Certificate installation and trust are still separate attended steps.
+
+The scanner reads frames locally with a bundled decoder. It sends only the decoded invitation
+through the existing pairing request; it never uploads or stores camera images, places an
+invitation in a URL, or grants additional authority. Camera access starts only after tapping Scan.
+Tracks stop on a successful read, cancellation, leaving or hiding the page, errors, or a one-minute
+limit. Denied or unsupported camera access returns to manual entry. A lost pairing response checks
+the session and never repeats the pairing request automatically.
+
+Keep the entire QR and its white border visible. Increase terminal text size if needed. A QR uses
+the same one-time, ten-minute invitation as its manual fallback; it is not a reusable login.
+Physical iPhone camera scanning and target TV camera/manual behavior still require acceptance.
 
 Phone invitations require explicit `--node ID --allow app.open,url.open` grants alongside
 `browser invite phone --label NAME`. These reserve authority for future routes; this version exposes

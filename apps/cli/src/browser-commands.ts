@@ -13,6 +13,7 @@ import type {
   BrowserInvitationSpec,
 } from "../../server/src/browser-auth.ts";
 import type { BrowserUnavailableReason } from "../../server/src/browser-management.ts";
+import { terminalBrowserPairingQr } from "./browser-qr.ts";
 
 interface BrowserCommandClient {
   call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
@@ -207,8 +208,11 @@ export async function runBrowserCommand(
         JSON.stringify(issued.grants) !== JSON.stringify(command.invitation.grants)
       )
         throw new Error();
+      const qr = await terminalBrowserPairingQr(issued.code);
       return [
-        `Browser invitation code: ${issued.code}`,
+        "Open the trusted Ellie pairing page and choose Scan QR code:",
+        qr,
+        `Manual pairing code: ${issued.code}`,
         `Role: ${issued.role}`,
         `Label: ${issued.label}`,
         `Expires: ${new Date(issued.expiresAt).toISOString()}`,

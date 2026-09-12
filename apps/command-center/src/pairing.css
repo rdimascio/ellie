@@ -137,6 +137,30 @@ label {
 .pairing-button.secondary:hover {
   background: #edf6f4;
 }
+.scan-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.pairing-alternative {
+  text-align: center;
+  color: var(--slate);
+  font-size: 13px;
+  margin: 20px 0;
+}
+.qr-scanner video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: cover;
+  background: var(--ink);
+  border-radius: 14px;
+}
+.scan-note {
+  margin: 16px 0 8px;
+  color: var(--slate);
+}
 .pairing-status {
   margin: 20px 0 0;
   color: var(--slate);
