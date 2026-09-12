@@ -174,6 +174,60 @@ function openApi(): Json {
           },
         }),
       },
+      "/v1/browser": {
+        get: operation({
+          operationId: "getBrowserStatus",
+          summary: "Inspect optional browser listener readiness",
+          description:
+            "Controller bearer identity required. The response contains only fixed status and recovery reason values, plus the canonical origin when ready.",
+          responses: {
+            "200": response("Browser listener status.", ref("BrowserStatus")),
+            ...errors("400", "401", "403"),
+          },
+        }),
+      },
+      "/v1/browser/invitations": {
+        post: operation({
+          operationId: "createBrowserInvitation",
+          summary: "Create a fixed-authority browser invitation",
+          description:
+            "Controller bearer identity required. The response deliberately contains a single-use code; callers must not log it or place it in a URL.",
+          requestBody: request(ref("BrowserInvitationSpec")),
+          responses: {
+            "200": response("Single-use browser invitation created.", ref("BrowserInvitation")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/browser/clients": {
+        get: operation({
+          operationId: "listBrowserClients",
+          summary: "List public browser client identities and grants",
+          description:
+            "Controller bearer identity required. Credential verifiers are never returned.",
+          responses: {
+            "200": response("Active public browser clients.", {
+              type: "array",
+              maxItems: 128,
+              items: ref("BrowserClient"),
+            }),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+      },
+      "/v1/browser/revoke": {
+        post: operation({
+          operationId: "revokeBrowserClient",
+          summary: "Revoke one browser client session",
+          description:
+            "Controller bearer identity required. Revocation is persisted before success.",
+          requestBody: request(ref("BrowserRevokeRequest")),
+          responses: {
+            "200": response("Browser revocation result.", ref("BrowserRevokeResponse")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
       "/v1/nodes": {
         get: operation({
           operationId: "listNodes",
@@ -350,7 +404,7 @@ function openApi(): Json {
             ["NotFound", "Endpoint unavailable for this identity."],
             ["Conflict", "Current node or job state rejected the request."],
             ["UnsupportedMediaType", "JSON required."],
-            ["ServiceUnavailable", "The coordinator is stopping."],
+            ["ServiceUnavailable", "The coordinator service is temporarily unavailable."],
           ] as const
         ).map(([name, description]) => [name, response(description, ref("ErrorResponse"))]),
       ),
@@ -373,6 +427,128 @@ function openApi(): Json {
             code: { type: "string", pattern: "^[a-f0-9]{64}$" },
             expiresAt: finiteNumber,
           },
+        },
+        BrowserGrant: {
+          type: "object",
+          additionalProperties: false,
+          required: ["target", "capabilities"],
+          properties: {
+            target: identifier,
+            capabilities: {
+              type: "array",
+              minItems: 1,
+              maxItems: OPERATION_REGISTRY.operations.length,
+              uniqueItems: true,
+              items: ref("Capability"),
+            },
+          },
+        },
+        BrowserInvitationSpec: {
+          oneOf: [
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["role", "label", "grants"],
+              properties: {
+                role: { const: "phone_controller" },
+                label: boundedString(64),
+                grants: {
+                  type: "array",
+                  minItems: 1,
+                  maxItems: 16,
+                  items: ref("BrowserGrant"),
+                },
+              },
+            },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["role", "label", "grants"],
+              properties: {
+                role: { const: "tv_viewer" },
+                label: boundedString(64),
+                grants: { type: "array", maxItems: 0 },
+              },
+            },
+          ],
+        },
+        BrowserClient: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "role", "label", "grants", "createdAt", "expiresAt"],
+          properties: {
+            id: identifier,
+            role: { enum: ["phone_controller", "tv_viewer"] },
+            label: boundedString(64),
+            grants: { type: "array", maxItems: 16, items: ref("BrowserGrant") },
+            createdAt: { type: "number", minimum: 0 },
+            expiresAt: { type: "number", minimum: 0 },
+          },
+        },
+        BrowserInvitation: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "role", "label", "grants", "createdAt", "expiresAt", "code"],
+          properties: {
+            id: identifier,
+            role: { enum: ["phone_controller", "tv_viewer"] },
+            label: boundedString(64),
+            grants: { type: "array", maxItems: 16, items: ref("BrowserGrant") },
+            createdAt: { type: "number", minimum: 0 },
+            expiresAt: { type: "number", minimum: 0 },
+            code: { type: "string", pattern: "^[a-f0-9]{64}$" },
+          },
+        },
+        BrowserStatus: {
+          oneOf: [
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["status", "origin"],
+              properties: {
+                status: { const: "ready" },
+                origin: {
+                  type: "string",
+                  format: "uri",
+                  pattern: "^https://[^/@]+$",
+                },
+              },
+            },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["status"],
+              properties: { status: { const: "disabled" } },
+            },
+            {
+              type: "object",
+              additionalProperties: false,
+              required: ["status", "reason"],
+              properties: {
+                status: { const: "unavailable" },
+                reason: {
+                  enum: [
+                    "identity_unavailable",
+                    "assets_unavailable",
+                    "auth_unavailable",
+                    "listener_unavailable",
+                  ],
+                },
+              },
+            },
+          ],
+        },
+        BrowserRevokeRequest: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id"],
+          properties: { id: identifier },
+        },
+        BrowserRevokeResponse: {
+          type: "object",
+          additionalProperties: false,
+          required: ["ok", "revoked"],
+          properties: { ok: { const: true }, revoked: { type: "boolean" } },
         },
         NodeIdRequest: { type: "object", required: ["id"], properties: { id: identifier } },
         OkResponse: ok,

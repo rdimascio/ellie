@@ -20,6 +20,8 @@ import { authorize } from "@ellie/permissions";
 import { readJson } from "@ellie/transport";
 import { selectWorker } from "@ellie/compute";
 import type { Auth, Identity } from "./auth.ts";
+import { handleBrowserManagement } from "./browser-management.ts";
+import type { BrowserControl } from "./browser-management.ts";
 import type { JobMetadata, JobOutcomeCode, JobState, JobStore } from "./jobs.ts";
 
 const cancellationMessage =
@@ -62,6 +64,7 @@ export function createEllieServer(options: {
   auth: Auth;
   preferences: Preferences;
   jobStore: JobStore;
+  browser?: BrowserControl;
   commandTimeout?: number;
 }) {
   const sessions = new Map<string, Session>();
@@ -227,7 +230,11 @@ export function createEllieServer(options: {
     { key: options.key, cert: options.cert, minVersion: "TLSv1.2", maxHeaderSize: 8192 },
     (req, res) => {
       void (async () => {
-        if (req.headers.origin)
+        if (
+          req.rawHeaders.some(
+            (header, index) => index % 2 === 0 && header.toLowerCase() === "origin",
+          )
+        )
           return send(res, 403, { error: "Browser clients are not enabled." });
         if (req.headers["x-ellie-version"] !== String(VERSION))
           return send(res, 400, { error: "Unsupported protocol version." });
@@ -242,6 +249,13 @@ export function createEllieServer(options: {
         const identity = auth.authenticate(req.headers.authorization);
         if (!identity)
           return send(res, 401, { error: "Authentication required. Pair this node first." });
+        const browserManagement = await handleBrowserManagement(
+          req,
+          path,
+          identity.role,
+          options.browser,
+        );
+        if (browserManagement) return send(res, browserManagement.status, browserManagement.body);
         if (req.method === "POST" && path === "/v1/invite" && identity.role === "controller")
           return send(res, 200, await auth.invite());
         if (req.method === "POST" && path === "/v1/revoke" && identity.role === "controller") {
