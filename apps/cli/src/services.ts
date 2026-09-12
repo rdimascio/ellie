@@ -42,6 +42,13 @@ export const run: Run = (file, args) =>
     );
   });
 export const label = (role: ServiceRole) => `org.ellie.assistant.${role}`;
+export function serviceEnabled(output: string, role: ServiceRole): boolean {
+  const name = label(role).replaceAll(".", "\\.");
+  const value = output.match(new RegExp(`^\\s*"${name}"\\s*=>[ \t]*(.*?)[ \t]*$`, "m"))?.[1];
+  if (value === undefined || value === "enabled" || value === "false") return true;
+  if (value === "disabled" || value === "true") return false;
+  throw new Error("Cannot interpret service enablement. Check the logged-in GUI session.");
+}
 const marker = "<!-- Managed by Ellie service install; version 1. -->";
 function xml(value: string): string {
   if (
@@ -205,7 +212,7 @@ export class Services {
     const disabled = await this.run("/bin/launchctl", ["print-disabled", this.domain]);
     if (disabled.code !== 0)
       throw new Error("Cannot inspect service enablement. Check the logged-in GUI session.");
-    const enabled = !disabled.stdout.includes(`"${label(role)}" => true`);
+    const enabled = serviceEnabled(disabled.stdout, role);
     const response = await this.run("/bin/launchctl", ["print", this.target(role)]);
     // 113 is launchctl's missing-service result; other failures must not look stopped.
     if (response.code !== 0 && response.code !== 113)
