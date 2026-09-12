@@ -27,6 +27,12 @@ import { generateCertificate } from "./certificate.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
+import {
+  nodeIdArgument,
+  runServiceTest,
+  selectExecutionNode,
+  serviceTestOptions,
+} from "./self-test.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
@@ -90,6 +96,18 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
 async function main(): Promise<void> {
   if (args[0] === "service") {
     const action = args[1];
+    if (action === "test") {
+      const options = serviceTestOptions(args.slice(2));
+      if (options.desktopApp)
+        console.log(
+          `Desktop test requested: Ellie will open the allowed app “${options.desktopApp}” on the selected node.`,
+        );
+      await withController(async (client) => {
+        const report = await runServiceTest(client, options);
+        report.lines.forEach((line) => console.log(line));
+      });
+      return;
+    }
     const role = serviceRole(args[2]);
     if (args.length !== 3)
       throw new Error(
@@ -320,10 +338,10 @@ async function main(): Promise<void> {
     let nodeId: string;
     let words: string[];
     if (args[1] === "--node") {
-      nodeId = identifier(args[2]);
+      nodeId = nodeIdArgument(args[2]);
       words = args.slice(3);
       client = await controller();
-    } else {
+    } else if (await exists("node.json")) {
       const config = nodeConfig(await load("node.json"));
       nodeId = config.id;
       words = args.slice(1);
@@ -332,6 +350,10 @@ async function main(): Promise<void> {
         await readFile(join(stateDir, "node-server-cert.pem"), "utf8"),
         await secrets.get(`node.${config.id}`),
       );
+    } else {
+      client = await controller();
+      nodeId = selectExecutionNode(await client.call("GET", "/v1/nodes")).id;
+      words = args.slice(1);
     }
     const interrupt = interruptSignal();
     try {
@@ -352,7 +374,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {

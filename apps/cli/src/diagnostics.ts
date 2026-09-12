@@ -242,13 +242,20 @@ export async function doctorService(
   }
 
   let capabilities: Capability[] | undefined;
+  let terminalMissing = false;
   try {
     capabilities = await environment.capabilities();
     lines.push(`Terminal helper tools: ${capabilities.join(", ")}`);
-    const missing = CAPABILITIES.some((capability) => !capabilities!.includes(capability));
-    if (!coordinator && (config as NodeConfig | undefined)?.executionEnabled !== false && missing)
-      fail("Desktop execution is enabled but Accessibility does not provide every tool.");
-    else if (missing)
+    terminalMissing = CAPABILITIES.some((capability) => !capabilities!.includes(capability));
+    if (
+      !coordinator &&
+      (config as NodeConfig | undefined)?.executionEnabled !== false &&
+      terminalMissing
+    )
+      warn(
+        "The terminal-launched helper lacks some desktop tools; the running node service is checked separately.",
+      );
+    else if (terminalMissing)
       warn("Accessibility is incomplete; this role does not require every desktop tool.");
     else pass("The terminal-launched helper reports every desktop capability.");
   } catch {
@@ -295,15 +302,19 @@ export async function doctorService(
             registered.executionCapabilities ?? registered.capabilities,
           );
           lines.push(`Registered node tools: ${advertised.join(", ")}`);
-          if (
-            (config as NodeConfig).executionEnabled &&
-            CAPABILITIES.some((capability) => !advertised.includes(capability))
-          )
+          const registeredMissing = CAPABILITIES.some(
+            (capability) => !advertised.includes(capability),
+          );
+          if ((config as NodeConfig).executionEnabled && registeredMissing)
             fail(
               "The running node has not advertised every desktop tool. Check Accessibility for the service and restart the node; terminal permissions alone do not establish service permissions.",
             );
           else if ((config as NodeConfig).executionEnabled)
             pass("The running node advertises every desktop capability.");
+          if ((config as NodeConfig).executionEnabled && terminalMissing && !registeredMissing)
+            warn(
+              "Terminal and service Accessibility differ; the healthy running service registration is authoritative for background commands.",
+            );
         } catch {
           fail("The running node's advertised capabilities are invalid or unavailable.");
         }

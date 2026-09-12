@@ -206,3 +206,26 @@ test("coordinator rejects unknown, oversized, and ungranted commands before disp
     await f.close();
   }
 });
+
+test("command target errors distinguish unknown IDs from paired offline nodes", async () => {
+  const f = await fixture();
+  try {
+    await f.pair("known-offline");
+    await assert.rejects(
+      f.controller.call("POST", "/v1/commands", {
+        nodeId: "known-offline",
+        text: "open Arc",
+      }),
+      /paired but offline.*node service/,
+    );
+    await assert.rejects(
+      f.controller.call("POST", "/v1/commands", {
+        nodeId: "NODE_ID",
+        text: "open Arc",
+      }),
+      /Unknown node ID.*ellie nodes.*exact ID/,
+    );
+  } finally {
+    await f.close();
+  }
+});

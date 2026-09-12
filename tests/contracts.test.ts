@@ -116,7 +116,10 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
     };
   };
   const openapi = JSON.parse(await readFile("contracts/openapi.v1.json", "utf8")) as {
-    paths: Record<string, Record<string, { operationId: string }>>;
+    paths: Record<
+      string,
+      Record<string, { operationId: string; responses: Record<string, { $ref?: string }> }>
+    >;
     components: {
       schemas: {
         Registration: { dependentRequired: { computeCapabilities: string[] } };
@@ -163,6 +166,10 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
     "workerId",
   ]);
   assert.ok(openapi.components.schemas.InferenceResponse.properties.workerId);
+  assert.equal(
+    openapi.paths["/v1/commands"]?.post?.responses["404"]?.$ref,
+    "#/components/responses/NotFound",
+  );
 
   const document = openapi as unknown as Record<string, unknown>;
   const resolve = (pointer: string): unknown =>

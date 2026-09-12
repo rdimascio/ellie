@@ -228,6 +228,21 @@ test("terminal Accessibility cannot mask missing window tools in the running nod
   );
 });
 
+test("healthy service registration makes a terminal Accessibility difference a warning", async () => {
+  const f = await fixture("node");
+  const report = await doctorService("node", {
+    ...f.deps,
+    capabilities: async () => ["app.open", "url.open"],
+  });
+  assert.equal(report.ok, true, report.lines.join("\n"));
+  assert.ok(
+    report.lines.some(
+      (line) => line.startsWith("WARN") && line.includes("healthy running service registration"),
+    ),
+  );
+  assert.ok(report.lines.includes("PASS The running node advertises every desktop capability."));
+});
+
 test("compute-only node does not require desktop registration and unknown tool names stay redacted", async () => {
   const f = await fixture("node");
   const read = f.deps.readFile!;

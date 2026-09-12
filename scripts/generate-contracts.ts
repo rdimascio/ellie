@@ -279,7 +279,7 @@ function openApi(): Json {
               "Command outcome, including unsupported deterministic input as `ok: false`.",
               ref("Result"),
             ),
-            ...errors("400", "401", "403", "409", "415"),
+            ...errors("400", "401", "403", "404", "409", "415"),
           },
         }),
       },
