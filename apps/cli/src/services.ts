@@ -44,7 +44,7 @@ export const run: Run = (file, args) =>
 export const label = (role: ServiceRole) => `org.ellie.assistant.${role}`;
 export function serviceEnabled(output: string, role: ServiceRole): boolean {
   const name = label(role).replaceAll(".", "\\.");
-  const value = output.match(new RegExp(`^\\s*"${name}"\\s*=>\\s*(\\S+)\\s*$`, "m"))?.[1];
+  const value = output.match(new RegExp(`^\\s*"${name}"\\s*=>[ \t]*(.*?)[ \t]*$`, "m"))?.[1];
   if (value === undefined || value === "enabled" || value === "false") return true;
   if (value === "disabled" || value === "true") return false;
   throw new Error("Cannot interpret service enablement. Check the logged-in GUI session.");

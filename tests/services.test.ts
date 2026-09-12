@@ -98,13 +98,13 @@ test("launchctl enablement accepts real macOS word values and legacy booleans", 
   for (const value of ["disabled", "true"])
     assert.equal(
       serviceEnabled(
-        `disabled services = {\n\t\"org.ellie.assistant.coordinator\" => ${value}\n}`,
+        `disabled services = {\n\t"org.ellie.assistant.coordinator" => ${value}\n}`,
         "coordinator",
       ),
       false,
     );
   for (const value of ["enabled", "false"])
-    assert.equal(serviceEnabled(`\t\"org.ellie.assistant.node\" => ${value}`, "node"), true);
+    assert.equal(serviceEnabled(`\t"org.ellie.assistant.node" => ${value}`, "node"), true);
   assert.equal(serviceEnabled('"org.ellie.assistant.node" => disabled', "coordinator"), true);
   assert.throws(
     () => serviceEnabled('"org.ellie.assistant.node" => unknown', "node"),
