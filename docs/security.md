@@ -39,6 +39,14 @@ To re-pair an existing node, revoke its previous ID, remove its local `node.json
 
 TLS certificates currently expire after one year. Automated rotation is future work. For deliberate identity rotation, stop the server, revoke/decommission paired nodes, remove the server's local configuration/certificate/auth files and associated Keychain entries, then initialize and pair again. Never bypass fingerprint verification to get around a changed or expired certificate.
 
+## Prepared browser TLS identity
+
+Ellie includes an offline generation primitive for a future, optional same-origin HTTPS browser listener. It creates a distinct private root CA and a 397-day server leaf for one validated, persisted `<LocalHostName>.local` DNS name. The root is critically constrained to that name; the leaf has exactly that DNS SAN and server-auth usage. Both use SHA-256 signatures and 2048-bit RSA keys. Generation is explicit and returns PEM material in memory for future Keychain integration. It does not save an identity, rotate the existing agent identity, start a listener, advertise Bonjour, or change any trust store. The existing `server-cert.pem` and Keychain credentials remain the agent boundary.
+
+Trust bootstrap must export only the public CA certificate through an existing trusted local channel. Never export either private key or the leaf key. An unmanaged iPhone or iPad requires the operator to install the certificate profile and then enable full trust in Settings; managed devices should use Apple Configurator or MDM. This flow has not yet been validated with Safari or Apple TV hardware, so browser and TV trust remain acceptance work. There is no HTTP fallback and no cloud relay in this design.
+
+Design references: [Apple local-network TLS identity guidance](https://developer.apple.com/documentation/Network/creating-an-identity-for-local-network-tls), [Apple manual certificate trust steps](https://support.apple.com/en-au/102390), [Apple TLS certificate requirements](https://support.apple.com/en-hk/103769), and [OpenSSL X.509 extension configuration](https://docs.openssl.org/3.0/man5/x509v3_config/).
+
 If only the server's network address changes, update `serverUrl` in the node's private config; keep the verified certificate. Onboarding generates these files automatically. The current advanced settings are JSON; editing apps/sites on both ends and restarting is required to customize the allowlist. A settings UI is planned.
 
 The server Keychain must be accessible in the logged-in session. Rebuilding the ad-hoc signed helper may require a new Keychain or Accessibility grant. Developer signing and a notarized installer are future work.
