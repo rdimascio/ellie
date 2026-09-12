@@ -302,7 +302,7 @@ test("cancellation wins the delivered-to-start race and delivery commit failures
   }
 });
 
-test("undelivered jobs expire and a result commit failure quarantines the node", async () => {
+test("undelivered jobs expire before delivery", async () => {
   const f = await fixture(40);
   try {
     const node = await f.pair("storage-node");
@@ -314,7 +314,16 @@ test("undelivered jobs expire and a result commit failure quarantines the node",
     assert.equal(record(await queued).ok, false);
     assert.equal(f.jobStore.list()[0]?.state, "expired");
     assert.equal(f.jobStore.list()[0]?.outcomeCode, "expired_before_delivery");
+  } finally {
+    await f.close();
+  }
+});
 
+test("a result commit failure quarantines the node", async () => {
+  const f = await fixture();
+  try {
+    const node = await f.pair("storage-node");
+    await node.call("POST", "/v1/register", { capabilities: [...CAPABILITIES] });
     const running = f.controller.call("POST", "/v1/commands", {
       nodeId: "storage-node",
       text: "open Arc",
