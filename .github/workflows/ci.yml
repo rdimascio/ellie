@@ -1,0 +1,32 @@
+name: CI
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+  native:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm run build:macos
+      - name: Verify screen coordinate conversion and tiling
+        run: |
+          xcrun swiftc -swift-version 5 -parse-as-library packages/macos/native/Geometry.swift tests/GeometryTests.swift -o "$RUNNER_TEMP/ellie-geometry-tests"
+          "$RUNNER_TEMP/ellie-geometry-tests"

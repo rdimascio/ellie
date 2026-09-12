@@ -1,0 +1,14 @@
+{
+  "name": "@ellie/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@ellie/config": "*",
+    "@ellie/protocol": "*",
+    "@ellie/router": "*",
+    "@ellie/permissions": "*",
+    "@ellie/transport": "*"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "@ellie/permissions",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@ellie/protocol": "*",
+    "@ellie/config": "*"
+  }
+}
