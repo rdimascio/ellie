@@ -36,6 +36,9 @@ export class Auth {
     const digest = hash(header.slice(7));
     return this.state.identities.find((identity) => equal(identity.tokenHash, digest));
   }
+  hasNode(id: string): boolean {
+    return this.state.identities.some((identity) => identity.role === "node" && identity.id === id);
+  }
   private async mutate<T>(fn: () => Promise<T>): Promise<T> {
     const previous = this.lock;
     let release!: () => void;
