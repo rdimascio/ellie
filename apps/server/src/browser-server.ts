@@ -23,11 +23,14 @@ const SECURITY_HEADERS = {
   "x-frame-options": "DENY",
 } as const;
 
+export type BrowserAssets = ReadonlyMap<string, { contentType: string; body: Buffer }>;
+
 export interface BrowserServerOptions {
   key: string | Buffer;
   cert: string | Buffer;
   origin: string;
   auth: BrowserAuth;
+  assets?: BrowserAssets;
 }
 
 export interface BrowserServer {
@@ -152,6 +155,22 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
         if (!path) {
           send(response, 400, { error: "Invalid browser request." }, {}, true);
           return;
+        }
+
+        if (
+          (method === "GET" || method === "HEAD") &&
+          (path === "/" || path.startsWith("/assets/"))
+        ) {
+          const asset = options.assets?.get(path);
+          if (asset) {
+            response.writeHead(200, {
+              ...SECURITY_HEADERS,
+              "content-type": asset.contentType,
+              "content-length": asset.body.length,
+            });
+            response.end(method === "HEAD" ? undefined : asset.body);
+            return;
+          }
         }
 
         if (method === "GET" && path === "/browser/v1/health") {

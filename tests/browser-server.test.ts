@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 import { BROWSER_SESSION_COOKIE, BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import type { BrowserAuthState, BrowserInvitationSpec } from "../apps/server/src/browser-auth.ts";
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
+import type { BrowserAssets } from "../apps/server/src/browser-server.ts";
 
 const run = promisify(execFile);
 const phone: BrowserInvitationSpec = {
@@ -159,7 +160,7 @@ interface Response {
   body: unknown;
 }
 
-async function fixture() {
+async function fixture(assets?: BrowserAssets) {
   const tls = await certificate;
   const port = await availablePort();
   const origin = `https://localhost:${port}`;
@@ -169,7 +170,7 @@ async function fixture() {
     if (failSave) throw new Error("private path and credential must stay redacted");
     state = structuredClone(next);
   });
-  const app = createBrowserServer({ ...tls, origin, auth });
+  const app = createBrowserServer({ ...tls, origin, auth, assets });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(port, "127.0.0.1", resolve);
@@ -217,7 +218,10 @@ async function fixture() {
               status: response.statusCode ?? 0,
               headers: response.headers,
               text,
-              body: text ? (JSON.parse(text) as unknown) : undefined,
+              body:
+                text && response.headers["content-type"]?.startsWith("application/json")
+                  ? (JSON.parse(text) as unknown)
+                  : undefined,
             });
           });
         },
@@ -247,6 +251,57 @@ function cookieFrom(response: Response): string {
   assert.ok(setCookie);
   return setCookie.split(";", 1)[0]!;
 }
+
+test("static pairing assets retain origin, host and agent-credential isolation", async () => {
+  const f = await fixture(
+    new Map([
+      ["/", { contentType: "text/html; charset=utf-8", body: Buffer.from("<html>Connect</html>") }],
+      [
+        "/assets/pairing.js",
+        { contentType: "text/javascript; charset=utf-8", body: Buffer.from("pairing") },
+      ],
+      [
+        "/browser/v1/session",
+        { contentType: "text/html", body: Buffer.from("must not shadow API") },
+      ],
+    ]),
+  );
+  try {
+    const page = await f.request("GET", "/");
+    assert.equal(page.status, 200);
+    assert.equal(page.text, "<html>Connect</html>");
+    assert.equal(page.headers["cache-control"], "no-store");
+    assert.match(String(page.headers["content-security-policy"]), /frame-ancestors 'none'/);
+    const head = await f.request("HEAD", "/assets/pairing.js");
+    assert.equal(head.status, 200);
+    assert.equal(head.text, "");
+    assert.equal(head.headers["content-length"], "7");
+    assert.equal((await f.request("GET", "/browser/v1/session")).status, 401);
+    for (const path of [
+      "/index.html",
+      "/pair/index.html",
+      "/assets/missing.js",
+      "/.vite/manifest.json",
+      "/browser-auth.json",
+      "/v1/nodes",
+    ]) {
+      assert.equal((await f.request("GET", path)).status, 404);
+    }
+    assert.equal((await f.request("GET", "/?code=private")).status, 400);
+    assert.equal((await f.request("GET", "/", { headers: { host: "evil.local" } })).status, 403);
+    assert.equal(
+      (await f.request("GET", "/", { headers: { origin: "https://evil.local" } })).status,
+      403,
+    );
+    assert.equal(
+      (await f.request("GET", "/", { headers: { authorization: "Bearer synthetic-agent" } }))
+        .status,
+      403,
+    );
+  } finally {
+    f.close();
+  }
+});
 
 async function rawRequest(
   f: Awaited<ReturnType<typeof fixture>>,

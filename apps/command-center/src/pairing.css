@@ -1,0 +1,236 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: var(--mist);
+  color: var(--ink);
+  font-family:
+    "Avenir Next",
+    Avenir,
+    -apple-system,
+    BlinkMacSystemFont,
+    sans-serif;
+  font-size: 16px;
+  line-height: 1.55;
+}
+button,
+input {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 4px;
+}
+.pairing-page {
+  min-height: 100dvh;
+  padding: 44px 24px 28px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.pairing-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 44px;
+  font-size: 36px;
+  font-weight: 800;
+  letter-spacing: -2px;
+}
+.pairing-brand img {
+  border-radius: 10px;
+}
+.pairing-panel {
+  width: 100%;
+  max-width: 460px;
+  background: var(--paper);
+  border-radius: 26px;
+  padding: 36px;
+}
+.connection-symbol {
+  width: 50px;
+  height: 50px;
+  border-radius: 50%;
+  background: #dceceb;
+  color: var(--pine);
+  font-size: 34px;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+  margin-bottom: 22px;
+}
+.connection-symbol.confirmed {
+  font-size: 25px;
+}
+h1 {
+  margin: 0 0 12px;
+  font-size: 32px;
+  line-height: 1.15;
+  letter-spacing: -1.2px;
+  font-weight: 700;
+}
+.pairing-intro {
+  color: var(--slate);
+  margin: 0 0 28px;
+}
+label {
+  display: block;
+  margin: 0 0 8px;
+  font-weight: 650;
+}
+.code-input {
+  display: flex;
+  border: 1px solid #9eb7bb;
+  border-radius: 10px;
+  overflow: visible;
+}
+.code-input input {
+  min-width: 0;
+  width: 100%;
+  min-height: 52px;
+  border: 0;
+  background: transparent;
+  padding: 12px;
+  border-radius: 10px;
+}
+.code-input button {
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--pine);
+  padding: 0 16px;
+  min-height: 52px;
+  font-weight: 650;
+}
+.code-help {
+  margin: 8px 0 24px;
+  font-size: 13px;
+  color: var(--slate);
+}
+.pairing-button {
+  width: 100%;
+  min-height: 52px;
+  border: 1px solid var(--pine);
+  border-radius: 12px;
+  color: white;
+  background: var(--pine);
+  padding: 12px 18px;
+  font-weight: 650;
+}
+.pairing-button:hover:enabled {
+  background: #125c5b;
+}
+.pairing-button.secondary {
+  background: white;
+  color: var(--pine);
+}
+.pairing-button.secondary:hover {
+  background: #edf6f4;
+}
+.pairing-status {
+  margin: 20px 0 0;
+  color: var(--slate);
+  font-size: 14px;
+}
+.pairing-status:empty {
+  display: none;
+}
+.pairing-status.has-note {
+  padding-top: 18px;
+  border-top: 1px solid #dbe5e6;
+}
+.connection-details {
+  margin: 24px 0;
+}
+.connection-details div {
+  padding: 12px 0;
+  border-bottom: 1px solid #e1e9e9;
+}
+.connection-details dt {
+  color: var(--slate);
+  font-size: 13px;
+}
+.connection-details dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-weight: 600;
+}
+.version-note {
+  color: var(--slate);
+  font-size: 14px;
+  margin-bottom: 26px;
+}
+.connection-progress {
+  width: 100%;
+  height: 4px;
+  background: #dceceb;
+  margin: 28px 0;
+  border-radius: 4px;
+}
+.pairing-footer {
+  margin-top: 30px;
+  color: var(--slate);
+  font-size: 14px;
+  text-align: center;
+}
+.pairing-footer span {
+  font-size: 12px;
+}
+.pairing-skip {
+  position: fixed;
+  top: -100px;
+  padding: 12px;
+  background: white;
+  color: var(--ink);
+  z-index: 10;
+}
+.pairing-skip:focus {
+  top: 8px;
+}
+.shared-display .pairing-panel {
+  max-width: 580px;
+  font-size: 19px;
+}
+.shared-display h1 {
+  font-size: 40px;
+}
+.shared-display .connection-details dt,
+.shared-display .version-note {
+  font-size: 16px;
+}
+@media (max-width: 500px) {
+  .pairing-page {
+    padding: 28px 20px;
+  }
+  .pairing-brand {
+    margin-bottom: 28px;
+  }
+  .pairing-panel {
+    padding: 28px 24px;
+  }
+  h1 {
+    font-size: 30px;
+  }
+  .shared-display h1 {
+    font-size: 32px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation: none !important;
+    transition: none !important;
+  }
+}
