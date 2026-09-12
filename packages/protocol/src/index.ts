@@ -42,6 +42,41 @@ export interface NodeInfo {
   telemetryReceivedAt?: number;
   lastSeen: number;
 }
+export const JOB_STATES = [
+  "queued",
+  "delivered",
+  "running",
+  "cancellation_requested",
+  "completed",
+  "failed",
+  "cancelled",
+  "expired",
+  "unknown",
+] as const;
+export const JOB_OUTCOME_CODES = [
+  "succeeded",
+  "operation_failed",
+  "timed_out",
+  "cancelled_by_caller",
+  "expired_before_delivery",
+  "abandoned_after_restart",
+  "unknown_after_restart",
+  "node_revoked",
+  "coordinator_stopped",
+] as const;
+export type JobState = (typeof JOB_STATES)[number];
+export type JobOutcomeCode = (typeof JOB_OUTCOME_CODES)[number];
+export interface JobMetadata {
+  id: string;
+  kind: "desktop" | "inference";
+  target: string;
+  state: JobState;
+  createdAt: number;
+  updatedAt: number;
+  expiresAt: number;
+  outcomeOk?: boolean;
+  outcomeCode?: JobOutcomeCode;
+}
 export function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Expected an object.");
@@ -80,6 +115,30 @@ export function result(value: unknown): Result {
   const v = record(value);
   if (typeof v.ok !== "boolean") throw new Error("Invalid result.");
   return { ok: v.ok, message: string(v.message, OPERATION_REGISTRY.limits.maxResultMessageLength) };
+}
+export function jobMetadata(value: unknown): JobMetadata {
+  const v = record(value);
+  if (
+    (v.kind !== "desktop" && v.kind !== "inference") ||
+    !JOB_STATES.includes(v.state as JobState) ||
+    !Number.isFinite(v.createdAt) ||
+    !Number.isFinite(v.updatedAt) ||
+    !Number.isFinite(v.expiresAt) ||
+    (v.outcomeOk !== undefined && typeof v.outcomeOk !== "boolean") ||
+    (v.outcomeCode !== undefined && !JOB_OUTCOME_CODES.includes(v.outcomeCode as JobOutcomeCode))
+  )
+    throw new Error("Invalid job metadata.");
+  return {
+    id: identifier(v.id),
+    kind: v.kind,
+    target: identifier(v.target),
+    state: v.state as JobState,
+    createdAt: v.createdAt as number,
+    updatedAt: v.updatedAt as number,
+    expiresAt: v.expiresAt as number,
+    ...(v.outcomeOk === undefined ? {} : { outcomeOk: v.outcomeOk }),
+    ...(v.outcomeCode === undefined ? {} : { outcomeCode: v.outcomeCode as JobOutcomeCode }),
+  };
 }
 
 export * from "./compute.ts";

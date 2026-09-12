@@ -64,6 +64,8 @@ The command should return `Done.` after the native helper reports success. App i
 
 For additional Macs, create a fresh invitation and repeat node pairing. On the server, `bun run ellie nodes` lists connected node IDs, and `bun run ellie say --node NODE_ID "open Arc"` targets one explicitly. These are opaque local IDs; do not paste diagnostic output into public issues without reviewing it.
 
+The coordinator keeps payload-free job lifecycle metadata in `~/.ellie/jobs.sqlite`. Use `bun run ellie jobs`, `bun run ellie job JOB_ID`, and `bun run ellie cancel JOB_ID` on the server Mac to inspect or cancel work. Pressing Control-C while `say` or `infer` is waiting also requests cancellation. Once native execution begins, cancellation asks the helper or model request to stop but cannot undo a side effect that already happened.
+
 ## Workspace
 
 | Location                                                                       | Responsibility                                                                              |
@@ -81,7 +83,7 @@ For additional Macs, create a fresh invitation and repeat node pairing. On the s
 
 ## Privacy and development
 
-Public examples belong in `examples/`. Generated installation state belongs exclusively in `~/.ellie/`, outside the checkout. Secrets are stored in macOS Keychain; server-side credential verifiers are hashes. Browser sessions remain browser-owned. Commands and conversation context are not persisted. There is no external analytics. Explicitly enabled compute workers report resource telemetry only to their paired coordinator; it is kept in process memory.
+Public examples belong in `examples/`. Generated installation state belongs exclusively in `~/.ellie/`, outside the checkout. Secrets are stored in macOS Keychain; server-side credential verifiers are hashes. Browser sessions remain browser-owned. Command text, actions, prompts, responses, and conversation context are not persisted. The local job database contains IDs, targets, lifecycle timestamps and enum outcomes only. Startup and lifecycle writes prune terminal rows older than 30 days and cap terminal history at 10,000 rows. There is no external analytics. Explicitly enabled compute workers report resource telemetry only to their paired coordinator; it is kept in process memory.
 
 Run `bun run check` for Oxlint, Oxfmt verification, generated-contract drift checks, strict TypeScript checking, and Node tests, including actual HTTPS server/node integration with a simulated native executor, independent-worker scheduling, and a synthetic loopback model server. Run `bun run format` to apply Oxfmt. macOS CI additionally compiles the helper and tests monitor geometry. A physical Mac with Accessibility permission is required to verify real window actions; CI cannot grant that permission or substitute for the manual checklist.
 

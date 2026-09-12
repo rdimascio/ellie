@@ -9,6 +9,17 @@ import type { Client } from "@ellie/transport";
 import type { InferenceWorker } from "./inference.ts";
 import { collectTelemetry } from "./telemetry.ts";
 
+export function reconnectDelay(
+  attempt: number,
+  random: () => number = Math.random,
+  options: { baseMs?: number; maxMs?: number } = {},
+): number {
+  const base = options.baseMs ?? 250;
+  const maximum = options.maxMs ?? 10_000;
+  const exponential = Math.min(maximum, base * 2 ** Math.max(0, Math.min(attempt, 16)));
+  return Math.min(maximum, Math.max(base, Math.round(exponential * (0.75 + random() * 0.5))));
+}
+
 export async function runNode(options: {
   client: Client;
   executor?: Executor;
@@ -18,13 +29,18 @@ export async function runNode(options: {
   health?: () => Promise<unknown>;
   collect?: (activeJobs: number, roundTripMs: number | null) => Promise<Telemetry>;
   heartbeatMs?: number;
+  stableConnectionMs?: number;
+  reconnect?: { baseMs?: number; maxMs?: number; random?: () => number };
   onStatus?: (message: string) => void;
+  onEvent?: (event: "connected" | "reconnecting") => void;
 }): Promise<void> {
   const { client, executor, worker, signal } = options;
   const seen = new Set<string>();
   let activeJobs = 0;
   let roundTripMs: number | null = null;
-  let backoff = 250;
+  let reconnectAttempt = 0;
+  let connectionState: "connected" | "reconnecting" | undefined;
+  let currentJob: { id: string; abort: AbortController } | undefined;
   const metrics = () =>
     (options.collect ?? ((active, rtt) => collectTelemetry(active, rtt, options.health)))(
       activeJobs,
@@ -38,22 +54,39 @@ export async function runNode(options: {
     } // Unavailable runner withdraws compute only.
   };
   while (!signal.aborted) {
+    let connectedAt = 0;
     const connected = new AbortController();
     const connectionSignal = AbortSignal.any([signal, connected.signal]);
     let heartbeat: Promise<void> | undefined;
     try {
       const granted = (await executor?.capabilities()) ?? [];
-      await client.call("POST", "/v1/register", {
-        capabilities: granted,
-        executionCapabilities: granted,
-        computeCapabilities: await advertise(),
-        telemetry: worker ? await metrics() : undefined,
-      });
+      await client.call(
+        "POST",
+        "/v1/register",
+        {
+          capabilities: granted,
+          executionCapabilities: granted,
+          computeCapabilities: await advertise(),
+          telemetry: worker ? await metrics() : undefined,
+        },
+        { signal: connectionSignal },
+      );
       const beat = async () => {
         const computeCapabilities = await advertise();
         const telemetry = worker ? await metrics() : undefined;
         const start = performance.now();
-        await client.call("POST", "/v1/heartbeat", { computeCapabilities, telemetry });
+        const reply = record(
+          await client.call(
+            "POST",
+            "/v1/heartbeat",
+            { computeCapabilities, telemetry },
+            { signal: connectionSignal },
+          ),
+        );
+        const cancellations = Array.isArray(reply.cancelJobIds)
+          ? reply.cancelJobIds.map((id) => String(id))
+          : [];
+        if (currentJob && cancellations.includes(currentJob.id)) currentJob.abort.abort();
         roundTripMs = performance.now() - start;
       };
       await beat();
@@ -67,19 +100,33 @@ export async function runNode(options: {
           connected.abort();
         }
       })();
-      options.onStatus?.("Node connected. Ready for commands and enabled compute work.");
+      connectedAt = Date.now();
+      if (connectionState !== "connected") {
+        options.onStatus?.("Node connected. Ready for commands and enabled compute work.");
+        options.onEvent?.("connected");
+        connectionState = "connected";
+      }
       while (!connectionSignal.aborted) {
-        const reply = record(await client.call("GET", "/v1/poll"));
+        const reply = record(
+          await client.call("GET", "/v1/poll", undefined, { signal: connectionSignal }),
+        );
         if (!reply.job) continue;
         const wire = record(reply.job);
         const task = wire.kind === "inference" ? inferenceJob(wire) : job(wire);
         let outcome: Result;
+        const jobAbort = new AbortController();
+        currentJob = { id: task.id, abort: jobAbort };
         try {
           if (connectionSignal.aborted || task.expiresAt <= Date.now())
             throw new Error("Job expired or connection was lost before execution.");
           if (seen.has(task.id)) throw new Error("Duplicate job blocked.");
           seen.add(task.id);
           if (seen.size > 1024) seen.delete(seen.values().next().value!);
+          const start = record(
+            await client.call("POST", "/v1/start", { id: task.id }, { signal: connectionSignal }),
+          );
+          if (start.cancel === true) jobAbort.abort();
+          if (jobAbort.signal.aborted) throw new Error("Command cancelled before execution.");
           if ("kind" in task) {
             if (!worker) throw new Error("Inference is not enabled on this node.");
             const compute = await advertise();
@@ -104,6 +151,7 @@ export async function runNode(options: {
             if (remaining <= 0) throw new Error("Inference expired before execution.");
             const deadline = AbortSignal.any([
               connectionSignal,
+              jobAbort.signal,
               AbortSignal.timeout(Math.min(remaining, 30_000)),
             ]);
             outcome = result(await worker.execute(task.request, deadline));
@@ -112,10 +160,15 @@ export async function runNode(options: {
             authorize(task.actions, granted, options.preferences);
             activeJobs = 1;
             outcome = { ok: true, message: "Done." };
+            const executionSignal = AbortSignal.any([
+              connectionSignal,
+              jobAbort.signal,
+              AbortSignal.timeout(Math.max(1, Math.ceil(task.expiresAt - Date.now()))),
+            ]);
             for (const action of task.actions) {
-              if (connectionSignal.aborted || Date.now() >= task.expiresAt)
+              if (executionSignal.aborted || Date.now() >= task.expiresAt)
                 throw new Error("Command cancelled or expired.");
-              outcome = await executor.execute(action);
+              outcome = await executor.execute(action, executionSignal);
               if (!outcome.ok) break;
             }
           }
@@ -131,23 +184,35 @@ export async function runNode(options: {
           };
         } finally {
           activeJobs = 0;
+          if (currentJob?.id === task.id) currentJob = undefined;
         }
-        await client.call("POST", "/v1/result", { id: task.id, result: outcome });
+        await client.call(
+          "POST",
+          "/v1/result",
+          { id: task.id, result: outcome },
+          { signal: connectionSignal },
+        );
         await beat();
-        backoff = 250;
+        reconnectAttempt = 0;
       }
     } catch {
-      if (!signal.aborted)
+      if (!signal.aborted && connectionState !== "reconnecting") {
         options.onStatus?.(
           "Connection interrupted. Reconnecting; delivered jobs will not be replayed.",
         );
+        options.onEvent?.("reconnecting");
+        connectionState = "reconnecting";
+      }
     } finally {
       connected.abort();
       await heartbeat;
     }
     if (!signal.aborted) {
-      await delay(backoff, undefined, { signal }).catch(() => {});
-      backoff = Math.min(backoff * 2, 5000);
+      if (connectedAt && Date.now() - connectedAt >= (options.stableConnectionMs ?? 30_000))
+        reconnectAttempt = 0;
+      const wait = reconnectDelay(reconnectAttempt, options.reconnect?.random, options.reconnect);
+      reconnectAttempt++;
+      await delay(wait, undefined, { signal }).catch(() => {});
     }
   }
 }

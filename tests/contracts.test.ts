@@ -139,8 +139,11 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
     "/v1/heartbeat",
     "/v1/poll",
     "/v1/result",
+    "/v1/start",
     "/v1/inference",
     "/v1/commands",
+    "/v1/jobs",
+    "/v1/jobs/{id}",
   ]);
   const ids = Object.values(openapi.paths).flatMap((path) =>
     Object.values(path).map((operation) => operation.operationId),

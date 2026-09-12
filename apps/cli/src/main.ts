@@ -14,11 +14,19 @@ import {
   serverUrl,
   Keychain,
 } from "@ellie/config";
-import { identifier, operationDefinition, record, string, result } from "@ellie/protocol";
+import {
+  identifier,
+  jobMetadata,
+  operationDefinition,
+  record,
+  string,
+  result,
+} from "@ellie/protocol";
 import { Client, discoverCertificate, fingerprint } from "@ellie/transport";
 import { MacOSExecutor } from "@ellie/macos";
 import { Auth, newToken } from "../../server/src/auth.ts";
 import { createEllieServer } from "../../server/src/index.ts";
+import { JobStore } from "../../server/src/jobs.ts";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
 
@@ -69,6 +77,19 @@ async function withController(fn: (client: Client) => Promise<void>): Promise<vo
     client.close();
   }
 }
+function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
+  const abort = new AbortController();
+  const cancel = () => abort.abort();
+  process.once("SIGINT", cancel);
+  process.once("SIGTERM", cancel);
+  return {
+    signal: abort.signal,
+    dispose: () => {
+      process.off("SIGINT", cancel);
+      process.off("SIGTERM", cancel);
+    },
+  };
+}
 async function main(): Promise<void> {
   if (args[0] === "server" && args[1] === "init") {
     if (await exists("server.json"))
@@ -93,16 +114,27 @@ async function main(): Promise<void> {
   if (args[0] === "server" && args[1] === "start") {
     const config = serverConfig(await load("server.json"));
     const cert = await readFile(join(stateDir, "server-cert.pem"), "utf8");
-    const app = createEllieServer({
-      key: await secrets.get("server.key"),
-      cert,
-      auth: await Auth.open(),
-      preferences: config.preferences,
-    });
-    await new Promise<void>((resolve, reject) => {
-      app.server.once("error", reject);
-      app.server.listen(config.port, config.host, () => resolve());
-    });
+    const jobStore = new JobStore(join(stateDir, "jobs.sqlite"));
+    let app: ReturnType<typeof createEllieServer> | undefined;
+    try {
+      const created = createEllieServer({
+        key: await secrets.get("server.key"),
+        cert,
+        auth: await Auth.open(),
+        preferences: config.preferences,
+        jobStore,
+      });
+      app = created;
+      await new Promise<void>((resolve, reject) => {
+        created.server.once("error", reject);
+        created.server.listen(config.port, config.host, () => resolve());
+      });
+    } catch (error) {
+      if (app) app.shutdown();
+      else jobStore.close();
+      throw error;
+    }
+    if (!app) throw new Error("Coordinator failed to initialize.");
     console.log(`Ellie server ready on port ${config.port}. No model or cloud API is required.`);
     for (const signal of ["SIGINT", "SIGTERM"] as const) process.once(signal, () => app.shutdown());
     return;
@@ -198,13 +230,42 @@ async function main(): Promise<void> {
     });
     return;
   }
+  if (args[0] === "jobs") {
+    await withController(async (client) => {
+      console.log(JSON.stringify(await client.call("GET", "/v1/jobs"), null, 2));
+    });
+    return;
+  }
+  if (args[0] === "job") {
+    const id = identifier(args[1]);
+    await withController(async (client) => {
+      console.log(JSON.stringify(jobMetadata(await client.call("GET", `/v1/jobs/${id}`)), null, 2));
+    });
+    return;
+  }
+  if (args[0] === "cancel") {
+    const id = identifier(args[1]);
+    await withController(async (client) => {
+      console.log(
+        JSON.stringify(jobMetadata(await client.call("POST", `/v1/jobs/${id}`, {})), null, 2),
+      );
+    });
+    return;
+  }
   if (args[0] === "infer") {
     const model = string(args[1], 200);
     const prompt = string(args.slice(2).join(" "), 4000);
     await withController(async (client) => {
-      const response = result(await client.call("POST", "/v1/inference", { model, prompt }));
-      console.log(response.message);
-      if (!response.ok) process.exitCode = 1;
+      const interrupt = interruptSignal();
+      try {
+        const response = result(
+          await client.call("POST", "/v1/inference", { model, prompt }, interrupt),
+        );
+        console.log(response.message);
+        if (!response.ok) process.exitCode = 1;
+      } finally {
+        interrupt.dispose();
+      }
     });
     return;
   }
@@ -226,19 +287,26 @@ async function main(): Promise<void> {
         await secrets.get(`node.${config.id}`),
       );
     }
+    const interrupt = interruptSignal();
     try {
       const response = result(
-        await client.call("POST", "/v1/commands", { nodeId, text: string(words.join(" "), 500) }),
+        await client.call(
+          "POST",
+          "/v1/commands",
+          { nodeId, text: string(words.join(" "), 500) },
+          interrupt,
+        ),
       );
       console.log(response.message);
       if (!response.ok) process.exitCode = 1;
     } finally {
+      interrupt.dispose();
       client.close();
     }
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  doctor                Check native helper and Accessibility\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  doctor                Check native helper and Accessibility\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send a command to this paired Mac\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {
