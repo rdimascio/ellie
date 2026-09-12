@@ -4,7 +4,14 @@ import { mkdtemp, mkdir, readFile, writeFile, stat, rm, symlink, chmod } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { defaults } from "@ellie/config";
-import { Services, label, run, servicePlist, serviceRole } from "../apps/cli/src/services.ts";
+import {
+  Services,
+  label,
+  run,
+  servicePlist,
+  serviceRole,
+  serviceEnabled,
+} from "../apps/cli/src/services.ts";
 import type { Run } from "../apps/cli/src/services.ts";
 import { ServiceLog, serviceLogs } from "../apps/cli/src/service-logs.ts";
 
@@ -86,6 +93,24 @@ async function fixture() {
     close: () => rm(home, { recursive: true, force: true }),
   };
 }
+
+test("launchctl enablement accepts real macOS word values and legacy booleans", () => {
+  for (const value of ["disabled", "true"])
+    assert.equal(
+      serviceEnabled(
+        `disabled services = {\n\t\"org.ellie.assistant.coordinator\" => ${value}\n}`,
+        "coordinator",
+      ),
+      false,
+    );
+  for (const value of ["enabled", "false"])
+    assert.equal(serviceEnabled(`\t\"org.ellie.assistant.node\" => ${value}`, "node"), true);
+  assert.equal(serviceEnabled('"org.ellie.assistant.node" => disabled', "coordinator"), true);
+  assert.throws(
+    () => serviceEnabled('"org.ellie.assistant.node" => unknown', "node"),
+    /Cannot interpret/,
+  );
+});
 
 test("per-user GUI lifecycle is idempotent and uninstall preserves private identity", async () => {
   const f = await fixture();
