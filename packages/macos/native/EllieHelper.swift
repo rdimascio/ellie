@@ -38,8 +38,8 @@ func availableMemoryBytes() -> UInt64? {
     guard host_page_size(host, &pageSize) == KERN_SUCCESS else { return nil }
 
     // Apple's VM headers say speculative pages are already included in free_count.
-    // Inactive pages are pageable under pressure. Omit other cache categories so
-    // this admission estimate stays conservative and does not double count pages.
+    // Inactive pages estimate memory reclaimable under pressure. Omit other cache
+    // categories so this admission estimate stays conservative and does not double count.
     let (pages, pagesOverflow) = UInt64(statistics.free_count).addingReportingOverflow(UInt64(statistics.inactive_count))
     guard !pagesOverflow else { return nil }
     let (bytes, bytesOverflow) = pages.multipliedReportingOverflow(by: UInt64(pageSize))

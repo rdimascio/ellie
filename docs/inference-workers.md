@@ -29,7 +29,7 @@ bun run build:macos
 bun run ellie node start
 ```
 
-The updated helper supplies power-mode, thermal, and conservative macOS admission-memory readings without Accessibility permission. The memory reading includes free and inactive VM pages and falls back to free pages alone if native collection fails. Execution-only setups keep their prior behavior. Compute Macs need to stay awake with their local runner and Ellie agent running; they do not need Accessibility unless desktop window control is also enabled.
+The updated helper supplies power-mode, thermal, and conservative macOS admission-memory readings without Accessibility permission. The reading includes free pages and an estimate from inactive pages that macOS may reclaim under pressure; it is not guaranteed immediately allocatable headroom. It falls back to free pages alone if native collection fails. Execution-only setups keep their prior behavior. Compute Macs need to stay awake with their local runner and Ellie agent running; they do not need Accessibility unless desktop window control is also enabled.
 
 ## Send a request from the server Mac
 
