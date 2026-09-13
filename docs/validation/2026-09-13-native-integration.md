@@ -45,7 +45,9 @@ A separately identified QA bundle ran on a physical Mac mini with a compiled fal
 
 The Devices toolbar opened the native Devices window; closing it returned to the dashboard without connecting. The playlist widget and its native setup sheet opened and cancelled without playback. The app was then quit. Dashboard and chores files were verified as separate mode-0600 files inside the owned mode-0700 directory. An explicit dashboard `--state-path` now also places chores beside it unless `--chores-state-path` is supplied, matching weather isolation.
 
-The chore management list exposes its completion and deletion labels together in one accessibility row, so the visible completion circle was used for that interaction. The dashboard card exposes a separate, labelled completion button. Improving the management list's individual accessibility actions remains a usability follow-up.
+The review found that the chore management list exposed completion and deletion together in one accessibility row. The final version uses a lazy native scroll layout with separately labelled buttons and stable accessibility identifiers. Physical review of the rebuilt app activated completion by its accessibility label, observed the weekly chart change from zero to one, opened the separately labelled delete confirmation, and cancelled while preserving the chore.
+
+Button focus uses native activation semantics, which follow the system's all-controls keyboard navigation preference. Apple documents this behavior for [`FocusInteractions.activate`](https://developer.apple.com/documentation/swiftui/focusinteractions/activate). Tab did not focus these buttons in the final build on this host, so Space-key activation is not claimed as tested. No system keyboard setting was changed. The final accessibility-only change compiled and passed bundle/signature validation; model and persistence behavior was unchanged.
 
 ## Acceptance limits
 
