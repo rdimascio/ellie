@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
+import { NativeSpeech } from "../apps/server/src/native-speech.ts";
+import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const environment = {
@@ -22,12 +24,14 @@ let simulatorID,
   server,
   browserAuth,
   nativeAuth,
+  nativeSpeech,
   activeChild,
   interruptChild,
   requestedSignal,
   succeeded = false;
 let remoteNodeReads = 0,
-  remoteAppOpens = 0;
+  remoteAppOpens = 0,
+  speechUploadRequests = 0;
 
 function terminate(child, signal) {
   if (!Number.isInteger(child.pid) || child.pid <= 0) return;
@@ -168,6 +172,29 @@ try {
   await execute("openssl", ["x509", "-in", cert, "-outform", "DER", "-out", der]);
   const pin = createHash("sha256").update(readFileSync(der)).digest("hex");
   const token = "c".repeat(64);
+  const fakeWhisper = join(owned, "fake-whisper.mjs");
+  const fakeModel = join(owned, "fake-model.bin");
+  const invocationLog = join(owned, "speech-invocations");
+  writeFileSync(fakeModel, "synthetic model fixture", { mode: 0o600 });
+  writeFileSync(
+    fakeWhisper,
+    `#!/usr/bin/env node
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+const value = (name) => process.argv[process.argv.indexOf(name) + 1];
+const audio = readFileSync(value("-f"));
+appendFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
+if (audio[44] === 1) {
+  process.on("SIGTERM", () => process.exit(143));
+  setInterval(() => {}, 1000);
+} else if (audio[44] === 2) {
+  setTimeout(() => writeFileSync(value("-of") + ".txt", "Open Safari\\n"), 11_000);
+} else {
+  writeFileSync(value("-of") + ".txt", "Open Safari\\n");
+}
+`,
+    { mode: 0o700 },
+  );
+  chmodSync(fakeWhisper, 0o700);
   const reservation = createNetServer();
   await new Promise((resolveListen, reject) => {
     reservation.once("error", reject);
@@ -178,21 +205,64 @@ try {
   const origin = `https://127.0.0.1:${address.port}`;
   await new Promise((resolveClose) => reservation.close(resolveClose));
   browserAuth = new BrowserAuth(BrowserAuth.empty(), async () => {});
+  const nativeIDs = [
+    "native-ats",
+    "speech-denied",
+    "speech-granted",
+    "speech-revoked",
+    "session-revoked",
+  ];
   nativeAuth = new NativeAuth(NativeAuth.empty(), async () => {}, {
     token: () => "a".repeat(64),
-    id: () => `native-ats-${randomUUID()}`,
+    id: () => nativeIDs.shift() ?? `unexpected-${randomUUID()}`,
   });
   const invitation = await nativeAuth.invite({
     label: "Phone",
     grants: [{ target: "studio-mac", capabilities: ["app.open"] }],
   });
   await nativeAuth.pair(invitation.code, token);
+  const speechClients = [];
+  for (const [label, candidate] of [
+    ["Speech Denied", "d"],
+    ["Speech Granted", "e"],
+    ["Speech Revoked", "f"],
+    ["Session Revoked", "b"],
+  ]) {
+    const next = await nativeAuth.invite({
+      label,
+      grants: [{ target: "speech-fixture-no-node", capabilities: ["app.open"] }],
+    });
+    speechClients.push(await nativeAuth.pair(next.code, candidate.repeat(64)));
+  }
+  nativeSpeech = NativeSpeech.memory(
+    nativeAuth,
+    () =>
+      new WhisperCliSpeechInput({
+        executable: fakeWhisper,
+        model: fakeModel,
+        maxAudioBytes: 1_100_000,
+        maxAudioDurationMs: 30_000,
+        maxTranscriptBytes: 16_384,
+        timeoutMs: 35_000,
+      }),
+  );
+  await nativeSpeech.grant({
+    clientId: speechClients[1].id,
+    capability: "speech.transcribe",
+  });
+  await nativeSpeech.grant({
+    clientId: speechClients[2].id,
+    capability: "speech.transcribe",
+  });
+  await nativeSpeech.revoke(speechClients[2].id);
+  await nativeAuth.revoke(speechClients[3].id);
   const hosted = createBrowserServer({
     cert: readFileSync(cert),
     key: readFileSync(key),
     origin,
     auth: browserAuth,
     nativeAuth,
+    speech: nativeSpeech,
     remote: {
       async nodes() {
         remoteNodeReads += 1;
@@ -208,6 +278,16 @@ try {
     },
   });
   server = hosted;
+  hosted.server.prependListener("request", (request, response) => {
+    if (request.method === "POST" && request.url === "/native/v1/speech/transcriptions") {
+      speechUploadRequests += 1;
+    }
+    if (request.headers["x-ellie-turn-id"] !== "77777777-7777-4777-8777-777777777777") return;
+    response.end = function () {
+      response.socket?.destroy();
+      return response;
+    };
+  });
   await new Promise((resolveListen, reject) => {
     hosted.server.once("error", reject);
     hosted.server.listen(address.port, "127.0.0.1", resolveListen);
@@ -267,6 +347,7 @@ try {
       resultBundle,
       `ELLIE_ATS_TEST_ORIGIN=${origin}`,
       `ELLIE_ATS_TEST_PIN=${pin}`,
+      "ELLIE_SPEECH_TEST_ENABLED=YES",
       "CODE_SIGNING_ALLOWED=YES",
       "test",
     ],
@@ -274,6 +355,22 @@ try {
   );
   if (remoteNodeReads !== 2 || remoteAppOpens !== 1) {
     throw new Error("The production native routes did not perform the expected finite operations.");
+  }
+  const invocationDeadline = Date.now() + 3_000;
+  let speechInvocations = 0;
+  do {
+    try {
+      speechInvocations = readFileSync(invocationLog, "utf8").trim().split("\n").length;
+    } catch {
+      speechInvocations = 0;
+    }
+    if (speechInvocations >= 4 || Date.now() >= invocationDeadline) break;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  } while (true);
+  if (speechUploadRequests !== 5 || speechInvocations < 4 || speechInvocations > 5) {
+    throw new Error(
+      `Production speech observed ${speechUploadRequests} uploads and ${speechInvocations} fixture processes.`,
+    );
   }
   const appInfo = JSON.parse(
     await execute(
@@ -299,11 +396,14 @@ try {
     );
   }
   succeeded = true;
-  console.log("iOS app-hosted pinned HTTPS, rejection, Keychain and built-policy checks passed.");
+  console.log(
+    "iOS app-hosted pinned HTTPS, native speech, cancellation, rejection, Keychain and built-policy checks passed.",
+  );
 } finally {
   if (server) {
     server.shutdown();
   }
+  await nativeSpeech?.close();
   await nativeAuth?.close();
   await browserAuth?.close();
   if (simulatorID) {

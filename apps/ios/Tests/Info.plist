@@ -8,4 +8,5 @@
 <key>CFBundlePackageType</key><string>BNDL</string>
 <key>EllieATSTestOrigin</key><string>$(ELLIE_ATS_TEST_ORIGIN)</string>
 <key>EllieATSTestPin</key><string>$(ELLIE_ATS_TEST_PIN)</string>
+<key>EllieSpeechTestEnabled</key><string>$(ELLIE_SPEECH_TEST_ENABLED)</string>
 </dict></plist>
