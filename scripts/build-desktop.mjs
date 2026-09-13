@@ -11,7 +11,7 @@ const packagePath = join(repositoryRoot, "apps/desktop");
 const iconSource = join(repositoryRoot, "packages/macos/assets/Ellie.png");
 
 function usage() {
-  return `Usage: node scripts/build-desktop.mjs [--output /absolute/path/Ellie.app]
+  return `Usage: node scripts/build-desktop.mjs [--output /absolute/path/Ellie.app] [--bundle-id ID]
 
 Builds and ad-hoc signs the native Ellie macOS application. The default output is
 dist/desktop/Ellie.app. A custom output must be an absolute, non-existing .app path.`;
@@ -19,9 +19,18 @@ dist/desktop/Ellie.app. A custom output must be an absolute, non-existing .app p
 
 function parseArgs(argv) {
   let output = join(repositoryRoot, "dist/desktop/Ellie.app");
+  let bundleId = "org.ellie.dashboard";
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help") return { help: true, output };
+    if (argument === "--bundle-id") {
+      const value = argv[index + 1];
+      if (!value || !/^[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)+$/.test(value))
+        throw new Error("--bundle-id requires a reverse-DNS identifier.");
+      bundleId = value;
+      index += 1;
+      continue;
+    }
     if (argument !== "--output") throw new Error(`Unknown option: ${argument}`);
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) throw new Error("--output requires a path.");
@@ -32,7 +41,7 @@ function parseArgs(argv) {
   if (!output.endsWith(".app") || basename(output) === ".app") {
     throw new Error("The output must be a named .app bundle.");
   }
-  return { help: false, output };
+  return { help: false, output, bundleId };
 }
 
 function run(file, args) {
@@ -91,12 +100,24 @@ async function main() {
   await mkdir(dirname(options.output), { recursive: true });
   const workDirectory = await mkdtemp(join(tmpdir(), "ellie-desktop-"));
   await chmod(workDirectory, 0o700);
-  const stagedBundle = join(workDirectory, "Ellie.app");
-  const contents = join(stagedBundle, "Contents");
-  const macOSDirectory = join(contents, "MacOS");
-  const resourcesDirectory = join(contents, "Resources");
 
   try {
+    const stagedBundle = join(workDirectory, "Ellie.app");
+    const contents = join(stagedBundle, "Contents");
+    const macOSDirectory = join(contents, "MacOS");
+    const resourcesDirectory = join(contents, "Resources");
+    const sourceRevision = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+    }).trim();
+    if (!/^[0-9a-f]{40}$/.test(sourceRevision))
+      throw new Error("Unable to determine source revision.");
+    const sourceModified = Boolean(
+      execFileSync("/usr/bin/git", ["status", "--porcelain", "--untracked-files=all"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+      }).trim(),
+    );
     const scratchPath = join(workDirectory, "swift-build");
     run("/usr/bin/xcrun", [
       "swift",
@@ -140,6 +161,11 @@ async function main() {
     await chmod(join(macOSDirectory, "Ellie"), 0o755);
     await createIcon(workDirectory, resourcesDirectory);
     await writeFile(
+      join(resourcesDirectory, "build-provenance.json"),
+      `${JSON.stringify({ bundleId: options.bundleId, sourceModified, sourceRevision, version: "0.1.0" }, null, 2)}\n`,
+      { mode: 0o644 },
+    );
+    await writeFile(
       join(contents, "Info.plist"),
       `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -148,12 +174,13 @@ async function main() {
   <key>CFBundleDevelopmentRegion</key><string>en</string>
   <key>CFBundleExecutable</key><string>Ellie</string>
   <key>CFBundleIconFile</key><string>Ellie</string>
-  <key>CFBundleIdentifier</key><string>org.ellie.dashboard</string>
+  <key>CFBundleIdentifier</key><string>${options.bundleId}</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleName</key><string>Ellie</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
+  <key>EllieSourceRevision</key><string>${sourceRevision}</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><false/>
   <key>NSHighResolutionCapable</key><true/>
