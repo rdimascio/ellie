@@ -3,8 +3,10 @@ import SwiftUI
 struct PhoneControlView: View {
   @Environment(\.scenePhase) private var scenePhase
   @StateObject private var store: PhoneControlStore
+  private let credential: NativeEnrollmentCredential
 
   init(credential: NativeEnrollmentCredential, store: PhoneControlStore? = nil) {
+    self.credential = credential
     _store = StateObject(wrappedValue: store ?? PhoneControlStore(credential: credential))
   }
 
@@ -34,6 +36,14 @@ struct PhoneControlView: View {
         .disabled(isBusy)
         Button("Open on selected Mac") { store.send() }
           .disabled(!store.canSend)
+      }
+
+      Section("Voice") {
+        NavigationLink {
+          SpeechTurnView(credential: credential, controls: store)
+        } label: {
+          Label("Record a command", systemImage: "waveform")
+        }
       }
 
       status
