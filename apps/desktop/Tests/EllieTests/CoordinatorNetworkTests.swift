@@ -50,6 +50,18 @@ final class CoordinatorNetworkTests: XCTestCase {
         }
     }
 
+    func testRealTLSRejectsNonJSONResponseMetadata() async throws {
+        let server = try await LoopbackCoordinator(mode: "wrong-mime")
+        defer { server.stop() }
+
+        do {
+            _ = try await PinnedCoordinatorClient().nodes(connection: server.connection)
+            XCTFail("expected content type rejection")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorFailure, .invalidResponse)
+        }
+    }
+
     func testRealTLSAbsoluteDeadlineStopsSlowDrip() async throws {
         let server = try await LoopbackCoordinator(mode: "drip")
         defer { server.stop() }
@@ -254,6 +266,9 @@ private final class LoopbackCoordinator: @unchecked Sendable {
         }
         if (mode === 'oversize') {
           res.writeHead(200, { 'content-type': 'application/json' }); return res.end(Buffer.alloc(128 * 1024 + 1, 32));
+        }
+        if (mode === 'wrong-mime') {
+          res.writeHead(200, { 'content-type': 'text/plain' }); return res.end('[]');
         }
         if (mode === 'drip') {
           res.writeHead(200, { 'content-type': 'application/json' }); res.write('[');

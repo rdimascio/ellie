@@ -174,6 +174,191 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
         }
     }
 
+  func createNativeInvitation(connection: CoordinatorConnection, label: String, nodeIDs: [String])
+    async throws -> NativeInvitation
+  {
+    let grants = nodeIDs.map { ManagedNativeGrant(target: $0, capabilities: ["app.open"]) }
+    let data = try JSONEncoder().encode(NativeInvitationRequest(label: label, grants: grants))
+    let (body, status) = try await management(
+      connection, path: "/v1/native/invitations", method: "POST", body: data)
+    switch status {
+    case 200: break
+    case 400, 415: throw PairingManagementFailure.invalid
+    case 401, 403: throw PairingManagementFailure.unauthorized
+    default: throw PairingManagementFailure.unknownOutcome
+    }
+    guard
+      let value = try? Self.decodeInvitationPayload(
+        body, connection: connection, label: label, grants: grants, now: now())
+    else { throw PairingManagementFailure.unknownOutcome }
+    let encoded = body.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+      .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+    let qr = "ellie-native:v1:" + encoded
+    guard qr.utf8.count <= 2300 else { throw PairingManagementFailure.unknownOutcome }
+    return NativeInvitation(
+      label: value.label, grants: value.grants,
+      expiresAt: Date(timeIntervalSince1970: Double(value.expiresAt) / 1_000), qr: qr)
+  }
+  func nativeClients(connection: CoordinatorConnection) async throws -> [ManagedNativeClient] {
+    let (body, status) = try await management(
+      connection, path: "/v1/native/clients", method: "GET", body: nil)
+    if status == 401 || status == 403 { throw PairingManagementFailure.unauthorized }
+    guard status == 200, let values = try? Self.decodeManagedClients(body, now: now())
+    else { throw PairingManagementFailure.unavailable }
+    return values
+  }
+  func revokeNativeClient(connection: CoordinatorConnection, id: String) async throws -> Bool {
+    guard validManagedNativeIdentifier(id) else { throw PairingManagementFailure.invalid }
+    let data = try JSONSerialization.data(withJSONObject: ["id": id])
+    let (body, status) = try await management(
+      connection, path: "/v1/native/revoke", method: "POST", body: data)
+    switch status {
+    case 200: break
+    case 400, 415: throw PairingManagementFailure.invalid
+    case 401, 403: throw PairingManagementFailure.unauthorized
+    default: throw PairingManagementFailure.unknownOutcome
+    }
+    guard let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+      Set(object.keys) == ["ok", "revoked"],
+      let okNumber = object["ok"] as? NSNumber, CFGetTypeID(okNumber) == CFBooleanGetTypeID(),
+      let revokedNumber = object["revoked"] as? NSNumber,
+      CFGetTypeID(revokedNumber) == CFBooleanGetTypeID(),
+      let ok = object["ok"] as? Bool, ok, let revoked = object["revoked"] as? Bool
+    else { throw PairingManagementFailure.unknownOutcome }
+    return revoked
+  }
+
+  static func decodeInvitationPayload(
+    _ body: Data, connection: CoordinatorConnection, label: String, grants: [ManagedNativeGrant],
+    now: Date
+  ) throws -> NativeInvitationPayload {
+    guard body.count <= 4_096,
+      let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+      Set(object.keys)
+        == [
+          "version", "origin", "certificateSha256", "invitation", "expiresAt", "label", "grants",
+        ],
+      let version = object["version"] as? NSNumber, CFGetTypeID(version) != CFBooleanGetTypeID(),
+      version.doubleValue == 1,
+      let originText = object["origin"] as? String,
+      canonicalManagedNativeOrigin(originText) != nil,
+      let pin = object["certificateSha256"] as? String, Self.validHexToken(pin),
+      let invitation = object["invitation"] as? String, Self.validHexToken(invitation),
+      let expires = object["expiresAt"] as? NSNumber,
+      CFGetTypeID(expires) != CFBooleanGetTypeID(),
+      expires.doubleValue.rounded() == expires.doubleValue,
+      expires.doubleValue >= 0, expires.doubleValue <= 9_007_199_254_740_991,
+      let responseLabel = object["label"] as? String, responseLabel == label,
+      validManagedNativeLabel(responseLabel),
+      let rawGrants = object["grants"] as? [[String: Any]], rawGrants.count == grants.count
+    else { throw PairingManagementFailure.unknownOutcome }
+    let checkedGrants = try rawGrants.map { raw -> ManagedNativeGrant in
+      guard Set(raw.keys) == ["target", "capabilities"],
+        let target = raw["target"] as? String,
+        let capabilities = raw["capabilities"] as? [String],
+        validManagedNativeIdentifier(target), capabilities == ["app.open"]
+      else { throw PairingManagementFailure.unknownOutcome }
+      return ManagedNativeGrant(target: target, capabilities: capabilities)
+    }
+    guard checkedGrants == grants, Set(checkedGrants.map(\.target)).count == checkedGrants.count
+    else {
+      throw PairingManagementFailure.unknownOutcome
+    }
+    let expiresAt = expires.int64Value
+    let currentMilliseconds = Int64(now.timeIntervalSince1970 * 1_000)
+    guard expiresAt > currentMilliseconds, expiresAt <= currentMilliseconds + 600_000 else {
+      throw PairingManagementFailure.unknownOutcome
+    }
+    let payload = NativeInvitationPayload(
+      version: 1, origin: originText, certificateSha256: pin, invitation: invitation,
+      expiresAt: expiresAt, label: responseLabel, grants: checkedGrants)
+    guard Self.canonicalInvitationJSON(payload) == body else {
+      throw PairingManagementFailure.unknownOutcome
+    }
+    return payload
+  }
+
+  static func decodeManagedClients(_ body: Data, now: Date) throws -> [ManagedNativeClient] {
+    guard body.count <= maximumResponseBytes,
+      let values = try? JSONSerialization.jsonObject(with: body) as? [[String: Any]],
+      values.count <= 128
+    else { throw PairingManagementFailure.unavailable }
+    var identifiers = Set<String>()
+    return try values.map { value in
+      guard Set(value.keys) == ["id", "role", "label", "grants", "createdAt", "expiresAt"],
+        let id = value["id"] as? String, validManagedNativeIdentifier(id),
+        identifiers.insert(id).inserted,
+        value["role"] as? String == "native_phone_controller",
+        let label = value["label"] as? String, validManagedNativeLabel(label),
+        let rawGrants = value["grants"] as? [[String: Any]], (1...16).contains(rawGrants.count),
+        let created = exactSafeInteger(value["createdAt"]),
+        let expires = exactSafeInteger(value["expiresAt"]), expires > created,
+        expires - created == 90 * 24 * 60 * 60 * 1_000,
+        created <= Int64(now.timeIntervalSince1970 * 1_000) + 300_000,
+        expires > Int64(now.timeIntervalSince1970 * 1_000)
+      else { throw PairingManagementFailure.unavailable }
+      let grants = try rawGrants.map { raw -> ManagedNativeGrant in
+        guard Set(raw.keys) == ["target", "capabilities"],
+          let target = raw["target"] as? String, validManagedNativeIdentifier(target),
+          let capabilities = raw["capabilities"] as? [String], capabilities == ["app.open"]
+        else { throw PairingManagementFailure.unavailable }
+        return ManagedNativeGrant(target: target, capabilities: capabilities)
+      }
+      guard Set(grants.map(\.target)).count == grants.count else {
+        throw PairingManagementFailure.unavailable
+      }
+      return ManagedNativeClient(
+        id: id, role: "native_phone_controller", label: label, grants: grants,
+        createdAt: created, expiresAt: expires)
+    }
+  }
+
+  private static func validHexToken(_ value: String) -> Bool {
+    value.utf8.count == 64 && value.utf8.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+  }
+
+  private static func exactSafeInteger(_ value: Any?) -> Int64? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+      number.doubleValue.rounded() == number.doubleValue, number.doubleValue >= 0,
+      number.doubleValue <= 9_007_199_254_740_991
+    else { return nil }
+    return number.int64Value
+  }
+
+  private static func canonicalInvitationJSON(_ payload: NativeInvitationPayload) -> Data? {
+    func quote(_ value: String) -> String? {
+      guard
+        let data = try? JSONSerialization.data(
+          withJSONObject: [value], options: [.withoutEscapingSlashes]),
+        let text = String(data: data, encoding: .utf8)
+      else { return nil }
+      return String(text.dropFirst().dropLast())
+    }
+    guard let origin = quote(payload.origin), let pin = quote(payload.certificateSha256),
+      let invitation = quote(payload.invitation), let label = quote(payload.label)
+    else { return nil }
+    var encodedGrants: [String] = []
+    for grant in payload.grants {
+      guard let target = quote(grant.target) else { return nil }
+      encodedGrants.append(#"{"target":\#(target),"capabilities":["app.open"]}"#)
+    }
+    return
+      #"{"version":1,"origin":\#(origin),"certificateSha256":\#(pin),"invitation":\#(invitation),"expiresAt":\#(payload.expiresAt),"label":\#(label),"grants":[\#(encodedGrants.joined(separator: ","))]}"#
+      .data(using: .utf8)
+  }
+  private func management(
+    _ connection: CoordinatorConnection, path: String, method: String, body: Data?
+  ) async throws -> (Data, Int) {
+    var request = try Self.makeRequest(connection: connection)
+    var parts = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+    parts.path = path
+    request.url = parts.url!
+    request.httpMethod = method
+    request.httpBody = body
+    if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+    return try await loader(request, connection.certificateDER)
+  }
+
     static func makeRequest(connection: CoordinatorConnection) throws -> URLRequest {
         guard connection.token.utf8.count == 64,
               connection.token.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
@@ -185,7 +370,7 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
               components.scheme?.lowercased() == "https",
               components.host?.isEmpty == false,
               components.user == nil, components.password == nil,
-              (components.path.isEmpty || components.path == "/"),
+      components.path.isEmpty || components.path == "/",
               components.query == nil, components.fragment == nil
         else { throw CoordinatorFailure.configurationUnsafe }
         components.path = "/v1/nodes"
@@ -347,9 +532,9 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
             timer.schedule(deadline: .now() + requestDeadline)
             timer.setEventHandler { [weak self] in self?.finish(.failure(CoordinatorFailure.unavailable)) }
             self.deadline = timer
-            lock.unlock()
             timer.resume()
             task.resume()
+      lock.unlock()
         }
     }
 
@@ -383,10 +568,13 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
         completionHandler(.useCredential, URLCredential(trust: trust))
     }
 
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let response = response as? HTTPURLResponse,
-              response.expectedContentLength <= Int64(PinnedCoordinatorClient.maximumResponseBytes)
+  func urlSession(
+    _ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+  ) {
+    guard let response = response as? HTTPURLResponse,
+      response.mimeType?.lowercased() == "application/json",
+      response.expectedContentLength <= Int64(PinnedCoordinatorClient.maximumResponseBytes)
         else {
             completionHandler(.cancel)
             finish(.failure(CoordinatorFailure.invalidResponse))
@@ -424,7 +612,10 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
             guard !finished else { return (nil, nil, nil, nil) }
             finished = true
             let resources = (continuation, task, session, deadline)
-            continuation = nil; task = nil; session = nil; deadline = nil
+      continuation = nil
+      task = nil
+      session = nil
+      deadline = nil
             return resources
         }
         guard let continuation = resources.0 else { return }
@@ -435,9 +626,10 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
     }
 }
 
-private extension NSLock {
-    func withLock<T>(_ work: () -> T) -> T {
-        lock(); defer { unlock() }
+extension NSLock {
+  fileprivate func withLock<T>(_ work: () -> T) -> T {
+    lock()
+    defer { unlock() }
         return work()
     }
 }
