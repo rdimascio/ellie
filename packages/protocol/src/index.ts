@@ -143,3 +143,4 @@ export function jobMetadata(value: unknown): JobMetadata {
 
 export * from "./compute.ts";
 export * from "./browser-pairing-qr.ts";
+export * from "./native-pairing-qr.ts";

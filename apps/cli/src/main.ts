@@ -35,6 +35,7 @@ import {
 } from "./browser-setup.ts";
 import { createBrowserRuntime } from "./browser-runtime.ts";
 import { parseBrowserCommand, runBrowserCommand } from "./browser-commands.ts";
+import { parseNativeCommand, runNativeCommand } from "./native-commands.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
@@ -141,6 +142,13 @@ async function main(): Promise<void> {
     } finally {
       interrupt.dispose();
     }
+    return;
+  }
+  if (args[0] === "native") {
+    const command = parseNativeCommand(args.slice(1));
+    await withController(async (client) => {
+      for (const line of await runNativeCommand(client, command)) console.log(line);
+    });
     return;
   }
   if (args[0] === "browser") {
@@ -495,7 +503,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
   console.log(
     "  transcribe --audio WAV --model PATH --executable PATH\n" +

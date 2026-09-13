@@ -1,6 +1,6 @@
 # Ellie native app
 
-Ellie is a macOS-first SwiftUI application. The initial app provides the dashboard experience as a normal Dock application on macOS 14 and later. Its dashboard model and persistence layer are kept separate from the views so a future iPhone app can share those concepts; an iOS app is not part of the current build.
+Ellie provides native SwiftUI dashboard applications for macOS and iPhone. The macOS app is a normal Dock application on macOS 14 and later. The iPhone target shares its versioned dashboard model and persistence implementation; see the [iPhone development guide](native-ios.md).
 
 ## Requirements
 
@@ -45,7 +45,7 @@ The versioned JSON schema accepts the browser dashboard editor’s export. Use F
 
 Chore due and completion days are Gregorian date-only values (`YYYY-MM-DD`) interpreted in the household time zone saved with the chore file. The current day changes at midnight in that zone, completion records the household day when the action occurs, and the weekly chart runs Monday through Sunday across daylight-saving transitions. This first local slice has no recurrence, reminder scheduling, chore sync, or chore import/export.
 
-The Mac client also provides connected device status, explicitly targeted app opening and reviewed local push-to-talk commands. Conversational voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain separate slices. An ad hoc development signature is not a notarized release.
+The Mac client also provides connected device status, explicitly targeted app opening and reviewed local push-to-talk commands. A native iPhone dashboard target shares the dashboard model; native enrollment client UI remains a later slice. Conversational voice, connected provider widgets, shared profiles and signed/notarized distribution remain separate slices. An ad hoc development signature is not a notarized release.
 
 ## Connected device status
 
@@ -85,4 +85,4 @@ The [native connection record](validation/2026-09-13-native-connection.md) cover
 
 The [native app control record](validation/2026-09-13-native-actions.md) distinguishes synthetic command outcomes from physical Mac UI and LAN acceptance. The [native chores validation record](validation/2026-09-13-native-chores.md) covers task creation, completion/undo, chart updates and persistence on the physical mini, plus date and state regression tests on the MacBook.
 
-Next, add the native iPhone pairing flow. Expand local voice only after the reviewed push-to-talk boundary has physical acceptance. Weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
+Next, review the native trust and credential bootstrap described in the iPhone guide before implementing the client enrollment flow. Expand local voice only after the reviewed push-to-talk boundary has physical acceptance. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.

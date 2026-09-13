@@ -329,6 +329,144 @@
         }
       }
     },
+    "/v1/native/invitations": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "createNativeInvitation",
+        "summary": "Create a scoped native-app invitation",
+        "description": "Controller bearer identity required. The response binds a single-use invitation to the actual native listener origin and leaf certificate pin.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeInvitationSpec"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Native pairing payload created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativePairingPayload"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/native/clients": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "listNativeClients",
+        "summary": "List public native-app identities and grants",
+        "description": "Controller bearer identity required. Credential verifiers are never returned.",
+        "responses": {
+          "200": {
+            "description": "Active public native clients.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "$ref": "#/components/schemas/NativeClient"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/native/revoke": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "revokeNativeClient",
+        "summary": "Revoke one native-app session",
+        "description": "Controller bearer identity required. Revocation is persisted before success.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BrowserRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Native revocation result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BrowserRevokeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/v1/nodes": {
       "get": {
         "parameters": [
@@ -1473,6 +1611,147 @@
           },
           "revoked": {
             "type": "boolean"
+          }
+        }
+      },
+      "NativeGrant": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target",
+          "capabilities"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "capabilities": {
+            "type": "array",
+            "prefixItems": [
+              {
+                "const": "app.open"
+              }
+            ],
+            "minItems": 1,
+            "maxItems": 1
+          }
+        }
+      },
+      "NativeInvitationSpec": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "grants"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S"
+          },
+          "grants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "$ref": "#/components/schemas/NativeGrant"
+            }
+          }
+        }
+      },
+      "NativeClient": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "role",
+          "label",
+          "grants",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "role": {
+            "const": "native_phone_controller"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S"
+          },
+          "grants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "$ref": "#/components/schemas/NativeGrant"
+            }
+          },
+          "createdAt": {
+            "type": "number"
+          },
+          "expiresAt": {
+            "type": "number"
+          }
+        }
+      },
+      "NativePairingPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "origin",
+          "certificateSha256",
+          "invitation",
+          "expiresAt",
+          "label",
+          "grants"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "origin": {
+            "type": "string",
+            "format": "uri",
+            "pattern": "^https://[^/@]+$"
+          },
+          "certificateSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "invitation": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "expiresAt": {
+            "type": "number"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S"
+          },
+          "grants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "items": {
+              "$ref": "#/components/schemas/NativeGrant"
+            }
           }
         }
       },

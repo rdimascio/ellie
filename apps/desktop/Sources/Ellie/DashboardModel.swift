@@ -97,6 +97,14 @@ enum DashboardModel {
         }
     }
 
+    static func formattedTime(_ date: Date, in timeZone: TimeZone, locale: Locale = .current) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = locale
+        formatter.timeZone = timeZone
+        formatter.setLocalizedDateFormatFromTemplate("jm")
+        return formatter.string(from: date)
+    }
+
     static let initialState = DashboardState(dashboards: [
         Dashboard(id: "home", name: "Home", widgets: [
             DashboardWidget(id: "clock", type: .clock, title: "Right now", size: .wide, config: [:]),

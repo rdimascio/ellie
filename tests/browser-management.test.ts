@@ -10,6 +10,7 @@ import { VERSION } from "@ellie/protocol";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
+import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import type { BrowserAuthState } from "../apps/server/src/browser-auth.ts";
 import type {
   BrowserControl,
@@ -32,12 +33,18 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     if (failBrowserSave) throw new Error("private persistence detail");
     browserState = structuredClone(next);
   });
+  let nativeState = NativeAuth.empty();
+  const nativeAuth = new NativeAuth(nativeState, async (next) => {
+    nativeState = structuredClone(next);
+  });
   let current =
     options.initial ??
     ({
       status: "ready",
       origin: "https://coordinator.local:8444",
       auth: browserAuth,
+      nativeAuth,
+      certificateSha256: "a".repeat(64),
     } satisfies BrowserControlSnapshot);
   const browser: BrowserControl = { current: () => current };
   const jobStore = new JobStore(join(dir, "jobs.sqlite"));
@@ -112,6 +119,7 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
 
   return {
     browserAuth,
+    nativeAuth,
     controllerToken,
     nodeToken,
     call,
@@ -123,6 +131,9 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     },
     persistedBrowserState() {
       return structuredClone(browserState);
+    },
+    persistedNativeState() {
+      return structuredClone(nativeState);
     },
     async close() {
       app.shutdown();
@@ -189,6 +200,49 @@ test("browser management status exposes only fixed public state to the controlle
   assert.deepEqual((await absent.call(absent.controllerToken, "GET", "/v1/browser")).body, {
     status: "disabled",
   });
+});
+
+test("only controller manages native invitations, clients and revocation", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const specification = {
+    label: "Family iPhone",
+    grants: [{ target: "living-room-mini", capabilities: ["app.open"] }],
+  };
+  assert.equal(
+    (await f.call(f.nodeToken, "POST", "/v1/native/invitations", { body: specification })).status,
+    403,
+  );
+  const overQrCapacity = await f.call(f.controllerToken, "POST", "/v1/native/invitations", {
+    body: {
+      label: "x".repeat(64),
+      grants: Array.from({ length: 16 }, (_, index) => ({
+        target: `${String(index).padStart(2, "0")}${"x".repeat(97)}`,
+        capabilities: ["app.open"],
+      })),
+    },
+  });
+  assert.equal(overQrCapacity.status, 400);
+  assert.deepEqual(f.persistedNativeState(), NativeAuth.empty());
+  const issued = await f.call(f.controllerToken, "POST", "/v1/native/invitations", {
+    body: specification,
+  });
+  assert.equal(issued.status, 200);
+  const payload = issued.body as { invitation: string; origin: string; certificateSha256: string };
+  assert.equal(payload.origin, "https://coordinator.local:8444");
+  assert.equal(payload.certificateSha256, "a".repeat(64));
+  assert.match(payload.invitation, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(issued.text, /tokenHash/);
+  const client = await f.nativeAuth.pair(payload.invitation, "7".repeat(64));
+  const clients = await f.call(f.controllerToken, "GET", "/v1/native/clients");
+  assert.deepEqual(clients.body, [client]);
+  assert.doesNotMatch(clients.text, /tokenHash|7777777777/);
+  assert.equal(
+    (await f.call(f.controllerToken, "POST", "/v1/native/revoke", { body: { id: client.id } }))
+      .status,
+    200,
+  );
+  assert.deepEqual((await f.call(f.controllerToken, "GET", "/v1/native/clients")).body, []);
 });
 
 test("controller issues fixed browser invitations, lists public clients, and revokes durably", async (t) => {

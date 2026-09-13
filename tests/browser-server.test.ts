@@ -12,6 +12,7 @@ import type { AddressInfo } from "node:net";
 import { BROWSER_SESSION_COOKIE, BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import type { BrowserAuthState, BrowserInvitationSpec } from "../apps/server/src/browser-auth.ts";
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
+import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import type { BrowserAssets, BrowserRemote } from "../apps/server/src/browser-server.ts";
 
 const run = promisify(execFile);
@@ -170,7 +171,11 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     if (failSave) throw new Error("private path and credential must stay redacted");
     state = structuredClone(next);
   });
-  const app = createBrowserServer({ ...tls, origin, auth, assets, remote });
+  let nativeState = NativeAuth.empty();
+  const nativeAuth = new NativeAuth(nativeState, async (next) => {
+    nativeState = structuredClone(next);
+  });
+  const app = createBrowserServer({ ...tls, origin, auth, nativeAuth, assets, remote });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(port, "127.0.0.1", resolve);
@@ -233,6 +238,7 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
 
   return {
     auth,
+    nativeAuth,
     origin,
     port,
     request,
@@ -245,6 +251,94 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     },
   };
 }
+
+test("native bearer channel pairs once, recovers by GET, logs out, and rejects browser authority", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Test iPhone",
+    grants: [{ target: "living-room-mini", capabilities: ["app.open"] }],
+  });
+  const token = "9".repeat(64);
+  const nativeHeaders = { "x-ellie-version": "1" };
+  assert.equal(
+    (await f.request("POST", "/native/v1/pair", { body: { invitation: invitation.code, token } }))
+      .status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token },
+        headers: { "x-ellie-version": "2" },
+      })
+    ).status,
+    403,
+  );
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: nativeHeaders,
+  });
+  assert.equal(paired.status, 200);
+  assert.doesNotMatch(paired.text, new RegExp(`${invitation.code}|${token}|tokenHash`));
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token: "8".repeat(64) },
+        headers: nativeHeaders,
+      })
+    ).status,
+    400,
+  );
+  const session = await f.request("GET", "/native/v1/session", {
+    headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+  });
+  assert.equal(session.status, 200);
+  assert.deepEqual(
+    (session.body as { client: { grants: unknown } }).client.grants,
+    invitation.grants,
+  );
+
+  for (const headers of [
+    { cookie: `__Host-ellie-session=${"a".repeat(64)}` },
+    { origin: f.origin },
+    { "sec-fetch-site": "same-origin" },
+  ] as Record<string, string>[])
+    assert.equal(
+      (
+        await f.request("GET", "/native/v1/session", {
+          headers: { ...nativeHeaders, authorization: `Bearer ${token}`, ...headers },
+        })
+      ).status,
+      403,
+    );
+  assert.equal(
+    (
+      await f.request("GET", "/browser/v1/session", {
+        headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+      })
+    ).status,
+    403,
+  );
+
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/logout", {
+        body: {},
+        headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await f.request("GET", "/native/v1/session", {
+        headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+      })
+    ).status,
+    401,
+  );
+});
 
 function cookieFrom(response: Response): string {
   const setCookie = response.headers["set-cookie"]?.[0];

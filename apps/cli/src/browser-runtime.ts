@@ -1,8 +1,10 @@
 import { lstat } from "node:fs/promises";
+import { X509Certificate, createHash } from "node:crypto";
 import { join } from "node:path";
 import type { BrowserSetupEnvironment } from "./browser-setup.ts";
 import { BROWSER_CONFIG, loadBrowserServerIdentity } from "./browser-setup.ts";
 import { BrowserAuth } from "../../server/src/browser-auth.ts";
+import { NativeAuth } from "../../server/src/native-auth.ts";
 import type { BrowserControl } from "../../server/src/browser-management.ts";
 import { createBrowserServer } from "../../server/src/browser-server.ts";
 import type {
@@ -68,6 +70,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   let snapshot: ReturnType<BrowserControl["current"]> = { status: "disabled" };
   let listener: BrowserServer | undefined;
   let auth: BrowserAuth | undefined;
+  let nativeAuth: NativeAuth | undefined;
   let stopped = false;
   let started: Promise<void> | undefined;
   let phase: "identity" | "assets" | "auth" | "listener" = "identity";
@@ -114,6 +117,11 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       return;
     }
     if (stopped) return;
+    try {
+      nativeAuth = await NativeAuth.openOrInitialize(options.setup.stateDir);
+    } catch {
+      nativeAuth = undefined;
+    }
 
     const origin = `https://${identity.config.hostname}:${identity.config.port}`;
     phase = "listener";
@@ -123,6 +131,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         cert: identity.cert,
         origin,
         auth,
+        nativeAuth,
         assets,
       });
       listener = activeListener;
@@ -136,7 +145,10 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         closeListener(activeListener);
         return;
       }
-      snapshot = { status: "ready", origin, auth };
+      const certificateSha256 = createHash("sha256")
+        .update(new X509Certificate(identity.cert).raw)
+        .digest("hex");
+      snapshot = { status: "ready", origin, auth, nativeAuth, certificateSha256 };
     } catch {
       closeListener();
       unavailable("listener_unavailable");
@@ -158,6 +170,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       await started;
       closeListener();
       await auth?.close();
+      await nativeAuth?.close();
     },
   };
 }
