@@ -17,7 +17,7 @@
     "check": "bun run lint && bun run format:check && bun run contracts:check && bun run typecheck && bun run test && bun run demo:build",
     "build:macos": "node scripts/build-macos.mjs",
     "desktop:build": "node scripts/build-desktop.mjs",
-    "desktop:test": "xcrun swift test --package-path apps/desktop --scratch-path apps/desktop/.build",
+    "desktop:test": "node scripts/test-desktop.mjs",
     "ios:build": "xcodebuild -project apps/ios/EllieIOS.xcodeproj -scheme EllieIOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build",
     "ios:test": "node scripts/test-ios.mjs",
     "contracts:generate": "node scripts/generate-contracts.ts",

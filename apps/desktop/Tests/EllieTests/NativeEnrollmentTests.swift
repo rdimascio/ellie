@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Security
 import XCTest
 
@@ -135,41 +136,45 @@ final class NativeEnrollmentTests: XCTestCase {
       return (process, port)
     }
     let (process, port) = try startServer()
-    defer {
-      if process.isRunning { process.terminate() }
-      process.waitUntilExit()
-    }
-    let certData = try Data(contentsOf: derURL)
-    let pin = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
-    let pending = PendingNativeEnrollment(
-      origin: URL(string: "https://127.0.0.1:\(port)")!, certificateSha256: pin, label: "Phone",
-      grants: [NativeGrant(target: "studio-mac", capabilities: ["app.open"])],
-      candidateToken: String(repeating: "c", count: 64))
-    let client = try await NativeEnrollmentTransport(timeout: 3).recover(pending)
-    XCTAssertEqual(client?.id, "native-1")
-    process.waitUntilExit()
-    XCTAssertEqual(process.terminationStatus, 0)
-    let request = try String(contentsOf: requestURL, encoding: .utf8)
-    XCTAssertTrue(request.hasPrefix("GET /native/v1/session HTTP/1.1\r\n"))
-    XCTAssertTrue(request.lowercased().contains("x-ellie-version: 1"))
-    XCTAssertTrue(request.contains("Authorization: Bearer \(pending.candidateToken)"))
-    XCTAssertFalse(request.lowercased().contains("cookie:"))
-    for (name, host, testedPin, date) in [
-      ("wrong pin", "127.0.0.1", String(repeating: "0", count: 64), Date()),
-      ("wrong hostname", "localhost", pin, Date()),
-      ("not yet valid", "127.0.0.1", pin, Date(timeIntervalSince1970: 0)),
-      ("expired", "127.0.0.1", pin, Date(timeIntervalSince1970: 4_102_444_800)),
-    ] {
-      let (server, port) = try startServer()
-      let rejected = PendingNativeEnrollment(
-        origin: URL(string: "https://\(host):\(port)")!, certificateSha256: testedPin,
-        label: pending.label, grants: pending.grants, candidateToken: pending.candidateToken)
-      do {
-        _ = try await NativeEnrollmentTransport(timeout: 2, now: { date }).recover(rejected)
-        XCTFail(name)
-      } catch { XCTAssertEqual(error as? NativeEnrollmentFailure, .trustFailed, name) }
-      if server.isRunning { server.terminate() }
-      server.waitUntilExit()
+    do {
+      let certData = try Data(contentsOf: derURL)
+      let pin = SHA256.hash(data: certData).map { String(format: "%02x", $0) }.joined()
+      let pending = PendingNativeEnrollment(
+        origin: URL(string: "https://127.0.0.1:\(port)")!, certificateSha256: pin, label: "Phone",
+        grants: [NativeGrant(target: "studio-mac", capabilities: ["app.open"])],
+        candidateToken: String(repeating: "c", count: 64))
+      let client = try await NativeEnrollmentTransport(timeout: 3).recover(pending)
+      XCTAssertEqual(client?.id, "native-1")
+      guard await processExits(process) else {
+        await stopProcess(process)
+        XCTFail("Synthetic HTTPS server did not exit")
+        return
+      }
+      XCTAssertEqual(process.terminationStatus, 0)
+      let request = try String(contentsOf: requestURL, encoding: .utf8)
+      XCTAssertTrue(request.hasPrefix("GET /native/v1/session HTTP/1.1\r\n"))
+      XCTAssertTrue(request.lowercased().contains("x-ellie-version: 1"))
+      XCTAssertTrue(request.contains("Authorization: Bearer \(pending.candidateToken)"))
+      XCTAssertFalse(request.lowercased().contains("cookie:"))
+      for (name, host, testedPin, date) in [
+        ("wrong pin", "127.0.0.1", String(repeating: "0", count: 64), Date()),
+        ("wrong hostname", "localhost", pin, Date()),
+        ("not yet valid", "127.0.0.1", pin, Date(timeIntervalSince1970: 0)),
+        ("expired", "127.0.0.1", pin, Date(timeIntervalSince1970: 4_102_444_800)),
+      ] {
+        let (server, port) = try startServer()
+        let rejected = PendingNativeEnrollment(
+          origin: URL(string: "https://\(host):\(port)")!, certificateSha256: testedPin,
+          label: pending.label, grants: pending.grants, candidateToken: pending.candidateToken)
+        do {
+          _ = try await NativeEnrollmentTransport(timeout: 2, now: { date }).recover(rejected)
+          XCTFail(name)
+        } catch { XCTAssertEqual(error as? NativeEnrollmentFailure, .trustFailed, name) }
+        await stopProcess(server)
+      }
+    } catch {
+      await stopProcess(process)
+      throw error
     }
   }
 
@@ -213,21 +218,27 @@ final class NativeEnrollmentTests: XCTestCase {
     let portText = String(decoding: output.fileHandleForReading.availableData, as: UTF8.self)
       .trimmingCharacters(in: .whitespacesAndNewlines)
     guard let port = Int(portText) else {
-      if process.isRunning { process.terminate() }
+      await stopProcess(process)
       throw XCTSkip("IPv6 loopback is unavailable")
     }
-    defer {
-      if process.isRunning { process.terminate() }
-      process.waitUntilExit()
+    do {
+      let data = try Data(contentsOf: derURL)
+      let pin = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+      let pending = PendingNativeEnrollment(
+        origin: URL(string: "https://[::1]:\(port)")!, certificateSha256: pin, label: "Phone",
+        grants: [NativeGrant(target: "studio-mac", capabilities: ["app.open"])],
+        candidateToken: String(repeating: "c", count: 64))
+      let client = try await NativeEnrollmentTransport(timeout: 3).recover(pending)
+      XCTAssertEqual(client?.id, "native-1")
+      guard await processExits(process) else {
+        await stopProcess(process)
+        XCTFail("Synthetic IPv6 server did not exit")
+        return
+      }
+    } catch {
+      await stopProcess(process)
+      throw error
     }
-    let data = try Data(contentsOf: derURL)
-    let pin = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    let pending = PendingNativeEnrollment(
-      origin: URL(string: "https://[::1]:\(port)")!, certificateSha256: pin, label: "Phone",
-      grants: [NativeGrant(target: "studio-mac", capabilities: ["app.open"])],
-      candidateToken: String(repeating: "c", count: 64))
-    let client = try await NativeEnrollmentTransport(timeout: 3).recover(pending)
-    XCTAssertEqual(client?.id, "native-1")
   }
 
   func testEphemeralHTTPSAbsoluteDeadlineAndCancellationStopSlowDrip() async throws {
@@ -287,8 +298,7 @@ final class NativeEnrollmentTests: XCTestCase {
     } catch { XCTAssertEqual(error as? NativeEnrollmentFailure, .unavailable) }
     XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(deadlineStarted), 0.15)
     XCTAssertLessThan(Date().timeIntervalSince(deadlineStarted), 2.0)
-    if deadlineServer.isRunning { deadlineServer.terminate() }
-    deadlineServer.waitUntilExit()
+    await stopProcess(deadlineServer)
     let (cancelServer, cancelPort) = try start()
     let operation = Task {
       try await NativeEnrollmentTransport(timeout: 3).recover(pending(cancelPort))
@@ -299,8 +309,7 @@ final class NativeEnrollmentTests: XCTestCase {
       _ = try await operation.value
       XCTFail("Cancelled recovery completed")
     } catch { XCTAssertEqual(error as? NativeEnrollmentFailure, .cancelled) }
-    if cancelServer.isRunning { cancelServer.terminate() }
-    cancelServer.waitUntilExit()
+    await stopProcess(cancelServer)
   }
 
   func testImmediateTransportCancellationCannotMissContinuationStart() async {
@@ -374,16 +383,14 @@ final class NativeEnrollmentTests: XCTestCase {
       _ = try await NativeEnrollmentTransport(timeout: 2).recover(oversizePending)
       XCTFail("Oversized response accepted")
     } catch { XCTAssertEqual(error as? NativeEnrollmentFailure, .invalidResponse) }
-    if oversizeServer.isRunning { oversizeServer.terminate() }
-    oversizeServer.waitUntilExit()
+    await stopProcess(oversizeServer)
     let (redirectServer, redirectPending) = try start(
       status: "302", body: "{}", location: "/native/v1/session")
     do {
       _ = try await NativeEnrollmentTransport(timeout: 2).recover(redirectPending)
       XCTFail("Redirect followed")
     } catch { XCTAssertEqual(error as? NativeEnrollmentFailure, .unavailable) }
-    if redirectServer.isRunning { redirectServer.terminate() }
-    redirectServer.waitUntilExit()
+    await stopProcess(redirectServer)
   }
 
   @MainActor
@@ -609,9 +616,34 @@ final class NativeEnrollmentTests: XCTestCase {
     process.arguments = arguments
     process.standardOutput = FileHandle.nullDevice
     process.standardError = FileHandle.nullDevice
+    let exited = DispatchSemaphore(value: 0)
+    process.terminationHandler = { _ in exited.signal() }
     try process.run()
-    process.waitUntilExit()
+    guard exited.wait(timeout: .now() + 10) == .success else {
+      if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+      guard exited.wait(timeout: .now() + 2) == .success else {
+        throw NativeEnrollmentFailure.unavailable
+      }
+      throw NativeEnrollmentFailure.unavailable
+    }
     XCTAssertEqual(process.terminationStatus, 0)
+  }
+  private func processExits(
+    _ process: Process, within timeout: Duration = .seconds(5)
+  ) async -> Bool {
+    await Task.detached {
+      let deadline = ContinuousClock.now.advanced(by: timeout)
+      while process.isRunning && ContinuousClock.now < deadline { usleep(10_000) }
+      return !process.isRunning
+    }.value
+  }
+  private func stopProcess(_ process: Process) async {
+    guard process.isRunning else { return }
+    process.terminate()
+    if await processExits(process, within: .seconds(1)) { return }
+    kill(process.processIdentifier, SIGKILL)
+    let processStopped = await processExits(process, within: .seconds(2))
+    XCTAssertTrue(processStopped, "Synthetic process did not stop")
   }
   @MainActor private func eventually(_ condition: @escaping @MainActor () async -> Bool) async {
     let deadline = ContinuousClock.now.advanced(by: .seconds(2))

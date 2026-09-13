@@ -4,9 +4,11 @@ final class EllieIOSUITests: XCTestCase {
     func testCoordinatorNavigationDoesNotStartEnrollment() {
         let app = XCUIApplication()
         app.launch()
-        app.staticTexts["Pair this iPhone"].tap()
-        XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 2))
-        XCTAssertTrue(app.buttons["Scan enrollment code"].exists)
+        let coordinator = app.buttons["coordinator-enrollment"]
+        XCTAssertTrue(coordinator.waitForExistence(timeout: 5))
+        coordinator.tap()
+        XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
         returnToDashboardList(from: "Coordinator", in: app)
     }
 
