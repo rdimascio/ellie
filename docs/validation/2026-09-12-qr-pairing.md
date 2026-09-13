@@ -38,10 +38,28 @@ check is recorded separately in [browser pairing validation](2026-09-12-browser-
   Screenshots use synthetic fixtures and remain local. No household identifiers, credentials,
   camera captures or invitation images were added to the repository.
 
-## Hardware limits
+## Attended iPhone QR check
 
-No physical camera, iPhone QR scan, TV camera, production Keychain setup, installed service
-replacement or household action was part of this slice. The earlier physical iPhone manual
-pairing, refresh persistence, private-tab isolation and revocation results do not substitute for
-camera acceptance. A later attended check must confirm Safari camera permission, rear-camera
-selection and readable terminal size/contrast, then pairing and camera shutdown on the real phone.
+The operator reported installing and trusting a fresh public certificate profile, then connecting
+after instructions to scan inside Ellie in Safari. The QR was displayed as a PNG in Preview on
+the MacBook. An authenticated query to the isolated coordinator independently confirmed exactly
+one paired browser with the TV role and no household-action grants.
+
+The operator then reported that the camera indicator turned off and refreshing Safari kept the
+phone connected. These are user-reported physical observations, separate from the automated
+camera tests. The temporary client was revoked through the controller, and a second query
+confirmed zero clients. The matching harness was stopped gracefully; its runtime, lock and
+listener were removed. Both matching files transferred to the MacBook were removed after
+ownership and hash checks. Removal of the latest test profile from the phone is awaiting the
+operator's confirmation.
+
+An earlier QR attempt expired without a reported scan result; the coordinator had zero clients
+at its last observation. That attempt is not counted as successful camera acceptance.
+
+## Remaining hardware limits
+
+The iPhone model and iOS version, explicit absence of TLS warnings, and rear-camera selection
+were not separately recorded. The optical check used a QR image, so it does not validate reading
+the terminal's rendered QR on hardware. TV camera behavior, production Keychain setup, installed
+service replacement and household actions were not tested. The isolated harness used memory-only
+keys and synthetic controller state and preserved existing household services and identities.

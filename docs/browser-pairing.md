@@ -72,7 +72,7 @@ the session and never repeats the pairing request automatically.
 
 Keep the entire QR and its white border visible. Increase terminal text size if needed. A QR uses
 the same one-time, ten-minute invitation as its manual fallback; it is not a reusable login.
-Physical iPhone camera scanning and target TV camera/manual behavior still require acceptance.
+An attended iPhone check confirmed pairing from a QR image, camera shutdown and refresh persistence; see the [QR validation record](validation/2026-09-12-qr-pairing.md) for evidence and limits. Reading the terminal-rendered QR on hardware and target TV behavior remain unvalidated.
 
 Phone invitations require explicit `--node ID --allow app.open,url.open` grants alongside
 `browser invite phone --label NAME`. These reserve authority for future routes; this version exposes
