@@ -12,6 +12,7 @@
 <key>LSApplicationCategoryType</key><string>public.app-category.lifestyle</string>
 <key>NSCameraUsageDescription</key><string>Scan a controller-issued Ellie enrollment code.</string>
 <key>NSLocalNetworkUsageDescription</key><string>Connect securely to your Ellie coordinator on the local network.</string>
+<key>NSMicrophoneUsageDescription</key><string>Record an explicit voice command for transcription by your paired Ellie coordinator.</string>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 <key>UILaunchScreen</key><dict/>
 </dict></plist>
