@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct EllieApp: App {
     @StateObject private var store: DashboardStore
     @StateObject private var weatherStore: WeatherStore
+    @StateObject private var agendaStore: AgendaStore
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -19,11 +20,12 @@ struct EllieApp: App {
         _store = StateObject(wrappedValue: DashboardStore(fileURL: stateURL))
         let weatherURL = stateURL?.deletingLastPathComponent().appendingPathComponent("weatherv1.json")
         _weatherStore = StateObject(wrappedValue: WeatherStore(fileURL: weatherURL))
+        _agendaStore = StateObject(wrappedValue: AgendaStore(fileURL: stateURL?.deletingLastPathComponent().appendingPathComponent("agendav1.json")))
     }
 
     var body: some Scene {
         WindowGroup("Ellie") {
-            DashboardView(store: store, weatherStore: weatherStore)
+            DashboardView(store: store, weatherStore: weatherStore, agendaStore: agendaStore)
                 .frame(minWidth: 720, minHeight: 520)
                 .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
         }
@@ -42,6 +44,15 @@ struct EllieApp: App {
             }
             SidebarCommands()
         }
+    }
+}
+
+@MainActor enum AgendaFiles {
+    static func importFile(into store: AgendaStore) {
+        let panel = NSOpenPanel(); panel.title = "Import agenda snapshot"; panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { store.importData(try AgendaStore.safeRead(url)) }
+        catch { store.message = "Choose a regular Ellie agenda JSON file smaller than 128 KB." }
     }
 }
 

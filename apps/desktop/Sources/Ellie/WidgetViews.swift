@@ -5,6 +5,7 @@ struct NativeWidgetCard: View {
     let widget: DashboardWidget
     let editing: Bool
     @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: AgendaStore
     let configure: () -> Void
     let earlier: () -> Void
     let later: () -> Void
@@ -61,6 +62,8 @@ struct NativeWidgetCard: View {
                     .frame(minHeight: 155, alignment: .topLeading)
                 } else if widget.type == .weather {
                     NativeWeather(store: weatherStore, configure: configure)
+                } else if widget.type == .calendar {
+                    NativeAgenda(store: agendaStore, configure: configure)
                 } else {
                     VStack(alignment: .leading, spacing: 14) {
                         Image(systemName: widget.type.symbol)
@@ -217,6 +220,7 @@ struct WidgetInspector: View {
     @Environment(\.dismiss) private var dismiss
     let widget: DashboardWidget
     @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: AgendaStore
     let save: (String, WidgetSize, [String: String]) -> Void
     @State private var title: String
     @State private var size: WidgetSize
@@ -227,9 +231,10 @@ struct WidgetInspector: View {
     @State private var latitude: String
     @State private var longitude: String
 
-    init(widget: DashboardWidget, weatherStore: WeatherStore, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
+    init(widget: DashboardWidget, weatherStore: WeatherStore, agendaStore: AgendaStore, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
         self.widget = widget
         self.weatherStore = weatherStore
+        self.agendaStore = agendaStore
         self.save = save
         _title = State(initialValue: widget.title)
         _size = State(initialValue: widget.size)
@@ -288,6 +293,14 @@ struct WidgetInspector: View {
                         }
                     }
                 }
+                if widget.type == .calendar {
+                    Section("Agenda snapshot") {
+                        Text("Import a read-only Ellie agenda JSON snapshot. It is stored privately on this Mac and applies to every calendar widget.").font(.caption).foregroundStyle(.secondary)
+                        Button("Import Snapshot…") { AgendaFiles.importFile(into: agendaStore) }
+                        if agendaStore.canClear { Button("Disconnect and Clear", role: .destructive) { agendaStore.disconnect() } }
+                        if let message = agendaStore.message { Text(message).font(.caption).foregroundStyle(.red) }
+                    }
+                }
             }
             .formStyle(.grouped)
             HStack {
@@ -318,6 +331,57 @@ struct WidgetInspector: View {
         guard !name.isEmpty, name.utf16.count <= 80,
               let latitude = Double(latitude), let longitude = Double(longitude) else { return false }
         return latitude.isFinite && longitude.isFinite && (-90...90).contains(latitude) && (-180...180).contains(longitude)
+    }
+}
+
+struct NativeAgenda: View {
+    @ObservedObject var store: AgendaStore; let configure: () -> Void
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 60)) { context in
+          VStack(alignment: .leading, spacing: 10) {
+            if let snapshot = store.snapshot {
+                let upcoming = snapshot.relevantEvents(at: context.date).prefix(4)
+                Text(snapshot.source.name).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                if upcoming.isEmpty { Spacer(); ContentUnavailableView("No upcoming events", systemImage: "calendar") }
+                ForEach(Array(upcoming)) { event in
+                    HStack(alignment: .top, spacing: 10) {
+                        RoundedRectangle(cornerRadius: 2).fill(Color.secondary.opacity(0.4)).frame(width: 3, height: 34)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(event.title).font(.system(size: 14, weight: .medium)).lineLimit(1)
+                            Text(detail(event, snapshot)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                    }
+                }
+                Spacer(minLength: 0); Text(store.freshness(at: context.date)).font(.caption2).foregroundStyle(.secondary)
+            } else {
+                Image(systemName: "calendar.badge.plus").font(.system(size: 32, weight: .light)).foregroundStyle(.secondary); Spacer()
+                Text("Import an agenda").font(.system(size: 19, weight: .semibold))
+                Text("Calendar stays offline until you choose a read-only snapshot.").font(.caption).foregroundStyle(.secondary)
+                Button("Choose Snapshot…", action: configure).buttonStyle(.bordered)
+            }
+          }.frame(maxWidth: .infinity, minHeight: 155, alignment: .leading)
+        }
+    }
+    private func detail(_ event: AgendaEvent, _ snapshot: AgendaSnapshot) -> String {
+        let calendar = snapshot.calendars.first { $0.id == event.calendarID }?.name ?? "Calendar"
+        if let value = event.startDate, let day = civilDate(value) {
+            let formatter = DateFormatter()
+            formatter.locale = .current
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.setLocalizedDateFormatFromTemplate("MMM d")
+            return "All day · \(formatter.string(from: day)) · \(calendar)"
+        }
+        guard let start = event.start else { return calendar }
+        return "\(start.formatted(date: .abbreviated, time: .shortened)) · \(calendar)"
+    }
+    private func civilDate(_ value: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: value)
     }
 }
 

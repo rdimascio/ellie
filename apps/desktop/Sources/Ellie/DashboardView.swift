@@ -37,6 +37,7 @@ extension WidgetKind {
 struct DashboardView: View {
     @ObservedObject var store: DashboardStore
     @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: AgendaStore
     @State private var editing = false
     @State private var gallery = false
     @State private var newDashboard = false
@@ -155,7 +156,7 @@ struct DashboardView: View {
             WidgetGallery { kind in store.addWidget(kind: kind); gallery = false }
         }
         .sheet(item: $editedWidget) { widget in
-            WidgetInspector(widget: widget, weatherStore: weatherStore) { title, size, config in
+            WidgetInspector(widget: widget, weatherStore: weatherStore, agendaStore: agendaStore) { title, size, config in
                 store.updateWidget(id: widget.id, title: title, size: size, config: config)
                 if store.error == nil { editedWidget = nil }
             }
@@ -185,7 +186,7 @@ struct DashboardView: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .top, spacing: 18) {
                     ForEach(row) { widget in
-                        NativeWidgetCard(widget: widget, editing: editing, weatherStore: weatherStore,
+                        NativeWidgetCard(widget: widget, editing: editing, weatherStore: weatherStore, agendaStore: agendaStore,
                             configure: { editedWidget = widget },
                             earlier: { store.moveWidget(id: widget.id, offset: -1) },
                             later: { store.moveWidget(id: widget.id, offset: 1) },
