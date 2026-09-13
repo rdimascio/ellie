@@ -1,0 +1,140 @@
+.phone-remote {
+  margin: 28px 0 24px;
+  padding-top: 24px;
+  border-top: 1px solid #dbe5e6;
+}
+.phone-remote-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.phone-remote-kicker {
+  margin: 0 0 2px;
+  color: var(--pine);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.phone-remote h2 {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.2;
+  letter-spacing: -0.5px;
+}
+.remote-refresh {
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--pine);
+  padding: 5px 0;
+  font-size: 13px;
+  font-weight: 650;
+}
+.phone-remote select {
+  width: 100%;
+  min-height: 48px;
+  margin-bottom: 12px;
+  border: 1px solid #9eb7bb;
+  border-radius: 10px;
+  background: white;
+  color: var(--ink);
+  padding: 10px 36px 10px 12px;
+  font: inherit;
+}
+.phone-remote select:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 4px;
+}
+.remote-apps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 18px 0 22px;
+}
+.remote-apps button {
+  min-width: 0;
+  min-height: 74px;
+  border: 1px solid #cbdadb;
+  border-radius: 12px;
+  background: #f7fbfa;
+  color: var(--ink);
+  padding: 10px 6px;
+  font-size: 12px;
+  font-weight: 650;
+}
+.remote-apps button span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--pine);
+  font-size: 19px;
+}
+.remote-apps button:hover:enabled {
+  border-color: var(--pine);
+  background: #edf6f4;
+}
+.remote-command > div {
+  display: flex;
+  gap: 8px;
+}
+.remote-command input {
+  min-width: 0;
+  width: 100%;
+  min-height: 48px;
+  border: 1px solid #9eb7bb;
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.remote-command button {
+  min-width: 76px;
+  border: 1px solid var(--pine);
+  border-radius: 10px;
+  background: var(--pine);
+  color: white;
+  padding: 10px 14px;
+  font-weight: 650;
+}
+.remote-note,
+.dictation-note,
+.remote-result {
+  color: var(--slate);
+  font-size: 13px;
+}
+.remote-note {
+  margin: 10px 0 16px;
+}
+.dictation-note {
+  margin: 10px 0 0;
+}
+.remote-result {
+  min-height: 21px;
+  margin: 14px 0 0;
+}
+.remote-result.success {
+  color: var(--pine);
+  font-weight: 650;
+}
+.remote-result.failed,
+.remote-result.unknown {
+  color: #85401f;
+}
+@media (max-width: 380px) {
+  .phone-remote-heading {
+    display: block;
+  }
+  .remote-refresh {
+    margin-top: 8px;
+  }
+  .remote-apps {
+    grid-template-columns: 1fr;
+  }
+  .remote-apps button {
+    min-height: 52px;
+  }
+  .remote-apps button span {
+    display: inline;
+    margin: 0 6px 0 0;
+  }
+}

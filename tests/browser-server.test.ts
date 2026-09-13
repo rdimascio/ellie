@@ -12,7 +12,7 @@ import type { AddressInfo } from "node:net";
 import { BROWSER_SESSION_COOKIE, BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import type { BrowserAuthState, BrowserInvitationSpec } from "../apps/server/src/browser-auth.ts";
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
-import type { BrowserAssets } from "../apps/server/src/browser-server.ts";
+import type { BrowserAssets, BrowserRemote } from "../apps/server/src/browser-server.ts";
 
 const run = promisify(execFile);
 const phone: BrowserInvitationSpec = {
@@ -160,7 +160,7 @@ interface Response {
   body: unknown;
 }
 
-async function fixture(assets?: BrowserAssets) {
+async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
   const tls = await certificate;
   const port = await availablePort();
   const origin = `https://localhost:${port}`;
@@ -170,7 +170,7 @@ async function fixture(assets?: BrowserAssets) {
     if (failSave) throw new Error("private path and credential must stay redacted");
     state = structuredClone(next);
   });
-  const app = createBrowserServer({ ...tls, origin, auth, assets });
+  const app = createBrowserServer({ ...tls, origin, auth, assets, remote });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(port, "127.0.0.1", resolve);
@@ -545,4 +545,281 @@ test("malformed, oversized, and failed-state requests return static redacted err
     assert.doesNotMatch(response.text, new RegExp(invitation.code));
     assert.doesNotMatch(response.text, /private path|credential|private-/);
   }
+});
+
+async function pairBrowserClient(
+  f: Awaited<ReturnType<typeof fixture>>,
+  invitation: BrowserInvitationSpec,
+): Promise<{ cookie: string; clientId: string }> {
+  const invited = await f.auth.invite(invitation);
+  const paired = await f.request("POST", "/browser/v1/pair", {
+    body: { code: invited.code },
+    headers: { origin: f.origin },
+  });
+  assert.equal(paired.status, 200);
+  return {
+    cookie: cookieFrom(paired),
+    clientId: (paired.body as { client: { id: string } }).client.id,
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+test("browser nodes require an authenticated phone, a configured remote, and app.open grants", async (t) => {
+  const calls: string[] = [];
+  const remote: BrowserRemote = {
+    async nodes() {
+      return [
+        {
+          id: "living-room-mini",
+          label: "Living room",
+          online: true,
+          capabilities: ["app.open"],
+          privateTelemetry: "remote-secret-must-not-cross-browser-boundary",
+        },
+        { id: "bedroom-mini", label: "Bedroom", online: true, capabilities: ["app.open"] },
+      ];
+    },
+    async openApp(nodeId, app) {
+      calls.push(`${nodeId}:${app}`);
+      return { ok: true, message: "opened" };
+    },
+  };
+  const f = await fixture(undefined, remote);
+  t.after(() => f.close());
+  assert.equal((await f.request("GET", "/browser/v1/nodes")).status, 401);
+
+  const tvSession = await pairBrowserClient(f, tv);
+  assert.equal(
+    (await f.request("GET", "/browser/v1/nodes", { headers: { cookie: tvSession.cookie } })).status,
+    403,
+  );
+
+  const phoneSession = await pairBrowserClient(f, phone);
+  const listed = await f.request("GET", "/browser/v1/nodes", {
+    headers: { cookie: phoneSession.cookie },
+  });
+  assert.equal(listed.status, 200);
+  assert.deepEqual(listed.body, {
+    nodes: [
+      { id: "living-room-mini", label: "Living room", online: true, capabilities: ["app.open"] },
+    ],
+  });
+  assert.doesNotMatch(listed.text, /privateTelemetry|remote-secret/);
+  assert.deepEqual(calls, []);
+
+  const withoutRemote = await fixture();
+  t.after(() => withoutRemote.close());
+  const noRemoteSession = await pairBrowserClient(withoutRemote, phone);
+  assert.equal(
+    (
+      await withoutRemote.request("GET", "/browser/v1/nodes", {
+        headers: { cookie: noRemoteSession.cookie },
+      })
+    ).status,
+    503,
+  );
+});
+
+test("browser commands reject unauthorized, malformed, unsupported, and cross-origin requests before dispatch", async (t) => {
+  const dispatched: string[] = [];
+  const remote: BrowserRemote = {
+    async nodes() {
+      return [
+        { id: "living-room-mini", label: "Living room", online: true, capabilities: ["app.open"] },
+        { id: "bedroom-mini", label: "Bedroom", online: true, capabilities: ["app.open"] },
+      ];
+    },
+    async openApp(nodeId, app) {
+      dispatched.push(`${nodeId}:${app}`);
+      return { ok: true, message: "opened" };
+    },
+  };
+  const f = await fixture(undefined, remote);
+  t.after(() => f.close());
+  const tvSession = await pairBrowserClient(f, tv);
+  const phoneSession = await pairBrowserClient(f, phone);
+  const endpoint = "/browser/v1/commands";
+  const validBody = { nodeId: "living-room-mini", text: "open Arc" };
+  const responses = [
+    await f.request("POST", endpoint, { body: validBody, headers: { origin: f.origin } }),
+    await f.request("POST", endpoint, {
+      body: validBody,
+      headers: { origin: f.origin, cookie: tvSession.cookie },
+    }),
+    await f.request("POST", endpoint, {
+      body: { nodeId: "bedroom-mini", text: "open Arc" },
+      headers: { origin: f.origin, cookie: phoneSession.cookie },
+    }),
+    await f.request("POST", endpoint, {
+      body: { ...validBody, extra: true },
+      headers: { origin: f.origin, cookie: phoneSession.cookie },
+    }),
+    await f.request("POST", endpoint, {
+      body: { nodeId: "living-room-mini", text: "delete every message" },
+      headers: { origin: f.origin, cookie: phoneSession.cookie },
+    }),
+    await f.request("POST", endpoint, {
+      body: { nodeId: "living-room-mini", text: `open Arc${" ".repeat(501)}` },
+      headers: { origin: f.origin, cookie: phoneSession.cookie },
+    }),
+    await f.request("POST", endpoint, {
+      body: validBody,
+      headers: { cookie: phoneSession.cookie },
+    }),
+  ];
+  assert.deepEqual(
+    responses.map(({ status }) => status),
+    [401, 403, 403, 400, 400, 400, 403],
+  );
+  assert.deepEqual(dispatched, []);
+});
+
+test("browser commands reauthenticate after node discovery and never dispatch a revoked session", async (t) => {
+  const nodeLookup = deferred<Awaited<ReturnType<BrowserRemote["nodes"]>>>();
+  let dispatches = 0;
+  const remote: BrowserRemote = {
+    nodes: () => nodeLookup.promise,
+    async openApp() {
+      dispatches += 1;
+      return { ok: true, message: "opened" };
+    },
+  };
+  const f = await fixture(undefined, remote);
+  t.after(() => f.close());
+  const session = await pairBrowserClient(f, phone);
+  const request = f.request("POST", "/browser/v1/commands", {
+    body: { nodeId: "living-room-mini", text: "open Arc" },
+    headers: { origin: f.origin, cookie: session.cookie },
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(await f.auth.revoke(session.clientId), true);
+  nodeLookup.resolve([
+    { id: "living-room-mini", label: "Living room", online: true, capabilities: ["app.open"] },
+  ]);
+  assert.equal((await request).status, 401);
+  assert.equal(dispatches, 0);
+});
+
+test("browser commands require an online capable target and normalize only the finite app grammar", async (t) => {
+  const dispatched: Array<[string, string]> = [];
+  const remote: BrowserRemote = {
+    async nodes() {
+      return [
+        { id: "living-room-mini", label: "Living room", online: false, capabilities: ["app.open"] },
+      ];
+    },
+    async openApp(nodeId, app) {
+      dispatched.push([nodeId, app]);
+      return { ok: true, message: "opened" };
+    },
+  };
+  const f = await fixture(undefined, remote);
+  t.after(() => f.close());
+  const session = await pairBrowserClient(f, phone);
+  const headers = { origin: f.origin, cookie: session.cookie };
+  const offline = await f.request("POST", "/browser/v1/commands", {
+    body: { nodeId: "living-room-mini", text: "open Arc" },
+    headers,
+  });
+  assert.equal(offline.status, 409);
+  assert.deepEqual(dispatched, []);
+
+  remote.nodes = async () => [
+    { id: "living-room-mini", label: "Living room", online: true, capabilities: [] },
+  ];
+  const incapable = await f.request("POST", "/browser/v1/commands", {
+    body: { nodeId: "living-room-mini", text: "open Arc" },
+    headers,
+  });
+  assert.equal(incapable.status, 409);
+  assert.deepEqual(dispatched, []);
+
+  remote.nodes = async () => [
+    { id: "living-room-mini", label: "Living room", online: true, capabilities: ["app.open"] },
+  ];
+  for (const [text, app] of [
+    ["Ellie, OPEN ARC!!!", "arc"],
+    ["launch Safari.", "safari"],
+    ["Start Messages", "messages"],
+  ] as const) {
+    const response = await f.request("POST", "/browser/v1/commands", {
+      body: { nodeId: "living-room-mini", text },
+      headers,
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(dispatched.at(-1), ["living-room-mini", app]);
+  }
+  assert.equal(dispatched.length, 3);
+});
+
+test("browser commands enforce one in-flight dispatch per node", async (t) => {
+  const firstDispatch = deferred<{ ok: boolean; message: string }>();
+  let dispatches = 0;
+  const remote: BrowserRemote = {
+    async nodes() {
+      return [
+        { id: "living-room-mini", label: "Living room", online: true, capabilities: ["app.open"] },
+      ];
+    },
+    openApp() {
+      dispatches += 1;
+      return firstDispatch.promise;
+    },
+  };
+  const f = await fixture(undefined, remote);
+  t.after(() => f.close());
+  const session = await pairBrowserClient(f, phone);
+  const options = {
+    body: { nodeId: "living-room-mini", text: "open Arc" },
+    headers: { origin: f.origin, cookie: session.cookie },
+  };
+  const first = f.request("POST", "/browser/v1/commands", options);
+  await new Promise((resolve) => setImmediate(resolve));
+  const busy = await f.request("POST", "/browser/v1/commands", options);
+  assert.equal(busy.status, 409);
+  assert.equal(dispatches, 1);
+  firstDispatch.resolve({ ok: true, message: "opened" });
+  assert.equal((await first).status, 200);
+  assert.equal(dispatches, 1);
+});
+
+test("browser commands report an unknown outcome without retrying an upstream failure", async (t) => {
+  let dispatches = 0;
+  const remote: BrowserRemote = {
+    async nodes() {
+      return [
+        { id: "living-room-mini", label: "Living room", online: true, capabilities: ["app.open"] },
+      ];
+    },
+    async openApp() {
+      dispatches += 1;
+      throw new Error("private upstream route and credential");
+    },
+  };
+  const f = await fixture(undefined, remote);
+  t.after(() => f.close());
+  const session = await pairBrowserClient(f, phone);
+  const response = await f.request("POST", "/browser/v1/commands", {
+    body: { nodeId: "living-room-mini", text: "open Arc" },
+    headers: { origin: f.origin, cookie: session.cookie },
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(response.body, {
+    error: "Command outcome is unknown. Check the Mac before sending again.",
+  });
+  assert.equal(dispatches, 1);
+  assert.doesNotMatch(response.text, /private upstream|credential/);
 });

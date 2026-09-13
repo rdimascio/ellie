@@ -2,10 +2,15 @@ import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
+import { identifier } from "@ellie/protocol";
 import { readJson } from "@ellie/transport";
+import { canOpenApps, phoneAppCommand } from "./browser-remote.ts";
+import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
+export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
   browserOrigin,
+  browserLabel,
   browserRequestMatchesOrigin,
   browserSessionCookie,
   browserSessionToken,
@@ -32,11 +37,26 @@ export interface BrowserServerOptions {
   origin: string;
   auth: BrowserAuth;
   assets?: BrowserAssets;
+  remote?: BrowserRemote;
 }
 
 export interface BrowserServer {
   server: HttpsServer;
   shutdown: () => void;
+}
+
+function publicNodes(value: BrowserRemoteNode[]): BrowserRemoteNode[] {
+  if (!Array.isArray(value) || value.length > 16) throw new Error("Nodes unavailable.");
+  return value.map((node) => {
+    if (typeof node?.online !== "boolean" || !Array.isArray(node.capabilities))
+      throw new Error("Nodes unavailable.");
+    return {
+      id: identifier(node.id),
+      label: browserLabel(node.label),
+      online: node.online,
+      capabilities: node.capabilities.includes("app.open") ? ["app.open"] : [],
+    };
+  });
 }
 
 function rawHeaderValues(request: IncomingMessage, name: string): string[] {
@@ -118,6 +138,7 @@ function invalidRequest(socket: Duplex): void {
 export function createBrowserServer(options: BrowserServerOptions): BrowserServer {
   const expected = browserOrigin(options.origin);
   const sockets = new Set<Duplex>();
+  const busyNodes = new Set<string>();
   let stopped = false;
 
   const server = createServer(
@@ -243,6 +264,112 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             return;
           }
           send(response, 200, { ok: true }, { "set-cookie": clearBrowserSessionCookie() });
+          return;
+        }
+
+        if (
+          (method === "GET" && path === "/browser/v1/nodes") ||
+          (method === "POST" && path === "/browser/v1/commands")
+        ) {
+          const client = options.auth.authenticateCookie(request.headers.cookie);
+          if (!client) {
+            send(response, 401, { error: "Browser session required." }, {}, true);
+            return;
+          }
+          if (client.role !== "phone_controller") {
+            send(response, 403, { error: "Phone remote permission required." }, {}, true);
+            return;
+          }
+          if (!options.remote) {
+            send(response, 503, { error: "Phone controls are not configured." }, {}, true);
+            return;
+          }
+          if (method === "GET") {
+            const nodes = publicNodes(await options.remote.nodes());
+            const current = options.auth.authenticateCookie(request.headers.cookie);
+            if (!current) {
+              send(response, 401, { error: "Browser session required." }, {}, true);
+              return;
+            }
+            send(response, 200, { nodes: nodes.filter((node) => canOpenApps(current, node.id)) });
+            return;
+          }
+          if (!isJson(request)) {
+            send(response, 415, { error: "JSON request required." }, {}, true);
+            return;
+          }
+          let command;
+          try {
+            command = phoneAppCommand(await readJson(request, MAX_BROWSER_BODY_BYTES));
+          } catch {
+            send(
+              response,
+              400,
+              { error: "Try open Arc, open Safari, or open Messages." },
+              {},
+              true,
+            );
+            return;
+          }
+          if (!canOpenApps(client, command.nodeId)) {
+            send(response, 403, { error: "App opening is not allowed on this device." }, {}, true);
+            return;
+          }
+          if (busyNodes.has(command.nodeId)) {
+            send(
+              response,
+              409,
+              { error: "This device is busy. Wait for the current command." },
+              {},
+              true,
+            );
+            return;
+          }
+          busyNodes.add(command.nodeId);
+          try {
+            const nodes = publicNodes(await options.remote.nodes());
+            const current = options.auth.authenticateCookie(request.headers.cookie);
+            if (!current) {
+              send(response, 401, { error: "Browser session required." }, {}, true);
+              return;
+            }
+            if (!canOpenApps(current, command.nodeId)) {
+              send(
+                response,
+                403,
+                { error: "App opening is not allowed on this device." },
+                {},
+                true,
+              );
+              return;
+            }
+            const target = nodes.find((node) => node.id === command.nodeId);
+            if (!target?.online || !target.capabilities.includes("app.open")) {
+              send(
+                response,
+                409,
+                { error: "This device is offline or cannot open apps." },
+                {},
+                true,
+              );
+              return;
+            }
+            if (response.destroyed || stopped) return;
+            response.setTimeout(40_000);
+            try {
+              send(response, 200, await options.remote.openApp(command.nodeId, command.app));
+            } catch {
+              send(
+                response,
+                502,
+                { error: "Command outcome is unknown. Check the Mac before sending again." },
+                {},
+                true,
+              );
+            }
+          } finally {
+            busyNodes.delete(command.nodeId);
+          }
           return;
         }
 
