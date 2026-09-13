@@ -2,12 +2,13 @@ import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
-import { identifier, record, VERSION } from "@ellie/protocol";
+import { identifier, record, VERSION, NATIVE_SESSION_CONTRACT } from "@ellie/protocol";
 import { readJson } from "@ellie/transport";
 import { canOpenApps, phoneAppCommand } from "./browser-remote.ts";
 import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
 import type { NativeAuth } from "./native-auth.ts";
 import { NativeAuthError } from "./native-auth.ts";
+import { NativeControls } from "./native-controls.ts";
 export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
@@ -18,6 +19,8 @@ import {
   browserSessionToken,
   clearBrowserSessionCookie,
 } from "./browser-auth.ts";
+
+const nativeRoutes = NATIVE_SESSION_CONTRACT.routes;
 
 const MAX_BROWSER_BODY_BYTES = 4096;
 const SECURITY_HEADERS = {
@@ -142,6 +145,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
   const expected = browserOrigin(options.origin);
   const sockets = new Set<Duplex>();
   const busyNodes = new Set<string>();
+  const nativeControls = new NativeControls(options.remote, busyNodes);
   let stopped = false;
 
   const server = createServer(
@@ -186,14 +190,14 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 415, { error: "JSON required." }, {}, true);
             return;
           }
-          if (method === "POST" && path === "/native/v1/pair") {
+          if (method === nativeRoutes.pair.method && path === nativeRoutes.pair.path) {
             if (authorizations.length !== 0) {
               send(response, 403, { error: "Native pairing rejected." }, {}, true);
               return;
             }
             let body: Record<string, unknown>;
             try {
-              body = record(await readJson(request, MAX_BROWSER_BODY_BYTES));
+              body = record(await readJson(request, NATIVE_SESSION_CONTRACT.requestBodyBytes));
               if (
                 Object.keys(body).length !== 2 ||
                 typeof body.invitation !== "string" ||
@@ -222,14 +226,14 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 401, { error: "Native session required." }, {}, true);
             return;
           }
-          if (method === "GET" && path === "/native/v1/session") {
+          if (method === nativeRoutes.session.method && path === nativeRoutes.session.path) {
             send(response, 200, { client });
             return;
           }
-          if (method === "POST" && path === "/native/v1/logout") {
+          if (method === nativeRoutes.logout.method && path === nativeRoutes.logout.path) {
             try {
               if (
-                !isEmptyObject(await readJson(request, MAX_BROWSER_BODY_BYTES)) ||
+                !isEmptyObject(await readJson(request, NATIVE_SESSION_CONTRACT.requestBodyBytes)) ||
                 !(await options.nativeAuth.logout(authorizations[0]))
               )
                 throw new Error();
@@ -239,6 +243,20 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             }
             return;
           }
+          if (
+            await nativeControls.handle(
+              request,
+              response,
+              path,
+              options.nativeAuth,
+              authorizations[0]!,
+              (status, body) => {
+                if (!response.destroyed && !response.writableEnded)
+                  send(response, status, body, {}, status !== 200);
+              },
+            )
+          )
+            return;
           send(response, 404, { error: "Native route not found." }, {}, true);
           return;
         }
@@ -486,6 +504,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
     shutdown: () => {
       if (stopped) return;
       stopped = true;
+      nativeControls.stop();
       if (server.listening) server.close();
       server.closeAllConnections();
       for (const socket of sockets) socket.destroy();

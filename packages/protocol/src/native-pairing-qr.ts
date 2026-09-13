@@ -1,8 +1,9 @@
+import { NATIVE_SESSION_CONTRACT } from "./native-session-contract.ts";
 import type { Capability } from "./operations.ts";
 
 export const NATIVE_PAIRING_QR_PREFIX = "ellie-native:v1:";
 export const MAX_NATIVE_PAIRING_QR_BYTES = 2300;
-export const NATIVE_INVITATION_TTL_MS = 10 * 60_000;
+export const NATIVE_INVITATION_TTL_MS = NATIVE_SESSION_CONTRACT.invitationLifetimeMs;
 const TOKEN = /^[a-f0-9]{64}$/;
 const PIN = /^[a-f0-9]{64}$/;
 

@@ -4,14 +4,20 @@ import type { Stats } from "node:fs";
 import { link, lstat, mkdir, open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { stateDir } from "@ellie/config";
-import { identifier, nativeGrants, nativeLabel, record } from "@ellie/protocol";
+import {
+  identifier,
+  nativeGrants,
+  nativeLabel,
+  record,
+  NATIVE_SESSION_CONTRACT,
+} from "@ellie/protocol";
 import type { NativeGrant } from "@ellie/protocol";
 import { TextDecoder } from "node:util";
 
 export const NATIVE_AUTH_FILE = "native-auth.json";
 export const NATIVE_AUTH_VERSION = 1;
-export const NATIVE_INVITATION_TTL_MS = 10 * 60_000;
-export const NATIVE_SESSION_TTL_MS = 90 * 24 * 60 * 60_000;
+export const NATIVE_INVITATION_TTL_MS = NATIVE_SESSION_CONTRACT.invitationLifetimeMs;
+export const NATIVE_SESSION_TTL_MS = NATIVE_SESSION_CONTRACT.sessionLifetimeMs;
 export const MAX_NATIVE_INVITATIONS = 32;
 export const MAX_NATIVE_SESSIONS = 128;
 const MAX_NATIVE_AUTH_BYTES = 1024 * 1024;

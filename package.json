@@ -17,7 +17,7 @@
     "check": "bun run lint && bun run format:check && bun run contracts:check && bun run typecheck && bun run test && bun run demo:build",
     "build:macos": "node scripts/build-macos.mjs",
     "desktop:build": "node scripts/build-desktop.mjs",
-    "desktop:test": "xcrun swift test --package-path apps/desktop --scratch-path apps/desktop/.build",
+    "desktop:test": "node scripts/test-desktop.mjs",
     "ios:build": "xcodebuild -project apps/ios/EllieIOS.xcodeproj -scheme EllieIOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build",
     "ios:test": "node scripts/test-ios.mjs",
     "contracts:generate": "node scripts/generate-contracts.ts",
@@ -27,7 +27,8 @@
     "demo": "bun run demo:build && bun run demo:preview",
     "demo:build": "node node_modules/vite/bin/vite.js build --config apps/command-center/vite.config.ts",
     "demo:preview": "node node_modules/vite/bin/vite.js preview --config apps/command-center/vite.config.ts",
-    "demo:test": "node node_modules/@playwright/test/cli.js test --config apps/command-center/playwright.config.ts"
+    "demo:test": "node node_modules/@playwright/test/cli.js test --config apps/command-center/playwright.config.ts",
+    "test:ios-ats": "node scripts/test-ios-ats.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

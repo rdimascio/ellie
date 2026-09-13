@@ -4,6 +4,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { OPERATION_REGISTRY } from "../packages/protocol/src/operations.ts";
 import { JOB_OUTCOME_CODES, JOB_STATES } from "../packages/protocol/src/index.ts";
 
+import {
+  NATIVE_SESSION_CONTRACT,
+  nativeSessionSchemas,
+} from "../packages/protocol/src/native-session-contract.ts";
+import { nativePairingFixtures } from "./native-contract-fixtures.ts";
+import {
+  NATIVE_CONTROL_CONTRACT,
+  nativeControlSchemas,
+} from "../packages/protocol/src/native-controls.ts";
+
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -592,64 +602,7 @@ function openApi(): Json {
           required: ["ok", "revoked"],
           properties: { ok: { const: true }, revoked: { type: "boolean" } },
         },
-        NativeGrant: {
-          type: "object",
-          additionalProperties: false,
-          required: ["target", "capabilities"],
-          properties: {
-            target: identifier,
-            capabilities: {
-              type: "array",
-              prefixItems: [{ const: "app.open" }],
-              minItems: 1,
-              maxItems: 1,
-            },
-          },
-        },
-        NativeInvitationSpec: {
-          type: "object",
-          additionalProperties: false,
-          required: ["label", "grants"],
-          properties: {
-            label: boundedString(64),
-            grants: { type: "array", minItems: 1, maxItems: 16, items: ref("NativeGrant") },
-          },
-        },
-        NativeClient: {
-          type: "object",
-          additionalProperties: false,
-          required: ["id", "role", "label", "grants", "createdAt", "expiresAt"],
-          properties: {
-            id: identifier,
-            role: { const: "native_phone_controller" },
-            label: boundedString(64),
-            grants: { type: "array", minItems: 1, maxItems: 16, items: ref("NativeGrant") },
-            createdAt: finiteNumber,
-            expiresAt: finiteNumber,
-          },
-        },
-        NativePairingPayload: {
-          type: "object",
-          additionalProperties: false,
-          required: [
-            "version",
-            "origin",
-            "certificateSha256",
-            "invitation",
-            "expiresAt",
-            "label",
-            "grants",
-          ],
-          properties: {
-            version: { const: 1 },
-            origin: { type: "string", format: "uri", pattern: "^https://[^/@]+$" },
-            certificateSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
-            invitation: { type: "string", pattern: "^[a-f0-9]{64}$" },
-            expiresAt: finiteNumber,
-            label: boundedString(64),
-            grants: { type: "array", minItems: 1, maxItems: 16, items: ref("NativeGrant") },
-          },
-        },
+        ...nativeSessionSchemas(),
         NodeIdRequest: { type: "object", required: ["id"], properties: { id: identifier } },
         OkResponse: ok,
         InstalledModel: {
@@ -839,6 +792,162 @@ function openApi(): Json {
   };
 }
 
+function nativeOpenApi(): Json {
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const response = (description: string, schema: Json) => ({
+    description,
+    content: { "application/json": { schema } },
+    headers: { "Cache-Control": { schema: { const: "no-store" } } },
+  });
+  const request = (schema: Json) => ({
+    required: true,
+    content: { "application/json": { schema } },
+  });
+  const errors = Object.fromEntries(
+    [400, 401, 403, 404, 409, 415, 500, 503].map((status) => [
+      String(status),
+      response(
+        status === 401
+          ? "Native credential rejected or expired."
+          : status === 503 || status === 500
+            ? "Authorization persistence or listener unavailable; a mutation outcome may be uncertain."
+            : "Request rejected by the native listener.",
+        ref("NativeError"),
+      ),
+    ]),
+  );
+  const routes = NATIVE_SESSION_CONTRACT.routes;
+  const common = {
+    parameters: [
+      {
+        name: "X-Ellie-Version",
+        in: "header",
+        required: true,
+        schema: { type: "string", const: "1" },
+      },
+    ],
+    "x-ellie-max-json-post-body-bytes": NATIVE_SESSION_CONTRACT.requestBodyBytes,
+    "x-ellie-request-channel": {
+      exactHost: true,
+      forbiddenHeaders: ["Origin", "Cookie", "Sec-Fetch-*"],
+      duplicateHeadersRejected: ["Host", "Authorization", "X-Ellie-Version"],
+      jsonPostRequiresSingleContentType: true,
+    },
+  };
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "Ellie native client API",
+      version: "1.0.0",
+      description:
+        "The optional client HTTPS listener exposes native enrollment, sessions and scoped app controls. Use the exact origin from the explicitly confirmed QR. Verify its leaf SHA-256, hostname and certificate validity. Native bearer credentials never authenticate as coordinator, execution-node or browser credentials. No cookies, Origin or Sec-Fetch-* headers are allowed; Host must match the exact listener authority. JSON POST bodies require a single application/json Content-Type, optionally charset=utf-8. No automatic mutation replay is permitted.",
+    },
+    servers: [
+      {
+        url: "{origin}",
+        variables: {
+          origin: {
+            default: "https://coordinator.example:8444",
+            description:
+              "Reserved example only. Replace with the verified QR origin; never infer the coordinator API port.",
+          },
+        },
+      },
+    ],
+    security: [{ nativeBearer: [] }],
+    paths: {
+      [routes.pair.path]: {
+        post: {
+          ...common,
+          operationId: routes.pair.operationId,
+          security: [],
+          summary: "Exchange a single-use invitation for a native session",
+          description:
+            "Authorization is forbidden. Generate and safely retain a random candidate token before the single POST. Success means durable pairing committed. An interrupted response is uncertain: use GET session with the candidate to recover, never replay this POST automatically.",
+          requestBody: request(ref("NativePairRequest")),
+          responses: {
+            ...errors,
+            "200": response(
+              "Pairing durably committed. No credential is returned; the client already holds its candidate.",
+              ref("NativeSessionResponse"),
+            ),
+          },
+        },
+      },
+      [routes.session.path]: {
+        get: {
+          ...common,
+          operationId: routes.session.operationId,
+          summary: "Inspect or recover the native credential",
+          description:
+            "Read-only. Candidate bearer authentication returns the public record after a committed pair, including after a lost pair response. A 401 means the candidate is not currently authorized; this read never consumes an invitation or creates a session.",
+          responses: {
+            ...errors,
+            "200": response("Current native session metadata.", ref("NativeSessionResponse")),
+          },
+        },
+      },
+      [routes.logout.path]: {
+        post: {
+          ...common,
+          operationId: routes.logout.operationId,
+          summary: "Revoke this native credential",
+          description:
+            "The empty JSON body is required. Success confirms durable revocation. On interruption retain uncertainty; GET session may resolve whether the credential still authenticates. Local credential removal alone does not confirm server revocation.",
+          requestBody: request(ref("NativeLogoutRequest")),
+          responses: {
+            ...errors,
+            "200": response("Native credential durably revoked.", ref("NativeLogoutResponse")),
+          },
+        },
+      },
+      [NATIVE_CONTROL_CONTRACT.routes.nodes.path]: {
+        get: {
+          ...common,
+          operationId: NATIVE_CONTROL_CONTRACT.routes.nodes.operationId,
+          summary: "List configured devices allowed by this native credential",
+          description:
+            "Read-only, bounded to 16 configured targets and 8192 response bytes. Returns only explicitly granted app.open targets, labels, online state and the app.open capability; no household telemetry. Discovery has a five-second deadline.",
+          responses: {
+            ...errors,
+            "200": response("Granted configured devices.", ref("NativeNodesResponse")),
+          },
+        },
+      },
+      [NATIVE_CONTROL_CONTRACT.routes.commands.path]: {
+        post: {
+          ...common,
+          operationId: NATIVE_CONTROL_CONTRACT.routes.commands.operationId,
+          summary: "Explicitly open an allowed app on a granted device",
+          description:
+            "Only app.open for Arc, Safari or Messages. Revalidates authority and live inventory before dispatch. Shares per-device reservations with browser commands. No persistence or automatic retry. Command dispatch has a 35-second deadline after bounded discovery. A timeout, disconnect or 502 may follow execution; check the Mac before issuing another action. Cancellation requests upstream cancellation but does not undo a launched app. 409 also means the device is offline, incapable or has an unfinished command.",
+          requestBody: request(ref("NativeAppRequest")),
+          responses: {
+            ...errors,
+            "200": response("Known command outcome.", ref("NativeCommandResponse")),
+            "502": response(
+              "Execution outcome is uncertain; never replay automatically.",
+              ref("NativeUnknownResponse"),
+            ),
+          },
+        },
+      },
+    },
+    components: {
+      securitySchemes: {
+        nativeBearer: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "64 lowercase hexadecimal characters",
+          description:
+            "The separate native candidate/session token. Never a controller token, node token, browser cookie or invitation.",
+        },
+      },
+      schemas: { ...nativeSessionSchemas(), ...nativeControlSchemas() },
+    },
+  } as Json;
+}
+
 function serialized(value: Json): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -848,6 +957,8 @@ export function generatedContracts(): Record<string, string> {
     "operation-registry.v1.json": serialized(OPERATION_REGISTRY as unknown as Json),
     "protocol.v1.schema.json": serialized(protocolSchema()),
     "openapi.v1.json": serialized(openApi()),
+    "native-openapi.v1.json": serialized(nativeOpenApi()),
+    "native-pairing-fixtures.v1.json": serialized(nativePairingFixtures() as Json),
   };
 }
 

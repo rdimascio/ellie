@@ -147,3 +147,76 @@ test("browser remote projects configured nodes with bounded freshness and app ca
     },
   ]);
 });
+
+test("native bridge forwards cancellation to both pinned discovery and command requests", async () => {
+  const controller = new AbortController();
+  const calls: { timeoutMs?: number; signal?: AbortSignal }[] = [];
+  const remote = createBrowserRemote(
+    {
+      async call(_method, path, _body, options) {
+        calls.push(options!);
+        return path === "/v1/nodes" ? [] : { ok: true };
+      },
+    },
+    [{ id: "test-mini", label: "Test Mac" }],
+  );
+  await remote.nodes({ signal: controller.signal });
+  await remote.openApp("test-mini", "arc", { signal: controller.signal });
+  assert.deepEqual(
+    calls.map((call) => call.timeoutMs),
+    [5000, 35_000],
+  );
+  assert.ok(calls.every((call) => call.signal === controller.signal));
+  controller.abort();
+  assert.ok(calls.every((call) => call.signal?.aborted));
+});
+
+test("production remote derives a bounded dynamic inventory from registered coordinator nodes", async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
+  const inventory = [
+    { id: "living-room-mini", lastSeen: now, executionCapabilities: ["app.open"] },
+    { id: "office-mini", lastSeen: now - 60_001, capabilities: ["app.open"] },
+  ];
+  const upstream = {
+    calls: [] as UpstreamCall[],
+    async call(
+      method: "GET" | "POST",
+      path: string,
+      body?: unknown,
+      options?: { timeoutMs?: number },
+    ): Promise<unknown> {
+      this.calls.push({ method, path, body, options });
+      return method === "GET" ? inventory : { ok: false };
+    },
+  };
+  const remote = createBrowserRemote(upstream);
+  assert.deepEqual(await remote.nodes(), [
+    {
+      id: "living-room-mini",
+      label: "Mac · living-room-mini",
+      online: true,
+      capabilities: ["app.open"],
+    },
+    {
+      id: "office-mini",
+      label: "Mac · office-mini",
+      online: false,
+      capabilities: ["app.open"],
+    },
+  ]);
+  assert.deepEqual(await remote.openApp("living-room-mini", "arc"), {
+    ok: false,
+    message: "The app could not be opened. Check the selected Mac.",
+  });
+});
+
+test("production remote rejects excessive duplicate and noncanonical registered inventories", async () => {
+  for (const value of [
+    Array.from({ length: 17 }, (_, index) => ({ id: `mac-${index}` })),
+    [{ id: "mac-a" }, { id: "mac-a" }],
+    [{ id: "../private" }],
+  ]) {
+    await assert.rejects(createBrowserRemote(upstreamReturning(value)).nodes());
+  }
+});

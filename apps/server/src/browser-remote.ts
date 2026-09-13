@@ -1,4 +1,4 @@
-import { identifier } from "@ellie/protocol";
+import { identifier, nativeLabel } from "@ellie/protocol";
 import type { BrowserClient } from "./browser-auth.ts";
 
 export const PHONE_APPS = { arc: "Arc", safari: "Safari", messages: "Messages" } as const;
@@ -10,8 +10,12 @@ export interface BrowserRemoteNode {
   capabilities: "app.open"[];
 }
 export interface BrowserRemote {
-  nodes(): Promise<BrowserRemoteNode[]>;
-  openApp(nodeId: string, app: PhoneApp): Promise<{ ok: boolean; message: string }>;
+  nodes(options?: { signal?: AbortSignal }): Promise<BrowserRemoteNode[]>;
+  openApp(
+    nodeId: string,
+    app: PhoneApp,
+    options?: { signal?: AbortSignal },
+  ): Promise<{ ok: boolean; message: string }>;
 }
 
 export function canOpenApps(client: BrowserClient, nodeId: string): boolean {
@@ -51,38 +55,54 @@ interface Upstream {
     method: "GET" | "POST",
     path: string,
     body?: unknown,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; signal?: AbortSignal },
   ): Promise<unknown>;
 }
 
 /** Opt-in bridge to an existing pinned coordinator; secrets never enter browser responses. */
 export function createBrowserRemote(
   upstream: Upstream,
-  configured: readonly { id: string; label: string }[],
+  configured?: readonly { id: string; label: string }[],
 ): BrowserRemote {
-  if (
-    configured.length < 1 ||
-    configured.length > 16 ||
-    new Set(configured.map((node) => node.id)).size !== configured.length
-  )
+  if (configured && (configured.length < 1 || configured.length > 16))
     throw new Error("Invalid remote targets.");
-  const targets = configured.map((node) => {
+  const targets = configured?.map((node) => {
     identifier(node.id);
-    if (!node.label || [...node.label].length > 64 || /\p{C}/u.test(node.label))
+    try {
+      nativeLabel(node.label);
+    } catch {
       throw new Error("Invalid remote label.");
+    }
     return { ...node };
   });
+  if (targets && new Set(targets.map((node) => node.id)).size !== targets.length)
+    throw new Error("Invalid remote targets.");
   return {
-    async nodes() {
-      const response = await upstream.call("GET", "/v1/nodes", undefined, { timeoutMs: 5000 });
-      if (!Array.isArray(response) || response.length > 128) throw new Error("Nodes unavailable.");
-      return targets.map((target) => {
-        const node = response.find((item) => item?.id === target.id);
+    async nodes(options) {
+      const response = await upstream.call("GET", "/v1/nodes", undefined, {
+        timeoutMs: 5000,
+        ...(options?.signal ? { signal: options.signal } : {}),
+      });
+      if (!Array.isArray(response) || response.length > (targets ? 128 : 16))
+        throw new Error("Nodes unavailable.");
+      const registered = response.map((item) => {
+        if (!item || typeof item !== "object") throw new Error("Nodes unavailable.");
+        const id = identifier((item as { id?: unknown }).id);
+        return { id, label: `Mac · ${[...id].slice(0, 58).join("")}`, item };
+      });
+      if (new Set(registered.map((node) => node.id)).size !== registered.length)
+        throw new Error("Nodes unavailable.");
+      const projected = targets ?? registered;
+      return projected.map((target) => {
+        const node = targets
+          ? response.find((item) => item?.id === target.id)
+          : registered.find((item) => item.id === target.id)?.item;
         const available =
           Array.isArray(node?.executionCapabilities ?? node?.capabilities) &&
           (node.executionCapabilities ?? node.capabilities).includes("app.open");
         return {
-          ...target,
+          id: target.id,
+          label: target.label,
           online: Boolean(
             available &&
             Number.isFinite(node?.lastSeen) &&
@@ -93,14 +113,18 @@ export function createBrowserRemote(
         };
       });
     },
-    async openApp(nodeId, app) {
-      if (!targets.some((node) => node.id === nodeId) || !Object.hasOwn(PHONE_APPS, app))
+    async openApp(nodeId, app, options) {
+      if (
+        (targets && !targets.some((node) => node.id === nodeId)) ||
+        !Object.hasOwn(PHONE_APPS, app)
+      )
         throw new Error("Unknown target or app.");
+      identifier(nodeId);
       const response = await upstream.call(
         "POST",
         "/v1/commands",
         { nodeId, text: `open app ${app}` },
-        { timeoutMs: 35_000 },
+        { timeoutMs: 35_000, ...(options?.signal ? { signal: options.signal } : {}) },
       );
       if (
         typeof response !== "object" ||

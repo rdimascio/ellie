@@ -1,39 +1,75 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testCoordinatorNavigationDoesNotStartEnrollment() {
+        let app = XCUIApplication()
+        app.launch()
+        let coordinator = app.buttons["coordinator-enrollment"]
+        XCTAssertTrue(coordinator.waitForExistence(timeout: 5))
+        coordinator.tap()
+        XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
+        returnToDashboardList(from: "Coordinator", in: app)
+    }
+
     func testNotesPersistAndDashboardDeletionReturnsToList() {
         let app = XCUIApplication()
         app.launch()
-        app.staticTexts["Home"].tap()
+        openDashboard(named: "Home", identifiedBy: "dashboard-home", in: app)
         app.buttons["Add a note"].tap()
         let note = "Remember the blue mug"
-        app.textViews.firstMatch.tap()
-        app.textViews.firstMatch.typeText(note)
+        let noteEditor = app.textViews.firstMatch
+        noteEditor.tap()
+        typeTextReliably(note, into: noteEditor)
         app.buttons["Save"].tap()
         XCTAssertTrue(app.buttons["note-note"].waitForExistence(timeout: 2))
         XCTAssertEqual(app.buttons["note-note"].label, note)
         app.terminate()
         app.launch()
-        app.staticTexts["Home"].tap()
+        openDashboard(named: "Home", identifiedBy: "dashboard-home", in: app)
         XCTAssertTrue(app.buttons["note-note"].waitForExistence(timeout: 2))
         XCTAssertEqual(app.buttons["note-note"].label, note)
-        app.navigationBars.buttons.firstMatch.tap()
+        returnToDashboardList(from: "Home", in: app)
 
         app.buttons["new-dashboard"].tap()
-        app.textFields["Name"].typeText("Kitchen")
+        typeTextReliably("Kitchen", into: app.textFields["Name"])
         app.buttons["Create"].tap()
-        XCTAssertTrue(app.staticTexts["Kitchen"].waitForExistence(timeout: 2))
-        app.staticTexts["Kitchen"].tap()
-        app.buttons["Dashboard options"].tap()
+        openDashboard(named: "Kitchen", in: app)
+        app.buttons["dashboard-options"].tap()
         app.buttons["Rename Dashboard"].tap()
         let field = app.textFields["Name"]
-        field.tap(); field.typeText(" Notes")
-        app.buttons["Save"].tap()
-        XCTAssertTrue(app.navigationBars["Kitchen Notes"].waitForExistence(timeout: 2))
-        app.buttons["Dashboard options"].tap()
+        field.tap()
+        typeTextReliably(" Notes", into: field, startingWith: "Kitchen")
+        app.alerts["Rename dashboard"].buttons["Save"].tap()
+        XCTAssertTrue(app.navigationBars["Kitchen Notes"].waitForExistence(timeout: 5))
+        app.buttons["dashboard-options"].tap()
         app.buttons["Delete Dashboard"].tap()
         app.buttons["Delete dashboard"].tap()
         XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 2))
         XCTAssertFalse(app.staticTexts["Kitchen Notes"].exists)
+    }
+
+    private func openDashboard(named name: String, identifiedBy identifier: String? = nil, in app: XCUIApplication) {
+        let link = identifier.map { app.buttons[$0] }
+            ?? app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch
+        XCTAssertTrue(link.waitForExistence(timeout: 5), "Expected the \(name) dashboard link")
+        link.tap()
+        XCTAssertTrue(app.navigationBars[name].waitForExistence(timeout: 5), "Expected the \(name) dashboard detail")
+    }
+
+    private func returnToDashboardList(from title: String, in app: XCUIApplication) {
+        let back = app.navigationBars[title].buttons["Ellie"]
+        XCTAssertTrue(back.waitForExistence(timeout: 5), "Expected the dashboard-list back button")
+        back.tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5), "Expected the dashboard list")
+    }
+
+    private func typeTextReliably(_ text: String, into element: XCUIElement, startingWith initial: String = "") {
+        var expected = initial
+        for character in text {
+            element.typeText(String(character))
+            expected.append(character)
+            XCTAssertEqual(element.value as? String, expected, "Expected input value \(expected)")
+        }
     }
 }

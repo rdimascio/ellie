@@ -10,7 +10,7 @@
   <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
     <Testables>
 
-      <TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000004" BuildableName="EllieIOSUITests.xctest" BlueprintName="EllieIOSUITests" ReferencedContainer="container:EllieIOS.xcodeproj"/></TestableReference>
+      <TestableReference skipped="NO"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000007" BuildableName="EllieIOSUnitTests.xctest" BlueprintName="EllieIOSUnitTests" ReferencedContainer="container:EllieIOS.xcodeproj"/></TestableReference>
     </Testables>
   </TestAction>
   <LaunchAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES"><BuildableProductRunnable runnableDebuggingMode="0"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="E00000000000000000000003" BuildableName="Ellie.app" BlueprintName="EllieIOS" ReferencedContainer="container:EllieIOS.xcodeproj"/></BuildableProductRunnable></LaunchAction>
