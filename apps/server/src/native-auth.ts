@@ -136,6 +136,7 @@ export class NativeAuth {
   private lock: Promise<void> = Promise.resolve();
   private poisoned = false;
   private closed = false;
+  private readonly revokeListeners = new Set<(clientId: string) => void>();
 
   constructor(
     state: unknown,
@@ -165,6 +166,19 @@ export class NativeAuth {
   async close(): Promise<void> {
     this.closed = true;
     await this.lock;
+    this.revokeListeners.clear();
+  }
+  onRevoke(listener: (clientId: string) => void): () => void {
+    this.assertUsable();
+    this.revokeListeners.add(listener);
+    return () => this.revokeListeners.delete(listener);
+  }
+  private notifyRevoked(clientId: string): void {
+    for (const listener of this.revokeListeners) {
+      try {
+        listener(clientId);
+      } catch {}
+    }
   }
   private assertUsable(): void {
     if (this.closed || this.poisoned) throw new NativeAuthError("unavailable");
@@ -319,6 +333,7 @@ export class NativeAuth {
       const next = { ...current, sessions };
       await this.commit(next);
       this.state = next;
+      this.notifyRevoked(checked);
       return true;
     });
   }
@@ -327,11 +342,13 @@ export class NativeAuth {
     const tokenHash = hash("session", header.slice(7));
     return this.mutate(async () => {
       const current = prune(this.state, this.now());
+      const removed = current.sessions.find((x) => equal(x.tokenHash, tokenHash));
       const sessions = current.sessions.filter((x) => !equal(x.tokenHash, tokenHash));
       if (sessions.length === current.sessions.length) return false;
       const next = { ...current, sessions };
       await this.commit(next);
       this.state = next;
+      if (removed) this.notifyRevoked(removed.id);
       return true;
     });
   }

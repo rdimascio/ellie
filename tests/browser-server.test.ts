@@ -14,6 +14,9 @@ import type { BrowserAuthState, BrowserInvitationSpec } from "../apps/server/src
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { HouseholdState } from "../apps/server/src/household-state.ts";
+import { NativeSpeech } from "../apps/server/src/native-speech.ts";
+import { WhisperCliSpeechInput } from "@ellie/speech";
+import type { SpeechInput } from "@ellie/speech";
 import type { BrowserAssets, BrowserRemote } from "../apps/server/src/browser-server.ts";
 
 const run = promisify(execFile);
@@ -162,7 +165,11 @@ interface Response {
   body: unknown;
 }
 
-async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
+async function fixture(
+  assets?: BrowserAssets,
+  remote?: BrowserRemote,
+  suppliedSpeech?: SpeechInput,
+) {
   const tls = await certificate;
   const port = await availablePort();
   const origin = `https://localhost:${port}`;
@@ -177,7 +184,25 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     nativeState = structuredClone(next);
   });
   const household = HouseholdState.memory();
-  const app = createBrowserServer({ ...tls, origin, auth, nativeAuth, household, assets, remote });
+  const speechInput: SpeechInput = {
+    async *transcribe(audio) {
+      let bytes = 0;
+      for await (const chunk of audio) bytes += chunk.length;
+      if (!bytes) throw new Error();
+      yield { text: "Synthetic transcript", final: true };
+    },
+  };
+  const speech = NativeSpeech.memory(nativeAuth, suppliedSpeech ?? speechInput);
+  const app = createBrowserServer({
+    ...tls,
+    origin,
+    auth,
+    nativeAuth,
+    household,
+    speech,
+    assets,
+    remote,
+  });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(port, "127.0.0.1", resolve);
@@ -188,7 +213,7 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     path: string,
     options: {
       body?: unknown;
-      rawBody?: string;
+      rawBody?: string | Buffer;
       headers?: Record<string, string>;
       signal?: AbortSignal;
     } = {},
@@ -244,6 +269,7 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     auth,
     nativeAuth,
     household,
+    speech,
     origin,
     port,
     request,
@@ -343,6 +369,209 @@ test("native bearer channel pairs once, recovers by GET, logs out, and rejects b
     ).status,
     401,
   );
+});
+
+test("native speech HTTPS requires a separate grant and strict bounded audio headers", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Speech iPhone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const token = "6".repeat(64);
+  const bearer = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  const client = (paired.body as { client: { id: string } }).client;
+  assert.equal(
+    (await f.request("GET", "/native/v1/speech/availability", { headers: bearer })).status,
+    403,
+  );
+  await f.speech.grant({ clientId: client.id, capability: "speech.transcribe" });
+  assert.deepEqual(
+    (await f.request("GET", "/native/v1/speech/availability", { headers: bearer })).body,
+    { available: true },
+  );
+  const audio = Buffer.from("synthetic wav bytes");
+  const turnId = "11111111-1111-4111-8111-111111111111";
+  const response = await f.request("POST", "/native/v1/speech/transcriptions", {
+    rawBody: audio,
+    headers: {
+      ...bearer,
+      "content-type": "audio/wav",
+      "content-length": String(audio.length),
+      "x-ellie-turn-id": turnId,
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, { turnId, text: "Synthetic transcript" });
+  assert.deepEqual(
+    (
+      await f.request("POST", `/native/v1/speech/transcriptions/${turnId}/cancel`, {
+        body: {},
+        headers: bearer,
+      })
+    ).body,
+    { ok: true, cancelled: false },
+  );
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/speech/transcriptions", {
+        rawBody: audio,
+        headers: {
+          ...bearer,
+          "content-type": "application/json",
+          "content-length": String(audio.length),
+          "x-ellie-turn-id": turnId,
+        },
+      })
+    ).status,
+    415,
+  );
+});
+
+test("native speech HTTPS rejects invalid WAV before starting Whisper", async (t) => {
+  const f = await fixture(
+    undefined,
+    undefined,
+    new WhisperCliSpeechInput({
+      executable: "/usr/bin/false",
+      model: "/dev/null",
+      timeoutMs: 1_000,
+    }),
+  );
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Speech iPhone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const token = "5".repeat(64),
+    headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  await f.speech.grant({
+    clientId: (paired.body as { client: { id: string } }).client.id,
+    capability: "speech.transcribe",
+  });
+  const body = Buffer.from("not a wave");
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/speech/transcriptions", {
+        rawBody: body,
+        headers: {
+          ...headers,
+          "content-type": "audio/wav",
+          "content-length": String(body.length),
+          "x-ellie-turn-id": "22222222-2222-4222-8222-222222222222",
+        },
+      })
+    ).status,
+    400,
+  );
+});
+
+function validSpeechWave(): Buffer {
+  const body = Buffer.alloc(46);
+  body.write("RIFF", 0);
+  body.writeUInt32LE(38, 4);
+  body.write("WAVEfmt ", 8);
+  body.writeUInt32LE(16, 16);
+  body.writeUInt16LE(1, 20);
+  body.writeUInt16LE(1, 22);
+  body.writeUInt32LE(16_000, 24);
+  body.writeUInt32LE(32_000, 28);
+  body.writeUInt16LE(2, 32);
+  body.writeUInt16LE(16, 34);
+  body.write("data", 36);
+  body.writeUInt32LE(2, 40);
+  return body;
+}
+
+async function speechBearer(f: Awaited<ReturnType<typeof fixture>>, token: string) {
+  const invitation = await f.nativeAuth.invite({
+    label: "Slow speech iPhone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  const clientId = (paired.body as { client: { id: string } }).client.id;
+  await f.speech.grant({ clientId, capability: "speech.transcribe" });
+  return headers;
+}
+
+test("completed speech upload keeps its bounded response window beyond ten seconds", async (t) => {
+  let calls = 0;
+  const input: SpeechInput = {
+    async *transcribe(audio) {
+      calls += 1;
+      for await (const _ of audio) void _;
+      await new Promise((resolve) => setTimeout(resolve, 10_500));
+      yield { text: "Slow synthetic transcript", final: true };
+    },
+  };
+  const f = await fixture(undefined, undefined, input);
+  t.after(() => f.close());
+  const headers = await speechBearer(f, "7".repeat(64));
+  const wave = validSpeechWave();
+  const response = await f.request("POST", "/native/v1/speech/transcriptions", {
+    rawBody: wave,
+    headers: {
+      ...headers,
+      "content-type": "audio/wav",
+      "content-length": String(wave.length),
+      "x-ellie-turn-id": "77777777-7777-4777-8777-777777777777",
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    turnId: "77777777-7777-4777-8777-777777777777",
+    text: "Slow synthetic transcript",
+  });
+  assert.equal(calls, 1);
+});
+
+test("incomplete speech upload retains the ten second socket deadline", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const headers = await speechBearer(f, "9".repeat(64));
+  const tls = await certificate;
+  const started = Date.now();
+  await new Promise<void>((resolve, reject) => {
+    const request = httpsRequest({
+      host: "127.0.0.1",
+      port: f.port,
+      servername: "localhost",
+      path: "/native/v1/speech/transcriptions",
+      method: "POST",
+      ca: tls.ca,
+      rejectUnauthorized: true,
+      headers: {
+        host: `localhost:${f.port}`,
+        ...headers,
+        "content-type": "audio/wav",
+        "content-length": String(validSpeechWave().length),
+        "x-ellie-turn-id": "99999999-9999-4999-8999-999999999999",
+      },
+    });
+    const timer = setTimeout(
+      () => reject(new Error("Stalled upload exceeded its deadline.")),
+      12_000,
+    );
+    request.once("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    request.write(validSpeechWave().subarray(0, 12));
+  });
+  assert.ok(Date.now() - started >= 9_000);
+  assert.ok(Date.now() - started < 12_000);
 });
 
 test("native household routes require separate grants and enforce conditional revisions", async (t) => {

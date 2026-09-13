@@ -4,6 +4,7 @@ import { identifier, record } from "@ellie/protocol";
 import { BrowserAuth, browserInvitationSpec, browserOrigin } from "./browser-auth.ts";
 import type { NativeAuth } from "./native-auth.ts";
 import type { HouseholdState } from "./household-state.ts";
+import type { NativeSpeech } from "./native-speech.ts";
 
 const MAX_BROWSER_MANAGEMENT_BODY_BYTES = 4096;
 const paths = new Set([
@@ -32,6 +33,7 @@ export type BrowserControlSnapshot =
       auth: BrowserAuth;
       nativeAuth?: NativeAuth;
       household?: HouseholdState;
+      speech?: NativeSpeech;
       certificateSha256?: string;
     }
   | { status: "disabled" }

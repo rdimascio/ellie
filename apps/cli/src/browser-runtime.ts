@@ -7,6 +7,8 @@ import { BrowserAuth } from "../../server/src/browser-auth.ts";
 import { NativeAuth } from "../../server/src/native-auth.ts";
 import type { BrowserControl } from "../../server/src/browser-management.ts";
 import { HouseholdState } from "../../server/src/household-state.ts";
+import { NativeSpeech, loadNativeSpeechConfiguration } from "../../server/src/native-speech.ts";
+import { WhisperCliSpeechInput, whisperCliAvailability } from "@ellie/speech";
 import { createBrowserServer } from "../../server/src/browser-server.ts";
 import type {
   BrowserAssets,
@@ -80,6 +82,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   let auth: BrowserAuth | undefined;
   let nativeAuth: NativeAuth | undefined;
   let household: HouseholdState | undefined;
+  let speech: NativeSpeech | undefined;
   let managedRemote: ManagedBrowserRemote | undefined;
   let stopped = false;
   let started: Promise<void> | undefined;
@@ -104,6 +107,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
     if (target === managedRemote) managedRemote = undefined;
   };
   const closeAuthorities = async (): Promise<void> => {
+    await speech?.close();
     await household?.close();
     await auth?.close();
     await nativeAuth?.close();
@@ -150,6 +154,25 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
     } catch {
       household = undefined;
     }
+    try {
+      const configuration = await loadNativeSpeechConfiguration(options.setup.stateDir);
+      if (nativeAuth && configuration)
+        speech = await NativeSpeech.open(
+          nativeAuth,
+          () =>
+            new WhisperCliSpeechInput({
+              ...configuration,
+              maxAudioBytes: 1_100_000,
+              maxAudioDurationMs: 30_000,
+              maxTranscriptBytes: 16_384,
+              timeoutMs: 35_000,
+            }),
+          options.setup.stateDir,
+          async () => (await whisperCliAvailability(configuration)).available,
+        );
+    } catch {
+      speech = undefined;
+    }
 
     if (stopped) {
       await closeAuthorities();
@@ -185,6 +208,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         auth,
         nativeAuth,
         household,
+        speech,
         assets,
         remote: managedRemote?.remote,
       });
@@ -203,7 +227,15 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       const certificateSha256 = createHash("sha256")
         .update(new X509Certificate(identity.cert).raw)
         .digest("hex");
-      snapshot = { status: "ready", origin, auth, nativeAuth, household, certificateSha256 };
+      snapshot = {
+        status: "ready",
+        origin,
+        auth,
+        nativeAuth,
+        household,
+        speech,
+        certificateSha256,
+      };
     } catch {
       closeListener();
       closeRemote();
