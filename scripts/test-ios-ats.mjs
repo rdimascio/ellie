@@ -2,10 +2,13 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:https";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
+import { createBrowserServer } from "../apps/server/src/browser-server.ts";
+import { NativeAuth } from "../apps/server/src/native-auth.ts";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const environment = {
@@ -14,22 +17,55 @@ const environment = {
 };
 const owned = mkdtempSync(join(tmpdir(), "ellie-ios-ats-"));
 const resultBundle = resolve(root, "test-results/native-ios-ats.xcresult");
-const sockets = new Set();
+const processGroups = new Set();
 let simulatorID,
   server,
+  browserAuth,
+  nativeAuth,
   activeChild,
   interruptChild,
   requestedSignal,
   succeeded = false;
-let acceptedRequests = 0,
-  unexpectedRequests = 0;
+let remoteNodeReads = 0,
+  remoteAppOpens = 0;
 
 function terminate(child, signal) {
+  if (!Number.isInteger(child.pid) || child.pid <= 0) return;
   try {
     process.kill(-child.pid, signal);
   } catch {
     child.kill(signal);
   }
+}
+
+function terminateGroup(processGroup, signal) {
+  try {
+    process.kill(-processGroup, signal);
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw error;
+  }
+}
+
+async function stopOwnedProcessGroups() {
+  await Promise.all([...processGroups].map(stopProcessGroup));
+}
+
+async function stopProcessGroup(processGroup) {
+  if (!Number.isInteger(processGroup) || processGroup <= 0) return;
+  terminateGroup(processGroup, "SIGKILL");
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(-processGroup, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") {
+        processGroups.delete(processGroup);
+        return;
+      }
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+  }
+  throw new Error("An owned iOS test process group did not stop.");
 }
 
 function execute(file, args, { capture = false, timeout = 30_000, cleanup = false } = {}) {
@@ -45,6 +81,7 @@ function execute(file, args, { capture = false, timeout = 30_000, cleanup = fals
       detached: true,
       stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
     });
+    if (Number.isInteger(child.pid) && child.pid > 0) processGroups.add(child.pid);
     activeChild = child;
     function stop(message) {
       failure ??= new Error(message);
@@ -61,9 +98,14 @@ function execute(file, args, { capture = false, timeout = 30_000, cleanup = fals
     child.once("error", (error) => {
       failure ??= error;
     });
-    child.once("close", (code, signal) => {
+    child.once("close", async (code, signal) => {
       clearTimeout(timer);
       clearTimeout(killTimer);
+      try {
+        await stopProcessGroup(child.pid);
+      } catch (error) {
+        failure ??= error;
+      }
       if (activeChild === child) {
         activeChild = undefined;
         interruptChild = undefined;
@@ -125,56 +167,51 @@ try {
   ]);
   await execute("openssl", ["x509", "-in", cert, "-outform", "DER", "-out", der]);
   const pin = createHash("sha256").update(readFileSync(der)).digest("hex");
-  const created = Date.now();
   const token = "c".repeat(64);
-  const body = JSON.stringify({
-    client: {
-      id: "native-ats-test",
-      role: "native_phone_controller",
-      label: "Phone",
-      grants: [{ target: "studio-mac", capabilities: ["app.open"] }],
-      createdAt: created,
-      expiresAt: created + 90 * 24 * 60 * 60 * 1_000,
-    },
-  });
-  server = createServer(
-    {
-      cert: readFileSync(cert),
-      key: readFileSync(key),
-      minVersion: "TLSv1.2",
-      headersTimeout: 5_000,
-      requestTimeout: 5_000,
-      keepAliveTimeout: 1_000,
-    },
-    (request, response) => {
-      const valid =
-        request.method === "GET" &&
-        request.url === "/native/v1/session" &&
-        request.headers["x-ellie-version"] === "1" &&
-        request.headers.authorization === `Bearer ${token}` &&
-        request.headers.cookie === undefined &&
-        request.headers.origin === undefined &&
-        !Object.keys(request.headers).some((name) => name.startsWith("sec-fetch-"));
-      if (valid) acceptedRequests += 1;
-      else unexpectedRequests += 1;
-      response.writeHead(valid ? 200 : 400, { "content-type": "application/json" });
-      response.end(valid ? body : "{}");
-    },
-  );
-  server.maxConnections = 8;
-  server.on("connection", (socket) => {
-    sockets.add(socket);
-    socket.setTimeout(5_000, () => socket.destroy());
-    socket.once("close", () => sockets.delete(socket));
-  });
-  server.on("tlsClientError", () => {});
+  const reservation = createNetServer();
   await new Promise((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolveListen);
+    reservation.once("error", reject);
+    reservation.listen(0, "127.0.0.1", resolveListen);
   });
-  const address = server.address();
+  const address = reservation.address();
   if (!address || typeof address === "string") throw new Error("Fixture has no loopback port.");
   const origin = `https://127.0.0.1:${address.port}`;
+  await new Promise((resolveClose) => reservation.close(resolveClose));
+  browserAuth = new BrowserAuth(BrowserAuth.empty(), async () => {});
+  nativeAuth = new NativeAuth(NativeAuth.empty(), async () => {}, {
+    token: () => "a".repeat(64),
+    id: () => `native-ats-${randomUUID()}`,
+  });
+  const invitation = await nativeAuth.invite({
+    label: "Phone",
+    grants: [{ target: "studio-mac", capabilities: ["app.open"] }],
+  });
+  await nativeAuth.pair(invitation.code, token);
+  const hosted = createBrowserServer({
+    cert: readFileSync(cert),
+    key: readFileSync(key),
+    origin,
+    auth: browserAuth,
+    nativeAuth,
+    remote: {
+      async nodes() {
+        remoteNodeReads += 1;
+        return [
+          { id: "studio-mac", label: "Studio Mac", online: true, capabilities: ["app.open"] },
+        ];
+      },
+      async openApp(node, app) {
+        if (node !== "studio-mac" || app !== "safari") throw new Error("Unexpected command");
+        remoteAppOpens += 1;
+        return { ok: true, message: "synthetic" };
+      },
+    },
+  });
+  server = hosted;
+  await new Promise((resolveListen, reject) => {
+    hosted.server.once("error", reject);
+    hosted.server.listen(address.port, "127.0.0.1", resolveListen);
+  });
 
   const runtimes = JSON.parse(
     await execute("xcrun", ["simctl", "list", "runtimes", "--json"], {
@@ -235,8 +272,8 @@ try {
     ],
     { timeout: 600_000 },
   );
-  if (acceptedRequests !== 1 || unexpectedRequests !== 0) {
-    throw new Error("The fixture did not receive exactly one valid native request.");
+  if (remoteNodeReads !== 2 || remoteAppOpens !== 1) {
+    throw new Error("The production native routes did not perform the expected finite operations.");
   }
   const appInfo = JSON.parse(
     await execute(
@@ -265,9 +302,10 @@ try {
   console.log("iOS app-hosted pinned HTTPS, rejection, Keychain and built-policy checks passed.");
 } finally {
   if (server) {
-    for (const socket of sockets) socket.destroy();
-    if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
+    server.shutdown();
   }
+  await nativeAuth?.close();
+  await browserAuth?.close();
   if (simulatorID) {
     for (const action of ["shutdown", "delete"]) {
       try {
@@ -277,6 +315,7 @@ try {
       }
     }
   }
+  await stopOwnedProcessGroups();
   rmSync(owned, { recursive: true, force: true });
   if (succeeded) rmSync(resultBundle, { recursive: true, force: true });
 }

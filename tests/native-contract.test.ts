@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   NATIVE_SESSION_CONTRACT,
+  NATIVE_CONTROL_CONTRACT,
+  nativeAppCommand,
   VERSION,
   nativePairingQr,
   parseNativePairingQr,
@@ -34,7 +36,7 @@ test("shared native QR fixtures follow the real canonical parser and byte limits
 
 test("native OpenAPI describes the separate runtime routes without controller authority", () => {
   const document = JSON.parse(generatedContracts()["native-openapi.v1.json"]!);
-  const routes = NATIVE_SESSION_CONTRACT.routes;
+  const routes = { ...NATIVE_SESSION_CONTRACT.routes, ...NATIVE_CONTROL_CONTRACT.routes };
   assert.deepEqual(
     Object.keys(document.paths),
     Object.values(routes).map((route) => route.path),
@@ -93,4 +95,30 @@ test("native OpenAPI describes the separate runtime routes without controller au
   const coordinator = JSON.parse(generatedContracts()["openapi.v1.json"]!);
   for (const name of ["NativeGrant", "NativeClient", "NativePairingPayload"])
     assert.deepEqual(document.components.schemas[name], coordinator.components.schemas[name]);
+});
+
+test("native app contract accepts only exact canonical finite commands", () => {
+  for (const app of NATIVE_CONTROL_CONTRACT.apps) {
+    const command = { nodeId: "test-mini", action: { tool: "app.open", app } };
+    assert.deepEqual(nativeAppCommand(command), command);
+  }
+  for (const command of [
+    null,
+    [],
+    {},
+    { nodeId: "mini", text: "open Arc" },
+    { nodeId: "mini", action: { tool: "app.open", app: "Terminal" } },
+    { nodeId: "mini", action: { tool: "url.open", url: "https://example.com" } },
+    { nodeId: "../mini", action: { tool: "app.open", app: "arc" } },
+    { nodeId: "mini", action: { tool: "app.open", app: "arc", extra: true } },
+    { nodeId: "mini", action: { tool: "app.open", app: "arc" }, extra: true },
+  ])
+    assert.throws(() => nativeAppCommand(command));
+  const document = JSON.parse(generatedContracts()["native-openapi.v1.json"]!);
+  assert.deepEqual(
+    document.components.schemas.NativeAppRequest.properties.action.properties.app.enum,
+    [...NATIVE_CONTROL_CONTRACT.apps],
+  );
+  assert.equal(document.components.schemas.NativeNodesResponse.properties.nodes.maxItems, 16);
+  assert.ok(document.paths[NATIVE_CONTROL_CONTRACT.routes.commands.path].post.responses[502]);
 });

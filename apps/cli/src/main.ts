@@ -32,6 +32,7 @@ import {
   systemLocalHostname,
 } from "./browser-setup.ts";
 import { createBrowserRuntime } from "./browser-runtime.ts";
+import { createBrowserRemote } from "../../server/src/browser-remote.ts";
 import { parseBrowserCommand, runBrowserCommand } from "./browser-commands.ts";
 import { parseNativeCommand, runNativeCommand } from "./native-commands.ts";
 import { Services, serviceRole } from "./services.ts";
@@ -244,6 +245,14 @@ async function main(): Promise<void> {
       setup: browserEnvironment,
       bindHost: config.host,
       loadAssets: loadBrowserAssets,
+      createRemote: async () => {
+        const upstream = new Client(
+          `https://127.0.0.1:${config.port}`,
+          cert,
+          await secrets.get("server.controller"),
+        );
+        return { remote: createBrowserRemote(upstream), close: () => upstream.close() };
+      },
     });
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {

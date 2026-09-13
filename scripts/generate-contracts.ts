@@ -9,6 +9,10 @@ import {
   nativeSessionSchemas,
 } from "../packages/protocol/src/native-session-contract.ts";
 import { nativePairingFixtures } from "./native-contract-fixtures.ts";
+import {
+  NATIVE_CONTROL_CONTRACT,
+  nativeControlSchemas,
+} from "../packages/protocol/src/native-controls.ts";
 
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
@@ -800,7 +804,7 @@ function nativeOpenApi(): Json {
     content: { "application/json": { schema } },
   });
   const errors = Object.fromEntries(
-    [400, 401, 403, 404, 415, 500, 503].map((status) => [
+    [400, 401, 403, 404, 409, 415, 500, 503].map((status) => [
       String(status),
       response(
         status === 401
@@ -833,10 +837,10 @@ function nativeOpenApi(): Json {
   return {
     openapi: "3.1.0",
     info: {
-      title: "Ellie native client enrollment API",
+      title: "Ellie native client API",
       version: "1.0.0",
       description:
-        "The optional client HTTPS listener exposes only native enrollment/session/logout here. Use the exact origin from the explicitly confirmed QR. Verify its leaf SHA-256, hostname and certificate validity. Native bearer credentials never authenticate as coordinator, execution-node or browser credentials. No cookies, Origin or Sec-Fetch-* headers are allowed; Host must match the exact listener authority. JSON POST bodies require a single application/json Content-Type, optionally charset=utf-8. No automatic mutation replay is permitted.",
+        "The optional client HTTPS listener exposes native enrollment, sessions and scoped app controls. Use the exact origin from the explicitly confirmed QR. Verify its leaf SHA-256, hostname and certificate validity. Native bearer credentials never authenticate as coordinator, execution-node or browser credentials. No cookies, Origin or Sec-Fetch-* headers are allowed; Host must match the exact listener authority. JSON POST bodies require a single application/json Content-Type, optionally charset=utf-8. No automatic mutation replay is permitted.",
     },
     servers: [
       {
@@ -897,6 +901,37 @@ function nativeOpenApi(): Json {
           },
         },
       },
+      [NATIVE_CONTROL_CONTRACT.routes.nodes.path]: {
+        get: {
+          ...common,
+          operationId: NATIVE_CONTROL_CONTRACT.routes.nodes.operationId,
+          summary: "List configured devices allowed by this native credential",
+          description:
+            "Read-only, bounded to 16 configured targets and 8192 response bytes. Returns only explicitly granted app.open targets, labels, online state and the app.open capability; no household telemetry. Discovery has a five-second deadline.",
+          responses: {
+            ...errors,
+            "200": response("Granted configured devices.", ref("NativeNodesResponse")),
+          },
+        },
+      },
+      [NATIVE_CONTROL_CONTRACT.routes.commands.path]: {
+        post: {
+          ...common,
+          operationId: NATIVE_CONTROL_CONTRACT.routes.commands.operationId,
+          summary: "Explicitly open an allowed app on a granted device",
+          description:
+            "Only app.open for Arc, Safari or Messages. Revalidates authority and live inventory before dispatch. Shares per-device reservations with browser commands. No persistence or automatic retry. Command dispatch has a 35-second deadline after bounded discovery. A timeout, disconnect or 502 may follow execution; check the Mac before issuing another action. Cancellation requests upstream cancellation but does not undo a launched app. 409 also means the device is offline, incapable or has an unfinished command.",
+          requestBody: request(ref("NativeAppRequest")),
+          responses: {
+            ...errors,
+            "200": response("Known command outcome.", ref("NativeCommandResponse")),
+            "502": response(
+              "Execution outcome is uncertain; never replay automatically.",
+              ref("NativeUnknownResponse"),
+            ),
+          },
+        },
+      },
     },
     components: {
       securitySchemes: {
@@ -908,7 +943,7 @@ function nativeOpenApi(): Json {
             "The separate native candidate/session token. Never a controller token, node token, browser cookie or invitation.",
         },
       },
-      schemas: nativeSessionSchemas(),
+      schemas: { ...nativeSessionSchemas(), ...nativeControlSchemas() },
     },
   } as Json;
 }

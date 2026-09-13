@@ -38,6 +38,7 @@ struct NativeEnrollmentView: View {
         Section("Paired") {
           LabeledContent("Coordinator", value: credential.origin.absoluteString)
           LabeledContent("Device", value: credential.client.label)
+          NavigationLink("Control a Mac") { PhoneControlView(credential: credential) }
         }
         Section {
           Button("Log out from coordinator", role: .destructive) { store.logout() }

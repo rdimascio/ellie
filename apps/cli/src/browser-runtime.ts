@@ -12,6 +12,12 @@ import type {
   BrowserServer,
   BrowserServerOptions,
 } from "../../server/src/browser-server.ts";
+import type { BrowserRemote } from "../../server/src/browser-remote.ts";
+
+export interface ManagedBrowserRemote {
+  remote: BrowserRemote;
+  close(): void;
+}
 
 type BrowserUnavailableReason = Extract<
   ReturnType<BrowserControl["current"]>,
@@ -22,6 +28,7 @@ export interface BrowserRuntimeOptions {
   setup: BrowserSetupEnvironment;
   bindHost: string;
   loadAssets: () => Promise<BrowserAssets>;
+  createRemote?: () => Promise<ManagedBrowserRemote>;
   createServer?: (options: BrowserServerOptions) => BrowserServer;
 }
 
@@ -71,9 +78,10 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   let listener: BrowserServer | undefined;
   let auth: BrowserAuth | undefined;
   let nativeAuth: NativeAuth | undefined;
+  let managedRemote: ManagedBrowserRemote | undefined;
   let stopped = false;
   let started: Promise<void> | undefined;
-  let phase: "identity" | "assets" | "auth" | "listener" = "identity";
+  let phase: "identity" | "assets" | "auth" | "remote" | "listener" = "identity";
 
   const closeListener = (target = listener): void => {
     try {
@@ -84,6 +92,18 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   };
   const unavailable = (reason: BrowserUnavailableReason): void => {
     if (!stopped) snapshot = { status: "unavailable", reason };
+  };
+  const closeRemote = (target = managedRemote): void => {
+    try {
+      target?.close();
+    } catch {
+      // The pinned coordinator client owns no browser listener state.
+    }
+    if (target === managedRemote) managedRemote = undefined;
+  };
+  const closeAuthorities = async (): Promise<void> => {
+    await auth?.close();
+    await nativeAuth?.close();
   };
 
   const run = async (): Promise<void> => {
@@ -123,6 +143,30 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       nativeAuth = undefined;
     }
 
+    if (stopped) {
+      await closeAuthorities();
+      return;
+    }
+
+    phase = "remote";
+    if (options.createRemote) {
+      try {
+        const created = await options.createRemote();
+        if (stopped) {
+          closeRemote(created);
+          await closeAuthorities();
+          return;
+        }
+        managedRemote = created;
+      } catch {
+        managedRemote = undefined;
+      }
+    }
+    if (stopped) {
+      await closeAuthorities();
+      return;
+    }
+
     const origin = `https://${identity.config.hostname}:${identity.config.port}`;
     phase = "listener";
     try {
@@ -133,11 +177,13 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         auth,
         nativeAuth,
         assets,
+        remote: managedRemote?.remote,
       });
       listener = activeListener;
       activeListener.server.on("error", () => {
         if (stopped || listener !== activeListener) return;
         closeListener(activeListener);
+        closeRemote();
         unavailable("listener_unavailable");
       });
       await waitForListening(activeListener.server, identity.config.port, options.bindHost);
@@ -151,6 +197,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       snapshot = { status: "ready", origin, auth, nativeAuth, certificateSha256 };
     } catch {
       closeListener();
+      closeRemote();
       unavailable("listener_unavailable");
     }
   };
@@ -166,11 +213,11 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       stopped = true;
       snapshot = { status: "disabled" };
       closeListener();
-      if (phase === "identity" || phase === "assets") return;
+      if (phase === "identity" || phase === "assets" || phase === "remote") return;
       await started;
       closeListener();
-      await auth?.close();
-      await nativeAuth?.close();
+      closeRemote();
+      await closeAuthorities();
     },
   };
 }

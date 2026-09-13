@@ -27,36 +27,8 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
   private func request<T: Decodable>(
     path: String, method: String, body: Data?, bearer: String?, pending: PendingNativeEnrollment
   ) async throws -> T {
-    guard let url = URL(string: path, relativeTo: pending.origin)?.absoluteURL,
-      url.scheme == "https", nativeTLSHost(url.host) == nativeTLSHost(pending.origin.host)
-    else { throw NativeEnrollmentFailure.invalidCode }
-    var request = URLRequest(
-      url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
-    request.httpMethod = method
-    request.httpBody = body
-    request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
-    if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-    if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
-    guard let host = nativeTLSHost(pending.origin.host) else {
-      throw NativeEnrollmentFailure.invalidCode
-    }
-    let delegate = PinnedSessionDelegate(
-      host: host, pin: pending.certificateSha256, maximumBytes: 4_096, timeout: timeout,
-      verificationDate: now())
-    let configuration = URLSessionConfiguration.ephemeral
-    configuration.httpCookieStorage = nil
-    configuration.urlCredentialStorage = nil
-    configuration.urlCache = nil
-    configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-    configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
-    configuration.timeoutIntervalForRequest = timeout
-    configuration.timeoutIntervalForResource = timeout
-    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
-    defer { session.finishTasksAndInvalidate() }
-    let (data, response) = try await delegate.perform(request, in: session)
-    guard let http = response as? HTTPURLResponse, http.url == url,
-      http.mimeType == "application/json"
-    else { throw NativeEnrollmentFailure.invalidResponse }
+    let (data, http) = try await requestEnvelope(
+      path: path, method: method, body: body, bearer: bearer, pending: pending)
     if http.statusCode == 400 { throw NativeEnrollmentFailure.rejected }
     guard http.statusCode == 200 else { throw HTTPFailure(status: http.statusCode) }
     do {
@@ -72,6 +44,46 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
       }
       return try JSONDecoder().decode(T.self, from: data)
     } catch { throw NativeEnrollmentFailure.invalidResponse }
+  }
+
+  func requestEnvelope(
+    path: String, method: String, body: Data?, bearer: String?,
+    pending: PendingNativeEnrollment, maximumBytes: Int = 4_096
+  ) async throws -> (Data, HTTPURLResponse) {
+    guard (1...8_192).contains(maximumBytes) else {
+      throw NativeEnrollmentFailure.invalidResponse
+    }
+    guard let url = URL(string: path, relativeTo: pending.origin)?.absoluteURL,
+      url.scheme == "https", nativeTLSHost(url.host) == nativeTLSHost(pending.origin.host)
+    else { throw NativeEnrollmentFailure.invalidCode }
+    var request = URLRequest(
+      url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
+    request.httpMethod = method
+    request.httpBody = body
+    request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
+    if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+    if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+    guard let host = nativeTLSHost(pending.origin.host) else {
+      throw NativeEnrollmentFailure.invalidCode
+    }
+    let delegate = PinnedSessionDelegate(
+      host: host, pin: pending.certificateSha256, maximumBytes: maximumBytes, timeout: timeout,
+      verificationDate: now())
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpCookieStorage = nil
+    configuration.urlCredentialStorage = nil
+    configuration.urlCache = nil
+    configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+    configuration.timeoutIntervalForRequest = timeout
+    configuration.timeoutIntervalForResource = timeout
+    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    defer { session.finishTasksAndInvalidate() }
+    let (data, response) = try await delegate.perform(request, in: session)
+    guard let http = response as? HTTPURLResponse, http.url == url,
+      http.mimeType == "application/json"
+    else { throw NativeEnrollmentFailure.invalidResponse }
+    return (data, http)
   }
 }
 

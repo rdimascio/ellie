@@ -8,6 +8,7 @@ import { canOpenApps, phoneAppCommand } from "./browser-remote.ts";
 import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
 import type { NativeAuth } from "./native-auth.ts";
 import { NativeAuthError } from "./native-auth.ts";
+import { NativeControls } from "./native-controls.ts";
 export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
@@ -144,6 +145,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
   const expected = browserOrigin(options.origin);
   const sockets = new Set<Duplex>();
   const busyNodes = new Set<string>();
+  const nativeControls = new NativeControls(options.remote, busyNodes);
   let stopped = false;
 
   const server = createServer(
@@ -241,6 +243,20 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             }
             return;
           }
+          if (
+            await nativeControls.handle(
+              request,
+              response,
+              path,
+              options.nativeAuth,
+              authorizations[0]!,
+              (status, body) => {
+                if (!response.destroyed && !response.writableEnded)
+                  send(response, status, body, {}, status !== 200);
+              },
+            )
+          )
+            return;
           send(response, 404, { error: "Native route not found." }, {}, true);
           return;
         }
@@ -488,6 +504,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
     shutdown: () => {
       if (stopped) return;
       stopped = true;
+      nativeControls.stop();
       if (server.listening) server.close();
       server.closeAllConnections();
       for (const socket of sockets) socket.destroy();

@@ -43,7 +43,7 @@ export function nativeSessionSchemas() {
     uniqueItems: true,
     items: ref("NativeGrant"),
     description:
-      "Each target is unique. This first version records only app.open grants; it does not expose native command dispatch.",
+      "Each target is unique. Native phone authority is restricted to app.open on explicitly granted targets.",
     "x-ellie-unique-key": "target",
   };
   return {
