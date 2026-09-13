@@ -149,7 +149,7 @@ async function main() {
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><false/>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSLocalNetworkUsageDescription</key><string>Ellie connects to your household coordinator to show your paired Macs and their availability.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Ellie connects to your household coordinator to show your paired Macs and open apps you choose on them.</string>
 </dict>
 </plist>
 `,

@@ -129,6 +129,68 @@ final class CoordinatorTransportTests: XCTestCase {
         }
     }
 
+    func testBuildsFiniteAppCommandRequestWithExpectedBodyAndHeaders() throws {
+        let request = try PinnedCoordinatorClient.makeCommandRequest(
+            connection: validConnection(), nodeID: "living-room.mac_1", app: .messages
+        )
+        XCTAssertEqual(request.url?.absoluteString, "https://127.0.0.1:8443/v1/commands")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.timeoutInterval, 35)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(validToken)")
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String])
+        XCTAssertEqual(body, ["nodeId": "living-room.mac_1", "text": "open app Messages"])
+
+        XCTAssertThrowsError(try PinnedCoordinatorClient.makeCommandRequest(
+            connection: validConnection(), nodeID: "bad id", app: .arc
+        ))
+    }
+
+    func testCommandValidatesSuccessAndNeverExposesServerMessage() async throws {
+        let success = PinnedCoordinatorClient(loader: { _, _ in
+            (Data(#"{"ok":true,"message":"private server detail"}"#.utf8), 200)
+        })
+        let outcome = try await success.openApp(connection: validConnection(), nodeID: "mac", app: .arc)
+        XCTAssertEqual(outcome, .completed)
+
+        for body in [
+            #"{"ok":false,"message":"raw refusal reason"}"#,
+            #"{"ok":true}"#,
+            #"{"ok":1,"message":"bad"}"#,
+            #"{"ok":"yes","message":"bad"}"#,
+            #"{"ok":true,"message":"ok","extra":1}"#,
+        ] {
+            let client = PinnedCoordinatorClient(loader: { _, _ in (Data(body.utf8), 200) })
+            do {
+                _ = try await client.openApp(connection: validConnection(), nodeID: "mac", app: .safari)
+                XCTFail("Expected unknown outcome")
+            } catch {
+                XCTAssertEqual(error as? NativeCommandFailure, .outcomeUnknown)
+                XCTAssertFalse(error.localizedDescription.contains("raw refusal"))
+            }
+        }
+    }
+
+    func testCommandUsesFixedRejectionsAndTreatsOtherFailuresAsUnknown() async throws {
+        let expected: [(Int, NativeCommandFailure)] = [
+            (400, .rejected(.invalidRequest)), (401, .rejected(.unauthorized)),
+            (403, .rejected(.forbidden)), (404, .rejected(.nodeNotFound)),
+            (409, .rejected(.nodeUnavailable)), (500, .outcomeUnknown),
+        ]
+        for (status, failure) in expected {
+            let client = PinnedCoordinatorClient(loader: { _, _ in
+                (Data(#"{"error":"raw server secret"}"#.utf8), status)
+            })
+            do {
+                _ = try await client.openApp(connection: validConnection(), nodeID: "mac", app: .arc)
+                XCTFail("Expected failure")
+            } catch {
+                XCTAssertEqual(error as? NativeCommandFailure, failure)
+                XCTAssertFalse(error.localizedDescription.contains("raw server secret"))
+            }
+        }
+    }
+
     func testTrustRequiresExactLeafAndCertificateValidity() throws {
         let peer = try XCTUnwrap(SecCertificateCreateWithData(nil, certificateDER as CFData))
         var trust: SecTrust?

@@ -22,6 +22,52 @@ protocol CoordinatorReading: Sendable {
     func nodes(connection: CoordinatorConnection) async throws -> [CoordinatorNode]
 }
 
+enum NativeApp: String, CaseIterable, Identifiable, Sendable {
+    case arc, safari, messages
+
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .arc: "Arc"
+        case .safari: "Safari"
+        case .messages: "Messages"
+        }
+    }
+    var command: String { "open app \(title)" }
+}
+
+enum NativeCommandRejection: Equatable, Sendable {
+    case invalidRequest, unauthorized, forbidden, nodeNotFound, nodeUnavailable, staleNode, capabilityMissing
+}
+
+enum NativeCommandOutcome: Equatable, Sendable {
+    case completed
+}
+
+enum NativeCommandFailure: Error, Equatable, LocalizedError {
+    case rejected(NativeCommandRejection)
+    case outcomeUnknown
+    case cancelled
+
+    var errorDescription: String? {
+        switch self {
+        case .rejected(.invalidRequest): "The coordinator rejected this app request. Refresh the node list and try again."
+        case .rejected(.unauthorized): "The coordinator rejected this identity. Its pairing may have been revoked."
+        case .rejected(.forbidden): "This identity is not allowed to control that node."
+        case .rejected(.nodeNotFound): "That node is no longer registered. Refresh the node list."
+        case .rejected(.nodeUnavailable): "That node is offline or busy. Wait for it to become available, then try again."
+        case .rejected(.staleNode): "That node is not currently online. Refresh its status before opening an app."
+        case .rejected(.capabilityMissing): "That node does not currently allow app opening. Check its Ellie service and permissions."
+        case .outcomeUnknown: "Ellie stopped waiting before it could confirm the result. The app may have opened. Check the target Mac before trying again."
+        case .cancelled: "Ellie stopped waiting for the result. The app may have opened. Check the target Mac before trying again."
+        }
+    }
+}
+
+protocol CoordinatorActing: Sendable {
+    func openApp(connection: CoordinatorConnection, nodeID: String, app: NativeApp) async throws -> NativeCommandOutcome
+}
+
 enum CoordinatorFailure: Error, Equatable, LocalizedError {
     case configurationMissing
     case configurationUnsafe
@@ -48,17 +94,20 @@ enum CoordinatorFailure: Error, Equatable, LocalizedError {
     }
 }
 
-struct PinnedCoordinatorClient: CoordinatorReading {
+struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
     static let maximumResponseBytes = 128 * 1_024
     static let maximumNodes = 128
     static let deadline: TimeInterval = 5
+    static let commandDeadline: TimeInterval = 35
 
     typealias Loader = @Sendable (URLRequest, Data) async throws -> (Data, Int)
     private let loader: Loader
     private let now: @Sendable () -> Date
 
     init() {
-        loader = { request, certificate in try await Self.load(request: request, certificateDER: certificate) }
+        loader = { request, certificate in
+            try await Self.load(request: request, certificateDER: certificate, deadline: request.timeoutInterval)
+        }
         now = { Date() }
     }
 
@@ -89,6 +138,42 @@ struct PinnedCoordinatorClient: CoordinatorReading {
         return try Self.decodeNodes(result.0, now: now())
     }
 
+    func openApp(connection: CoordinatorConnection, nodeID: String, app: NativeApp) async throws -> NativeCommandOutcome {
+        let request = try Self.makeCommandRequest(connection: connection, nodeID: nodeID, app: app)
+        let result: (Data, Int)
+        do {
+            result = try await loader(request, connection.certificateDER)
+        } catch is CancellationError {
+            throw NativeCommandFailure.cancelled
+        } catch let failure as CoordinatorFailure where failure == .cancelled {
+            throw NativeCommandFailure.cancelled
+        } catch {
+            throw NativeCommandFailure.outcomeUnknown
+        }
+
+        switch result.1 {
+        case 200:
+            guard result.0.count <= Self.maximumResponseBytes,
+                  let object = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any],
+                  Set(object.keys) == ["ok", "message"],
+                  let okValue = object["ok"] as? NSNumber,
+                  CFGetTypeID(okValue) == CFBooleanGetTypeID(),
+                  let ok = object["ok"] as? Bool,
+                  let message = object["message"] as? String,
+                  !message.isEmpty, message.utf8.count <= 500 else {
+                throw NativeCommandFailure.outcomeUnknown
+            }
+            guard ok else { throw NativeCommandFailure.outcomeUnknown }
+            return .completed
+        case 400: throw NativeCommandFailure.rejected(.invalidRequest)
+        case 401: throw NativeCommandFailure.rejected(.unauthorized)
+        case 403: throw NativeCommandFailure.rejected(.forbidden)
+        case 404: throw NativeCommandFailure.rejected(.nodeNotFound)
+        case 409: throw NativeCommandFailure.rejected(.nodeUnavailable)
+        default: throw NativeCommandFailure.outcomeUnknown
+        }
+    }
+
     static func makeRequest(connection: CoordinatorConnection) throws -> URLRequest {
         guard connection.token.utf8.count == 64,
               connection.token.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
@@ -111,6 +196,19 @@ struct PinnedCoordinatorClient: CoordinatorReading {
         request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
         request.setValue("Bearer \(connection.token)", forHTTPHeaderField: "Authorization")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        return request
+    }
+
+    static func makeCommandRequest(connection: CoordinatorConnection, nodeID: String, app: NativeApp) throws -> URLRequest {
+        guard validIdentifier(nodeID) else { throw CoordinatorFailure.configurationUnsafe }
+        var request = try makeRequest(connection: connection)
+        var components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+        components.path = "/v1/commands"
+        request.url = components.url!
+        request.httpMethod = "POST"
+        request.timeoutInterval = commandDeadline
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["nodeId": nodeID, "text": app.command], options: [.sortedKeys])
         return request
     }
 
@@ -192,8 +290,8 @@ struct PinnedCoordinatorClient: CoordinatorReading {
         return nil
     }
 
-    private static func load(request: URLRequest, certificateDER: Data) async throws -> (Data, Int) {
-        let operation = CoordinatorRequest(request: request, certificateDER: certificateDER)
+    private static func load(request: URLRequest, certificateDER: Data, deadline: TimeInterval) async throws -> (Data, Int) {
+        let operation = CoordinatorRequest(request: request, certificateDER: certificateDER, deadline: deadline)
         return try await withTaskCancellationHandler {
             try await operation.start()
         } onCancel: {
@@ -206,6 +304,7 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
     private let lock = NSLock()
     private let request: URLRequest
     private let pinnedCertificate: SecCertificate
+    private let requestDeadline: TimeInterval
     private var continuation: CheckedContinuation<(Data, Int), Error>?
     private var task: URLSessionDataTask?
     private var session: URLSession?
@@ -215,9 +314,10 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
     private var trustRejected = false
     private var deadline: DispatchSourceTimer?
 
-    init(request: URLRequest, certificateDER: Data) {
+    init(request: URLRequest, certificateDER: Data, deadline: TimeInterval = PinnedCoordinatorClient.deadline) {
         self.request = request
         self.pinnedCertificate = SecCertificateCreateWithData(nil, certificateDER as CFData)!
+        self.requestDeadline = deadline
     }
 
     func start() async throws -> (Data, Int) {
@@ -231,8 +331,8 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
             }
             self.continuation = continuation
             let configuration = URLSessionConfiguration.ephemeral
-            configuration.timeoutIntervalForRequest = PinnedCoordinatorClient.deadline
-            configuration.timeoutIntervalForResource = PinnedCoordinatorClient.deadline
+            configuration.timeoutIntervalForRequest = requestDeadline
+            configuration.timeoutIntervalForResource = requestDeadline
             configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
             configuration.urlCache = nil
             configuration.httpCookieStorage = nil
@@ -244,7 +344,7 @@ final class CoordinatorRequest: NSObject, URLSessionDataDelegate, @unchecked Sen
             let task = session.dataTask(with: request)
             self.task = task
             let timer = DispatchSource.makeTimerSource(queue: .global(qos: .userInitiated))
-            timer.schedule(deadline: .now() + PinnedCoordinatorClient.deadline)
+            timer.schedule(deadline: .now() + requestDeadline)
             timer.setEventHandler { [weak self] in self?.finish(.failure(CoordinatorFailure.unavailable)) }
             self.deadline = timer
             lock.unlock()

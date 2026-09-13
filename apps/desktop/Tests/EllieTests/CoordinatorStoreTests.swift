@@ -53,6 +53,7 @@ final class CoordinatorStoreTests: XCTestCase {
         XCTAssertEqual(recorded, [2, 4, 8])
         XCTAssertEqual(store.failure, .unavailable)
         XCTAssertFalse(store.isMonitoring)
+        XCTAssertNil(store.commandConnection)
     }
 
     @MainActor
@@ -68,6 +69,7 @@ final class CoordinatorStoreTests: XCTestCase {
         XCTAssertTrue(store.nodes.isEmpty)
         XCTAssertNil(store.selectedNodeID)
         XCTAssertNil(store.lastUpdated)
+        XCTAssertNil(store.commandConnection)
     }
 
     @MainActor
@@ -114,6 +116,23 @@ final class CoordinatorStoreTests: XCTestCase {
         XCTAssertEqual(calls, 0)
         XCTAssertEqual(store.phase, .disconnected)
         XCTAssertTrue(store.nodes.isEmpty)
+    }
+
+    @MainActor
+    func testCommandsRequireTheConnectedIdentityAndStopOnDisconnect() async throws {
+        let client = InventoryFixture([.nodes([node])])
+        let credentials = connection
+        let store = CoordinatorStore(client: client, load: { _ in credentials }, pause: { _ in
+            try await Task.sleep(nanoseconds: 60_000_000_000)
+        })
+        XCTAssertNil(store.commandConnection)
+        store.connect()
+        try await waitUntil { store.phase == .connected }
+        XCTAssertNotNil(store.commandConnection)
+        store.role = .node
+        XCTAssertNil(store.commandConnection, "An identity change must block commands before the UI disconnects")
+        store.disconnect()
+        XCTAssertNil(store.commandConnection)
     }
 
     @MainActor

@@ -19,6 +19,7 @@ final class CoordinatorStore: ObservableObject {
     private let pause: @Sendable (TimeInterval) async throws -> Void
     private let now: @Sendable () -> Date
     private var connection: CoordinatorConnection?
+    private var connectionRole: CoordinatorRole?
     private var task: Task<Void, Never>?
     private var revision = UUID()
 
@@ -40,6 +41,10 @@ final class CoordinatorStore: ObservableObject {
 
     var selectedNode: CoordinatorNode? { nodes.first { $0.id == selectedNodeID } }
     var isMonitoring: Bool { [.connecting, .connected, .reconnecting].contains(phase) }
+    var commandConnection: CoordinatorConnection? {
+        guard phase == .connected, role == connectionRole else { return nil }
+        return connection
+    }
 
     func connect() {
         disconnect()
@@ -51,6 +56,7 @@ final class CoordinatorStore: ObservableObject {
                 let credentials = try await load(requestedRole)
                 guard current == revision, !Task.isCancelled else { return }
                 connection = credentials
+                connectionRole = requestedRole
                 await monitor(credentials, revision: current)
             } catch {
                 guard current == revision, !Task.isCancelled else { return }
@@ -73,6 +79,7 @@ final class CoordinatorStore: ObservableObject {
         task?.cancel()
         task = nil
         connection = nil
+        connectionRole = nil
         nodes = []
         selectedNodeID = nil
         lastUpdated = nil
@@ -116,6 +123,7 @@ final class CoordinatorStore: ObservableObject {
         failure = reason
         phase = reason == .unavailable ? .unavailable : .blocked
         connection = nil
+        connectionRole = nil
         // Cached inventory is not evidence of current access after revocation or
         // failed trust. Availability failures may retain it with an unknown status.
         if reason != .unavailable {

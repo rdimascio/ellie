@@ -43,7 +43,7 @@ The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, na
 
 The versioned JSON schema accepts the browser dashboard editor’s export. Use File → Import Dashboards to carry layouts and notes over; the app does not reach into browser storage. Native state lives in Application Support/Ellie/dashboardsv1.json with private permissions. Invalid startup data remains intact and blocks writes until explicit import/reset recovery. `--state-path /absolute/private/dashboards.json` selects an isolated file for validation. Existing coordinator/node identities, Keychain credentials and services are untouched.
 
-This is the first macOS client slice. Live coordinator controls, model-backed voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain later slices. An ad hoc development signature is not a notarized release.
+The Mac client also provides connected device status and explicitly targeted app opening. Model-backed voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain separate slices. An ad hoc development signature is not a notarized release.
 
 ## Connected device status
 
@@ -55,9 +55,17 @@ Select a Mac to inspect its ID, desktop capabilities and last registration. Onli
 
 The app reads the selected role's existing private configuration and pinned certificate under `~/.ellie`. It retrieves the existing Keychain item through the installed Ellie native helper, using only `keychain.get`. Credentials stay in memory; there are no configuration writes, Keychain changes, new service processes or analytics calls. If the identity is missing, finish the existing CLI installation/pairing flow before connecting.
 
-Requests use an ephemeral HTTPS session with exact certificate pinning, a five-second deadline and a bounded response. Redirects, cookies and shared credential/cache storage are disabled. Successful reads refresh every ten seconds while the Devices window is open. Availability failures permit three retries after two, four and eight seconds; then monitoring stops until an explicit reconnect. Invalid trust, rejected credentials and malformed responses stop immediately. Closing Devices or selecting another identity cancels monitoring and drops the connection state.
+Requests use an ephemeral HTTPS session with exact certificate pinning and bounded responses. Device reads have a five-second deadline. Redirects, cookies and shared credential/cache storage are disabled. Successful reads refresh every ten seconds while the Devices window is open. Availability failures permit three retries after two, four and eight seconds; then monitoring stops until an explicit reconnect. Invalid trust, rejected credentials and malformed responses stop immediately. Closing Devices or selecting another identity cancels monitoring and drops the connection state.
 
-This slice is read-only. Granted app commands and cancellation/outcome controls will follow separately; no desktop action is queued or replayed by the device screen.
+## Open an app on a selected Mac
+
+Connect, select an online Mac with the **Open applications** capability, choose Arc, Safari or Messages, then click **Open**. The selected Mac and app are shown with the result. A node identity can control only itself; an existing coordinator identity can target its paired nodes. The coordinator and node still enforce their existing capabilities, app allowlists and macOS permissions. The screen does not grant permissions or accept arbitrary command text.
+
+Only one command can be in flight. Commands have a 35-second absolute deadline to accommodate the coordinator's default 30-second operation timeout. They are never retried automatically. Opening a window, connecting, refreshing status and restarting the app do not submit desktop actions.
+
+**Stop waiting** closes the command request. The coordinator requests cancellation when it observes that disconnection, but a native action may already have run. Ellie therefore shows an unknown outcome after cancellation, timeouts, interrupted connections or an ambiguous unsuccessful response. Check the target Mac before repeating the command. An already opened app is not closed by cancellation.
+
+Changing the selected Mac or identity, disconnecting, closing Devices, or losing authenticated availability stops an active wait. While the window remains open, it preserves that uncertainty in the visible result. Rejected credentials immediately discard the connection and cached inventory. The result captures the original target and app; a late response cannot overwrite a cancellation result. There is no persisted command payload, background queue or replay on launch. This initial control does not present a durable job ID or claim confirmation that a running native action stopped.
 
 ## Validation and next slices
 
@@ -65,4 +73,6 @@ The [dated validation record](validation/2026-09-13-native-app.md) separates act
 
 The [native connection record](validation/2026-09-13-native-connection.md) covers 44 Swift tests, including real localhost HTTPS, and the physical UI check that identified pending Local Network consent. Live native LAN inventory remains an acceptance step after that consent.
 
-Next, add a native connection and device view using the existing authenticated coordinator protocol, followed by an explicitly targeted granted command. Then add the native iPhone target and pairing flow, and local microphone capture feeding the reviewed transcription adapter. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
+The [native app control record](validation/2026-09-13-native-actions.md) distinguishes synthetic command outcomes from physical Mac UI and LAN acceptance.
+
+Next, add the native iPhone target and pairing flow, and local microphone capture feeding the reviewed transcription adapter. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.

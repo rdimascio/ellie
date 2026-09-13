@@ -3,6 +3,13 @@ import SwiftUI
 @MainActor
 struct DevicesView: View {
     @ObservedObject var store: CoordinatorStore
+    @StateObject private var actions: CoordinatorActionStore
+    @State private var app: NativeApp = .arc
+
+    init(store: CoordinatorStore, actions: CoordinatorActionStore? = nil) {
+        self.store = store
+        _actions = StateObject(wrappedValue: actions ?? CoordinatorActionStore())
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,7 +23,10 @@ struct DevicesView: View {
                     if store.phase == .connecting || store.phase == .reconnecting {
                         ProgressView().controlSize(.small)
                     }
-                    Button("Disconnect") { store.disconnect() }
+                    Button("Disconnect") {
+                        actions.cancel()
+                        store.disconnect()
+                    }
                 } else {
                     Button(store.phase == .disconnected ? "Connect" : "Reconnect") { store.connect() }
                         .keyboardShortcut(.defaultAction)
@@ -68,6 +78,10 @@ struct DevicesView: View {
                     }
                 }
             }
+            if actions.running || actions.terminalState != nil {
+                Divider()
+                actionStatus
+            }
             Divider()
             HStack {
                 Image(systemName: store.phase == .connected ? "checkmark.shield" : "network")
@@ -86,8 +100,21 @@ struct DevicesView: View {
                 .help("Refresh device status")
                 .keyboardShortcut("r")
         }
-        .onChange(of: store.role) { _, _ in store.disconnect() }
-        .onDisappear { store.disconnect() }
+        .onChange(of: store.role) { _, _ in
+            actions.cancel()
+            store.disconnect()
+        }
+        .onChange(of: store.selectedNodeID) { _, _ in actions.cancel() }
+        .onChange(of: store.phase) { _, phase in
+            if [.disconnected, .blocked, .unavailable, .reconnecting].contains(phase) { actions.cancel() }
+        }
+        .onChange(of: actions.terminalState) { _, result in
+            if result == .rejected(.unauthorized) { store.disconnect() }
+        }
+        .onDisappear {
+            actions.cancel()
+            store.disconnect()
+        }
     }
 
     private func detail(_ node: CoordinatorNode, at date: Date) -> some View {
@@ -111,9 +138,56 @@ struct DevicesView: View {
                 }
                 Text("Last registration: \(node.lastSeen.formatted(date: .abbreviated, time: .standard))")
                     .font(.caption).foregroundStyle(.secondary)
+                Divider()
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Open an app").font(.headline)
+                    Picker("Application", selection: $app) {
+                        ForEach(NativeApp.allCases) { choice in Text(choice.title).tag(choice) }
+                    }
+                    .disabled(actions.running)
+                    Button("Open \(app.title)") {
+                        guard let connection = store.commandConnection else { return }
+                        actions.start(connection: connection, node: node, app: app)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(actions.running || store.commandConnection == nil || !node.isOnline(at: date) || !node.capabilities.contains("app.open"))
+                    .accessibilityLabel("Open \(app.title) on Mac \(node.id.prefix(8))")
+                    Text("Opens on this Mac. Its allowed apps and permissions still apply.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             .padding(30).frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private var actionStatus: some View {
+        HStack(alignment: .top, spacing: 12) {
+            if actions.running {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: "info.circle").foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                if let nodeID = actions.nodeID, let requestedApp = actions.app {
+                    Text("\(requestedApp.title) · Mac \(nodeID.prefix(8))")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if actions.running {
+                    Text("Opening app…").fontWeight(.medium)
+                    Text("Stopping stops waiting and requests cancellation. The app may already have opened.")
+                        .font(.callout).foregroundStyle(.secondary)
+                } else if let result = actions.terminalState {
+                    Text(result.title).fontWeight(.medium)
+                    Text(result.message).font(.callout).foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if actions.running {
+                Button("Stop waiting") { actions.cancel() }
+            }
+        }
+        .padding(16)
+        .accessibilityElement(children: .contain)
     }
 
     private func status(_ node: CoordinatorNode, at date: Date) -> String {

@@ -14,6 +14,16 @@ final class CoordinatorNetworkTests: XCTestCase {
         XCTAssertEqual(nodes.first?.capabilities, ["app.open", "window.place"])
     }
 
+    func testRealTLSCommandPostsFiniteAppRequest() async throws {
+        let server = try await LoopbackCoordinator(mode: "action")
+        defer { server.stop() }
+
+        let outcome = try await PinnedCoordinatorClient().openApp(
+            connection: server.connection, nodeID: "loopback-mac", app: .safari
+        )
+        XCTAssertEqual(outcome, .completed)
+    }
+
     func testRealTLSRedirectIsRefusedWithoutForwardingCredential() async throws {
         let server = try await LoopbackCoordinator(mode: "redirect")
         defer { server.stop() }
@@ -218,6 +228,24 @@ private final class LoopbackCoordinator: @unchecked Sendable {
     let main;
     sink.listen(0, '127.0.0.1', () => {
       main = https.createServer(options, (req, res) => {
+        if (mode === 'action') {
+          if (req.url !== '/v1/commands' || req.method !== 'POST' || req.headers['x-ellie-version'] !== '1' ||
+              req.headers.authorization !== `Bearer ${token}` || req.headers['content-type'] !== 'application/json') {
+            res.writeHead(400, { 'content-type': 'application/json' }); return res.end('{}');
+          }
+          const chunks = [];
+          req.on('data', chunk => chunks.push(chunk));
+          req.on('end', () => {
+            let body;
+            try { body = JSON.parse(Buffer.concat(chunks)); } catch { body = null; }
+            if (!body || body.nodeId !== 'loopback-mac' || body.text !== 'open app Safari') {
+              res.writeHead(400, { 'content-type': 'application/json' }); return res.end('{}');
+            }
+            res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+            res.end(JSON.stringify({ ok: true, message: 'opened' }));
+          });
+          return;
+        }
         if (req.url !== '/v1/nodes' || req.method !== 'GET' || req.headers['x-ellie-version'] !== '1' || req.headers.authorization !== `Bearer ${token}`) {
           res.writeHead(400, { 'content-type': 'application/json' }); return res.end('{}');
         }
