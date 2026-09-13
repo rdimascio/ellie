@@ -152,7 +152,7 @@ struct DevicesView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(actions.running || store.commandConnection == nil || !node.isOnline(at: date) || !node.capabilities.contains("app.open"))
                     .accessibilityLabel("Open \(app.title) on Mac \(node.id.prefix(8))")
-                    Text("Opens on this Mac. Its allowed apps and permissions still apply.")
+                    Text("Opens on the selected Mac. Its allowed apps and permissions still apply.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
