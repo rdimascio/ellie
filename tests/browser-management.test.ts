@@ -12,6 +12,7 @@ import { Auth, newToken } from "../apps/server/src/auth.ts";
 import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { HouseholdState } from "../apps/server/src/household-state.ts";
+import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import type { BrowserAuthState } from "../apps/server/src/browser-auth.ts";
 import type {
   BrowserControl,
@@ -39,6 +40,11 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     nativeState = structuredClone(next);
   });
   const household = HouseholdState.memory();
+  const speech = NativeSpeech.memory(nativeAuth, {
+    async *transcribe() {
+      yield { text: "synthetic", final: true };
+    },
+  });
   let current =
     options.initial ??
     ({
@@ -47,6 +53,7 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
       auth: browserAuth,
       nativeAuth,
       household,
+      speech,
       certificateSha256: "a".repeat(64),
     } satisfies BrowserControlSnapshot);
   const browser: BrowserControl = { current: () => current };
@@ -123,6 +130,7 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
   return {
     browserAuth,
     nativeAuth,
+    speech,
     controllerToken,
     nodeToken,
     call,
@@ -144,6 +152,38 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     },
   };
 }
+
+test("speech authority management is controller-only and preserves unrelated native grants", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Phone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const client = await f.nativeAuth.pair(invitation.code, "d".repeat(64));
+  const body = { clientId: client.id, capability: "speech.transcribe" };
+  assert.equal((await f.call(f.nodeToken, "POST", "/v1/speech/authorities", { body })).status, 403);
+  assert.deepEqual(
+    (await f.call(f.controllerToken, "POST", "/v1/speech/authorities", { body })).body,
+    { ok: true, grant: body },
+  );
+  assert.deepEqual((await f.call(f.controllerToken, "GET", "/v1/speech/authorities")).body, {
+    grants: [body],
+  });
+  assert.deepEqual(
+    (
+      await f.call(f.controllerToken, "POST", "/v1/speech/authorities/revoke", {
+        body: { clientId: client.id },
+      })
+    ).body,
+    { ok: true, revoked: true },
+  );
+  assert.ok(
+    f.nativeAuth
+      .authenticateBearer(`Bearer ${"d".repeat(64)}`)
+      ?.grants[0]?.capabilities.includes("app.open"),
+  );
+});
 
 test("household management is controller-only and grants only an active native client", async (t) => {
   const f = await fixture();

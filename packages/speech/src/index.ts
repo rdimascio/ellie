@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, mkdtemp, open, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, open, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -228,6 +228,8 @@ export class WhisperCliSpeechInput implements SpeechInput {
     }, this.#timeoutMs);
     const combined = AbortSignal.any([signal, deadline.signal]);
     let directory: string | undefined;
+    let audioPath: string | undefined;
+    let transcriptPath: string | undefined;
     let primaryError: unknown;
     let cleanupFailed = false;
     let iterator: AsyncIterator<Uint8Array> | undefined;
@@ -250,12 +252,13 @@ export class WhisperCliSpeechInput implements SpeechInput {
       const wav = Buffer.concat(chunks, size);
       validateWave(wav, this.#maxAudioDurationMs);
       directory = await mkdtemp(join(tmpdir(), "ellie-speech-"));
-      const audioPath = join(directory, "turn.wav");
+      audioPath = join(directory, "turn.wav");
       const outputPath = join(directory, "transcript");
+      transcriptPath = `${outputPath}.txt`;
       await writeFile(audioPath, wav, { mode: 0o600 });
       await this.#run(audioPath, outputPath, combined, () => timedOut);
       yield {
-        text: await readBoundedTranscript(`${outputPath}.txt`, this.#maxTranscriptBytes),
+        text: await readBoundedTranscript(transcriptPath, this.#maxTranscriptBytes),
         final: true,
       };
     } catch (error) {
@@ -264,13 +267,24 @@ export class WhisperCliSpeechInput implements SpeechInput {
     } finally {
       clearTimeout(timer);
       void iterator?.return?.().catch(() => undefined);
-      try {
-        if (directory) await rm(directory, { recursive: true, force: true });
-      } catch {
-        cleanupFailed = true;
-      } finally {
-        this.#active = false;
+      const removeFile = async (path: string | undefined) => {
+        if (!path) return;
+        try {
+          await unlink(path);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") cleanupFailed = true;
+        }
+      };
+      await removeFile(audioPath);
+      await removeFile(transcriptPath);
+      if (directory) {
+        try {
+          await rmdir(directory);
+        } catch {
+          cleanupFailed = true;
+        }
       }
+      this.#active = false;
     }
     if (cleanupFailed && primaryError === undefined)
       throw new SpeechInputError("PROCESS_FAILED", "Temporary speech data could not be removed.");

@@ -11,6 +11,8 @@ import { NativeAuthError } from "./native-auth.ts";
 import { NativeControls } from "./native-controls.ts";
 import type { HouseholdState } from "./household-state.ts";
 import { handleNativeHousehold } from "./native-household.ts";
+import type { NativeSpeech } from "./native-speech.ts";
+import { handleNativeSpeech } from "./native-speech-routes.ts";
 export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
@@ -45,6 +47,7 @@ export interface BrowserServerOptions {
   auth: BrowserAuth;
   nativeAuth?: NativeAuth;
   household?: HouseholdState;
+  speech?: NativeSpeech;
   assets?: BrowserAssets;
   remote?: BrowserRemote;
 }
@@ -189,7 +192,8 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 503, { error: "Native enrollment unavailable." }, {}, true);
             return;
           }
-          if ((method === "POST" || method === "PUT") && !isJson(request)) {
+          const speechUpload = method === "POST" && path === "/native/v1/speech/transcriptions";
+          if ((method === "POST" || method === "PUT") && !speechUpload && !isJson(request)) {
             send(response, 415, { error: "JSON required." }, {}, true);
             return;
           }
@@ -229,6 +233,20 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 401, { error: "Native session required." }, {}, true);
             return;
           }
+          if (
+            await handleNativeSpeech(
+              request,
+              response,
+              path,
+              options.speech,
+              authorizations[0]!,
+              (status, body) => {
+                if (!response.destroyed && !response.writableEnded)
+                  send(response, status, body, {}, status !== 200);
+              },
+            )
+          )
+            return;
           if (options.household) {
             const handled = await handleNativeHousehold(
               request,

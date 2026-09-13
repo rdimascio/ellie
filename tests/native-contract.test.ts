@@ -41,6 +41,9 @@ test("native OpenAPI describes the separate runtime routes without controller au
     ...Object.values(NATIVE_SESSION_CONTRACT.routes).map((route) => route.path),
     "/native/v1/household/authority",
     "/native/v1/household/{profile}/{kind}",
+    "/native/v1/speech/availability",
+    "/native/v1/speech/transcriptions",
+    "/native/v1/speech/transcriptions/{turnId}/cancel",
     ...Object.values(NATIVE_CONTROL_CONTRACT.routes).map((route) => route.path),
   ]);
   assert.deepEqual(document.security, [{ nativeBearer: [] }]);

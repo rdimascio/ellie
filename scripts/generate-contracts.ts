@@ -492,6 +492,48 @@ function openApi(): Json {
           },
         }),
       },
+      "/v1/speech/authorities": {
+        get: operation({
+          operationId: "listSpeechAuthorities",
+          summary: "List explicit native speech grants",
+          description:
+            "Controller bearer identity required. Enrollment, app and household grants confer no speech authority.",
+          responses: {
+            "200": response("Current speech grants.", { type: "object" }),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+        post: operation({
+          operationId: "grantSpeechAuthority",
+          summary: "Grant one active native client local transcription",
+          requestBody: request({
+            type: "object",
+            required: ["clientId", "capability"],
+            additionalProperties: false,
+            properties: { clientId: ref("Identifier"), capability: { const: "speech.transcribe" } },
+          }),
+          responses: {
+            "200": response("Grant durably saved.", { type: "object" }),
+            ...errors("400", "401", "403", "404", "415", "503"),
+          },
+        }),
+      },
+      "/v1/speech/authorities/revoke": {
+        post: operation({
+          operationId: "revokeSpeechAuthority",
+          summary: "Revoke one native client's local transcription grant",
+          requestBody: request({
+            type: "object",
+            required: ["clientId"],
+            additionalProperties: false,
+            properties: { clientId: ref("Identifier") },
+          }),
+          responses: {
+            "200": response("Revocation durably saved.", { type: "object" }),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
       "/v1/nodes": {
         get: operation({
           operationId: "listNodes",
@@ -1192,6 +1234,92 @@ function nativeOpenApi(): Json {
               ref("HouseholdConflictResponse"),
             ),
             "428": response("Conditional revision required.", ref("NativeError")),
+          },
+        },
+      },
+      "/native/v1/speech/availability": {
+        get: {
+          ...common,
+          operationId: "getNativeSpeechAvailability",
+          summary: "Explicitly check configured local speech availability",
+          responses: {
+            ...errors,
+            "200": response("Local speech is configured and currently granted.", {
+              type: "object",
+              required: ["available"],
+              additionalProperties: false,
+              properties: { available: { const: true } },
+            }),
+          },
+        },
+      },
+      "/native/v1/speech/transcriptions": {
+        post: {
+          parameters: [
+            ...common.parameters,
+            {
+              name: "X-Ellie-Turn-ID",
+              in: "header",
+              required: true,
+              schema: { type: "string", format: "uuid" },
+            },
+          ],
+          operationId: "createNativeSpeechTranscription",
+          summary: "Transcribe one bounded WAV turn on the coordinator",
+          description:
+            "Requires a separate speech.transcribe grant. No cloud fallback, persistence or automatic replay.",
+          "x-ellie-request-channel": {
+            ...common["x-ellie-request-channel"],
+            jsonPostRequiresSingleContentType: false,
+            audioWavRequiresSingleContentType: true,
+            exactContentLength: true,
+          },
+          requestBody: {
+            required: true,
+            content: {
+              "audio/wav": { schema: { type: "string", format: "binary", maxLength: 1100000 } },
+            },
+          },
+          responses: {
+            ...errors,
+            "200": response("One editable transcript.", {
+              type: "object",
+              required: ["turnId", "text"],
+              additionalProperties: false,
+              properties: {
+                turnId: { type: "string", format: "uuid" },
+                text: { type: "string", maxLength: 2000 },
+              },
+            }),
+            "499": response(
+              "The caller stopped waiting; no transcript is published.",
+              ref("NativeError"),
+            ),
+          },
+        },
+      },
+      "/native/v1/speech/transcriptions/{turnId}/cancel": {
+        post: {
+          ...common,
+          operationId: "cancelNativeSpeechTranscription",
+          summary: "Signal cancellation for this client's matching active turn",
+          parameters: [
+            {
+              name: "turnId",
+              in: "path",
+              required: true,
+              schema: { type: "string", format: "uuid" },
+            },
+          ],
+          requestBody: request({ type: "object", maxProperties: 0, additionalProperties: false }),
+          responses: {
+            ...errors,
+            "200": response("Cancellation signal result.", {
+              type: "object",
+              required: ["ok", "cancelled"],
+              additionalProperties: false,
+              properties: { ok: { const: true }, cancelled: { type: "boolean" } },
+            }),
           },
         },
       },

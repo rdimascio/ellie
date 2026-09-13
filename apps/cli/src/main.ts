@@ -38,6 +38,7 @@ import { createBrowserRemote } from "../../server/src/browser-remote.ts";
 import { parseBrowserCommand, runBrowserCommand } from "./browser-commands.ts";
 import { parseNativeCommand, runNativeCommand } from "./native-commands.ts";
 import { parseHouseholdCommand, runHouseholdCommand } from "./household-commands.ts";
+import { parseSpeechCommand, runSpeechCommand } from "./speech-commands.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
@@ -156,6 +157,11 @@ async function main(): Promise<void> {
   if (args[0] === "household") {
     const command = parseHouseholdCommand(args.slice(1));
     await withController(async (client) => console.log(await runHouseholdCommand(client, command)));
+    return;
+  }
+  if (args[0] === "speech") {
+    const command = parseSpeechCommand(args.slice(1));
+    await withController(async (client) => console.log(await runSpeechCommand(client, command)));
     return;
   }
   if (args[0] === "browser") {
