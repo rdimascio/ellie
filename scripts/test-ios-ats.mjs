@@ -175,6 +175,7 @@ try {
   const fakeWhisper = join(owned, "fake-whisper.mjs");
   const fakeModel = join(owned, "fake-model.bin");
   const invocationLog = join(owned, "speech-invocations");
+  const processExitLog = join(owned, "speech-process-exits");
   writeFileSync(fakeModel, "synthetic model fixture", { mode: 0o600 });
   writeFileSync(
     fakeWhisper,
@@ -182,14 +183,24 @@ try {
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const value = (name) => process.argv[process.argv.indexOf(name) + 1];
 const audio = readFileSync(value("-f"));
-appendFileSync(${JSON.stringify(invocationLog)}, "invoked\\n");
-if (audio[44] === 1) {
-  process.on("SIGTERM", () => process.exit(143));
+const marker = String(audio[44]);
+if (audio[44] >= 3) {
+  process.on("SIGTERM", () => {
+    appendFileSync(${JSON.stringify(processExitLog)}, marker + "\\n");
+    process.exit(143);
+  });
+  appendFileSync(${JSON.stringify(invocationLog)}, marker + "\\n");
   setInterval(() => {}, 1000);
 } else if (audio[44] === 2) {
-  setTimeout(() => writeFileSync(value("-of") + ".txt", "Open Safari\\n"), 11_000);
+  appendFileSync(${JSON.stringify(invocationLog)}, marker + "\\n");
+  setTimeout(() => {
+    writeFileSync(value("-of") + ".txt", "Open Safari\\n");
+    appendFileSync(${JSON.stringify(processExitLog)}, marker + "\\n");
+  }, 11_000);
 } else {
+  appendFileSync(${JSON.stringify(invocationLog)}, marker + "\\n");
   writeFileSync(value("-of") + ".txt", "Open Safari\\n");
+  appendFileSync(${JSON.stringify(processExitLog)}, marker + "\\n");
 }
 `,
     { mode: 0o700 },
@@ -211,6 +222,8 @@ if (audio[44] === 1) {
     "speech-granted",
     "speech-revoked",
     "session-revoked",
+    "speech-cancel",
+    "speech-disconnect",
   ];
   nativeAuth = new NativeAuth(NativeAuth.empty(), async () => {}, {
     token: () => "a".repeat(64),
@@ -227,12 +240,14 @@ if (audio[44] === 1) {
     ["Speech Granted", "e"],
     ["Speech Revoked", "f"],
     ["Session Revoked", "b"],
+    ["Speech Cancel", "cd"],
+    ["Speech Disconnect", "de"],
   ]) {
     const next = await nativeAuth.invite({
       label,
       grants: [{ target: "speech-fixture-no-node", capabilities: ["app.open"] }],
     });
-    speechClients.push(await nativeAuth.pair(next.code, candidate.repeat(64)));
+    speechClients.push(await nativeAuth.pair(next.code, candidate.repeat(64 / candidate.length)));
   }
   nativeSpeech = NativeSpeech.memory(
     nativeAuth,
@@ -254,8 +269,45 @@ if (audio[44] === 1) {
     clientId: speechClients[2].id,
     capability: "speech.transcribe",
   });
+  await nativeSpeech.grant({
+    clientId: speechClients[4].id,
+    capability: "speech.transcribe",
+  });
+  await nativeSpeech.grant({
+    clientId: speechClients[5].id,
+    capability: "speech.transcribe",
+  });
   await nativeSpeech.revoke(speechClients[2].id);
   await nativeAuth.revoke(speechClients[3].id);
+  const disconnectBearer = `Bearer ${"de".repeat(32)}`;
+  const cancelBearer = `Bearer ${"cd".repeat(32)}`;
+  const readSpeechMarkers = () => {
+    try {
+      return readFileSync(invocationLog, "utf8").trim().split("\n").filter(Boolean);
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+  };
+  const readSpeechExitMarkers = () => {
+    try {
+      return readFileSync(processExitLog, "utf8").trim().split("\n").filter(Boolean);
+    } catch (error) {
+      if (error?.code === "ENOENT") return [];
+      throw error;
+    }
+  };
+  const settledTurns = new Set();
+  const activeTurns = new Map();
+  const fixtureTranscribe = nativeSpeech.transcribe.bind(nativeSpeech);
+  nativeSpeech.transcribe = async (bearer, turnId, audio, disconnected) => {
+    activeTurns.set(turnId, bearer);
+    try {
+      return await fixtureTranscribe(bearer, turnId, audio, disconnected);
+    } finally {
+      settledTurns.add(turnId);
+    }
+  };
   const hosted = createBrowserServer({
     cert: readFileSync(cert),
     key: readFileSync(key),
@@ -278,15 +330,68 @@ if (audio[44] === 1) {
     },
   });
   server = hosted;
-  hosted.server.prependListener("request", (request, response) => {
+  const productionListeners = hosted.server.listeners("request");
+  hosted.server.removeAllListeners("request");
+  hosted.server.on("request", (request, response) => {
+    const control = /^\/__ellie-test\/speech\/(cancel|disconnect)\/(started|settled)$/.exec(
+      request.url ?? "",
+    );
+    if (control) {
+      const [, fixtureCase, phase] = control;
+      const bearer = fixtureCase === "cancel" ? cancelBearer : disconnectBearer;
+      const marker = fixtureCase === "cancel" ? "3" : "4";
+      void (async () => {
+        if (
+          request.method !== "GET" ||
+          request.headers.authorization !== bearer ||
+          request.headers["x-ellie-version"] !== "1"
+        ) {
+          response.writeHead(403, {
+            "content-type": "application/json",
+            "cache-control": "no-store",
+          });
+          response.end('{"ok":false}');
+          return;
+        }
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          const turns = [...activeTurns].filter(([, owner]) => owner === bearer).map(([id]) => id);
+          const processMarkers = readSpeechMarkers();
+          const exitMarkers = readSpeechExitMarkers();
+          const ready =
+            phase === "started"
+              ? turns.some((id) => !settledTurns.has(id)) && processMarkers.includes(marker)
+              : turns.length === 1 &&
+                turns.every((id) => settledTurns.has(id)) &&
+                exitMarkers.includes(marker);
+          if (ready) {
+            response.writeHead(200, {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+            });
+            response.end('{"ok":true}');
+            return;
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+        }
+        response.writeHead(503, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end('{"ok":false}');
+      })().catch(() => response.destroy());
+      return;
+    }
     if (request.method === "POST" && request.url === "/native/v1/speech/transcriptions") {
       speechUploadRequests += 1;
     }
-    if (request.headers["x-ellie-turn-id"] !== "77777777-7777-4777-8777-777777777777") return;
-    response.end = function () {
-      response.socket?.destroy();
-      return response;
-    };
+    if (request.headers["x-ellie-turn-id"] === "77777777-7777-4777-8777-777777777777") {
+      response.end = function () {
+        response.socket?.destroy();
+        return response;
+      };
+    }
+    for (const listener of productionListeners) listener.call(hosted.server, request, response);
   });
   await new Promise((resolveListen, reject) => {
     hosted.server.once("error", reject);
@@ -356,19 +461,16 @@ if (audio[44] === 1) {
   if (remoteNodeReads !== 2 || remoteAppOpens !== 1) {
     throw new Error("The production native routes did not perform the expected finite operations.");
   }
-  const invocationDeadline = Date.now() + 3_000;
-  let speechInvocations = 0;
-  while (Date.now() < invocationDeadline && speechInvocations < 4) {
-    try {
-      speechInvocations = readFileSync(invocationLog, "utf8").trim().split("\n").length;
-    } catch {
-      speechInvocations = 0;
-    }
-    if (speechInvocations < 4) await new Promise((resolveWait) => setTimeout(resolveWait, 20));
-  }
-  if (speechUploadRequests !== 5 || speechInvocations < 4 || speechInvocations > 5) {
+  const speechMarkers = readSpeechMarkers().sort();
+  const speechExitMarkers = readSpeechExitMarkers().sort();
+  const expectedSpeechMarkers = ["0", "0", "2", "3", "4"];
+  if (
+    speechUploadRequests !== 5 ||
+    JSON.stringify(speechMarkers) !== JSON.stringify(expectedSpeechMarkers) ||
+    JSON.stringify(speechExitMarkers) !== JSON.stringify(expectedSpeechMarkers)
+  ) {
     throw new Error(
-      `Production speech observed ${speechUploadRequests} uploads and ${speechInvocations} fixture processes.`,
+      `Production speech observed ${speechUploadRequests} uploads and ${speechMarkers.length} fixture processes.`,
     );
   }
   const appInfo = JSON.parse(
