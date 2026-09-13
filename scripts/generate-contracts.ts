@@ -228,6 +228,48 @@ function openApi(): Json {
           },
         }),
       },
+      "/v1/native/invitations": {
+        post: operation({
+          operationId: "createNativeInvitation",
+          summary: "Create a scoped native-app invitation",
+          description:
+            "Controller bearer identity required. The response binds a single-use invitation to the actual native listener origin and leaf certificate pin.",
+          requestBody: request(ref("NativeInvitationSpec")),
+          responses: {
+            "200": response("Native pairing payload created.", ref("NativePairingPayload")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/native/clients": {
+        get: operation({
+          operationId: "listNativeClients",
+          summary: "List public native-app identities and grants",
+          description:
+            "Controller bearer identity required. Credential verifiers are never returned.",
+          responses: {
+            "200": response("Active public native clients.", {
+              type: "array",
+              maxItems: 128,
+              items: ref("NativeClient"),
+            }),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+      },
+      "/v1/native/revoke": {
+        post: operation({
+          operationId: "revokeNativeClient",
+          summary: "Revoke one native-app session",
+          description:
+            "Controller bearer identity required. Revocation is persisted before success.",
+          requestBody: request(ref("BrowserRevokeRequest")),
+          responses: {
+            "200": response("Native revocation result.", ref("BrowserRevokeResponse")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
       "/v1/nodes": {
         get: operation({
           operationId: "listNodes",
@@ -549,6 +591,64 @@ function openApi(): Json {
           additionalProperties: false,
           required: ["ok", "revoked"],
           properties: { ok: { const: true }, revoked: { type: "boolean" } },
+        },
+        NativeGrant: {
+          type: "object",
+          additionalProperties: false,
+          required: ["target", "capabilities"],
+          properties: {
+            target: identifier,
+            capabilities: {
+              type: "array",
+              prefixItems: [{ const: "app.open" }],
+              minItems: 1,
+              maxItems: 1,
+            },
+          },
+        },
+        NativeInvitationSpec: {
+          type: "object",
+          additionalProperties: false,
+          required: ["label", "grants"],
+          properties: {
+            label: boundedString(64),
+            grants: { type: "array", minItems: 1, maxItems: 16, items: ref("NativeGrant") },
+          },
+        },
+        NativeClient: {
+          type: "object",
+          additionalProperties: false,
+          required: ["id", "role", "label", "grants", "createdAt", "expiresAt"],
+          properties: {
+            id: identifier,
+            role: { const: "native_phone_controller" },
+            label: boundedString(64),
+            grants: { type: "array", minItems: 1, maxItems: 16, items: ref("NativeGrant") },
+            createdAt: finiteNumber,
+            expiresAt: finiteNumber,
+          },
+        },
+        NativePairingPayload: {
+          type: "object",
+          additionalProperties: false,
+          required: [
+            "version",
+            "origin",
+            "certificateSha256",
+            "invitation",
+            "expiresAt",
+            "label",
+            "grants",
+          ],
+          properties: {
+            version: { const: 1 },
+            origin: { type: "string", format: "uri", pattern: "^https://[^/@]+$" },
+            certificateSha256: { type: "string", pattern: "^[a-f0-9]{64}$" },
+            invitation: { type: "string", pattern: "^[a-f0-9]{64}$" },
+            expiresAt: finiteNumber,
+            label: boundedString(64),
+            grants: { type: "array", minItems: 1, maxItems: 16, items: ref("NativeGrant") },
+          },
         },
         NodeIdRequest: { type: "object", required: ["id"], properties: { id: identifier } },
         OkResponse: ok,

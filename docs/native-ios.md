@@ -13,14 +13,30 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer node scripts/test-ios.m
 
 The Xcode project creates the iPhone-only `org.ellie.dashboard.ios` app. These commands do not install on hardware or request a signing identity.
 
-## QR enrollment: next slice requirements
+## Native enrollment protocol foundation
 
-Before QR enrollment is implemented, the coordinator must define an authenticated native-session endpoint and credential lifecycle; the existing browser cookie is not a native app credential. The native bootstrap remains an open protocol design. A likely controller-originated QR would carry a versioned trusted origin, certificate pin material and a single-use invitation scoped to the intended native role, but its canonical encoding is not defined yet. It must not assume that the existing browser-only QR payload is sufficient.
+The coordinator now has a separate native-app authorization lifecycle. A controller can issue a ten-minute, single-use `native_phone_controller` invitation with explicit `app.open` grants for named nodes. The QR payload uses the versioned `ellie-native:v1:` format and binds the invitation to the exact HTTPS origin and the SHA-256 digest of the listener's actual leaf-certificate DER. Native session tokens use a separate bearer channel, domain-separated hashes, a bounded 90-day lifetime and independent list, logout and revocation operations. They never authenticate as a browser, node or controller.
 
-- Consume only a controller-issued, single-use, short-lived invitation and require the user to confirm the displayed coordinator identity and origin before enrollment. Do not invent an invitation, identity or household grant.
-- Validate the coordinator connection against the QR-provided origin and certificate pin, including hostname, pin shape, certificate validity interval and a reviewed rotation/recovery path. A native app can perform scoped trust evaluation without requiring installation of a system-wide CA profile. It must never accept an invalid certificate, suppress a trust error or silently change origins.
-- Bind the issued native session credential to the confirmed origin and store it in Keychain with an explicitly reviewed accessibility class. Define server-side revocation, local removal, device migration and coordinator certificate rotation behavior.
-- Start camera capture only after a user action; decode locally; stop on success, cancellation, backgrounding or timeout; and never persist or log QR contents.
-- Recover an uncertain pairing response by reading session state without replaying the pairing mutation automatically.
+The native client generates its candidate session token before the pairing POST. If the response is lost while the app remains running, it can make a read-only `GET /native/v1/session` request with that candidate token to determine whether pairing committed; it must not replay the POST automatically. If the unconfirmed token is lost in a crash, the server may retain an orphaned session until it expires or a controller revokes it. Reinstallation or migration requires a new invitation. A changed origin or certificate also requires explicit re-enrollment; the client must never rotate either silently.
 
-This dashboard slice does not define the QR wire format, pair a household, scan a QR code, install a certificate profile, touch Keychain or contact a coordinator.
+This slice deliberately stops at the server, protocol and controller CLI foundation. The iOS camera flow, explicit confirmation screen, pinned native transport and Keychain storage remain a dependent implementation. That client must use an app-specific Keychain item with reviewed accessibility, start camera capture only after user action, stop it on success/cancellation/backgrounding/timeout, and avoid persisting or logging QR contents. It must perform hostname and certificate-validity checks in addition to the exact QR leaf pin and must not install a system-wide CA profile.
+
+## Enrollment wire surfaces
+
+Controller management uses the coordinator API and its existing controller bearer authentication. These routes are included in `contracts/openapi.v1.json`:
+
+- `POST /v1/native/invitations` accepts an exact `{label, grants}` JSON object and returns the fields encoded into the QR.
+- `GET /v1/native/clients` lists active native clients without credentials.
+- `POST /v1/native/revoke` accepts an exact `{id}` JSON object and revokes that client.
+
+The canonical QR envelope is bounded to 2,300 ASCII bytes so it remains below the terminal renderer's level-M byte capacity. Its decoded JSON and native listener request bodies are bounded to 4 KiB. The QR's exact origin identifies a separate native HTTPS listener. The listener requires the QR origin's exact `Host`, one `X-Ellie-Version: 1` header, no cookies, no browser `Origin` header and no `Sec-Fetch-*` headers. JSON requests accept one `Content-Type: application/json` header, optionally with UTF-8 charset. Its three version 1 routes are:
+
+- `POST /native/v1/pair` accepts exact JSON `{invitation, token}` without authorization. Both values are 64 lowercase hexadecimal characters. `token` is the native client's candidate credential. Success returns `{client}` containing the public client record.
+- `GET /native/v1/session` accepts the candidate as `Authorization: Bearer <token>` and returns `{client}` containing its public client record. This is the read-only recovery operation for an uncertain pair response.
+- `POST /native/v1/logout` accepts exact empty JSON `{}` and the same native bearer. It revokes that session.
+
+The listener routes deliberately do not inherit controller authentication and are not represented as coordinator operations in `contracts/openapi.v1.json`. A dedicated native-listener OpenAPI contract remains follow-up work before the Swift client is implemented. The reviewed contract for this slice is the protocol parser plus the server integration and synthetic TLS tests.
+
+The controller CLI exposes `native invite --label NAME --node ID --allow app.open`, `native clients` and `native revoke ID`. Invitation creation validates the label, target, grant and maximum QR bytes before mutating invitation state. QR certificate material always comes from the listener's active leaf certificate.
+
+As of 2026-09-13, this repository implements the protocol, server lifecycle, controller CLI and synthetic tests only. The iOS app does not scan this QR, contact the listener, store a native credential in Keychain or enroll a household. Those client features require their own review and validation.
