@@ -5,9 +5,14 @@ import Security
 final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @unchecked Sendable {
   private let timeout: TimeInterval
   private let now: @Sendable () -> Date
-  init(timeout: TimeInterval = 10, now: @escaping @Sendable () -> Date = { Date() }) {
+  private let diagnostic: @Sendable (NativeTransportFailureCategory) -> Void
+  init(
+    timeout: TimeInterval = 10, now: @escaping @Sendable () -> Date = { Date() },
+    diagnostic: @escaping @Sendable (NativeTransportFailureCategory) -> Void = { _ in }
+  ) {
     self.timeout = timeout
     self.now = now
+    self.diagnostic = diagnostic
   }
 
   func logout(_ credential: NativeEnrollmentCredential) async throws {
@@ -89,11 +94,46 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
     configuration.timeoutIntervalForResource = timeout
     let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     defer { session.finishTasksAndInvalidate() }
-    let (data, response) = try await delegate.perform(request, in: session)
+    let data: Data
+    let response: URLResponse
+    do {
+      (data, response) = try await delegate.perform(request, in: session)
+    } catch {
+      diagnostic(nativeTransportFailureCategory(error))
+      throw error
+    }
     guard let http = response as? HTTPURLResponse, http.url == url,
       http.mimeType == "application/json"
     else { throw NativeEnrollmentFailure.invalidResponse }
     return (data, http)
+  }
+}
+
+enum NativeTransportFailureCategory: String, Sendable {
+  case cancelled
+  case connectionLost
+  case connectionFailed
+  case timedOut
+  case trustRejected
+  case unavailable
+}
+
+private func nativeTransportFailureCategory(_ error: Error) -> NativeTransportFailureCategory {
+  if error is CancellationError { return .cancelled }
+  if let failure = error as? NativeEnrollmentFailure, failure == .trustFailed {
+    return .trustRejected
+  }
+  let code = (error as? URLError)?.code
+  switch code {
+  case .cancelled: return .cancelled
+  case .networkConnectionLost: return .connectionLost
+  case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed: return .connectionFailed
+  case .timedOut: return .timedOut
+  case .secureConnectionFailed, .serverCertificateHasBadDate, .serverCertificateUntrusted,
+    .serverCertificateHasUnknownRoot, .serverCertificateNotYetValid, .clientCertificateRejected,
+    .clientCertificateRequired:
+    return .trustRejected
+  default: return .unavailable
   }
 }
 

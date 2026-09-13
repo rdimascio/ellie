@@ -32,6 +32,58 @@ let simulatorID,
 let remoteNodeReads = 0,
   remoteAppOpens = 0,
   speechUploadRequests = 0;
+const diagnosticStartedAt = Date.now();
+let diagnosticStage = "fixture-setup",
+  diagnosticStageStartedAt = diagnosticStartedAt;
+const endpointRequests = {
+  session: 0,
+  inventory: 0,
+  command: 0,
+  logout: 0,
+  unexpected: 0,
+};
+const endpointResponses = { ...endpointRequests };
+
+function enterDiagnosticStage(stage) {
+  diagnosticStage = stage;
+  diagnosticStageStartedAt = Date.now();
+}
+
+function endpointStage(request) {
+  const path = request.url?.split("?", 1)[0];
+  if (path?.startsWith("/native/v1/speech/") || path?.startsWith("/__ellie-test/speech/")) {
+    return undefined;
+  }
+  if (request.method === "GET" && path === "/native/v1/session") return "session";
+  if (request.method === "GET" && path === "/native/v1/nodes") return "inventory";
+  if (request.method === "POST" && path === "/native/v1/commands") return "command";
+  if (request.method === "POST" && path === "/native/v1/logout") return "logout";
+  return "unexpected";
+}
+
+function recordEndpointRequest(request, response) {
+  const stage = endpointStage(request);
+  if (!stage) return;
+  endpointRequests[stage] += 1;
+  response.once("finish", () => {
+    endpointResponses[stage] += 1;
+  });
+}
+
+function diagnosticSummary() {
+  const bounded = (value) => Math.min(Math.max(value, 0), 999_999);
+  const counts = (value) =>
+    ["session", "inventory", "command", "logout", "unexpected"]
+      .map((key) => `${key}:${Math.min(value[key], 99)}`)
+      .join(",");
+  return [
+    `stage=${diagnosticStage}`,
+    `stageMs=${bounded(Date.now() - diagnosticStageStartedAt)}`,
+    `totalMs=${bounded(Date.now() - diagnosticStartedAt)}`,
+    `requests=${counts(endpointRequests)}`,
+    `responses=${counts(endpointResponses)}`,
+  ].join(" ");
+}
 
 function terminate(child, signal) {
   if (!Number.isInteger(child.pid) || child.pid <= 0) return;
@@ -131,6 +183,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 try {
   rmSync(resultBundle, { recursive: true, force: true });
   mkdirSync(dirname(resultBundle), { recursive: true });
+  enterDiagnosticStage("fixture-certificate");
   const cert = join(owned, "cert.pem"),
     key = join(owned, "key.pem"),
     der = join(owned, "cert.der");
@@ -170,6 +223,7 @@ try {
     config,
   ]);
   await execute("openssl", ["x509", "-in", cert, "-outform", "DER", "-out", der]);
+  enterDiagnosticStage("fixture-listener");
   const pin = createHash("sha256").update(readFileSync(der)).digest("hex");
   const token = "c".repeat(64);
   const fakeWhisper = join(owned, "fake-whisper.mjs");
@@ -333,6 +387,7 @@ if (audio[44] >= 3) {
   const productionListeners = hosted.server.listeners("request");
   hosted.server.removeAllListeners("request");
   hosted.server.on("request", (request, response) => {
+    recordEndpointRequest(request, response);
     const control = /^\/__ellie-test\/speech\/(cancel|disconnect)\/(started|settled)$/.exec(
       request.url ?? "",
     );
@@ -398,6 +453,7 @@ if (audio[44] >= 3) {
     hosted.server.listen(address.port, "127.0.0.1", resolveListen);
   });
 
+  enterDiagnosticStage("simulator-discovery");
   const runtimes = JSON.parse(
     await execute("xcrun", ["simctl", "list", "runtimes", "--json"], {
       capture: true,
@@ -417,6 +473,7 @@ if (audio[44] >= 3) {
     runtimes[0].supportedDeviceTypes?.filter((item) => item.productFamily === "iPhone") ?? [];
   const device = compatible.find((item) => item.name === "iPhone 16") ?? compatible[0];
   if (!device) throw new Error("The selected iOS runtime has no supported iPhone.");
+  enterDiagnosticStage("simulator-create");
   simulatorID = await execute(
     "xcrun",
     [
@@ -432,8 +489,10 @@ if (audio[44] >= 3) {
     simulatorID = undefined;
     throw new Error("Simulator creation returned an invalid identifier.");
   }
+  enterDiagnosticStage("simulator-boot");
   await execute("xcrun", ["simctl", "boot", simulatorID]);
   await execute("xcrun", ["simctl", "bootstatus", simulatorID, "-b"], { timeout: 180_000 });
+  enterDiagnosticStage("xcode-test");
   await execute(
     "xcodebuild",
     [
@@ -473,6 +532,14 @@ if (audio[44] >= 3) {
       `Production speech observed ${speechUploadRequests} uploads and ${speechMarkers.length} fixture processes.`,
     );
   }
+  if (
+    JSON.stringify(endpointRequests) !==
+      JSON.stringify({ session: 1, inventory: 2, command: 1, logout: 1, unexpected: 0 }) ||
+    JSON.stringify(endpointResponses) !== JSON.stringify(endpointRequests)
+  ) {
+    throw new Error("The synthetic listener observed an unexpected request lifecycle.");
+  }
+  enterDiagnosticStage("built-policy");
   const appInfo = JSON.parse(
     await execute(
       "plutil",
@@ -497,10 +564,13 @@ if (audio[44] >= 3) {
     );
   }
   succeeded = true;
+  enterDiagnosticStage("complete");
+  console.log(`ATS synthetic diagnostics: ${diagnosticSummary()}`);
   console.log(
     "iOS app-hosted pinned HTTPS, native speech, cancellation, rejection, Keychain and built-policy checks passed.",
   );
 } finally {
+  if (!succeeded) console.error(`ATS synthetic diagnostics: ${diagnosticSummary()}`);
   if (server) {
     server.shutdown();
   }
