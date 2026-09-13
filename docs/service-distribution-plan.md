@@ -74,7 +74,7 @@ Install without `sudo` into a user-owned root:
 ```text
 ~/Library/Application Support/Ellie/Services/
   releases/0.1.0-dev-REVISION-ARCH/   # verified immutable payload
-  receipts/installed.json             # current and previous release IDs
+  receipts/installed.json             # current release and hashes for each selected role
 ~/Applications/Ellie Coordinator.app
 ~/Applications/Ellie Node.app
 ~/Library/LaunchAgents/org.ellie.assistant.coordinator.plist
@@ -87,6 +87,16 @@ entry and code signature, remove write access from the completed payload, then r
 `releases`. Reject unsafe ownership, links, unexpected existing paths, or a differing payload at an
 existing release ID. The receipt is private, contains no credential or private path beyond the
 fixed installation root, and is atomically replaced only after every published file succeeds.
+
+The native installer exposes `select RELEASE --roles coordinator|node|coordinator,node` and an
+explicit `recover` command. Selection uses a private lock and a durable intent journal, verifies
+the full old selection before changing either role, refuses loaded LaunchAgents and unmanaged or
+developer-checkout collisions, and publishes the receipt last. Recovery verifies exact old/new
+receipt bytes and app/plist contents before restoring a pre-commit transaction or completing a
+post-commit transaction. `recover` and the next `select` both attempt this recovery. Unsafe,
+ambiguous, or incomplete evidence retains the journal and remains blocked; selection never starts
+a service or removes a release. The unloaded check covers the managed LaunchAgent labels. It does
+not coordinate arbitrary foreground processes; a shared runtime lease remains future work.
 
 Generate each LaunchAgent with its stable label and release directory as `WorkingDirectory`; its
 program arguments are the corresponding stable role app and fixed `--launch-agent` mode. Preserve the existing per-user
@@ -101,7 +111,8 @@ Keep these production identities stable across releases:
 - Coordinator launcher: `org.ellie.assistant.coordinator.app`
 - Node launcher: `org.ellie.assistant.node.app`
 - LaunchAgents: `org.ellie.assistant.coordinator` and `org.ellie.assistant.node`
-- Keychain service and helper identity: the existing `org.ellie.assistant` contract
+- Keychain service: the existing `org.ellie.assistant` contract
+- Native helper signing identifier: `org.ellie.helper`
 
 The final distribution must use the same reviewed Developer ID Application team and designated
 requirements on every upgrade. Bundle IDs alone do not preserve TCC or Keychain trust. Ad-hoc

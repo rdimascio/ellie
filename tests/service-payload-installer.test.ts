@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -22,6 +22,10 @@ import test from "node:test";
 const mac = process.platform === "darwin";
 const source = new URL("../packages/macos/native/ServicePayloadInstaller.swift", import.meta.url)
   .pathname;
+const selectionSource = new URL(
+  "../packages/macos/native/ServicePayloadSelection.swift",
+  import.meta.url,
+).pathname;
 const launcherSource = new URL(
   "../packages/macos/native/PackagedServiceLauncher.swift",
   import.meta.url,
@@ -193,6 +197,7 @@ async function withFixture(
     "-parse-as-library",
     "-D",
     "ELLIE_INSTALLER_TESTING",
+    selectionSource,
     source,
     "-o",
     installer,
@@ -225,6 +230,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-parse-as-library",
     "-D",
     "ELLIE_INSTALLER_TESTING",
+    selectionSource,
     source,
     "-o",
     testing,
@@ -234,6 +240,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-swift-version",
     "5",
     "-parse-as-library",
+    selectionSource,
     source,
     "-o",
     production,
@@ -488,6 +495,417 @@ test(
 
       assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
       assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o555);
+    });
+  },
+);
+
+test(
+  "native selection publishes fixed stopped roles and preserves unselected role state",
+  { ...options, timeout: 20_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const prepareSelectionHome = async (name: string) => {
+        const candidate = join(root, name);
+        const candidateServices = join(candidate, "Library/Application Support/Ellie/Services");
+        await mkdir(candidateServices, { recursive: true, mode: 0o700 });
+        await chmod(join(candidate, "Library"), 0o700);
+        await chmod(join(candidate, "Library/Application Support"), 0o700);
+        await chmod(join(candidate, "Library/Application Support/Ellie"), 0o700);
+        await mkdir(join(candidate, "Applications"), { mode: 0o700 });
+        await mkdir(join(candidate, "Library/LaunchAgents"), { mode: 0o700 });
+        assert.equal(
+          run(installer, ["stage", release, "--test-services-root", candidateServices]).status,
+          0,
+        );
+        return { home: candidate, services: candidateServices };
+      };
+      const home = join(root, "selection-home");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(services, { recursive: true, mode: 0o700 });
+      await chmod(join(home, "Library"), 0o700);
+      await chmod(join(home, "Library/Application Support"), 0o700);
+      await chmod(join(home, "Library/Application Support/Ellie"), 0o700);
+      await mkdir(join(home, "Applications"), { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+
+      const selectCoordinator = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(selectCoordinator.status, 0, selectCoordinator.stderr);
+      assert.equal(
+        await lstat(join(home, "Applications/Ellie Coordinator.app")).then(() => true),
+        true,
+      );
+      assert.equal(
+        await lstat(join(home, "Applications/Ellie Node.app"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      const firstReceipt = await readFile(join(services, "receipts/installed.json"), "utf8");
+      assert.match(firstReceipt, /"coordinator"/);
+      assert.match(firstReceipt, /"node":null/);
+
+      const selectNode = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "node",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(selectNode.status, 0, selectNode.stderr);
+      const secondReceipt = await readFile(join(services, "receipts/installed.json"), "utf8");
+      assert.match(secondReceipt, /"coordinator"/);
+      assert.doesNotMatch(secondReceipt, /"node":null/);
+      assert.equal(
+        run(installer, ["select", id, "--roles", "node", "--test-home-root", home]).status,
+        0,
+      );
+
+      const upgradeRelease = join(root, "upgrade-source");
+      await cp(release, upgradeRelease, { recursive: true });
+      const upgradeRevision = "d".repeat(40);
+      const upgradeManifestPath = join(upgradeRelease, "manifest.json");
+      const upgradeManifest = JSON.parse(await readFile(upgradeManifestPath, "utf8"));
+      upgradeManifest.productVersion = "0.1.1";
+      upgradeManifest.sourceRevision = upgradeRevision;
+      await writeFile(upgradeManifestPath, `${JSON.stringify(upgradeManifest, null, 2)}\n`, {
+        mode: 0o644,
+      });
+      await writeFile(
+        join(upgradeRelease, "SOURCE.txt"),
+        `Ellie service payload\nSource revision: ${upgradeRevision}\nNode.js: v24.21.0\nNode archive SHA-256: ${"b".repeat(64)}\nMinimum macOS: 14.0\nHelper: org.ellie.helper (development-ad-hoc)\n`,
+        { mode: 0o644 },
+      );
+      const upgradeID = `0.1.1-${upgradeRevision}-${upgradeManifest.architecture}`;
+      assert.equal(
+        run(installer, ["stage", upgradeRelease, "--test-services-root", services]).status,
+        0,
+      );
+      const upgraded = run(installer, [
+        "select",
+        upgradeID,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(upgraded.status, 0, upgraded.stderr);
+      assert.equal(
+        (await lstat(join(home, "Applications/Ellie Coordinator.app"))).mode & 0o7777,
+        0o555,
+      );
+      const upgradedReceipt = await readFile(join(services, "receipts/installed.json"), "utf8");
+
+      for (const point of [
+        "after-old-app-unseal-coordinator",
+        "after-old-app-backup-coordinator",
+      ]) {
+        const crashed = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-fault",
+          point,
+        ]);
+        assert.equal(crashed.status, 86, `${point}: ${crashed.stderr}`);
+        const recovered = run(installer, ["recover", "--test-home-root", home]);
+        assert.equal(recovered.status, 0, `${point}: ${recovered.stderr}`);
+        assert.equal(
+          await readFile(join(services, "receipts/installed.json"), "utf8"),
+          upgradedReceipt,
+        );
+        assert.equal(
+          (await lstat(join(home, "Applications/Ellie Coordinator.app"))).mode & 0o7777,
+          0o555,
+        );
+      }
+
+      for (const point of ["after-old-app-unseal-coordinator", "after-app-seal-coordinator"]) {
+        const rejected = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-reject-at",
+          point,
+        ]);
+        assert.notEqual(rejected.status, 0);
+        assert.match(rejected.stderr, /requires recovery/);
+        assert.equal(run(installer, ["recover", "--test-home-root", home]).status, 0);
+        assert.equal(
+          await readFile(join(services, "receipts/installed.json"), "utf8"),
+          upgradedReceipt,
+        );
+      }
+
+      for (const point of [
+        "after-old-app-unseal-coordinator",
+        "after-old-app-backup-coordinator",
+        "after-app-move-coordinator",
+        "after-plist-move-coordinator",
+        "after-receipt",
+      ]) {
+        const update = await prepareSelectionHome(`update-${point}`);
+        assert.equal(
+          run(installer, ["stage", upgradeRelease, "--test-services-root", update.services]).status,
+          0,
+        );
+        assert.equal(
+          run(installer, [
+            "select",
+            id,
+            "--roles",
+            "coordinator,node",
+            "--test-home-root",
+            update.home,
+          ]).status,
+          0,
+        );
+        const crashed = run(installer, [
+          "select",
+          upgradeID,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          update.home,
+          "--test-fault",
+          point,
+        ]);
+        assert.equal(crashed.status, 86, `${point}: ${crashed.stderr}`);
+        const recovered = run(installer, ["recover", "--test-home-root", update.home]);
+        assert.equal(recovered.status, 0, `${point}: ${recovered.stderr}`);
+        const receipt = JSON.parse(
+          await readFile(join(update.services, "receipts/installed.json"), "utf8"),
+        );
+        assert.equal(receipt.coordinator.releaseID, point === "after-receipt" ? upgradeID : id);
+        assert.equal(receipt.node.releaseID, id);
+        assert.equal(
+          (await lstat(join(update.home, "Applications/Ellie Coordinator.app"))).mode & 0o7777,
+          0o555,
+        );
+      }
+
+      const loaded = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-loaded",
+        "coordinator",
+      ]);
+      assert.notEqual(loaded.status, 0);
+      assert.equal(
+        await readFile(join(services, "receipts/installed.json"), "utf8"),
+        upgradedReceipt,
+      );
+
+      await chmod(join(home, "Applications/Ellie Node.app"), 0o700);
+      const tamperedNoop = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "node",
+        "--test-home-root",
+        home,
+      ]);
+      assert.notEqual(tamperedNoop.status, 0);
+      await chmod(join(home, "Applications/Ellie Node.app"), 0o555);
+
+      const invalidHome = join(root, "invalid-selection-home");
+      for (const roles of ["coordinator,bogus", "coordinator,", "node,coordinator"]) {
+        assert.notEqual(
+          run(installer, ["select", id, "--roles", roles, "--test-home-root", invalidHome]).status,
+          0,
+        );
+      }
+      assert.equal(
+        await lstat(invalidHome)
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const unsafeParent = await prepareSelectionHome("unsafe-parent");
+      await rm(join(unsafeParent.home, "Applications"), { recursive: true });
+      await rm(join(unsafeParent.home, "Library/LaunchAgents"), { recursive: true });
+      await chmod(join(unsafeParent.home, "Library/Application Support"), 0o777);
+      assert.notEqual(
+        run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          unsafeParent.home,
+        ]).status,
+        0,
+      );
+      assert.equal(
+        await lstat(join(unsafeParent.home, "Applications"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      assert.equal(
+        await lstat(join(unsafeParent.home, "Library/LaunchAgents"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      await chmod(join(unsafeParent.home, "Library/Application Support"), 0o700);
+
+      const symlinkHome = join(root, "symlink-ancestor-home");
+      const symlinkLibrary = join(root, "symlink-ancestor-target");
+      const symlinkServices = join(symlinkLibrary, "Application Support/Ellie/Services");
+      await mkdir(symlinkHome, { mode: 0o700 });
+      await mkdir(symlinkServices, { recursive: true, mode: 0o700 });
+      await chmod(join(symlinkLibrary, "Application Support"), 0o700);
+      await chmod(join(symlinkLibrary, "Application Support/Ellie"), 0o700);
+      assert.equal(
+        run(installer, ["stage", release, "--test-services-root", symlinkServices]).status,
+        0,
+      );
+      await symlink(symlinkLibrary, join(symlinkHome, "Library"));
+      assert.notEqual(
+        run(installer, ["select", id, "--roles", "coordinator", "--test-home-root", symlinkHome])
+          .status,
+        0,
+      );
+      assert.equal(
+        await lstat(join(symlinkHome, "Applications"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const postJournalFailure = await prepareSelectionHome("post-journal-failure");
+      const failedAfterIntent = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        postJournalFailure.home,
+        "--test-fail-after-journal",
+      ]);
+      assert.notEqual(failedAfterIntent.status, 0);
+      assert.match(failedAfterIntent.stderr, /requires recovery/);
+      assert.equal(
+        await lstat(join(postJournalFailure.services, "selection-journal.json")).then(() => true),
+        true,
+      );
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", postJournalFailure.home]).status,
+        0,
+      );
+
+      for (const point of [
+        "before-journal-fsync",
+        "after-journal-fsync",
+        "after-journal",
+        "after-app-coordinator",
+        "after-plist-coordinator",
+        "after-app-move-coordinator",
+        "after-plist-move-coordinator",
+        "after-receipt",
+      ]) {
+        const { home: crashHome, services: crashServices } = await prepareSelectionHome(
+          `crash-${point}`,
+        );
+        const crashed = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          crashHome,
+          "--test-fault",
+          point,
+        ]);
+        assert.equal(crashed.status, 86, `${point}: ${crashed.stderr}`);
+        const recovered = run(installer, ["recover", "--test-home-root", crashHome]);
+        assert.equal(recovered.status, 0, `${point}: ${recovered.stderr}`);
+        assert.equal(
+          await lstat(join(crashServices, "selection-journal.json"))
+            .then(() => true)
+            .catch(() => false),
+          false,
+        );
+        assert.equal(
+          await lstat(join(crashHome, "Applications/Ellie Coordinator.app"))
+            .then(() => true)
+            .catch(() => false),
+          point === "after-receipt",
+          point,
+        );
+      }
+
+      const finalRace = await prepareSelectionHome("final-loaded-race");
+      const stoppedLate = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        finalRace.home,
+        "--test-load-after-preflight",
+      ]);
+      assert.notEqual(stoppedLate.status, 0);
+      assert.match(stoppedLate.stderr, /requires every selected role to be unloaded/);
+      assert.equal(run(installer, ["recover", "--test-home-root", finalRace.home]).status, 0);
+      assert.equal(
+        await lstat(join(finalRace.home, "Applications/Ellie Coordinator.app"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const contention = await prepareSelectionHome("selector-contention");
+      const holder = spawn(
+        installer,
+        ["recover", "--test-home-root", contention.home, "--test-hold-lock-ms", "500"],
+        { stdio: "ignore" },
+      );
+      const holderExit = new Promise<number | null>((resolve) => holder.once("exit", resolve));
+      const ready = join(contention.services, ".test-selection-lock-ready");
+      const deadline = Date.now() + 2_000;
+      while (
+        !(await lstat(ready)
+          .then(() => true)
+          .catch(() => false))
+      ) {
+        assert.ok(Date.now() < deadline, "selection lock holder did not become ready");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      assert.notEqual(run(installer, ["recover", "--test-home-root", contention.home]).status, 0);
+      assert.equal(await holderExit, 0);
+
+      const collision = await prepareSelectionHome("developer-collision");
+      const developerApp = join(collision.home, "Applications/Ellie Coordinator.app");
+      await mkdir(developerApp, { mode: 0o700 });
+      await writeFile(join(developerApp, "ellie-build.json"), "developer\n", { mode: 0o600 });
+      const developerBytes = await readFile(join(developerApp, "ellie-build.json"));
+      assert.notEqual(
+        run(installer, ["select", id, "--roles", "coordinator", "--test-home-root", collision.home])
+          .status,
+        0,
+      );
+      assert.deepEqual(await readFile(join(developerApp, "ellie-build.json")), developerBytes);
     });
   },
 );

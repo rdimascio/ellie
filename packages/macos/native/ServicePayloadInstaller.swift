@@ -112,6 +112,18 @@ private struct Inspected {
   let releaseID: String
   let root: Int32
 }
+struct SelectionFile {
+  let path: String
+  let mode: Int
+  let size: UInt64
+  let sha256: String
+}
+struct SelectionRelease {
+  let id: String
+  let rootPath: String
+  let applicationPath: String
+  let applicationFiles: [SelectionFile]
+}
 
 private func fail(_ error: Error? = nil) -> Never {
   let message: String
@@ -499,6 +511,156 @@ private func sourceNodeHash(_ data: Data) throws -> String {
   else { throw InstallerFailure.rejected }
   return value
 }
+func verifiedSelectionRelease(servicesRoot: String, releaseID: String, role: String) throws
+  -> SelectionRelease
+{
+  _ = try checkedComponent(releaseID)
+  guard role == "coordinator" || role == "node" else { throw InstallerFailure.rejected }
+  let path = servicesRoot + "/releases/" + releaseID
+  let value = try inspect(path, installed: true)
+  defer { closeFD(value.root) }
+  guard value.releaseID == releaseID else { throw InstallerFailure.rejected }
+  let name = role == "coordinator" ? "Ellie Coordinator.app" : "Ellie Node.app"
+  let prefix = "launchers/\(name)/"
+  let files = value.manifest.files.compactMap { entry -> SelectionFile? in
+    guard entry.path.hasPrefix(prefix) else { return nil }
+    return SelectionFile(
+      path: String(entry.path.dropFirst(prefix.count)), mode: entry.mode, size: entry.size,
+      sha256: entry.sha256)
+  }
+  guard !files.isEmpty else { throw InstallerFailure.rejected }
+  return SelectionRelease(
+    id: releaseID, rootPath: path, applicationPath: path + "/payload/launchers/" + name,
+    applicationFiles: files)
+}
+func selectionOpenDirectory(_ path: String, privateMode: Bool) throws -> Int32 {
+  let fd = try openAbsoluteDirectory(path)
+  do { try statSafeDirectory(fd, privateMode: privateMode) } catch {
+    closeFD(fd)
+    throw error
+  }
+  return fd
+}
+func selectionRemoveTree(parent: Int32, name: String) throws {
+  try removeTree(parent: parent, name: name)
+}
+func selectionEnsureDirectory(parent: Int32, name: String, mode: mode_t) throws -> Int32 {
+  try ensureDirectory(parent: parent, name: name, mode: mode)
+}
+func selectionOpenChildDirectory(parent: Int32, name: String) throws -> Int32 {
+  try openDirectory(at: parent, name)
+}
+func selectionOpenOwnedDirectory(parent: Int32, name: String) throws -> Int32 {
+  let fd = try openDirectory(at: parent, name)
+  var info = stat()
+  guard fstat(fd, &info) == 0, info.st_uid == getuid(), (info.st_mode & 0o022) == 0 else {
+    closeFD(fd)
+    throw InstallerFailure.rejected
+  }
+  return fd
+}
+func selectionEnsureOwnedDirectory(parent: Int32, name: String) throws -> Int32 {
+  let component = try checkedComponent(name)
+  let created = mkdirat(parent, component, 0o700) == 0
+  if !created && errno != EEXIST { throw InstallerFailure.rejected }
+  let fd = try openDirectory(at: parent, name)
+  var info = stat()
+  guard fstat(fd, &info) == 0, info.st_uid == getuid(), (info.st_mode & 0o022) == 0 else {
+    closeFD(fd)
+    throw InstallerFailure.rejected
+  }
+  if created {
+    guard fchmod(fd, 0o700) == 0, fsync(fd) == 0, fsync(parent) == 0 else {
+      closeFD(fd)
+      throw InstallerFailure.rejected
+    }
+  }
+  return fd
+}
+func selectionApplicationDigest(
+  parent: Int32, name: String, files: [SelectionFile], identifier: String,
+  rootMode: mode_t = 0o555
+) throws -> String {
+  let root = try openDirectory(at: parent, name)
+  defer { closeFD(root) }
+  var rootInfo = stat()
+  guard fstat(root, &rootInfo) == 0, rootInfo.st_uid == getuid(),
+    (rootInfo.st_mode & 0o7777) == rootMode
+  else { throw InstallerFailure.rejected }
+  var allowedDirectories = Set<String>()
+  var declaredPaths = Set<String>()
+  var digest = SHA256()
+  for file in files.sorted(by: { $0.path < $1.path }) {
+    guard declaredPaths.insert(file.path).inserted else { throw InstallerFailure.rejected }
+    try validatePath(file.path)
+    var parts = file.path.split(separator: "/").map(String.init)
+    parts.removeLast()
+    while !parts.isEmpty {
+      allowedDirectories.insert(parts.joined(separator: "/"))
+      parts.removeLast()
+    }
+    let entry = Entry(path: file.path, mode: file.mode, size: file.size, sha256: file.sha256)
+    try hashAndValidate(root: root, entry: entry, installed: true)
+    digest.update(data: Data("\(file.path)\u{0}\(file.sha256)\n".utf8))
+  }
+  var count = 0
+  let actual = try listedFiles(
+    root, installed: true, allowedDirectories: allowedDirectories, count: &count)
+  guard actual.count == declaredPaths.count, Set(actual) == declaredPaths else {
+    throw InstallerFailure.rejected
+  }
+  try validateSignature(path: try pathFromFD(root), identifier: identifier)
+  return digest.finalize().map { String(format: "%02x", $0) }.joined()
+}
+func selectionCopyApplication(
+  source: SelectionRelease, parent: Int32, name: String, identifier: String
+) throws -> String {
+  guard mkdirat(parent, try checkedComponent(name), 0o700) == 0 else {
+    throw InstallerFailure.rejected
+  }
+  do {
+    let sourceRoot = try openAbsoluteDirectory(source.applicationPath)
+    defer { closeFD(sourceRoot) }
+    let destination = try openDirectory(at: parent, name)
+    defer { closeFD(destination) }
+    let entries = source.applicationFiles.map {
+      Entry(path: $0.path, mode: $0.mode, size: $0.size, sha256: $0.sha256)
+    }
+    var counter = 0
+    try copyPayload(
+      source: sourceRoot, destination: destination, entries: entries, counter: &counter,
+      failAfter: nil, sourceInstalled: true)
+    try makeImmutable(destination)
+    return try selectionApplicationDigest(
+      parent: parent, name: name, files: source.applicationFiles, identifier: identifier,
+      rootMode: 0o700)
+  } catch {
+    try? removeTree(parent: parent, name: name)
+    throw error
+  }
+}
+func selectionSealApplication(
+  parent: Int32, name: String, files: [SelectionFile], identifier: String
+) throws -> String {
+  _ = try selectionApplicationDigest(
+    parent: parent, name: name, files: files, identifier: identifier, rootMode: 0o700)
+  let root = try openDirectory(at: parent, name)
+  defer { closeFD(root) }
+  guard fchmod(root, 0o555) == 0, fsync(root) == 0 else { throw InstallerFailure.rejected }
+  return try selectionApplicationDigest(
+    parent: parent, name: name, files: files, identifier: identifier)
+}
+func selectionUnsealApplication(
+  parent: Int32, name: String, files: [SelectionFile], identifier: String
+) throws -> String {
+  _ = try selectionApplicationDigest(
+    parent: parent, name: name, files: files, identifier: identifier)
+  let root = try openDirectory(at: parent, name)
+  defer { closeFD(root) }
+  guard fchmod(root, 0o700) == 0, fsync(root) == 0 else { throw InstallerFailure.rejected }
+  return try selectionApplicationDigest(
+    parent: parent, name: name, files: files, identifier: identifier, rootMode: 0o700)
+}
 private func directoryNames(_ fd: Int32, maximum: Int = maximumPayloadEntries) throws -> [String] {
   guard let stream = fdopendir(dup(fd)) else { throw InstallerFailure.rejected }
   defer { closedir(stream) }
@@ -571,7 +733,7 @@ private func productionServicesRoot() throws -> String {
 }
 private func copyFile(
   source: Int32, destination: Int32, name: String, expected: Entry,
-  counter: inout Int, failAfter: Int?
+  counter: inout Int, failAfter: Int?, sourceInstalled: Bool = false
 ) throws {
   if let failAfter, counter == failAfter { throw InstallerFailure.rejected }
   counter += 1
@@ -579,7 +741,8 @@ private func copyFile(
   guard fstat(source, &sourceInfo) == 0, (sourceInfo.st_mode & S_IFMT) == S_IFREG,
     sourceInfo.st_nlink == 1, sourceInfo.st_uid == getuid(), sourceInfo.st_size >= 0,
     UInt64(sourceInfo.st_size) == expected.size,
-    (sourceInfo.st_mode & 0o7777) == mode_t(expected.mode)
+    (sourceInfo.st_mode & 0o7777)
+      == (sourceInstalled ? (expected.mode == 0o755 ? 0o555 : 0o444) : mode_t(expected.mode))
   else { throw InstallerFailure.rejected }
   let targetMode: mode_t = expected.mode == 0o755 ? 0o555 : 0o444
   let output = openat(
@@ -638,7 +801,8 @@ private func writeCapturedFile(
   }
 }
 private func copyPayload(
-  source: Int32, destination: Int32, entries: [Entry], counter: inout Int, failAfter: Int?
+  source: Int32, destination: Int32, entries: [Entry], counter: inout Int, failAfter: Int?,
+  sourceInstalled: Bool = false
 ) throws {
   for entry in entries {
     let parts = try components(entry.path)
@@ -661,7 +825,7 @@ private func copyPayload(
     defer { closeFD(input) }
     try copyFile(
       source: input, destination: destinationDir, name: parts.last!, expected: entry,
-      counter: &counter, failAfter: failAfter)
+      counter: &counter, failAfter: failAfter, sourceInstalled: sourceInstalled)
   }
 }
 private func makeImmutable(_ fd: Int32) throws {
@@ -819,6 +983,13 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "select" || arguments.first == "recover" {
+      do {
+        try runSelectionCommand(arguments)
+      } catch {
+        failSelectionCommand(error)
+      }
+    }
     guard arguments.count >= 2 else { fail() }
     let command = arguments.removeFirst()
     let source = arguments.removeFirst()
