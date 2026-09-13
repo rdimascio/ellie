@@ -28,7 +28,7 @@ extension WidgetKind {
         case .weather: return "Current weather for a place you choose."
         case .calendar: return "Calendar connection coming next."
         case .chores: return "Household chores coming next."
-        case .playlist: return "Selected playlists coming next."
+        case .playlist: return "A selected playlist that plays when you ask."
         }
     }
 }

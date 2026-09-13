@@ -61,6 +61,8 @@ struct NativeWidgetCard: View {
                     .frame(minHeight: 155, alignment: .topLeading)
                 } else if widget.type == .weather {
                     NativeWeather(store: weatherStore, configure: configure)
+                } else if widget.type == .playlist {
+                    NativePlaylist(widget: widget, configure: configure)
                 } else {
                     VStack(alignment: .leading, spacing: 14) {
                         Image(systemName: widget.type.symbol)
@@ -206,7 +208,7 @@ struct WidgetGallery: View {
                     .accessibilityLabel("Add \(kind.displayName)")
                 }
             }
-            Text("Clock and notes work on this Mac. Other widgets are ready for future connections.")
+            Text("Clock, notes, weather, and selected playlists work on this Mac.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .padding(28).frame(width: 570)
@@ -226,6 +228,7 @@ struct WidgetInspector: View {
     @State private var placeName: String
     @State private var latitude: String
     @State private var longitude: String
+    @State private var playlistInput: String
 
     init(widget: DashboardWidget, weatherStore: WeatherStore, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
         self.widget = widget
@@ -239,6 +242,7 @@ struct WidgetInspector: View {
         _placeName = State(initialValue: weatherStore.state.place?.name ?? "")
         _latitude = State(initialValue: weatherStore.state.place.map { String($0.latitude) } ?? "")
         _longitude = State(initialValue: weatherStore.state.place.map { String($0.longitude) } ?? "")
+        _playlistInput = State(initialValue: widget.config["youtubePlaylistID"] ?? "")
     }
 
     var body: some View {
@@ -288,6 +292,16 @@ struct WidgetInspector: View {
                         }
                     }
                 }
+                if widget.type == .playlist {
+                    Section("YouTube playlist") {
+                        TextField("Playlist URL or ID", text: $playlistInput,
+                                  prompt: Text("https://www.youtube.com/playlist?list=…"))
+                        Text("Use a public playlist whose ID begins with PL. Ellie contacts YouTube only when you press Play.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Playback uses YouTube’s privacy-enhanced embedded player without your account cookies.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
             HStack {
@@ -297,6 +311,10 @@ struct WidgetInspector: View {
                     var config = widget.config
                     if widget.type == .note { config = ["text": note] }
                     if widget.type == .clock { config = zone.isEmpty ? [:] : ["timeZone": zone] }
+                    if widget.type == .playlist {
+                        let trimmed = playlistInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        config = trimmed.isEmpty ? [:] : ["youtubePlaylistID": YouTubePlaylist.parse(trimmed)!]
+                    }
                     if widget.type == .weather {
                         if weatherEnabled {
                             guard weatherStore.configure(name: placeName, latitudeText: latitude, longitudeText: longitude) else { return }
@@ -306,7 +324,8 @@ struct WidgetInspector: View {
                 }
                 .keyboardShortcut(.defaultAction)
                 .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.count > 80 || note.count > 2000 ||
-                    (widget.type == .weather && weatherEnabled && !validWeatherPlace))
+                    (widget.type == .weather && weatherEnabled && !validWeatherPlace) ||
+                    (widget.type == .playlist && !validPlaylist))
             }
             .padding(20)
         }
@@ -318,6 +337,11 @@ struct WidgetInspector: View {
         guard !name.isEmpty, name.utf16.count <= 80,
               let latitude = Double(latitude), let longitude = Double(longitude) else { return false }
         return latitude.isFinite && longitude.isFinite && (-90...90).contains(latitude) && (-180...180).contains(longitude)
+    }
+
+    private var validPlaylist: Bool {
+        let trimmed = playlistInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || YouTubePlaylist.parse(trimmed) != nil
     }
 }
 
