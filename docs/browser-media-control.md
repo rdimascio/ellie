@@ -8,6 +8,8 @@ The installed node has four desktop operations: app opening, URL opening, window
 
 The first companion is in development on `codex/browser-media-control`, based on `9e75923`. Its branch was successfully pushed before implementation. It is an isolated development extension, not an installed browser integration, a native remote release or verified streaming-service support.
 
+Apple Watch is now part of the requested media experience: while an Ellie-controlled session plays, the watch should surface its title, target device and supported player controls. This is a new requirement, not an existing Watch app or accepted system Now Playing integration.
+
 ## WebMCP and browser adapters
 
 WebMCP lets a site publish structured tools; it does not automatically add tools to a website. The [10 September 2026 draft](https://webmachinelearning.github.io/webmcp/) describes `document.modelContext.getTools()` and `executeTool(RegisteredTool, input, options)` for in-page agents. Browser agents have a different discovery mechanism. Legacy `navigator.modelContext` examples do not establish current compatibility. The draft is not a W3C Standard.
@@ -43,3 +45,15 @@ First load the actual companion into an isolated browser and run a synthetic cat
 Then run the sequence on each claimed service in an explicitly selected, authenticated browser tab. Record browser/service, observed results and missing controls without publishing viewing history or account data. A Netflix pass does not count as Disney+ or YouTube TV acceptance. The final household gate starts from the native iPhone and crosses the real coordinator/node connection.
 
 Report synthetic browser, public-site browser, authenticated service, and physical phone-to-browser results separately. No such new acceptance is claimed by this plan.
+
+## Apple Watch
+
+Use the same observed media session for phone and watch. The first watch remote needs a native SwiftUI view showing the service, title, target Mac, play/pause and seek only when supported. Actions must include the selected session/document generation; an offline or replaced tab cannot receive an old command. A button shows a pending state until the browser confirms the change. Never queue media mutations for later delivery when the watch or phone reconnects.
+
+Apple's [NowPlayingView](https://developer.apple.com/documentation/WatchKit/NowPlayingView) lets the system choose the current or recent watch/iPhone audio source. It is not an API that selects an arbitrary Mac browser tab. [MPNowPlayingInfoCenter](https://developer.apple.com/documentation/mediaplayer/mpnowplayinginfocenter) describes media the app plays. Do not assume publishing remote metadata will make Ellie the phone's system player, or use silent audio to force that behavior.
+
+For automatic visibility, evaluate a playback Live Activity with a custom watch layout. Apple documents [Live Activities in the Smart Stack](https://developer.apple.com/videos/play/wwdc2024/10068/) starting with iOS 18 and watchOS 11, and [launching a watch app from a Live Activity](https://developer.apple.com/documentation/ActivityKit/launching-your-app-from-a-live-activity). System presentation preferences, permissions and background update delivery still apply. A native watch remote and a Smart Stack activity are separate from the built-in Now Playing app.
+
+Before implementation, verify the command path and current SDK support for interactive watch Live Activities, WatchConnectivity reachability and locked/suspended-phone operation. Keep the default local-first; do not silently add Apple Push Notification service or claim continuous LAN polling while iOS is suspended. Show stale/disconnected state honestly. Watch pairing and explicit phone media authority must not become a new implicit household grant.
+
+Accept in a paired simulator first, then on the user's signed physical iPhone/Watch: start browser playback, observe the watch surface, pause exactly once and verify the Mac player, resume, seek when supported, switch titles, close the tab and disconnect/reconnect. Test the phone locked and app suspended separately. Record what appears automatically under the user's actual settings and what requires opening Ellie. No physical Watch acceptance has occurred.

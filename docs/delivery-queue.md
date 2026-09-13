@@ -6,6 +6,8 @@ The product UI is native-first: SwiftUI on macOS and iPhone. Browser code remain
 
 The user has made **in-page media control** a core requirement: browse down a catalogue, move across a row, open a title, play and pause on Netflix, YouTube, YouTube TV and Disney+. Opening a URL does not satisfy it. The [browser media plan](browser-media-control.md) adds WebMCP discovery and a companion fallback with a native SwiftUI remote. Actual service and phone-to-browser acceptance remain pending.
 
+**Apple Watch is included:** surface the current Ellie media session with player controls while it plays. Plan a native watch remote and evaluate Smart Stack Live Activities. Built-in Now Playing automatically chooses watch/iPhone audio sources; arbitrary remote Mac playback integration is unverified. native_weather is researching supported automatic presentation and locked-phone limits before target implementation. No Watch app is installed or validated.
+
 ## Current delivery
 
 | Item                            | Owner / branch                               | State                                                 | Acceptance                                                                                                                                                                                                                                                                                                                                                                                |
