@@ -4,11 +4,13 @@ import SwiftUI
 struct DevicesView: View {
     @ObservedObject var store: CoordinatorStore
     @StateObject private var actions: CoordinatorActionStore
+    @StateObject private var voice: VoiceTurnStore
     @State private var app: NativeApp = .arc
 
-    init(store: CoordinatorStore, actions: CoordinatorActionStore? = nil) {
+    init(store: CoordinatorStore, actions: CoordinatorActionStore? = nil, voice: VoiceTurnStore? = nil) {
         self.store = store
         _actions = StateObject(wrappedValue: actions ?? CoordinatorActionStore())
+        _voice = StateObject(wrappedValue: voice ?? VoiceTurnStore())
     }
 
     var body: some View {
@@ -101,17 +103,19 @@ struct DevicesView: View {
                 .keyboardShortcut("r")
         }
         .onChange(of: store.role) { _, _ in
+            voice.cancel()
             actions.cancel()
             store.disconnect()
         }
-        .onChange(of: store.selectedNodeID) { _, _ in actions.cancel() }
+        .onChange(of: store.selectedNodeID) { _, _ in voice.cancel(); actions.cancel() }
         .onChange(of: store.phase) { _, phase in
-            if [.disconnected, .blocked, .unavailable, .reconnecting].contains(phase) { actions.cancel() }
+            if [.disconnected, .blocked, .unavailable, .reconnecting].contains(phase) { voice.cancel(); actions.cancel() }
         }
         .onChange(of: actions.terminalState) { _, result in
             if result == .rejected(.unauthorized) { store.disconnect() }
         }
         .onDisappear {
+            voice.cancel()
             actions.cancel()
             store.disconnect()
         }
@@ -152,11 +156,43 @@ struct DevicesView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(actions.running || store.commandConnection == nil || !node.isOnline(at: date) || !node.capabilities.contains("app.open"))
                     .accessibilityLabel("Open \(app.title) on Mac \(node.id.prefix(8))")
-                    Text("Opens on this Mac. Its allowed apps and permissions still apply.")
+                    Text("Opens on the selected Mac. Its allowed apps and permissions still apply.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Divider()
+                voiceControls
             }
             .padding(30).frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var voiceControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Push to talk").font(.headline)
+            if voice.phase == .reviewing {
+                TextEditor(text: $voice.transcript).frame(height: 70).border(.quaternary)
+                if let reviewed = voice.reviewedApp {
+                    HStack {
+                        Button("Use reviewed command: Open \(reviewed.title)") { app = reviewed; voice.cancel() }.disabled(actions.running)
+                        Button("Discard") { voice.cancel() }
+                    }
+                    Text("Review the application and target above, then click Open. Nothing is sent automatically.").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text("Use exactly “Open Arc”, “Open Safari”, or “Open Messages”.").font(.caption).foregroundStyle(.secondary)
+                    Button("Discard") { voice.cancel() }
+                }
+            } else if voice.phase == .recording {
+                HStack { Button("Stop recording") { voice.stop() }.buttonStyle(.borderedProminent); Button("Cancel") { voice.cancel() } }
+            } else if voice.phase == .starting {
+                HStack { ProgressView(); Text("Waiting for microphone access…"); Button("Cancel") { voice.cancel() } }
+            } else if voice.phase == .transcribing {
+                HStack { ProgressView(); Text("Transcribing locally…"); Button("Cancel") { voice.cancel() } }
+            } else if voice.phase == .cancelling {
+                HStack { ProgressView(); Text("Cancelling…") }
+            } else {
+                HStack { Button("Start recording") { voice.start() }.buttonStyle(.borderedProminent).disabled(actions.running); Button("Voice Settings…") { VoiceSettings.choose() }.disabled(actions.running) }
+            }
+            if let error = voice.error { Text(error).font(.caption).foregroundStyle(.secondary) }
         }
     }
 

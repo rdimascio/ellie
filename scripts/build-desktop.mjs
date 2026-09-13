@@ -128,6 +128,14 @@ async function main() {
 
     await mkdir(macOSDirectory, { recursive: true, mode: 0o755 });
     await mkdir(resourcesDirectory, { recursive: true, mode: 0o755 });
+    await cp(
+      join(repositoryRoot, "scripts/voice-transcribe.mjs"),
+      join(resourcesDirectory, "voice-transcribe.mjs"),
+    );
+    await cp(
+      join(repositoryRoot, "packages/speech/src/index.ts"),
+      join(resourcesDirectory, "speech-index.ts"),
+    );
     await cp(join(binaryPath, "Ellie"), join(macOSDirectory, "Ellie"));
     await chmod(join(macOSDirectory, "Ellie"), 0o755);
     await createIcon(workDirectory, resourcesDirectory);
@@ -149,6 +157,7 @@ async function main() {
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><false/>
   <key>NSHighResolutionCapable</key><true/>
+  <key>NSMicrophoneUsageDescription</key><string>Ellie records only while you explicitly use Push to Talk and transcribes the temporary recording locally.</string>
   <key>NSLocalNetworkUsageDescription</key><string>Ellie connects to your household coordinator to show your paired Macs and open apps you choose on them.</string>
 </dict>
 </plist>

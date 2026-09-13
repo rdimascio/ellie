@@ -43,7 +43,7 @@ The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, na
 
 The versioned JSON schema accepts the browser dashboard editor’s export. Use File → Import Dashboards to carry layouts and notes over; the app does not reach into browser storage. Native state lives in Application Support/Ellie/dashboardsv1.json with private permissions. Invalid startup data remains intact and blocks writes until explicit import/reset recovery. `--state-path /absolute/private/dashboards.json` selects an isolated file for validation. Existing coordinator/node identities, Keychain credentials and services are untouched.
 
-The Mac client also provides connected device status and explicitly targeted app opening. Model-backed voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain separate slices. An ad hoc development signature is not a notarized release.
+The Mac client also provides connected device status, explicitly targeted app opening and reviewed local push-to-talk commands. Conversational voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain separate slices. An ad hoc development signature is not a notarized release.
 
 ## Connected device status
 
@@ -65,6 +65,14 @@ Only one command can be in flight. Commands have a 35-second absolute deadline t
 
 **Stop waiting** closes the command request. The coordinator requests cancellation when it observes that disconnection, but a native action may already have run. Ellie therefore shows an unknown outcome after cancellation, timeouts, interrupted connections or an ambiguous unsuccessful response. Check the target Mac before repeating the command. An already opened app is not closed by cancellation.
 
+## Local push to talk
+
+Devices includes an explicit **Start recording** control. The first use is the only point at which macOS can ask for microphone access. Recording stops when requested or after 30 seconds, stays under 1.1 MB, and is transcribed by the configured local Node.js 24, whisper-cli and GGML model. Choose those three existing files through **Voice Settings**; Ellie does not download a model or use a cloud fallback. The source-checkout app bundle includes the small Node bridge, so this is a development distribution workflow rather than a signed installer promise.
+
+Audio and intermediate transcript files use a private temporary directory. Ellie attempts exact-file cleanup followed by removal of its empty per-turn directory after success, error or cancellation; cleanup failure is reported without exposing a path. Ellie writes neither content to logs. Cancelling recording or transcription terminates the local turn and cannot restore a late result.
+
+The transcript is editable. Only the exact commands Open, Launch or Start followed by Arc, Safari or Messages can be prepared. Preparing a reviewed command changes only the application picker: it does not choose a Mac or send a request. Review the selected Mac and application, then click the existing **Open** button to dispatch through the same capability, allowlist, timeout and cancellation checks. Speech is input, not authentication.
+
 Changing the selected Mac or identity, disconnecting, closing Devices, or losing authenticated availability stops an active wait. While the window remains open, it preserves that uncertainty in the visible result. Rejected credentials immediately discard the connection and cached inventory. The result captures the original target and app; a late response cannot overwrite a cancellation result. There is no persisted command payload, background queue or replay on launch. This initial control does not present a durable job ID or claim confirmation that a running native action stopped.
 
 ## Validation and next slices
@@ -75,4 +83,4 @@ The [native connection record](validation/2026-09-13-native-connection.md) cover
 
 The [native app control record](validation/2026-09-13-native-actions.md) distinguishes synthetic command outcomes from physical Mac UI and LAN acceptance.
 
-Next, add the native iPhone target and pairing flow, and local microphone capture feeding the reviewed transcription adapter. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
+Next, add the native iPhone target and pairing flow. Expand local voice only after the reviewed push-to-talk boundary has physical acceptance. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
