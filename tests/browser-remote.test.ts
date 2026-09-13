@@ -104,8 +104,9 @@ test("browser remote replaces upstream failure detail with a fixed public result
   assert.doesNotMatch(JSON.stringify(result), /credential|private|token|secret/);
 });
 
-test("browser remote projects configured nodes with bounded freshness and app capability", async () => {
-  const now = Date.now();
+test("browser remote projects configured nodes with bounded freshness and app capability", async (t) => {
+  const now = 1_800_000_000_000;
+  t.mock.timers.enable({ apis: ["Date"], now });
   const upstream = upstreamReturning([
     {
       id: "fresh-mini",
