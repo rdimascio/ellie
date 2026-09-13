@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdtemp, open, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -21,6 +22,7 @@ export interface WhisperCliOptions {
   executable: string;
   model: string;
   maxAudioBytes?: number;
+  maxAudioDurationMs?: number;
   maxTranscriptBytes?: number;
   timeoutMs?: number;
 }
@@ -30,6 +32,7 @@ export interface WhisperCliAvailability {
   model: boolean;
 }
 const DEFAULT_MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+const DEFAULT_MAX_AUDIO_DURATION_MS = 120_000;
 const DEFAULT_MAX_TRANSCRIPT_BYTES = 256 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -61,13 +64,14 @@ function validatePath(value: string, name: string): string {
     throw new TypeError(`${name} must be an absolute path.`);
   return value;
 }
-async function present(path: string): Promise<boolean> {
+async function usableFile(path: string, mode: number): Promise<boolean> {
   try {
-    await access(path);
+    const metadata = await stat(path);
+    if (!metadata.isFile()) return false;
+    await access(path, mode);
     return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-    throw error;
+  } catch {
+    return false;
   }
 }
 /** Checks only configured local paths. It never searches, downloads, or starts a model. */
@@ -76,15 +80,85 @@ export async function whisperCliAvailability(
 ): Promise<WhisperCliAvailability> {
   const executablePath = validatePath(options.executable, "executable");
   const modelPath = validatePath(options.model, "model");
-  const [executable, model] = await Promise.all([present(executablePath), present(modelPath)]);
+  const [executable, model] = await Promise.all([
+    usableFile(executablePath, constants.X_OK),
+    usableFile(modelPath, constants.R_OK),
+  ]);
   return { available: executable && model, executable, model };
 }
-function isWave(bytes: Buffer): boolean {
-  return (
-    bytes.length >= 12 &&
-    bytes.subarray(0, 4).toString("ascii") === "RIFF" &&
-    bytes.subarray(8, 12).toString("ascii") === "WAVE"
-  );
+function validateWave(bytes: Buffer, maxDurationMs: number): void {
+  const invalid = () =>
+    new SpeechInputError("INVALID_AUDIO", "Audio must be 16 kHz mono PCM16 WAV.");
+  if (
+    bytes.length < 12 ||
+    bytes.subarray(0, 4).toString("ascii") !== "RIFF" ||
+    bytes.subarray(8, 12).toString("ascii") !== "WAVE" ||
+    bytes.readUInt32LE(4) + 8 !== bytes.length
+  )
+    throw invalid();
+  let offset = 12;
+  let chunks = 0;
+  let byteRate: number | undefined;
+  let dataBytes: number | undefined;
+  while (offset < bytes.length) {
+    if (++chunks > 128 || bytes.length - offset < 8) throw invalid();
+    const id = bytes.subarray(offset, offset + 4).toString("ascii");
+    const size = bytes.readUInt32LE(offset + 4);
+    const start = offset + 8;
+    const end = start + size;
+    const next = end + (size & 1);
+    if (end < start || next > bytes.length) throw invalid();
+    if (id === "fmt ") {
+      if (byteRate !== undefined || size < 16) throw invalid();
+      const format = bytes.readUInt16LE(start);
+      const channels = bytes.readUInt16LE(start + 2);
+      const sampleRate = bytes.readUInt32LE(start + 4);
+      byteRate = bytes.readUInt32LE(start + 8);
+      const blockAlign = bytes.readUInt16LE(start + 12);
+      const bitsPerSample = bytes.readUInt16LE(start + 14);
+      if (
+        format !== 1 ||
+        channels !== 1 ||
+        sampleRate !== 16_000 ||
+        byteRate !== 32_000 ||
+        blockAlign !== 2 ||
+        bitsPerSample !== 16
+      )
+        throw invalid();
+    } else if (id === "data") {
+      if (dataBytes !== undefined || size === 0) throw invalid();
+      dataBytes = size;
+    }
+    offset = next;
+  }
+  if (offset !== bytes.length || byteRate === undefined || dataBytes === undefined) throw invalid();
+  if (dataBytes % 2 !== 0) throw invalid();
+  if (dataBytes * 1_000 > byteRate * maxDurationMs)
+    throw new SpeechInputError("LIMIT_EXCEEDED", "Audio exceeds the configured duration limit.");
+}
+async function readBoundedTranscript(path: string, maxBytes: number): Promise<string> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(path, "r");
+    const bytes = Buffer.alloc(maxBytes + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const { bytesRead } = await handle.read(bytes, offset, bytes.length - offset, null);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > maxBytes)
+      throw new SpeechInputError("LIMIT_EXCEEDED", "Transcript exceeds the configured turn limit.");
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, offset)).trim();
+  } catch (error) {
+    if (error instanceof SpeechInputError) throw error;
+    throw new SpeechInputError(
+      "PROCESS_FAILED",
+      "Local transcription produced no valid transcript.",
+    );
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
 }
 async function nextChunk(
   iterator: AsyncIterator<Uint8Array>,
@@ -116,6 +190,7 @@ export class WhisperCliSpeechInput implements SpeechInput {
   readonly #executable: string;
   readonly #model: string;
   readonly #maxAudioBytes: number;
+  readonly #maxAudioDurationMs: number;
   readonly #maxTranscriptBytes: number;
   readonly #timeoutMs: number;
   #active = false;
@@ -126,6 +201,11 @@ export class WhisperCliSpeechInput implements SpeechInput {
       options.maxAudioBytes,
       DEFAULT_MAX_AUDIO_BYTES,
       "maxAudioBytes",
+    );
+    this.#maxAudioDurationMs = positiveInteger(
+      options.maxAudioDurationMs,
+      DEFAULT_MAX_AUDIO_DURATION_MS,
+      "maxAudioDurationMs",
     );
     this.#maxTranscriptBytes = positiveInteger(
       options.maxTranscriptBytes,
@@ -148,8 +228,11 @@ export class WhisperCliSpeechInput implements SpeechInput {
     }, this.#timeoutMs);
     const combined = AbortSignal.any([signal, deadline.signal]);
     let directory: string | undefined;
-    const iterator = audio[Symbol.asyncIterator]();
+    let primaryError: unknown;
+    let cleanupFailed = false;
+    let iterator: AsyncIterator<Uint8Array> | undefined;
     try {
+      iterator = audio[Symbol.asyncIterator]();
       const chunks: Buffer[] = [];
       let size = 0;
       while (true) {
@@ -165,26 +248,32 @@ export class WhisperCliSpeechInput implements SpeechInput {
       }
       if (combined.aborted) throw this.#abortError(timedOut);
       const wav = Buffer.concat(chunks, size);
-      if (!isWave(wav))
-        throw new SpeechInputError("INVALID_AUDIO", "Audio must be a RIFF/WAVE file.");
+      validateWave(wav, this.#maxAudioDurationMs);
       directory = await mkdtemp(join(tmpdir(), "ellie-speech-"));
       const audioPath = join(directory, "turn.wav");
       const outputPath = join(directory, "transcript");
       await writeFile(audioPath, wav, { mode: 0o600 });
       await this.#run(audioPath, outputPath, combined, () => timedOut);
-      const transcriptPath = `${outputPath}.txt`;
-      if ((await stat(transcriptPath)).size > this.#maxTranscriptBytes)
-        throw new SpeechInputError(
-          "LIMIT_EXCEEDED",
-          "Transcript exceeds the configured turn limit.",
-        );
-      yield { text: (await readFile(transcriptPath, "utf8")).trim(), final: true };
+      yield {
+        text: await readBoundedTranscript(`${outputPath}.txt`, this.#maxTranscriptBytes),
+        final: true,
+      };
+    } catch (error) {
+      primaryError = error;
+      throw error;
     } finally {
       clearTimeout(timer);
-      void iterator.return?.().catch(() => undefined);
-      if (directory) await rm(directory, { recursive: true, force: true });
-      this.#active = false;
+      void iterator?.return?.().catch(() => undefined);
+      try {
+        if (directory) await rm(directory, { recursive: true, force: true });
+      } catch {
+        cleanupFailed = true;
+      } finally {
+        this.#active = false;
+      }
     }
+    if (cleanupFailed && primaryError === undefined)
+      throw new SpeechInputError("PROCESS_FAILED", "Temporary speech data could not be removed.");
   }
   #abortError(timedOut: boolean): SpeechInputError {
     return timedOut

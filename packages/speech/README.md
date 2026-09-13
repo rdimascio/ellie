@@ -15,8 +15,9 @@ bun run ellie transcribe \
   --executable /absolute/path/whisper-cli
 ```
 
-The input must already be WAV. whisper.cpp documents 16-bit WAV input and shows converting to
-16 kHz mono PCM before transcription. The next browser milestone is explicit press-and-hold
+The input must be a structurally valid, uncompressed 16 kHz mono PCM16 WAV of at most two minutes
+(and 10 MiB). whisper.cpp documents 16-bit WAV input and shows this 16 kHz mono conversion before
+transcription. The next browser milestone is explicit press-and-hold
 microphone capture, local conversion to that format, and posting the bounded turn to an endpoint
 authorized by the paired phone's existing grants. A transcript is content to parse through those
 grants; it is not authentication and must never expand them.
