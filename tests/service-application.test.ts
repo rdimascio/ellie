@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, writeFile, stat, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, writeFile, stat, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -50,6 +50,75 @@ async function fixture() {
     close: () => rm(home, { recursive: true, force: true }),
   };
 }
+
+test("a failed fresh publication preserves a competing nonempty application", async () => {
+  const f = await fixture();
+  const target = applicationPath(f.home, "node");
+  let inserted = false;
+  const competing = new MacOSServiceApplication(f.home, process.getuid!(), f.source, ".test", {
+    register: false,
+    command: async (file, args) => {
+      if (file === "/usr/bin/xcrun") await writeFile(args.at(-1)!, "fixture executable");
+      if (file === "/usr/bin/iconutil") await writeFile(args.at(-1)!, "fixture icns");
+      if (file === "/usr/bin/codesign" && args.includes("--verify") && !inserted) {
+        inserted = true;
+        await mkdir(join(target, "Contents"), { recursive: true });
+        await writeFile(join(target, "Contents/competitor.txt"), "competing application\n");
+      }
+    },
+  });
+  try {
+    await assert.rejects(competing.install("node", f.source, process.execPath));
+    assert.equal(
+      await readFile(join(target, "Contents/competitor.txt"), "utf8"),
+      "competing application\n",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("failed restoration preserves a competing target and the prior backup", async () => {
+  const f = await fixture();
+  const target = applicationPath(f.home, "node");
+  try {
+    await f.app.install("node", f.source, process.execPath);
+    const oldManifest = await readFile(join(target, "Contents/Resources/ellie-build.json"), "utf8");
+    const racing = new MacOSServiceApplication(f.home, process.getuid!(), f.source, ".test", {
+      command: async (file, args) => {
+        if (file === "/usr/bin/xcrun") await writeFile(args.at(-1)!, "fixture executable");
+        if (file === "/usr/bin/iconutil") await writeFile(args.at(-1)!, "fixture icns");
+        if (args[0] === "--register") {
+          await rm(target, { recursive: true });
+          await mkdir(join(target, "Contents"), { recursive: true });
+          await writeFile(join(target, "Contents/competitor.txt"), "competing application\n");
+          throw new Error("fixture registration failed");
+        }
+      },
+    });
+    await assert.rejects(
+      racing.install("node", f.source + " moved", process.execPath),
+      /registration failed/,
+    );
+    assert.equal(
+      await readFile(join(target, "Contents/competitor.txt"), "utf8"),
+      "competing application\n",
+    );
+    const backups = (await readdir(join(f.home, "Applications"))).filter((name) =>
+      name.endsWith(".previous.app"),
+    );
+    assert.equal(backups.length, 1);
+    assert.equal(
+      await readFile(
+        join(f.home, "Applications", backups[0]!, "Contents/Resources/ellie-build.json"),
+        "utf8",
+      ),
+      oldManifest,
+    );
+  } finally {
+    await f.close();
+  }
+});
 
 test("application keeps a stable signed bundle on repeated installs, re-registers, and separates roles", async () => {
   const f = await fixture();
