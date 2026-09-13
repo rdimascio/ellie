@@ -51,8 +51,11 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
     pending: PendingNativeEnrollment, maximumBytes: Int = 4_096,
     contentType: String? = nil, additionalHeaders: [String: String] = [:]
   ) async throws -> (Data, HTTPURLResponse) {
-    guard (1...16_384).contains(maximumBytes),
-      additionalHeaders.keys.allSatisfy({ $0 == "X-Ellie-Turn-ID" })
+    guard (1...270_000).contains(maximumBytes), additionalHeaders.count <= 2,
+      Set(additionalHeaders.keys).isSubset(of: ["If-Match", "X-Ellie-Turn-ID"]),
+      additionalHeaders.allSatisfy({
+        $0.value.utf8.count <= 128 && !$0.value.contains("\r") && !$0.value.contains("\n")
+      })
     else {
       throw NativeEnrollmentFailure.invalidResponse
     }
