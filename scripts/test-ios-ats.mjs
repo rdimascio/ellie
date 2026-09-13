@@ -358,15 +358,14 @@ if (audio[44] === 1) {
   }
   const invocationDeadline = Date.now() + 3_000;
   let speechInvocations = 0;
-  do {
+  while (Date.now() < invocationDeadline && speechInvocations < 4) {
     try {
       speechInvocations = readFileSync(invocationLog, "utf8").trim().split("\n").length;
     } catch {
       speechInvocations = 0;
     }
-    if (speechInvocations >= 4 || Date.now() >= invocationDeadline) break;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
-  } while (true);
+    if (speechInvocations < 4) await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
   if (speechUploadRequests !== 5 || speechInvocations < 4 || speechInvocations > 5) {
     throw new Error(
       `Production speech observed ${speechUploadRequests} uploads and ${speechInvocations} fixture processes.`,

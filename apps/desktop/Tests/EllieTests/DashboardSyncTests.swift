@@ -214,7 +214,7 @@ final class DashboardSyncTests: XCTestCase {
       credential: credential(), transport: transport, persistence: SyncPersistence())
 
     store.readServerCopy()
-    await Task.yield()
+    await waitUntil { transport.calls == ["read"] }
     store.enterBackground()
     try? await Task.sleep(nanoseconds: 40_000_000)
 
@@ -252,6 +252,15 @@ final class DashboardSyncTests: XCTestCase {
     }
     await Task.yield()
     await Task.yield()
+  }
+
+  private func waitUntil(_ condition: @escaping () -> Bool) async {
+    let deadline = ContinuousClock.now + .seconds(2)
+    while ContinuousClock.now < deadline {
+      if condition() { return }
+      try? await Task.sleep(for: .milliseconds(5))
+    }
+    XCTFail("Timed out waiting for the synthetic dashboard request")
   }
 }
 
