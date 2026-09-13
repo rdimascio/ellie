@@ -105,6 +105,26 @@ enum DashboardModel {
         return formatter.string(from: date)
     }
 
+    static func configAfterEditing(
+        _ widget: DashboardWidget,
+        note: String,
+        timeZone: String
+    ) throws -> [String: String] {
+        let config: [String: String]
+        switch widget.type {
+        case .note:
+            config = ["text": note]
+        case .clock:
+            config = timeZone.isEmpty ? [:] : ["timeZone": timeZone]
+        case .weather, .calendar, .chores, .playlist:
+            config = widget.config
+        }
+        var candidate = widget
+        candidate.config = config
+        try validate(candidate)
+        return config
+    }
+
     static let initialState = DashboardState(dashboards: [
         Dashboard(id: "home", name: "Home", widgets: [
             DashboardWidget(id: "clock", type: .clock, title: "Right now", size: .wide, config: [:]),

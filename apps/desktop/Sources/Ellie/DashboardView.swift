@@ -26,7 +26,7 @@ extension WidgetKind {
     case .clock: return "The time, wherever home is."
     case .note: return "Keep a thought close by."
     case .weather: return "Current weather for a place you choose."
-    case .calendar: return "Calendar connection coming next."
+    case .calendar: return "A read-only agenda snapshot you choose."
     case .chores: return "Local tasks for your household."
     case .playlist: return "A selected playlist that plays when you ask."
     }

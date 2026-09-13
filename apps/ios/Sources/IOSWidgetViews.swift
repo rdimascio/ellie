@@ -81,7 +81,7 @@ struct IOSWidgetEditor: View {
             .navigationTitle("Edit \(widget.type.iosName)").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { var config: [String: String] = [:]; if widget.type == .note { config["text"] = note }; if widget.type == .clock, !zone.isEmpty { config["timeZone"] = zone }; save(title, size, config) }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.utf16.count > 80 || note.utf16.count > 2_000 || (widget.type == .clock && !zone.isEmpty && TimeZone(identifier: zone) == nil)) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { guard let config = try? DashboardModel.configAfterEditing(widget, note: note, timeZone: zone) else { return }; save(title, size, config) }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.utf16.count > 80 || note.utf16.count > 2_000 || (widget.type == .clock && !zone.isEmpty && TimeZone(identifier: zone) == nil)) }
             }
         }
     }

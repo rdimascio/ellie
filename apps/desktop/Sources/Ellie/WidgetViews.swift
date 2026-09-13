@@ -243,7 +243,7 @@ struct WidgetGallery: View {
           .accessibilityLabel("Add \(kind.displayName)")
         }
       }
-      Text("Clock, notes, local chores, weather, and selected playlists work on this Mac.")
+      Text("Clock, notes, local chores, weather, agenda snapshots, and selected playlists work on this Mac.")
         .font(.system(size: 11)).foregroundStyle(.secondary)
     }
     .padding(28).frame(width: 570)

@@ -15,6 +15,43 @@ final class DashboardModelTests: XCTestCase {
         XCTAssertNotEqual(utcText, losAngelesText)
     }
 
+    func testIOSEditPreservesImportedNativeWidgetConfiguration() throws {
+        let input = Data(#"{"version":1,"dashboards":[{"id":"family","name":"Family","widgets":[{"id":"playlist","type":"playlist","title":"Videos","size":"wide","config":{"youtubePlaylistID":"PLC77007E23FF423C6"}},{"id":"weather","type":"weather","title":"Weather","size":"small","config":{}},{"id":"calendar","type":"calendar","title":"Agenda","size":"wide","config":{}}]}]}"#.utf8)
+        let widgets = try XCTUnwrap(DashboardModel.decode(input).dashboards.first?.widgets)
+
+        for widget in widgets {
+            XCTAssertEqual(
+                try DashboardModel.configAfterEditing(widget, note: "ignored", timeZone: "UTC"),
+                widget.config
+            )
+        }
+    }
+
+    func testIOSEditClearsAnExplicitlyBlankClockTimeZone() throws {
+        let clock = DashboardWidget(
+            id: "clock", type: .clock, title: "Clock", size: .small,
+            config: ["timeZone": "America/Los_Angeles"]
+        )
+
+        XCTAssertEqual(
+            try DashboardModel.configAfterEditing(clock, note: "ignored", timeZone: ""),
+            [:]
+        )
+    }
+
+    func testIOSEditDoesNotPreserveConfigurationOutsideTheWidgetSchema() {
+        let weather = DashboardWidget(
+            id: "weather", type: .weather, title: "Weather", size: .small,
+            config: ["remoteURL": "https://example.invalid"]
+        )
+
+        XCTAssertThrowsError(
+            try DashboardModel.configAfterEditing(weather, note: "ignored", timeZone: "UTC")
+        ) { error in
+            XCTAssertEqual(error as? DashboardModelError, .invalidConfig)
+        }
+    }
+
     func testBrowserExportRoundTripsWithoutChangingItsSchema() throws {
         let input = Data(#"{"version":1,"dashboards":[{"id":"family","name":"Family","widgets":[{"id":"clock-one","type":"clock","title":"Clock","size":"wide","config":{"timeZone":"America/Los_Angeles"}},{"id":"note-one","type":"note","title":"Note","size":"small","config":{"text":"Dinner is at six."}}]}]}"#.utf8)
         let state = try DashboardModel.decode(input)
