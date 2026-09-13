@@ -786,6 +786,35 @@ export async function buildServicePayload(options) {
       architecture,
       work: join(scratch, "launcher-build"),
     });
+    const installer = join(payload, "bin/ellie-service-installer");
+    command(
+      "/usr/bin/xcrun",
+      [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-O",
+        "-parse-as-library",
+        "-target",
+        `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+        join(buildSource, "packages/macos/native/ServicePayloadInstaller.swift"),
+        "-o",
+        installer,
+      ],
+      { stdio: "ignore" },
+    );
+    await chmod(installer, 0o755);
+    command(
+      "/usr/bin/codesign",
+      ["--force", "--sign", "-", "--identifier", "org.ellie.installer", installer],
+      { stdio: "ignore" },
+    );
+    command("/usr/bin/codesign", ["--verify", "--strict", installer], { stdio: "ignore" });
+    if (command("/usr/bin/lipo", ["-archs", installer]).trim() !== helperArchitecture)
+      throw new Error("Native installer architecture does not match the payload.");
+    const installerBuild = command("/usr/bin/xcrun", ["vtool", "-show-build", installer]);
+    if (!/platform MACOS/.test(installerBuild) || !minimumPattern.test(installerBuild))
+      throw new Error("Native installer minimum macOS version does not match the payload.");
     const lockSha256 = await fileSha256(join(buildSource, "bun.lock"));
     const manifest = {
       version: 1,

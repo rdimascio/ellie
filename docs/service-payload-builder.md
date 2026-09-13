@@ -38,8 +38,27 @@ the verified packaged native helper through a dedicated absolute environment val
 desktop execution, and diagnostics share that resolver. Existing checkout workflows retain the
 `~/.ellie/bin/ellie-macos` fallback.
 
-The output remains owner-writable preparation material. A future transactional installer must
-verify it and remove write access before describing an installed release as immutable.
+The output remains owner-writable preparation material. The included native installer verifies it
+and removes write access when staging an unselected immutable release. Selection and rollback stay
+outside this foundation.
+
+Each expanded archive now contains the prebuilt native command
+`payload/bin/ellie-service-installer`. `inspect RELEASE_DIRECTORY` verifies the exact manifest,
+payload contents, modes, architecture, and installer-controlled ad-hoc development identities.
+`stage RELEASE_DIRECTORY` copies through no-follow file descriptors into the current user's fixed
+`~/Library/Application Support/Ellie/Services/releases` directory, verifies the copy again, removes
+write access, and publishes a source-derived release name from the product version, full
+source revision, and architecture. It requires no installed Node, Bun, checkout, or build tools.
+
+Staging does not select the release: it does not create or update a receipt, application,
+LaunchAgent, service state, private Ellie identity, or Keychain item. Installer-controlled ad-hoc
+signature checks protect development payload integrity; they do not establish Developer ID
+authenticity. Selection, upgrade, crash journal, and rollback transactions remain a later gate.
+If failure cleanup cannot remove the installer's exact private staging directory, the command
+reports a fixed cleanup-incomplete result and retains that evidence. If the final no-replace rename
+succeeds but its parent-directory sync fails, it reports publication uncertainty and retains the
+unselected release. Retrying the exact identical payload verifies and syncs that release; it does
+not select or start it.
 
 The copied CLI, Node runtime, role launchers, and native helper resolve from the payload without the
 checkout. LaunchAgent generation, final app and helper publication, and service start remain later
@@ -48,12 +67,11 @@ installer and lifecycle work.
 `verifyManifest` validates builder-owned staging and archive round-trip trees: exact top-level
 layout, regular no-follow metadata files, allowed payload modes, hashes, and exact `SOURCE.txt`
 agreement. It is not an installer verifier for a concurrently hostile filesystem; descriptor-relative
-installation validation remains part of the installer slice.
+validation and copying are implemented by the shipped native `inspect` and `stage` commands.
 
 The launcher deliberately rejects the builder's owner-writable 0644/0755 preparation tree. The
-future installer must verify it first and publish the exact corresponding 0444/0555 file modes and
-0555 directory modes. This slice builds the apps but does not perform that installation or mutate
-launchd.
+native installer verifies it first and publishes the exact corresponding 0444/0555 file modes and
+0555 directory modes. This slice does not select an installed release or mutate launchd.
 
 This slice does not install LaunchAgents, update a running service, access `~/.ellie` or Keychain,
 or create distribution signatures. The helper signature is for isolated development validation.
