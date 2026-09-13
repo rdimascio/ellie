@@ -1,6 +1,6 @@
 # Native household state contract
 
-This document freezes the implementation boundary for the first authenticated household-state slice. It describes work to be implemented; it is not evidence that the routes, stores, or clients exist.
+This document freezes the implementation boundary for the first authenticated household-state slice. The backend is now published in [PR39](https://github.com/rdimascio/ellie/pull/39) with synthetic local HTTPS and cross-language validation. It is not deployed. Native synchronization views are in progress separately.
 
 ## Authority boundary
 
@@ -58,7 +58,7 @@ The native listener uses only the native bearer and its existing exact Host, hea
 
 - `GET /native/v1/household/authority` returns only the authenticated client's current data grants.
 - `GET /native/v1/household/{shared|private}/{dashboards|chores}` returns the authorized document projection.
-- `PUT /native/v1/household/{shared|private}/{dashboards|chores}` replaces one complete document after conditional revision and fresh authorization checks.
+- `PUT /native/v1/household/{shared|private}/{dashboards|chores}` accepts exact JSON `{value: DOCUMENT}` and replaces one complete document after conditional revision and fresh authorization checks.
 
 GET and successful PUT return exact JSON `{profile, kind, revision, value}` and an ETag formatted as `"ellie-revision-N"`. PUT requires exactly one matching `If-Match` value. Missing precondition returns 428. A stale revision returns 412 with only `{profile, kind, revision}` for the same already-authorized document; it does not return the current value. The client must make a separate authorized GET to inspect current contents. An unauthorized or cross-private request returns a fixed 401 or 403 without confirming whether the document exists, its revision, its owner, or another client's grant. Unsupported routes return 404. Responses and errors are `no-store`, bounded, exact-shape JSON with fixed redacted messages.
 
@@ -74,7 +74,7 @@ The initial pull request contains the shared dashboard/chores protocol validator
 
 Native sync UI is the next slice. It adds explicit profile selection, explicit first upload, explicit save, revision display, conflict/recovery state, and local-draft preservation to the existing Mac and iPhone stores. It does not silently replace local state on launch.
 
-Open implementation choices for review are the internal lock composition between native auth, authority, and document stores; whether authority rows use an enum or separate read/write booleans internally; and the exact fixed error text. These choices must preserve the serialization, privacy, durability, and wire behavior above.
+The implementation acquires the native-auth lock before the household mutation queue and synchronously rechecks authentication after queue entry. Grant access uses the read/write enum above. Fixed errors distinguish unavailability, denial, malformed requests, stale revisions and exhausted revisions. Native client implementation must preserve the serialization, privacy, durability and wire behavior above.
 
 ## Required synthetic acceptance
 
