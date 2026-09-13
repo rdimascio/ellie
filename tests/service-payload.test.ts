@@ -20,9 +20,28 @@ function manifest(files: object[]) {
   return {
     version: 1,
     sourceRevision: "a".repeat(40),
+    architecture: "arm64",
     minimumOS: "14.0",
     runtime: { version: "v24.9.0", sha256: "b".repeat(64) },
     helper: { identifier: "org.ellie.helper", signature: "development-ad-hoc" },
+    launchers: [
+      {
+        role: "coordinator",
+        name: "Ellie Coordinator",
+        identifier: "org.ellie.assistant.coordinator.app",
+        signature: "development-ad-hoc",
+        architecture: "arm64",
+        minimumOS: "14.0",
+      },
+      {
+        role: "node",
+        name: "Ellie Node",
+        identifier: "org.ellie.assistant.node.app",
+        signature: "development-ad-hoc",
+        architecture: "arm64",
+        minimumOS: "14.0",
+      },
+    ],
     files,
   };
 }
@@ -325,4 +344,21 @@ test("manifest verification rejects linked release roots and mismatched source m
   await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest([]))}\n`);
   await writeFile(join(release, "SOURCE.txt"), "wrong\n");
   await assert.rejects(verifyManifest(release), /SOURCE/);
+});
+
+test("manifest parsing rejects noncanonical source revisions and payload paths", async (t) => {
+  const directory = await temporary(t, "ellie-payload-manifest-syntax-");
+  const release = join(directory, "release");
+  await mkdir(join(release, "payload"), { recursive: true });
+  await writeFile(join(release, "SOURCE.txt"), sourceRecord());
+  for (const suffix of ["\n", "\r", "\r\n", "g"]) {
+    await writeFile(
+      join(release, "manifest.json"),
+      `${JSON.stringify({ ...manifest([]), sourceRevision: `${"a".repeat(40)}${suffix}` })}\n`,
+    );
+    await assert.rejects(verifyManifest(release), /unsupported shape/);
+  }
+  await writeFile(join(release, "payload/bad\n"), "unsafe\n");
+  await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest([]))}\n`);
+  await assert.rejects(verifyManifest(release), /Unsafe payload path/);
 });

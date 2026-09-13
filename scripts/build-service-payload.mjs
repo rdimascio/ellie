@@ -44,6 +44,17 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function exactLowercaseHex(value, count) {
+  return (
+    typeof value === "string" &&
+    value.length === count &&
+    [...value].every(
+      (character) =>
+        (character >= "0" && character <= "9") || (character >= "a" && character <= "f"),
+    )
+  );
+}
+
 async function fileSha256(path) {
   const handle = await open(path, "r");
   const hash = createHash("sha256");
@@ -70,6 +81,31 @@ function safeRelative(path) {
           part !== "." &&
           part !== ".." &&
           /^[A-Za-z0-9._@+-]+$/.test(part),
+      )
+  );
+}
+
+function safePayloadRelative(path) {
+  return (
+    path.length > 0 &&
+    path.length <= 500 &&
+    !path.startsWith("/") &&
+    !path.includes("\\") &&
+    path
+      .split("/")
+      .every(
+        (part) =>
+          part.length > 0 &&
+          part.length <= 100 &&
+          part !== "." &&
+          part !== ".." &&
+          [...part].every(
+            (character) =>
+              (character >= "0" && character <= "9") ||
+              (character >= "A" && character <= "Z") ||
+              (character >= "a" && character <= "z") ||
+              "._@+ -".includes(character),
+          ),
       )
   );
 }
@@ -103,7 +139,7 @@ async function extractNodeMember(archive, member, destination, maximum, mode) {
 }
 
 export async function extractVerifiedNode({ archive, expectedSha256, destination, architecture }) {
-  if (!/^[a-f0-9]{64}$/.test(expectedSha256)) throw new Error("Invalid Node archive checksum.");
+  if (!exactLowercaseHex(expectedSha256, 64)) throw new Error("Invalid Node archive checksum.");
   const match = basename(archive).match(RELEASE);
   if (!match || match[2] !== architecture)
     throw new Error("Node archive does not match the target.");
@@ -250,6 +286,111 @@ export function nativeArchitecture(architecture) {
   if (architecture === "arm64") return "arm64";
   if (architecture === "x64") return "x86_64";
   throw new Error("Unsupported native helper architecture.");
+}
+
+const launcherRoles = {
+  coordinator: {
+    name: "Ellie Coordinator",
+    identifier: "org.ellie.assistant.coordinator.app",
+    define: "ELLIE_COORDINATOR",
+  },
+  node: {
+    name: "Ellie Node",
+    identifier: "org.ellie.assistant.node.app",
+    define: "ELLIE_NODE",
+  },
+};
+
+function launcherInfo(role) {
+  const value = launcherRoles[role];
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>${value.identifier}</string>
+<key>CFBundleName</key><string>${value.name}</string>
+<key>CFBundleDisplayName</key><string>${value.name}</string>
+<key>CFBundleExecutable</key><string>EllieService</string>
+<key>CFBundleIconFile</key><string>Ellie</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+`;
+}
+
+export async function buildPackagedLaunchers({ source, payload, architecture, work }) {
+  const helperArchitecture = nativeArchitecture(architecture);
+  const iconset = join(work, "Ellie.iconset");
+  const icon = join(work, "Ellie.icns");
+  await mkdir(iconset, { recursive: true, mode: 0o700 });
+  for (const size of [16, 32, 128, 256, 512]) {
+    for (const scale of [1, 2]) {
+      command(
+        "/usr/bin/sips",
+        [
+          "-z",
+          String(size * scale),
+          String(size * scale),
+          join(source, "packages/macos/assets/Ellie.png"),
+          "--out",
+          join(iconset, `icon_${size}x${size}${scale === 2 ? "@2x" : ""}.png`),
+        ],
+        { stdio: "ignore" },
+      );
+    }
+  }
+  command("/usr/bin/iconutil", ["-c", "icns", iconset, "-o", icon], { stdio: "ignore" });
+
+  const result = [];
+  for (const [role, value] of Object.entries(launcherRoles)) {
+    const app = join(payload, "launchers", `${value.name}.app`);
+    const executable = join(app, "Contents/MacOS/EllieService");
+    const resources = join(app, "Contents/Resources");
+    await mkdir(dirname(executable), { recursive: true, mode: 0o755 });
+    await mkdir(resources, { recursive: true, mode: 0o755 });
+    command(
+      "/usr/bin/xcrun",
+      [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-O",
+        "-parse-as-library",
+        "-target",
+        `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+        "-D",
+        value.define,
+        join(source, "packages/macos/native/PackagedServiceLauncher.swift"),
+        "-o",
+        executable,
+      ],
+      { stdio: "ignore" },
+    );
+    await chmod(executable, 0o755);
+    await cp(icon, join(resources, "Ellie.icns"));
+    await chmod(join(resources, "Ellie.icns"), 0o644);
+    await writeFile(join(app, "Contents/Info.plist"), launcherInfo(role), { mode: 0o644 });
+    command("/usr/bin/plutil", ["-lint", join(app, "Contents/Info.plist")], { stdio: "ignore" });
+    command(
+      "/usr/bin/codesign",
+      ["--force", "--sign", "-", "--identifier", value.identifier, app],
+      {
+        stdio: "ignore",
+      },
+    );
+    command("/usr/bin/codesign", ["--verify", "--strict", app], { stdio: "ignore" });
+    result.push({
+      role,
+      name: value.name,
+      identifier: value.identifier,
+      signature: "development-ad-hoc",
+      architecture,
+      minimumOS: MINIMUM_MACOS,
+    });
+  }
+  return result;
 }
 
 function isolatedEnvironment(root, bun, cache) {
@@ -416,7 +557,7 @@ async function entries(root, current = root) {
   for (const name of (await readdir(current)).sort()) {
     const path = join(current, name);
     const relativePath = relative(root, path).split(sep).join("/");
-    if (!safeRelative(relativePath)) throw new Error("Unsafe payload path.");
+    if (!safePayloadRelative(relativePath)) throw new Error("Unsafe payload path.");
     const info = await lstat(path);
     if (info.isSymbolicLink()) throw new Error("Payload contains a symbolic link.");
     if (info.isDirectory()) {
@@ -479,11 +620,22 @@ export async function verifyManifest(release) {
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
   if (
     manifest?.version !== 1 ||
-    typeof manifest.sourceRevision !== "string" ||
-    !/^[a-f0-9]{40}$/.test(manifest.sourceRevision) ||
+    !exactLowercaseHex(manifest.sourceRevision, 40) ||
     manifest.minimumOS !== MINIMUM_MACOS ||
     manifest.helper?.identifier !== "org.ellie.helper" ||
     manifest.helper?.signature !== "development-ad-hoc" ||
+    !Array.isArray(manifest.launchers) ||
+    JSON.stringify(manifest.launchers) !==
+      JSON.stringify(
+        Object.entries(launcherRoles).map(([role, value]) => ({
+          role,
+          name: value.name,
+          identifier: value.identifier,
+          signature: "development-ad-hoc",
+          architecture: manifest.architecture,
+          minimumOS: MINIMUM_MACOS,
+        })),
+      ) ||
     !Array.isArray(manifest.files)
   )
     throw new Error("Payload manifest has an unsupported shape.");
@@ -628,6 +780,12 @@ export async function buildServicePayload(options) {
     const minimumPattern = new RegExp(`minos ${MINIMUM_MACOS.replace(".", "\\.")}(?:\\s|$)`);
     if (!/platform MACOS/.test(buildVersion) || !minimumPattern.test(buildVersion))
       throw new Error("Native helper minimum macOS version does not match the payload.");
+    const launchers = await buildPackagedLaunchers({
+      source: buildSource,
+      payload,
+      architecture,
+      work: join(scratch, "launcher-build"),
+    });
     const lockSha256 = await fileSha256(join(buildSource, "bun.lock"));
     const manifest = {
       version: 1,
@@ -646,6 +804,7 @@ export async function buildServicePayload(options) {
         architecture,
         minimumOS: MINIMUM_MACOS,
       },
+      launchers,
       components,
       files: await entries(payload),
     };
@@ -676,6 +835,18 @@ export async function buildServicePayload(options) {
     if (roundTripNames.length !== 1 || roundTripNames[0] !== name)
       throw new Error("Service archive has an unexpected top-level layout.");
     await verifyManifest(join(roundTrip, name));
+    for (const value of Object.values(launcherRoles)) {
+      const app = join(roundTrip, name, "payload/launchers", `${value.name}.app`);
+      command("/usr/bin/codesign", ["--verify", "--strict", app], { stdio: "ignore" });
+      if (
+        command("/usr/libexec/PlistBuddy", [
+          "-c",
+          "Print :CFBundleIdentifier",
+          join(app, "Contents/Info.plist"),
+        ]).trim() !== value.identifier
+      )
+        throw new Error("Round-trip launcher identity does not match its manifest.");
+    }
     const roundTripManifest = await regularFile(
       join(roundTrip, name, "manifest.json"),
       0o644,

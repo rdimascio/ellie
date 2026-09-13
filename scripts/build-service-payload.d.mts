@@ -38,6 +38,22 @@ export function targetArchitecture(
 
 export function nativeArchitecture(architecture: "arm64" | "x64"): "arm64" | "x86_64";
 
+export function buildPackagedLaunchers(options: {
+  source: string;
+  payload: string;
+  architecture: "arm64" | "x64";
+  work: string;
+}): Promise<
+  Array<{
+    role: "coordinator" | "node";
+    name: string;
+    identifier: string;
+    signature: "development-ad-hoc";
+    architecture: "arm64" | "x64";
+    minimumOS: "14.0";
+  }>
+>;
+
 export function prepareDependencies(options: {
   bun: string;
   cwd: string;

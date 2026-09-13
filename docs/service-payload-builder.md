@@ -28,19 +28,32 @@ This builder targets only its current Mac architecture. It verifies both the arc
 extracted runtime's reported architecture; cross-building the native helper is outside this slice.
 The helper explicitly targets macOS 14.0, and the builder checks its Mach-O architecture and build
 version before recording them in the manifest.
+
+The payload also contains prebuilt **Ellie Coordinator** and **Ellie Node** launchers with the stable
+bundle identifiers in the distribution plan. Each launcher has one compiled role. At runtime it
+accepts the release root only as launchd's working directory, validates the complete declared
+payload and its read-only installed-mode projection, removes Node preload and certificate override
+environment variables, pins the executable path, and executes the packaged Node 24 CLI. It passes
+the verified packaged native helper through a dedicated absolute environment value; Keychain,
+desktop execution, and diagnostics share that resolver. Existing checkout workflows retain the
+`~/.ellie/bin/ellie-macos` fallback.
+
 The output remains owner-writable preparation material. A future transactional installer must
 verify it and remove write access before describing an installed release as immutable.
 
-The copied CLI and Node runtime resolve their JavaScript dependencies without the checkout. The
-current CLI still expects the native helper at `~/.ellie/bin/ellie-macos`, and this slice includes a
-prepared helper without changing that production resolution. Isolated acceptance may copy that
-helper into a synthetic home. Role launchers, their final helper placement, and a self-contained
-service start remain later work.
+The copied CLI, Node runtime, role launchers, and native helper resolve from the payload without the
+checkout. LaunchAgent generation, final app and helper publication, and service start remain later
+installer and lifecycle work.
 
 `verifyManifest` validates builder-owned staging and archive round-trip trees: exact top-level
 layout, regular no-follow metadata files, allowed payload modes, hashes, and exact `SOURCE.txt`
 agreement. It is not an installer verifier for a concurrently hostile filesystem; descriptor-relative
 installation validation remains part of the installer slice.
+
+The launcher deliberately rejects the builder's owner-writable 0644/0755 preparation tree. The
+future installer must verify it first and publish the exact corresponding 0444/0555 file modes and
+0555 directory modes. This slice builds the apps but does not perform that installation or mutate
+launchd.
 
 This slice does not install LaunchAgents, update a running service, access `~/.ellie` or Keychain,
 or create distribution signatures. The helper signature is for isolated development validation.

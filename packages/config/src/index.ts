@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile, rename, lstat, chmod } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join, resolve, relative } from "node:path";
+import { isAbsolute, join, resolve, relative } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -12,6 +12,17 @@ import type { Preferences } from "./defaults.ts";
 export { defaults } from "./defaults.ts";
 export type { Preferences } from "./defaults.ts";
 export const stateDir = join(homedir(), ".ellie");
+export function nativeHelperPath(
+  environment: NodeJS.ProcessEnv = process.env,
+  fallbackStateDir = stateDir,
+): string {
+  const packaged = environment.ELLIE_MACOS_HELPER;
+  if (packaged !== undefined) {
+    if (!isAbsolute(packaged)) throw new Error("The packaged native helper path is invalid.");
+    return packaged;
+  }
+  return join(fallbackStateDir, "bin", "ellie-macos");
+}
 export interface ServerConfig {
   version: 1;
   host: string;
@@ -170,7 +181,7 @@ export class Keychain implements MutableSecretStore {
     if (process.platform !== "darwin")
       throw new Error("Keychain requires macOS. Tests use an explicit in-memory store.");
     return new Promise((resolve, reject) => {
-      const child = spawn(join(stateDir, "bin", "ellie-macos"), [], {
+      const child = spawn(nativeHelperPath(), [], {
         stdio: ["pipe", "pipe", "pipe"],
       });
       let output = "";
