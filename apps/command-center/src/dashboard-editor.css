@@ -1,0 +1,357 @@
+.dashboard-workspace {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  min-height: calc(100vh - 172px);
+  background: #dce8e8;
+  border-top: 1px solid #cfdddd;
+}
+.dashboard-rail {
+  padding: 42px 28px;
+  background: var(--mist);
+  border-right: 1px solid #cfdddd;
+}
+.dashboard-rail h1 {
+  font-size: 30px;
+}
+.dashboard-rail > div:first-child p {
+  color: var(--slate);
+  font-size: 14px;
+  margin-top: 5px;
+}
+.dashboard-list {
+  display: grid;
+  gap: 7px;
+  margin: 30px 0;
+}
+.dashboard-list button {
+  display: grid;
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  padding: 12px;
+}
+.dashboard-list button[aria-pressed="true"] {
+  background: white;
+  border-color: #d3dfdf;
+}
+.dashboard-list span {
+  font-weight: 650;
+}
+.dashboard-list small {
+  color: var(--slate);
+}
+.new-dashboard label,
+.dashboard-stage-header label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--slate);
+}
+.new-dashboard > div {
+  display: flex;
+  margin-top: 6px;
+}
+.new-dashboard input,
+.dashboard-stage-header input,
+.widget-heading input,
+.note-input {
+  min-width: 0;
+  border: 1px solid #aabdbf;
+  background: white;
+  color: var(--ink);
+  font: inherit;
+}
+.new-dashboard input {
+  width: 100%;
+  padding: 10px;
+  border-radius: 8px 0 0 8px;
+}
+.new-dashboard button,
+.add-widget-bar button {
+  border: 0;
+  background: var(--harbor);
+  color: white;
+  font-weight: 650;
+  padding: 10px 14px;
+  border-radius: 0 8px 8px 0;
+}
+.data-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 22px;
+}
+.data-actions button,
+.danger-button {
+  border: 1px solid #b7c8c8;
+  background: transparent;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.dashboard-stage {
+  padding: 42px 4vw 64px;
+  min-width: 0;
+}
+.dashboard-stage-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 20px;
+}
+.dashboard-stage-header label {
+  width: min(520px, 70%);
+}
+.dashboard-stage-header input {
+  padding: 4px 0;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  font-size: 36px;
+  font-weight: 650;
+  letter-spacing: -1.2px;
+}
+.dashboard-stage-header input:hover,
+.dashboard-stage-header input:focus {
+  border-bottom-color: #789093;
+}
+.danger-button:disabled {
+  opacity: 0.4;
+}
+.add-widget-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 32px 0 26px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  background: #fff;
+}
+.add-widget-bar > div {
+  display: grid;
+  margin-right: auto;
+}
+.add-widget-bar span {
+  font-size: 12px;
+  color: var(--slate);
+}
+.add-widget-bar button {
+  border-radius: 8px;
+  min-height: 44px;
+}
+.widget-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.dashboard-widget {
+  min-height: 260px;
+  padding: 20px;
+  border-radius: 18px;
+  background: var(--paper);
+  border: 1px solid #d2dede;
+}
+.dashboard-widget.wide {
+  grid-column: 1/-1;
+}
+.widget-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.widget-heading > input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  font-weight: 650;
+  font-size: 17px;
+  padding: 5px;
+}
+.widget-controls {
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
+.widget-controls button {
+  width: 38px;
+  height: 38px;
+  border: 1px solid #d5dfdf;
+  border-radius: 8px;
+  background: #f5f8f8;
+  font-size: 18px;
+}
+.widget-controls button:disabled {
+  opacity: 0.3;
+}
+.widget-controls select {
+  min-height: 38px;
+  padding: 4px 25px 4px 8px;
+  font-size: 12px;
+}
+.widget-clock {
+  display: flex;
+  align-items: baseline;
+  gap: 20px;
+  margin-top: 28px;
+  font-size: 68px;
+  font-weight: 600;
+  letter-spacing: -4px;
+}
+.widget-clock span {
+  font-size: 16px;
+  letter-spacing: 0;
+  color: var(--slate);
+}
+.note-input {
+  display: block;
+  width: 100%;
+  height: 150px;
+  margin-top: 20px;
+  resize: vertical;
+  border: 0;
+  border-radius: 10px;
+  background: #f1f6f6;
+  padding: 14px;
+  line-height: 1.6;
+}
+.widget-placeholder {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  min-height: 180px;
+  color: var(--slate);
+}
+.widget-placeholder > span {
+  font-size: 38px;
+  color: #729397;
+}
+.widget-placeholder p {
+  font-weight: 650;
+  color: var(--ink);
+}
+.empty-dashboard {
+  display: grid;
+  place-content: center;
+  min-height: 360px;
+  text-align: center;
+  color: var(--slate);
+}
+.empty-dashboard h2 {
+  color: var(--ink);
+  font-size: 24px;
+}
+.empty-dashboard p {
+  margin-top: 8px;
+}
+@media (max-width: 760px) {
+  .dashboard-workspace {
+    display: block;
+  }
+  .dashboard-rail {
+    padding: 24px 20px;
+    border-right: 0;
+  }
+  .dashboard-list {
+    display: flex;
+    overflow: auto;
+    margin: 20px 0 16px;
+    padding-bottom: 4px;
+  }
+  .dashboard-list button {
+    min-width: 155px;
+  }
+  .new-dashboard {
+    max-width: 500px;
+  }
+  .data-actions {
+    margin-top: 14px;
+  }
+  .dashboard-stage {
+    padding: 26px 20px 50px;
+  }
+  .dashboard-stage-header {
+    align-items: start;
+  }
+  .dashboard-stage-header label {
+    width: 100%;
+  }
+  .dashboard-stage-header input {
+    font-size: 27px;
+  }
+  .danger-button {
+    white-space: nowrap;
+  }
+  .add-widget-bar {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+  .add-widget-bar > div {
+    width: 100%;
+  }
+  .add-widget-bar label {
+    flex: 1;
+  }
+  .add-widget-bar select {
+    width: 100%;
+  }
+  .widget-grid {
+    display: block;
+  }
+  .dashboard-widget {
+    margin-bottom: 14px;
+    min-height: 230px;
+  }
+  .widget-heading {
+    align-items: flex-start;
+  }
+  .widget-controls {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+  .widget-controls select {
+    width: 80px;
+  }
+  .widget-clock {
+    display: grid;
+    gap: 0;
+    font-size: 50px;
+  }
+  .widget-clock span {
+    font-size: 14px;
+  }
+  .note-input {
+    font-size: 16px;
+  }
+}
+@media (max-width: 380px) {
+  .dashboard-mode .app-header {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .dashboard-mode .view-switch {
+    width: 100%;
+  }
+  .dashboard-mode .view-switch button {
+    flex: 1;
+    padding-inline: 7px;
+  }
+  .dashboard-stage,
+  .dashboard-rail {
+    padding-inline: 14px;
+  }
+  .dashboard-stage-header {
+    display: grid;
+  }
+  .widget-heading {
+    display: grid;
+  }
+  .widget-controls {
+    justify-content: flex-start;
+  }
+  .add-widget-bar select {
+    font-size: 16px;
+  }
+}
