@@ -1,0 +1,145 @@
+import Foundation
+import XCTest
+@testable import Ellie
+
+final class DashboardModelTests: XCTestCase {
+    func testBrowserExportRoundTripsWithoutChangingItsSchema() throws {
+        let input = Data(#"{"version":1,"dashboards":[{"id":"family","name":"Family","widgets":[{"id":"clock-one","type":"clock","title":"Clock","size":"wide","config":{"timeZone":"America/Los_Angeles"}},{"id":"note-one","type":"note","title":"Note","size":"small","config":{"text":"Dinner is at six."}}]}]}"#.utf8)
+        let state = try DashboardModel.decode(input)
+        XCTAssertEqual(state.dashboards.first?.widgets.map(\.type), [.clock, .note])
+        XCTAssertEqual(try DashboardModel.decode(DashboardModel.encode(state)), state)
+    }
+
+    @MainActor
+    func testPersistsEditsAndUsesPrivatePermissions() async throws {
+        let location = temporaryLocation()
+        let store = DashboardStore(fileURL: location)
+        store.renameDashboard(id: "home", name: "Downstairs")
+        XCTAssertNil(store.error)
+
+        let reloaded = DashboardStore(fileURL: location)
+        XCTAssertEqual(reloaded.selectedDashboard?.name, "Downstairs")
+        let fileMode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: location.path)[.posixPermissions] as? NSNumber)
+        let directoryMode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: location.deletingLastPathComponent().path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(fileMode.intValue & 0o777, 0o600)
+        XCTAssertEqual(directoryMode.intValue & 0o777, 0o700)
+    }
+
+    @MainActor
+    func testCorruptSavedFileIsPreservedAndReported() async throws {
+        let location = temporaryLocation()
+        try FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let corrupt = Data("not json".utf8)
+        try corrupt.write(to: location)
+
+        let store = DashboardStore(fileURL: location)
+        XCTAssertEqual(store.state, DashboardModel.initialState)
+        XCTAssertNotNil(store.error)
+        XCTAssertEqual(try Data(contentsOf: location), corrupt)
+
+        store.error = nil
+        store.renameDashboard(id: "home", name: "Must not replace corrupt data")
+        XCTAssertEqual(store.state, DashboardModel.initialState)
+        XCTAssertEqual(try Data(contentsOf: location), corrupt)
+        XCTAssertNotNil(store.error)
+
+        store.reset()
+        XCTAssertNil(store.error)
+        XCTAssertEqual(try DashboardModel.decode(Data(contentsOf: location)), DashboardModel.initialState)
+    }
+
+    @MainActor
+    func testInvalidImportPreservesCurrentStateAndSavedFile() async throws {
+        let location = temporaryLocation()
+        let store = DashboardStore(fileURL: location)
+        store.renameDashboard(id: "home", name: "Kitchen")
+        let previousState = store.state
+        let previousData = try Data(contentsOf: location)
+
+        store.importData(Data(#"{"version":2,"dashboards":[]}"#.utf8))
+
+        XCTAssertEqual(store.state, previousState)
+        XCTAssertEqual(try Data(contentsOf: location), previousData)
+        XCTAssertNotNil(store.error)
+    }
+
+    func testRejectsUnknownKindsDuplicateIDsAndUnknownFields() throws {
+        let documents = [
+            #"{"version":1,"dashboards":[{"id":"x","name":"X","widgets":[{"id":"w","type":"video","title":"Video","size":"small","config":{}}]}]}"#,
+            #"{"version":1,"dashboards":[{"id":"x","name":"X","widgets":[]},{"id":"x","name":"Again","widgets":[]}]}"#,
+            #"{"version":1,"dashboards":[],"extra":true}"#,
+        ]
+        for document in documents {
+            XCTAssertThrowsError(try DashboardModel.decode(Data(document.utf8)))
+        }
+    }
+
+    func testEnforcesCollectionNoteAndSerializedBounds() throws {
+        let board = Dashboard(id: "board", name: "Board", widgets: [])
+        XCTAssertThrowsError(try DashboardModel.encode(DashboardState(dashboards: Array(repeating: board, count: 13))))
+
+        let widgets = (0..<25).map {
+            DashboardWidget(id: "note-\($0)", type: .note, title: "Note", size: .small, config: ["text": ""])
+        }
+        XCTAssertThrowsError(try DashboardModel.encode(DashboardState(dashboards: [Dashboard(id: "home", name: "Home", widgets: widgets)])))
+
+        let longNote = String(repeating: "a", count: 2_001)
+        let note = DashboardWidget(id: "note", type: .note, title: "Note", size: .small, config: ["text": longNote])
+        XCTAssertThrowsError(try DashboardModel.encode(DashboardState(dashboards: [Dashboard(id: "home", name: "Home", widgets: [note])])))
+
+        XCTAssertThrowsError(try DashboardModel.decode(Data(repeating: 0x20, count: DashboardModel.maximumSerializedBytes + 1)))
+    }
+
+    @MainActor
+    func testFailedMutationKeepsState() async throws {
+        let store = DashboardStore(fileURL: temporaryLocation())
+        let previous = store.state
+        store.renameDashboard(id: "home", name: "  ")
+        XCTAssertEqual(store.state, previous)
+        XCTAssertNotNil(store.error)
+    }
+
+    @MainActor
+    func testCustomStatePathDoesNotChangeExistingParentPermissions() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EllieExistingParent-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755]
+        )
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+        let location = directory.appendingPathComponent("state.json")
+
+        let store = DashboardStore(fileURL: location)
+        store.renameDashboard(id: "home", name: "Private file")
+
+        let directoryMode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: directory.path)[.posixPermissions] as? NSNumber)
+        let fileMode = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: location.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(directoryMode.intValue & 0o777, 0o755)
+        XCTAssertEqual(fileMode.intValue & 0o777, 0o600)
+    }
+
+    @MainActor
+    func testSymbolicLinkStatePathIsRejectedWithoutTouchingTarget() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("EllieSymlinkState-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let target = directory.appendingPathComponent("target.json")
+        let link = directory.appendingPathComponent("state.json")
+        let targetData = try DashboardModel.encode(DashboardModel.initialState)
+        try targetData.write(to: target)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let store = DashboardStore(fileURL: link)
+        XCTAssertNotNil(store.error)
+        store.renameDashboard(id: "home", name: "Must not follow link")
+        XCTAssertEqual(try Data(contentsOf: target), targetData)
+    }
+
+    private func temporaryLocation() -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("EllieDashboardTests-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("dashboardsv1.json")
+    }
+}
