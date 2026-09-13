@@ -207,16 +207,18 @@ final class DashboardSyncTests: XCTestCase {
 
   func testBackgroundRejectsLateReadWithoutReplacingServerCopy() async {
     let transport = SyncTransport()
-    transport.readDelayNanoseconds = 20_000_000
+    let readGate = SyncReadGate()
+    transport.readGate = readGate
     transport.document = HouseholdDashboardDocument(
       profile: .shared, revision: 8, value: DashboardModel.initialState)
     let store = DashboardSyncStore(
       credential: credential(), transport: transport, persistence: SyncPersistence())
 
     store.readServerCopy()
-    await waitUntil { transport.calls == ["read"] }
-    store.enterBackground()
-    try? await Task.sleep(nanoseconds: 40_000_000)
+    await readGate.waitUntilStarted()
+    let cancelled = store.enterBackground()
+    await readGate.release()
+    await cancelled?.value
 
     XCTAssertNil(store.remote)
     XCTAssertEqual(store.phase, .idle)
@@ -253,15 +255,6 @@ final class DashboardSyncTests: XCTestCase {
     await Task.yield()
     await Task.yield()
   }
-
-  private func waitUntil(_ condition: @escaping () -> Bool) async {
-    let deadline = ContinuousClock.now + .seconds(2)
-    while ContinuousClock.now < deadline {
-      if condition() { return }
-      try? await Task.sleep(for: .milliseconds(5))
-    }
-    XCTFail("Timed out waiting for the synthetic dashboard request")
-  }
 }
 
 private final class SyncPersistence: PendingDashboardDraftPersisting, @unchecked Sendable {
@@ -290,6 +283,7 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
   var readFailure: DashboardSyncFailure?
   var readDelayNanoseconds: UInt64 = 0
   var readDocuments: [(UInt64, HouseholdDashboardDocument)] = []
+  var readGate: SyncReadGate?
   func authority(_ credential: NativeEnrollmentCredential) async throws
     -> [HouseholdDashboardGrant]
   {
@@ -301,6 +295,7 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
     -> HouseholdDashboardDocument
   {
     calls.append("read")
+    if let readGate { await readGate.waitForRelease() }
     if !readDocuments.isEmpty {
       let next = readDocuments.removeFirst()
       if next.0 > 0 { try? await Task.sleep(nanoseconds: next.0) }
@@ -316,6 +311,32 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
     calls.append("save")
     if let saveFailure { throw saveFailure }
     return saveResult ?? .saved(document)
+  }
+}
+
+private actor SyncReadGate {
+  private var didStart = false
+  private var isReleased = false
+  private var startedWaiter: CheckedContinuation<Void, Never>?
+  private var releaseWaiter: CheckedContinuation<Void, Never>?
+
+  func waitForRelease() async {
+    didStart = true
+    startedWaiter?.resume()
+    startedWaiter = nil
+    guard !isReleased else { return }
+    await withCheckedContinuation { releaseWaiter = $0 }
+  }
+
+  func waitUntilStarted() async {
+    guard !didStart else { return }
+    await withCheckedContinuation { startedWaiter = $0 }
+  }
+
+  func release() {
+    isReleased = true
+    releaseWaiter?.resume()
+    releaseWaiter = nil
   }
 }
 

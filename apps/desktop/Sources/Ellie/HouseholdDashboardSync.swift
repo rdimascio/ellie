@@ -421,13 +421,16 @@ final class DashboardSyncStore: ObservableObject {
       phase = .idle
     } catch { phase = .privacyBlocked }
   }
-  func enterBackground() {
+  @discardableResult
+  func enterBackground() -> Task<Void, Never>? {
     let saving = phase == .saving
     generation += 1
-    task?.cancel()
+    let cancelled = task
+    cancelled?.cancel()
     task = nil
     if saving, draft != nil { phase = .unknown }
     else if phase == .loading { phase = .idle }
+    return cancelled
   }
   func leaveView() { enterBackground() }
 
