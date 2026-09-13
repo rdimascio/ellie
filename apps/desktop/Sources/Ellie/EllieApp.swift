@@ -22,7 +22,7 @@ struct EllieApp: App {
         if let index = arguments.firstIndex(of: "--chores-state-path"), index + 1 < arguments.count {
             choresURL = URL(fileURLWithPath: arguments[index + 1])
         } else {
-            choresURL = nil
+            choresURL = stateURL?.deletingLastPathComponent().appendingPathComponent("choresv1.json")
         }
         _store = StateObject(wrappedValue: DashboardStore(fileURL: stateURL))
         _choresStore = StateObject(wrappedValue: ChoresStore(fileURL: choresURL))
