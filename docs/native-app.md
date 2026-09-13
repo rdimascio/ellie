@@ -39,7 +39,7 @@ Building the desktop app does not install or launch it. It does not read or chan
 
 ## Native experience and data
 
-The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, native menus, editable widget sheets and macOS open/save dialogs. Edit reveals inline layout controls; contextual actions and adding notes remain available while browsing. Clock and notes work; weather/calendar/chores/playlist cards clearly show that provider connections are not implemented. There is no web view or embedded browser in the app.
+The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, native menus, editable widget sheets and macOS open/save dialogs. Edit reveals inline layout controls; contextual actions and adding notes remain available while browsing. Clock and notes work. The optional [weather widget](native-weather.md) shows current conditions for an explicitly configured place; calendar, chores and playlist connections are separate slices. There is no web view or embedded browser in the app.
 
 The versioned JSON schema accepts the browser dashboard editor’s export. Use File → Import Dashboards to carry layouts and notes over; the app does not reach into browser storage. Native state lives in Application Support/Ellie/dashboardsv1.json with private permissions. Invalid startup data remains intact and blocks writes until explicit import/reset recovery. `--state-path /absolute/private/dashboards.json` selects an isolated file for validation. Existing coordinator/node identities, Keychain credentials and services are untouched.
 
