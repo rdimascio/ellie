@@ -48,9 +48,14 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
 
   func requestEnvelope(
     path: String, method: String, body: Data?, bearer: String?,
-    pending: PendingNativeEnrollment, maximumBytes: Int = 4_096
+    pending: PendingNativeEnrollment, maximumBytes: Int = 4_096,
+    additionalHeaders: [String: String] = [:]
   ) async throws -> (Data, HTTPURLResponse) {
-    guard (1...8_192).contains(maximumBytes) else {
+    guard (1...270_000).contains(maximumBytes),
+      additionalHeaders.count <= 2,
+      Set(additionalHeaders.keys).isSubset(of: ["If-Match"]),
+      additionalHeaders.allSatisfy({ $0.value.utf8.count <= 128 && !$0.value.contains("\r") && !$0.value.contains("\n") })
+    else {
       throw NativeEnrollmentFailure.invalidResponse
     }
     guard let url = URL(string: path, relativeTo: pending.origin)?.absoluteURL,
@@ -63,6 +68,7 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
     request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
     if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
     if let bearer { request.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization") }
+    for (name, value) in additionalHeaders { request.setValue(value, forHTTPHeaderField: name) }
     guard let host = nativeTLSHost(pending.origin.host) else {
       throw NativeEnrollmentFailure.invalidCode
     }

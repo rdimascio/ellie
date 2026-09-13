@@ -28,7 +28,7 @@ struct IOSDashboardList: View {
                 } header: { Text("Dashboards") }
                 footer: { Text("Layouts and notes stay on this iPhone until you export them.") }
                 Section("Coordinator") {
-                    NavigationLink { NativeEnrollmentView(store: enrollment) } label: { Label("Pair this iPhone", systemImage: "link") }
+                    NavigationLink { NativeEnrollmentView(store: enrollment, dashboards: store) } label: { Label("Pair this iPhone", systemImage: "link") }
                         .accessibilityIdentifier("coordinator-enrollment")
                 }
             }

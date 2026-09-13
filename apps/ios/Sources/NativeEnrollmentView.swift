@@ -3,7 +3,9 @@ import SwiftUI
 
 struct NativeEnrollmentView: View {
   @ObservedObject var store: NativeEnrollmentStore
+  @ObservedObject var dashboards: DashboardStore
   @Environment(\.scenePhase) private var scenePhase
+  @State private var syncCleanupError = false
 
   var body: some View {
     List {
@@ -39,10 +41,17 @@ struct NativeEnrollmentView: View {
           LabeledContent("Coordinator", value: credential.origin.absoluteString)
           LabeledContent("Device", value: credential.client.label)
           NavigationLink("Control a Mac") { PhoneControlView(credential: credential) }
+          NavigationLink("Sync Dashboards") {
+            DashboardSyncView(credential: credential, dashboards: dashboards)
+          }
         }
         Section {
-          Button("Log out from coordinator", role: .destructive) { store.logout() }
-          Button("Remove local credential", role: .destructive) { store.removeLocalCredential() }
+          Button("Log out from coordinator", role: .destructive) {
+            clearPendingSync { store.logout() }
+          }
+          Button("Remove local credential", role: .destructive) {
+            clearPendingSync { store.removeLocalCredential() }
+          }
         }
         Section { Text("Removing the local credential does not revoke the coordinator session.") }
           .font(.footnote).foregroundStyle(.secondary)
@@ -53,7 +62,9 @@ struct NativeEnrollmentView: View {
         }
         Section {
           Button("Recover pairing") { store.recover() }
-          Button("Discard pending credential", role: .destructive) { store.removeLocalCredential() }
+          Button("Discard pending credential", role: .destructive) {
+            clearPendingSync { store.removeLocalCredential() }
+          }
         }
         Section("Coordinator") { Text(pending.origin.absoluteString) }
         Section {
@@ -68,7 +79,9 @@ struct NativeEnrollmentView: View {
         }
         Section {
           Button("Check session") { store.checkLogout() }
-          Button("Remove local credential", role: .destructive) { store.removeLocalCredential() }
+          Button("Remove local credential", role: .destructive) {
+            clearPendingSync { store.removeLocalCredential() }
+          }
         }
         Section("Coordinator") { Text(credential.origin.absoluteString) }
         Section {
@@ -79,7 +92,9 @@ struct NativeEnrollmentView: View {
           "Enrollment unavailable", systemImage: "exclamationmark.triangle",
           description: Text(message))
         Button("Try another code") { store.startScanning() }
-        Button("Remove saved pairing", role: .destructive) { store.removeLocalCredential() }
+        Button("Remove saved pairing", role: .destructive) {
+          clearPendingSync { store.removeLocalCredential() }
+        }
         Text(
           "Removing the saved pairing affects only this iPhone. It does not revoke a session on the coordinator."
         ).font(.footnote).foregroundStyle(.secondary)
@@ -109,6 +124,15 @@ struct NativeEnrollmentView: View {
     }
     .onChange(of: scenePhase) { _, phase in if phase == .background { store.cancelTransient() } }
     .onDisappear { store.cancelTransient() }
+    .alert("Couldn’t Clear Pending Dashboard Sync", isPresented: $syncCleanupError) {
+      Button("OK", role: .cancel) {}
+    } message: {
+      Text("Logout is blocked until Ellie can clear its private pending dashboard copy.")
+    }
+  }
+  private func clearPendingSync(_ action: () -> Void) {
+    do { try clearPendingDashboardSync(action: action) }
+    catch { syncCleanupError = true }
   }
   private func shortPin(_ pin: String) -> String { "\(pin.prefix(12))…\(pin.suffix(12))" }
 }
