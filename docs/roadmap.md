@@ -2,6 +2,8 @@
 
 Ellie is working toward a local-first, open-source household command center: a Mac can coordinate the home, a TV can show shared information, and a paired phone can act as a remote. This roadmap is ordered by dependency and learning value. It is not a promise of dates.
 
+The primary Mac and iPhone interfaces are SwiftUI applications. [PR38](https://github.com/rdimascio/ellie/pull/38) combines native household widgets, Mac Devices/pairing and iPhone enrollment/app controls in one validated, isolated candidate. Shared state follows the [explicit household-authority contract](native-household-state.md); existing app-opening credentials do not inherit data access. See the [delivery queue](delivery-queue.md) for current PR status and physical versus simulated acceptance.
+
 ## Current foundation
 
 The repository currently provides a developer milestone, not a household product:
