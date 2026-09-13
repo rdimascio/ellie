@@ -60,7 +60,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: native-iphone-test-result
-          path: test-results/native-ios.xcresult
+          path: |
+            test-results/native-ios.xcresult
+            test-results/native-ios-runner-diagnostic.txt
           retention-days: 3
   command-center:
     runs-on: ubuntu-latest
