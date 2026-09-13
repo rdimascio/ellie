@@ -4,6 +4,8 @@ Ellie is working toward a local-first, open-source household command center: a M
 
 The primary Mac and iPhone interfaces are SwiftUI applications. [PR38](https://github.com/rdimascio/ellie/pull/38) combines native household widgets, Mac Devices/pairing and iPhone enrollment/app controls in one validated, isolated candidate. [PR39](https://github.com/rdimascio/ellie/pull/39) adds durable conditional state and the [explicit household-authority contract](native-household-state.md); existing app-opening credentials do not inherit data access. iPhone sync and household-local voice are the active next slices. See the [delivery queue](delivery-queue.md) for current PR status and physical versus simulated acceptance.
 
+In-page media control is now a core requirement: catalogue scrolling, row navigation, title selection and verified playback across Netflix, YouTube, YouTube TV and Disney+. See the [browser media plan](browser-media-control.md) for WebMCP discovery, the browser companion, native remote integration and per-service acceptance. URL opening and embedded playlist playback do not satisfy this milestone.
+
 ## Current foundation
 
 The repository currently provides a developer milestone, not a household product:
