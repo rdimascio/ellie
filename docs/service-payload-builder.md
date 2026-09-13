@@ -39,16 +39,19 @@ desktop execution, and diagnostics share that resolver. Existing checkout workfl
 `~/.ellie/bin/ellie-macos` fallback.
 
 The output remains owner-writable preparation material. The included native installer verifies it
-and removes write access when staging an unselected immutable release. Selection and rollback stay
-outside this foundation.
+and stages an unselected immutable release. Selection and rollback stay outside this foundation.
 
 Each expanded archive now contains the prebuilt native command
 `payload/bin/ellie-service-installer`. `inspect RELEASE_DIRECTORY` verifies the exact manifest,
 payload contents, modes, architecture, and installer-controlled ad-hoc development identities.
 `stage RELEASE_DIRECTORY` copies through no-follow file descriptors into the current user's fixed
 `~/Library/Application Support/Ellie/Services/releases` directory, verifies the copy again, removes
-write access, and publishes a source-derived release name from the product version, full
-source revision, and architecture. It requires no installed Node, Bun, checkout, or build tools.
+write access from every payload file and directory, and verifies that installed-mode projection.
+It keeps the private staging root at 0700 for the no-replace rename required by macOS 15, then
+immediately seals the renamed root to 0555 and syncs the root and releases directory. The launcher
+requires a 0555 release root, so an incomplete 0700 publication cannot run. The published name is
+derived from the product version, full source revision, and architecture. Staging requires no
+installed Node, Bun, checkout, or build tools.
 
 Staging does not select the release: it does not create or update a receipt, application,
 LaunchAgent, service state, private Ellie identity, or Keychain item. Installer-controlled ad-hoc
@@ -56,9 +59,11 @@ signature checks protect development payload integrity; they do not establish De
 authenticity. Selection, upgrade, crash journal, and rollback transactions remain a later gate.
 If failure cleanup cannot remove the installer's exact private staging directory, the command
 reports a fixed cleanup-incomplete result and retains that evidence. If the final no-replace rename
-succeeds but its parent-directory sync fails, it reports publication uncertainty and retains the
-unselected release. Retrying the exact identical payload verifies and syncs that release; it does
-not select or start it.
+succeeds but sealing the release root or a subsequent directory sync fails, it reports publication
+uncertainty and retains the unselected release. A retry accepts a 0700 root only after verifying its
+entire installed-mode contents, identity, and manifest against the requested source, then seals and
+syncs it. A mismatch is preserved without changing its mode. Retrying never selects or starts the
+release.
 
 The copied CLI, Node runtime, role launchers, and native helper resolve from the payload without the
 checkout. LaunchAgent generation, final app and helper publication, and service start remain later

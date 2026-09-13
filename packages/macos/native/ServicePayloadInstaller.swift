@@ -15,9 +15,36 @@ private let maximumSourceBytes = 16 * 1024
 #if ELLIE_INSTALLER_TESTING
   private let maximumPayloadFiles = 100
   private let maximumPayloadEntries = 128
+  private var diagnosticStage = "argument-validation"
+  private var diagnosticCategory = "validation"
+
+  private func diagnosticCheckpoint(_ stage: String, category: String = "validation") {
+    diagnosticStage = stage
+    diagnosticCategory = category
+  }
+
+  private func syscallCategory(_ value: Int32) -> String {
+    switch value {
+    case EACCES, EPERM: return "permission"
+    case EEXIST: return "already-exists"
+    case ENOENT: return "not-found"
+    case ENOSPC, EMFILE, ENFILE: return "resource-limit"
+    case ENOTSUP: return "unsupported"
+    case EINVAL: return "invalid-operation"
+    default: return "io-failure"
+    }
+  }
+
+  private func diagnosticSyscallFailure(_ stage: String) -> InstallerFailure {
+    diagnosticCheckpoint(stage, category: syscallCategory(errno))
+    return .rejected
+  }
 #else
   private let maximumPayloadFiles = 2_048
   private let maximumPayloadEntries = 4_096
+  private func diagnosticCheckpoint(_ stage: String, category: String = "validation") {}
+
+  private func diagnosticSyscallFailure(_ stage: String) -> InstallerFailure { .rejected }
 #endif
 private let maximumPayloadDepth = 16
 private let maximumFileBytes: UInt64 = 128 * 1024 * 1024
@@ -94,6 +121,12 @@ private func fail(_ error: Error? = nil) -> Never {
   default: message = fixedError
   }
   FileHandle.standardError.write(Data((message + "\n").utf8))
+  #if ELLIE_INSTALLER_TESTING
+    FileHandle.standardError.write(
+      Data(
+        "Ellie installer test diagnostic: stage=\(diagnosticStage) category=\(diagnosticCategory)\n"
+          .utf8))
+  #endif
   exit(1)
 }
 private func closeFD(_ fd: Int32) { if fd >= 0 { _ = Darwin.close(fd) } }
@@ -327,7 +360,9 @@ private func pathFromFD(_ fd: Int32) throws -> String {
   guard fcntl(fd, F_GETPATH, &value) == 0 else { throw InstallerFailure.rejected }
   return String(cString: value)
 }
-private func inspect(_ source: String, installed: Bool = false) throws -> Inspected {
+private func inspect(
+  _ source: String, installed: Bool = false, allowPrivateStagingRoot: Bool = false
+) throws -> Inspected {
   let root = try openAbsoluteDirectory(source)
   do { try statSafeDirectory(root, privateMode: false) } catch {
     closeFD(root)
@@ -335,8 +370,11 @@ private func inspect(_ source: String, installed: Bool = false) throws -> Inspec
   }
   do {
     var rootInfo = stat()
-    guard fstat(root, &rootInfo) == 0,
-      (rootInfo.st_mode & 0o7777) == (installed ? 0o555 : 0o755)
+    guard fstat(root, &rootInfo) == 0 else { throw InstallerFailure.rejected }
+    let rootMode = rootInfo.st_mode & 0o7777
+    guard
+      rootMode == (installed ? 0o555 : 0o755)
+        || (installed && allowPrivateStagingRoot && rootMode == 0o700)
     else { throw InstallerFailure.rejected }
     let names = try directoryNames(root)
     guard names == ["SOURCE.txt", "manifest.json", "payload"] else {
@@ -659,10 +697,15 @@ private func existingRelease(_ releases: Int32, _ releaseID: String) throws -> B
 }
 private func verifyExisting(_ releases: Int32, _ inspected: Inspected) throws {
   let existingPath = try pathFromFD(releases) + "/" + inspected.releaseID
-  let existing = try inspect(existingPath, installed: true)
+  let existing = try inspect(existingPath, installed: true, allowPrivateStagingRoot: true)
   defer { closeFD(existing.root) }
   guard existing.releaseID == inspected.releaseID, existing.manifestData == inspected.manifestData
   else { throw InstallerFailure.rejected }
+  var info = stat()
+  guard fstat(existing.root, &info) == 0 else { throw InstallerFailure.rejected }
+  if (info.st_mode & 0o7777) == 0o700, fchmod(existing.root, 0o555) != 0 {
+    throw InstallerFailure.publicationUncertain
+  }
   guard fsync(existing.root) == 0, fsync(releases) == 0 else {
     throw InstallerFailure.publicationUncertain
   }
@@ -671,18 +714,21 @@ private func stage(
   _ inspected: Inspected, servicesRoot: String, failAfter: Int?, competingRelease: Bool,
   failAfterRename: Bool, growSource: Bool, failCleanup: Bool
 ) throws {
+  diagnosticCheckpoint("open-services-root")
   let support = try openAbsoluteDirectory(servicesRoot)
   defer { closeFD(support) }
   try statSafeDirectory(support, privateMode: true)
   let releases = try ensureDirectory(parent: support, name: "releases", mode: 0o700)
   defer { closeFD(releases) }
-  guard fsync(support) == 0 else { throw InstallerFailure.rejected }
+  guard fsync(support) == 0 else { throw diagnosticSyscallFailure("sync-services-root") }
   if try existingRelease(releases, inspected.releaseID) {
     try verifyExisting(releases, inspected)
     return
   }
   let stagingName = ".stage-" + UUID().uuidString.lowercased()
-  guard mkdirat(releases, stagingName, 0o700) == 0 else { throw InstallerFailure.rejected }
+  guard mkdirat(releases, stagingName, 0o700) == 0 else {
+    throw diagnosticSyscallFailure("create-private-stage")
+  }
   var renamed = false
   do {
     let staging = try openDirectory(at: releases, stagingName)
@@ -696,6 +742,7 @@ private func stage(
       }
     #endif
     var count = 0
+    diagnosticCheckpoint("copy-captured-metadata")
     try writeCapturedFile(
       destination: staging, name: "manifest.json", data: inspected.manifestData, counter: &count,
       failAfter: failAfter)
@@ -719,15 +766,19 @@ private func stage(
     #endif
     let destinationPayload = try ensureDirectory(parent: staging, name: "payload", mode: 0o700)
     defer { closeFD(destinationPayload) }
+    diagnosticCheckpoint("copy-payload")
     try copyPayload(
       source: sourcePayload, destination: destinationPayload, entries: inspected.manifest.files,
       counter: &count, failAfter: failAfter)
+    diagnosticCheckpoint("make-payload-immutable")
     try makeImmutable(destinationPayload)
+    diagnosticCheckpoint("seal-private-stage", category: "filesystem-operation")
     guard fchmod(destinationPayload, 0o555) == 0, fsync(destinationPayload) == 0,
-      fchmod(staging, 0o555) == 0, fsync(staging) == 0
-    else { throw InstallerFailure.rejected }
+      fsync(staging) == 0
+    else { throw diagnosticSyscallFailure("seal-private-stage") }
+    diagnosticCheckpoint("verify-private-stage")
     let stagingPath = try pathFromFD(staging)
-    let verified = try inspect(stagingPath, installed: true)
+    let verified = try inspect(stagingPath, installed: true, allowPrivateStagingRoot: true)
     defer { closeFD(verified.root) }
     guard verified.releaseID == inspected.releaseID,
       verified.manifestData == inspected.manifestData
@@ -739,9 +790,10 @@ private func stage(
         }
       }
     #endif
+    diagnosticCheckpoint("publish-exclusive", category: "filesystem-operation")
     if renameatx_np(releases, stagingName, releases, inspected.releaseID, UInt32(RENAME_EXCL)) != 0
     {
-      guard errno == EEXIST else { throw InstallerFailure.rejected }
+      guard errno == EEXIST else { throw diagnosticSyscallFailure("publish-exclusive") }
       try verifyExisting(releases, inspected)
       try removeTree(parent: releases, name: stagingName)
       return
@@ -750,7 +802,10 @@ private func stage(
     #if ELLIE_INSTALLER_TESTING
       if failAfterRename { throw InstallerFailure.publicationUncertain }
     #endif
-    guard fsync(releases) == 0 else { throw InstallerFailure.publicationUncertain }
+    diagnosticCheckpoint("seal-published-release", category: "filesystem-operation")
+    guard fchmod(staging, 0o555) == 0, fsync(staging) == 0, fsync(releases) == 0 else {
+      throw InstallerFailure.publicationUncertain
+    }
   } catch {
     if renamed { throw error }
     do { try removeTree(parent: releases, name: stagingName) } catch {
@@ -797,6 +852,7 @@ private struct ServicePayloadInstaller {
       guard arguments.isEmpty else { fail() }
     #endif
     do {
+      diagnosticCheckpoint("inspect-source")
       let inspected = try inspect(source)
       defer { closeFD(inspected.root) }
       if command == "inspect" {
