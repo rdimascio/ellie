@@ -4,6 +4,22 @@ This is the working queue for the household alpha. Each completion advances the 
 
 The product UI is native-first: SwiftUI on macOS and iPhone. Browser code remains a compatibility and protocol reference; new household interface work targets native views. Preserve the browser-v1 dashboard export path.
 
+## Release priority and parallel work
+
+The user explicitly corrected the workflow: new feature ideas must not displace the stability and shipping backlog. Freeze feature expansion until there is one reviewable, installable native candidate and an honest end-to-end acceptance record. Browser media and Apple Watch remain committed backlog requirements; complete only already-started review fixes before parking that feature work. PR count is not release progress.
+
+Three independent agents are assigned, with root responsible for review, integration order, publishing and the release decision:
+
+| Lane        | Owner and branch                                      | Concrete output                                                                                                                                                                                                                |
+| ----------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Integration | native_credentials, `codex/native-release-validation` | Production Swift iPhone speech transport against the production Node speech backend with synthetic audio, plus compatibility with the completed sync sources; exact combined-source evidence and no implicit command dispatch. |
+| Reliability | native_ios, `codex/native-release-reliability`        | Close a missing coordinator/node process-interruption gate after inspecting existing tests: bounded reconnect, no duplicate execution, truthful unknown outcomes, cancellation/revocation and a fresh command after recovery.  |
+| Packaging   | native_weather, `codex/native-release-packaging`      | One reproducible macOS development artifact from green PR38, source/version provenance, checksum, outside-checkout execution, preservation/rollback instructions and explicit signing/permission gaps.                         |
+
+All three branches were created and successfully pushed before implementation. Validation and reliability are based on `9e75923`; packaging is based on green PR38 `88d1568`. Feature source worktrees remain separate and quiescent. Integration uses owned synthetic source copies for validation; later integration must preserve the reviewed feature commit histories. No agent may deploy over the household stack or broaden permissions to make a test pass.
+
+The first usable release target is native Mac dashboards and explicit cross-Mac control in one installed candidate. Complete iPhone signing/enrollment and real microphone acceptance as separate subsequent gates. Do not add browser/Watch/provider features to the release blocker list merely because they are newer requests. Queue them after the stable base; reassign a blocked lane to the next release blocker, not the newest idea.
+
 The user has made **in-page media control** a core requirement: browse down a catalogue, move across a row, open a title, play and pause on Netflix, YouTube, YouTube TV and Disney+. Opening a URL does not satisfy it. The [browser media plan](browser-media-control.md) adds WebMCP discovery and a companion fallback with a native SwiftUI remote. Actual service and phone-to-browser acceptance remain pending.
 
 **Apple Watch is included:** surface the current Ellie media session with player controls while it plays. Plan a native watch remote and evaluate Smart Stack Live Activities. Built-in Now Playing automatically chooses watch/iPhone audio sources; arbitrary remote Mac playback integration is unverified. native_weather is researching supported automatic presentation and locked-phone limits before target implementation. No Watch app is installed or validated.
@@ -37,6 +53,8 @@ The user has made **in-page media control** a core requirement: browse down a ca
 Native dashboards and chores currently save on one device. PR38 combines Mac household widgets, agenda, Devices and pairing management with iPhone enrollment and app controls in one isolated SwiftUI integration candidate. It is published, not deployed. PR39 adds the explicit data-authority and durable-state backend. Native synchronization screens, person profiles, real microphone acceptance and signed iPhone distribution remain pending. Calendar imports a private offline snapshot; Google account access is not implemented.
 
 ## Next ready slices
+
+The **release lanes above override this feature queue**. The following implementation history remains for review and sequencing, not permission to resume feature expansion.
 
 **Priority addition:** `codex/browser-media-control` in `/Users/ryan/ellie-browser-media` was created and successfully pushed from `9e75923` before implementation. native_ios owns the first companion. Native messaging and remote integration follow an actual extension-driven synthetic catalogue/player workflow. Netflix and YouTube are the first experimental origins; YouTube TV and Disney+ require separate observed adapters and acceptance. WebMCP support is unverified; discovery alone does not enable tool execution.
 
