@@ -28,6 +28,54 @@ let simulatorID,
   succeeded = false;
 let remoteNodeReads = 0,
   remoteAppOpens = 0;
+const diagnosticStartedAt = Date.now();
+let diagnosticStage = "fixture-setup",
+  diagnosticStageStartedAt = diagnosticStartedAt;
+const endpointRequests = {
+  session: 0,
+  inventory: 0,
+  command: 0,
+  logout: 0,
+  unexpected: 0,
+};
+const endpointResponses = { ...endpointRequests };
+
+function enterDiagnosticStage(stage) {
+  diagnosticStage = stage;
+  diagnosticStageStartedAt = Date.now();
+}
+
+function endpointStage(request) {
+  const path = request.url?.split("?", 1)[0];
+  if (request.method === "GET" && path === "/native/v1/session") return "session";
+  if (request.method === "GET" && path === "/native/v1/nodes") return "inventory";
+  if (request.method === "POST" && path === "/native/v1/commands") return "command";
+  if (request.method === "POST" && path === "/native/v1/logout") return "logout";
+  return "unexpected";
+}
+
+function recordEndpointRequest(request, response) {
+  const stage = endpointStage(request);
+  endpointRequests[stage] += 1;
+  response.once("finish", () => {
+    endpointResponses[stage] += 1;
+  });
+}
+
+function diagnosticSummary() {
+  const bounded = (value) => Math.min(Math.max(value, 0), 999_999);
+  const counts = (value) =>
+    ["session", "inventory", "command", "logout", "unexpected"]
+      .map((key) => `${key}:${Math.min(value[key], 99)}`)
+      .join(",");
+  return [
+    `stage=${diagnosticStage}`,
+    `stageMs=${bounded(Date.now() - diagnosticStageStartedAt)}`,
+    `totalMs=${bounded(Date.now() - diagnosticStartedAt)}`,
+    `requests=${counts(endpointRequests)}`,
+    `responses=${counts(endpointResponses)}`,
+  ].join(" ");
+}
 
 function terminate(child, signal) {
   if (!Number.isInteger(child.pid) || child.pid <= 0) return;
@@ -125,6 +173,7 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 try {
+  enterDiagnosticStage("fixture-certificate");
   rmSync(resultBundle, { recursive: true, force: true });
   mkdirSync(dirname(resultBundle), { recursive: true });
   const cert = join(owned, "cert.pem"),
@@ -166,6 +215,7 @@ try {
     config,
   ]);
   await execute("openssl", ["x509", "-in", cert, "-outform", "DER", "-out", der]);
+  enterDiagnosticStage("fixture-listener");
   const pin = createHash("sha256").update(readFileSync(der)).digest("hex");
   const token = "c".repeat(64);
   const reservation = createNetServer();
@@ -208,11 +258,13 @@ try {
     },
   });
   server = hosted;
+  hosted.server.prependListener("request", recordEndpointRequest);
   await new Promise((resolveListen, reject) => {
     hosted.server.once("error", reject);
     hosted.server.listen(address.port, "127.0.0.1", resolveListen);
   });
 
+  enterDiagnosticStage("simulator-discovery");
   const runtimes = JSON.parse(
     await execute("xcrun", ["simctl", "list", "runtimes", "--json"], {
       capture: true,
@@ -232,6 +284,7 @@ try {
     runtimes[0].supportedDeviceTypes?.filter((item) => item.productFamily === "iPhone") ?? [];
   const device = compatible.find((item) => item.name === "iPhone 16") ?? compatible[0];
   if (!device) throw new Error("The selected iOS runtime has no supported iPhone.");
+  enterDiagnosticStage("simulator-create");
   simulatorID = await execute(
     "xcrun",
     [
@@ -247,8 +300,10 @@ try {
     simulatorID = undefined;
     throw new Error("Simulator creation returned an invalid identifier.");
   }
+  enterDiagnosticStage("simulator-boot");
   await execute("xcrun", ["simctl", "boot", simulatorID]);
   await execute("xcrun", ["simctl", "bootstatus", simulatorID, "-b"], { timeout: 180_000 });
+  enterDiagnosticStage("xcode-test");
   await execute(
     "xcodebuild",
     [
@@ -275,6 +330,14 @@ try {
   if (remoteNodeReads !== 2 || remoteAppOpens !== 1) {
     throw new Error("The production native routes did not perform the expected finite operations.");
   }
+  if (
+    JSON.stringify(endpointRequests) !==
+      JSON.stringify({ session: 1, inventory: 2, command: 1, logout: 1, unexpected: 0 }) ||
+    JSON.stringify(endpointResponses) !== JSON.stringify(endpointRequests)
+  ) {
+    throw new Error("The synthetic listener observed an unexpected request lifecycle.");
+  }
+  enterDiagnosticStage("built-policy");
   const appInfo = JSON.parse(
     await execute(
       "plutil",
@@ -299,8 +362,11 @@ try {
     );
   }
   succeeded = true;
+  enterDiagnosticStage("complete");
+  console.log(`ATS synthetic diagnostics: ${diagnosticSummary()}`);
   console.log("iOS app-hosted pinned HTTPS, rejection, Keychain and built-policy checks passed.");
 } finally {
+  if (!succeeded) console.error(`ATS synthetic diagnostics: ${diagnosticSummary()}`);
   if (server) {
     server.shutdown();
   }
