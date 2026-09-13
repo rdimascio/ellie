@@ -50,8 +50,8 @@ phone connected. These are user-reported physical observations, separate from th
 camera tests. The temporary client was revoked through the controller, and a second query
 confirmed zero clients. The matching harness was stopped gracefully; its runtime, lock and
 listener were removed. Both matching files transferred to the MacBook were removed after
-ownership and hash checks. Removal of the latest test profile from the phone is awaiting the
-operator's confirmation.
+ownership and hash checks. The operator confirmed removal of the latest test profile from the phone after being asked to
+verify that its certificate-trust entry was gone.
 
 An earlier QR attempt expired without a reported scan result; the coordinator had zero clients
 at its last observation. That attempt is not counted as successful camera acceptance.
