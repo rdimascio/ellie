@@ -16,8 +16,8 @@ const required = (name: string): string => {
 const notify = (message: Record<string, unknown>) => process.send?.(message);
 
 if (process.argv[2] === "stalled") {
-  notify({ event: "ready" });
   process.once("SIGTERM", () => notify({ event: "term" }));
+  notify({ event: "ready" });
   setInterval(() => {}, 1000);
 } else if (process.argv[2] === "coordinator") {
   const directory = required("ELLIE_RELIABILITY_STATE");
