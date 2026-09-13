@@ -4,6 +4,43 @@ import XCTest
 @testable import Ellie
 
 final class CoordinatorNetworkTests: XCTestCase {
+    func testRealTLSAcceptsTheExistingCoordinatorGeneratorIdentity() async throws {
+        let server = try await LoopbackCoordinator(mode: "success", certificateProfile: .legacy)
+        defer { server.stop() }
+        let nodes = try await PinnedCoordinatorClient().nodes(connection: server.connection)
+        XCTAssertEqual(nodes.map(\.id), ["loopback-mac"])
+    }
+
+    func testRealTLSLegacyCertificateMismatchSendsNoRequest() async throws {
+        let server = try await LoopbackCoordinator(mode: "success", certificateProfile: .legacy)
+        defer { server.stop() }
+        let other = try await LoopbackCoordinator(mode: "success", certificateProfile: .legacy)
+        defer { other.stop() }
+        let mismatched = CoordinatorConnection(origin: server.connection.origin,
+            certificateDER: other.connection.certificateDER, token: server.connection.token)
+        do {
+            _ = try await PinnedCoordinatorClient().nodes(connection: mismatched)
+            XCTFail("A different legacy identity was accepted")
+        } catch {
+            XCTAssertEqual(error as? CoordinatorFailure, .trustFailed)
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: server.requestHitURL.path))
+    }
+
+    func testRealTLSModernNameAndPurposeFailuresSendNoRequest() async throws {
+        for profile in [CoordinatorCertificateProfile.wrongDNS, .clientOnly] {
+            let server = try await LoopbackCoordinator(mode: "success", certificateProfile: profile)
+            defer { server.stop() }
+            do {
+                _ = try await PinnedCoordinatorClient().nodes(connection: server.connection)
+                XCTFail("A modern certificate with the wrong name or purpose was accepted")
+            } catch {
+                XCTAssertEqual(error as? CoordinatorFailure, .trustFailed)
+            }
+            XCTAssertFalse(FileManager.default.fileExists(atPath: server.requestHitURL.path))
+        }
+    }
+
     func testRealTLSRequestUsesExpectedPathHeadersAndBearer() async throws {
         let server = try await LoopbackCoordinator(mode: "success")
         defer { server.stop() }
@@ -99,14 +136,17 @@ final class CoordinatorNetworkTests: XCTestCase {
     }
 }
 
+private enum CoordinatorCertificateProfile { case modern, legacy, wrongDNS, clientOnly }
+
 private final class LoopbackCoordinator: @unchecked Sendable {
     private static let token = String(repeating: "a", count: 64)
     private let process: Process
     private let directory: URL
     let connection: CoordinatorConnection
     let sinkHitURL: URL
+    var requestHitURL: URL { directory.appendingPathComponent("request-hit") }
 
-    convenience init(mode: String) async throws {
+    convenience init(mode: String, certificateProfile: CoordinatorCertificateProfile = .modern) async throws {
         let manager = FileManager.default
         let directory = manager.temporaryDirectory.appendingPathComponent("EllieCoordinatorNetwork-\(UUID().uuidString)", isDirectory: true)
         try manager.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
@@ -118,12 +158,32 @@ private final class LoopbackCoordinator: @unchecked Sendable {
         let ready = directory.appendingPathComponent("ready.json")
         let sinkHit = directory.appendingPathComponent("sink-hit")
         do {
-            try Self.opensslConfiguration.write(to: config, atomically: true, encoding: .utf8)
+            var certificateConfiguration = Self.opensslConfiguration
+            if certificateProfile == .wrongDNS {
+                certificateConfiguration = certificateConfiguration.replacingOccurrences(
+                    of: "subjectAltName=DNS:ellie.local", with: "subjectAltName=DNS:other.invalid")
+            } else if certificateProfile == .clientOnly {
+                certificateConfiguration = certificateConfiguration.replacingOccurrences(
+                    of: "extendedKeyUsage=serverAuth", with: "extendedKeyUsage=clientAuth")
+            }
+            try certificateConfiguration.write(to: config, atomically: true, encoding: .utf8)
             try Self.serverScript.write(to: script, atomically: true, encoding: .utf8)
-            try Self.runBounded("/usr/bin/openssl", arguments: [
-                "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
-                "-keyout", key.path, "-out", certificate.path, "-config", config.path,
-            ])
+            if certificateProfile == .legacy {
+                let repository = URL(fileURLWithPath: #filePath)
+                    .deletingLastPathComponent().deletingLastPathComponent()
+                    .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                let generator = repository.appendingPathComponent("apps/cli/src/certificate.ts")
+                try Self.runBounded("/usr/bin/env", arguments: [
+                    "node", "--input-type=module", "-e",
+                    "const {generateCertificate}=await import(process.argv[1]); const {writeFile}=await import('node:fs/promises'); const identity=await generateCertificate({openssl:'/usr/bin/openssl'}); await writeFile(process.argv[2],identity.key,{mode:0o600}); await writeFile(process.argv[3],identity.cert,{mode:0o600});",
+                    generator.absoluteString, key.path, certificate.path,
+                ])
+            } else {
+                try Self.runBounded("/usr/bin/openssl", arguments: [
+                    "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+                    "-keyout", key.path, "-out", certificate.path, "-config", config.path,
+                ])
+            }
             try Self.runBounded("/usr/bin/openssl", arguments: [
                 "x509", "-in", certificate.path, "-outform", "DER", "-out", certificateDER.path,
             ])
@@ -240,6 +300,7 @@ private final class LoopbackCoordinator: @unchecked Sendable {
     let main;
     sink.listen(0, '127.0.0.1', () => {
       main = https.createServer(options, (req, res) => {
+        fs.writeFileSync(require('node:path').join(require('node:path').dirname(readyPath), 'request-hit'), 'received', { mode: 0o600 });
         if (mode === 'action') {
           if (req.url !== '/v1/commands' || req.method !== 'POST' || req.headers['x-ellie-version'] !== '1' ||
               req.headers.authorization !== `Bearer ${token}` || req.headers['content-type'] !== 'application/json') {

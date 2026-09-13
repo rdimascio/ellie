@@ -454,6 +454,14 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
               SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess,
               SecTrustSetVerifyDate(trust, date as CFDate) == errSecSuccess
         else { return false }
+        if SecTrustEvaluateWithError(trust, nil) { return true }
+        guard legacyCoordinatorCertificate(pinnedCertificate) else { return false }
+        guard SecTrustSetPolicies(trust, SecPolicyCreateBasicX509()) == errSecSuccess,
+              SecTrustSetAnchorCertificates(trust, [pinnedCertificate] as CFArray) == errSecSuccess,
+              SecTrustSetAnchorCertificatesOnly(trust, true) == errSecSuccess,
+              SecTrustSetNetworkFetchAllowed(trust, false) == errSecSuccess,
+              SecTrustSetVerifyDate(trust, date as CFDate) == errSecSuccess
+        else { return false }
         return SecTrustEvaluateWithError(trust, nil)
     }
 
