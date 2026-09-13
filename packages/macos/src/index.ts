@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { nativeHelperPath } from "@ellie/config";
 import type { Action, Capability, Result } from "@ellie/protocol";
 import { CAPABILITIES, record, result } from "@ellie/protocol";
 export interface Executor {
@@ -11,7 +10,7 @@ export class MacOSExecutor implements Executor {
   private async call(payload: unknown, signal?: AbortSignal): Promise<unknown> {
     if (process.platform !== "darwin") throw new Error("The native executor requires macOS.");
     return new Promise((resolve, reject) => {
-      const child = spawn(join(homedir(), ".ellie", "bin", "ellie-macos"), [], {
+      const child = spawn(nativeHelperPath(), [], {
         stdio: ["pipe", "pipe", "pipe"],
         signal,
       });

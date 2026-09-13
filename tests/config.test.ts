@@ -12,6 +12,7 @@ import {
   serverConfig,
   nodeConfig,
   Keychain,
+  nativeHelperPath,
 } from "@ellie/config";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 
@@ -45,6 +46,14 @@ test("Keychain presence checks reject unknown helper responses", async () => {
     }
   }
   await assert.rejects(new InvalidPresenceKeychain().has("browser-ca-key"), /invalid presence/);
+});
+test("packaged helper resolution is explicit, absolute, and preserves the developer fallback", () => {
+  assert.equal(nativeHelperPath({}, "/synthetic/.ellie"), "/synthetic/.ellie/bin/ellie-macos");
+  assert.equal(
+    nativeHelperPath({ ELLIE_MACOS_HELPER: "/release/payload/helpers/ellie-macos" }),
+    "/release/payload/helpers/ellie-macos",
+  );
+  assert.throws(() => nativeHelperPath({ ELLIE_MACOS_HELPER: "relative/helper" }), /invalid/);
 });
 test("private state cannot be written into the checkout or traversed through a file name", async () => {
   await assert.rejects(ensureState(join(process.cwd(), ".ellie")), /outside/);
