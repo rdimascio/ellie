@@ -2,7 +2,7 @@ import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
-import { identifier, record, VERSION } from "@ellie/protocol";
+import { identifier, record, VERSION, NATIVE_SESSION_CONTRACT } from "@ellie/protocol";
 import { readJson } from "@ellie/transport";
 import { canOpenApps, phoneAppCommand } from "./browser-remote.ts";
 import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
@@ -18,6 +18,8 @@ import {
   browserSessionToken,
   clearBrowserSessionCookie,
 } from "./browser-auth.ts";
+
+const nativeRoutes = NATIVE_SESSION_CONTRACT.routes;
 
 const MAX_BROWSER_BODY_BYTES = 4096;
 const SECURITY_HEADERS = {
@@ -186,14 +188,14 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 415, { error: "JSON required." }, {}, true);
             return;
           }
-          if (method === "POST" && path === "/native/v1/pair") {
+          if (method === nativeRoutes.pair.method && path === nativeRoutes.pair.path) {
             if (authorizations.length !== 0) {
               send(response, 403, { error: "Native pairing rejected." }, {}, true);
               return;
             }
             let body: Record<string, unknown>;
             try {
-              body = record(await readJson(request, MAX_BROWSER_BODY_BYTES));
+              body = record(await readJson(request, NATIVE_SESSION_CONTRACT.requestBodyBytes));
               if (
                 Object.keys(body).length !== 2 ||
                 typeof body.invitation !== "string" ||
@@ -222,14 +224,14 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 401, { error: "Native session required." }, {}, true);
             return;
           }
-          if (method === "GET" && path === "/native/v1/session") {
+          if (method === nativeRoutes.session.method && path === nativeRoutes.session.path) {
             send(response, 200, { client });
             return;
           }
-          if (method === "POST" && path === "/native/v1/logout") {
+          if (method === nativeRoutes.logout.method && path === nativeRoutes.logout.path) {
             try {
               if (
-                !isEmptyObject(await readJson(request, MAX_BROWSER_BODY_BYTES)) ||
+                !isEmptyObject(await readJson(request, NATIVE_SESSION_CONTRACT.requestBodyBytes)) ||
                 !(await options.nativeAuth.logout(authorizations[0]))
               )
                 throw new Error();

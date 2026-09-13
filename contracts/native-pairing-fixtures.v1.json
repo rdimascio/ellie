@@ -1,0 +1,190 @@
+{
+  "version": 1,
+  "referenceTime": 1893456000000,
+  "valid": [
+    {
+      "name": "ascii",
+      "payload": {
+        "version": 1,
+        "origin": "https://coordinator.example:8444",
+        "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "invitation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expiresAt": 1893456600000,
+        "label": "Test iPhone",
+        "grants": [
+          {
+            "target": "synthetic-mac",
+            "capabilities": [
+              "app.open"
+            ]
+          }
+        ]
+      },
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "unicode-and-escaping",
+      "payload": {
+        "version": 1,
+        "origin": "https://coordinator.example:8444",
+        "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "invitation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expiresAt": 1893456600000,
+        "label": "Kitchen \"One\" \\ 🏡 café",
+        "grants": [
+          {
+            "target": "synthetic-mac",
+            "capabilities": [
+              "app.open"
+            ]
+          }
+        ]
+      },
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IktpdGNoZW4gXCJPbmVcIiBcXCDwn4-hIGNhZsOpIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "ipv6-origin",
+      "payload": {
+        "version": 1,
+        "origin": "https://[2001:db8::1]:8444",
+        "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "invitation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expiresAt": 1893456600000,
+        "label": "Test iPhone",
+        "grants": [
+          {
+            "target": "synthetic-mac",
+            "capabilities": [
+              "app.open"
+            ]
+          }
+        ]
+      },
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL1syMDAxOmRiODo6MV06ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    }
+  ],
+  "invalid": [
+    {
+      "name": "unknown-field",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XSwiZXh0cmEiOnRydWV9"
+    },
+    {
+      "name": "http-origin",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwOi8vY29vcmRpbmF0b3IuZXhhbXBsZSIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "origin-credentials",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL3VzZXJAY29vcmRpbmF0b3IuZXhhbXBsZSIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "origin-path",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGUvZXh0cmEiLCJjZXJ0aWZpY2F0ZVNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpbnZpdGF0aW9uIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsImV4cGlyZXNBdCI6MTg5MzQ1NjYwMDAwMCwibGFiZWwiOiJUZXN0IGlQaG9uZSIsImdyYW50cyI6W3sidGFyZ2V0Ijoic3ludGhldGljLW1hYyIsImNhcGFiaWxpdGllcyI6WyJhcHAub3BlbiJdfV19"
+    },
+    {
+      "name": "origin-trailing-slash",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGUvIiwiY2VydGlmaWNhdGVTaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiaW52aXRhdGlvbiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJleHBpcmVzQXQiOjE4OTM0NTY2MDAwMDAsImxhYmVsIjoiVGVzdCBpUGhvbmUiLCJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dfQ"
+    },
+    {
+      "name": "uppercase-pin",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "control-label",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlBob25lXG5OYW1lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "blank-label",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IiAiLCJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dfQ"
+    },
+    {
+      "name": "label-leading-space",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IiBQaG9uZSIsImdyYW50cyI6W3sidGFyZ2V0Ijoic3ludGhldGljLW1hYyIsImNhcGFiaWxpdGllcyI6WyJhcHAub3BlbiJdfV19"
+    },
+    {
+      "name": "label-too-long",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6Inh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4eHh4IiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0"
+    },
+    {
+      "name": "duplicate-target",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19LHsidGFyZ2V0Ijoic3ludGhldGljLW1hYyIsImNhcGFiaWxpdGllcyI6WyJhcHAub3BlbiJdfV19"
+    },
+    {
+      "name": "unsupported-capability",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbIndpbmRvdy5wbGFjZSJdfV19"
+    },
+    {
+      "name": "fractional-expiry",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxLjUsImxhYmVsIjoiVGVzdCBpUGhvbmUiLCJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dfQ"
+    },
+    {
+      "name": "noncanonical-key-order",
+      "qr": "ellie-native:v1:eyJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJpbnZpdGF0aW9uIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsIm9yaWdpbiI6Imh0dHBzOi8vY29vcmRpbmF0b3IuZXhhbXBsZTo4NDQ0IiwidmVyc2lvbiI6MX0"
+    },
+    {
+      "name": "base64-padding",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLmV4YW1wbGU6ODQ0NCIsImNlcnRpZmljYXRlU2hhMjU2IjoiYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYSIsImludml0YXRpb24iOiJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiIiwiZXhwaXJlc0F0IjoxODkzNDU2NjAwMDAwLCJsYWJlbCI6IlRlc3QgaVBob25lIiwiZ3JhbnRzIjpbeyJ0YXJnZXQiOiJzeW50aGV0aWMtbWFjIiwiY2FwYWJpbGl0aWVzIjpbImFwcC5vcGVuIl19XX0="
+    },
+    {
+      "name": "envelope-too-large",
+      "qr": "ellie-native:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "name": "browser-qr",
+      "qr": "ellie-pair:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "responses": {
+    "client": {
+      "id": "synthetic-native-client",
+      "role": "native_phone_controller",
+      "label": "Test iPhone",
+      "grants": [
+        {
+          "target": "synthetic-mac",
+          "capabilities": [
+            "app.open"
+          ]
+        }
+      ],
+      "createdAt": 1893456000000,
+      "expiresAt": 1901232000000
+    },
+    "pair": {
+      "client": {
+        "id": "synthetic-native-client",
+        "role": "native_phone_controller",
+        "label": "Test iPhone",
+        "grants": [
+          {
+            "target": "synthetic-mac",
+            "capabilities": [
+              "app.open"
+            ]
+          }
+        ],
+        "createdAt": 1893456000000,
+        "expiresAt": 1901232000000
+      }
+    },
+    "session": {
+      "client": {
+        "id": "synthetic-native-client",
+        "role": "native_phone_controller",
+        "label": "Test iPhone",
+        "grants": [
+          {
+            "target": "synthetic-mac",
+            "capabilities": [
+              "app.open"
+            ]
+          }
+        ],
+        "createdAt": 1893456000000,
+        "expiresAt": 1901232000000
+      }
+    },
+    "logout": {
+      "ok": true
+    }
+  }
+}

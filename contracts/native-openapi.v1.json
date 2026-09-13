@@ -1,0 +1,812 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ellie native client enrollment API",
+    "version": "1.0.0",
+    "description": "The optional client HTTPS listener exposes only native enrollment/session/logout here. Use the exact origin from the explicitly confirmed QR. Verify its leaf SHA-256, hostname and certificate validity. Native bearer credentials never authenticate as coordinator, execution-node or browser credentials. No cookies, Origin or Sec-Fetch-* headers are allowed; Host must match the exact listener authority. JSON POST bodies require a single application/json Content-Type, optionally charset=utf-8. No automatic mutation replay is permitted."
+  },
+  "servers": [
+    {
+      "url": "{origin}",
+      "variables": {
+        "origin": {
+          "default": "https://coordinator.example:8444",
+          "description": "Reserved example only. Replace with the verified QR origin; never infer the coordinator API port."
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "nativeBearer": []
+    }
+  ],
+  "paths": {
+    "/native/v1/pair": {
+      "post": {
+        "parameters": [
+          {
+            "name": "X-Ellie-Version",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "1"
+            }
+          }
+        ],
+        "x-ellie-max-json-post-body-bytes": 4096,
+        "x-ellie-request-channel": {
+          "exactHost": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Host",
+            "Authorization",
+            "X-Ellie-Version"
+          ],
+          "jsonPostRequiresSingleContentType": true
+        },
+        "operationId": "pairNativeClient",
+        "security": [],
+        "summary": "Exchange a single-use invitation for a native session",
+        "description": "Authorization is forbidden. Generate and safely retain a random candidate token before the single POST. Success means durable pairing committed. An interrupted response is uncertain: use GET session with the candidate to recover, never replay this POST automatically.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativePairRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Pairing durably committed. No credential is returned; the client already holds its candidate.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeSessionResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Native credential rejected or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/native/v1/session": {
+      "get": {
+        "parameters": [
+          {
+            "name": "X-Ellie-Version",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "1"
+            }
+          }
+        ],
+        "x-ellie-max-json-post-body-bytes": 4096,
+        "x-ellie-request-channel": {
+          "exactHost": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Host",
+            "Authorization",
+            "X-Ellie-Version"
+          ],
+          "jsonPostRequiresSingleContentType": true
+        },
+        "operationId": "getNativeSession",
+        "summary": "Inspect or recover the native credential",
+        "description": "Read-only. Candidate bearer authentication returns the public record after a committed pair, including after a lost pair response. A 401 means the candidate is not currently authorized; this read never consumes an invitation or creates a session.",
+        "responses": {
+          "200": {
+            "description": "Current native session metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeSessionResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Native credential rejected or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/native/v1/logout": {
+      "post": {
+        "parameters": [
+          {
+            "name": "X-Ellie-Version",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "1"
+            }
+          }
+        ],
+        "x-ellie-max-json-post-body-bytes": 4096,
+        "x-ellie-request-channel": {
+          "exactHost": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Host",
+            "Authorization",
+            "X-Ellie-Version"
+          ],
+          "jsonPostRequiresSingleContentType": true
+        },
+        "operationId": "logoutNativeClient",
+        "summary": "Revoke this native credential",
+        "description": "The empty JSON body is required. Success confirms durable revocation. On interruption retain uncertainty; GET session may resolve whether the credential still authenticates. Local credential removal alone does not confirm server revocation.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NativeLogoutRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Native credential durably revoked.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeLogoutResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Native credential rejected or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "nativeBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "64 lowercase hexadecimal characters",
+        "description": "The separate native candidate/session token. Never a controller token, node token, browser cookie or invitation."
+      }
+    },
+    "schemas": {
+      "NativeGrant": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "target",
+          "capabilities"
+        ],
+        "properties": {
+          "target": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$"
+          },
+          "capabilities": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "items": {
+              "const": "app.open"
+            }
+          }
+        }
+      },
+      "NativeInvitationSpec": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "label",
+          "grants"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S",
+            "description": "One to 64 Unicode code points, no Unicode control/format/surrogate/private/unassigned characters, and no leading or trailing ECMAScript whitespace. Enforced by the nativeLabel runtime validator.",
+            "x-ellie-validator": "nativeLabel"
+          },
+          "grants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/NativeGrant"
+            },
+            "description": "Each target is unique. This first version records only app.open grants; it does not expose native command dispatch.",
+            "x-ellie-unique-key": "target"
+          }
+        }
+      },
+      "NativeClient": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "role",
+          "label",
+          "grants",
+          "createdAt",
+          "expiresAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$"
+          },
+          "role": {
+            "const": "native_phone_controller"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S",
+            "description": "One to 64 Unicode code points, no Unicode control/format/surrogate/private/unassigned characters, and no leading or trailing ECMAScript whitespace. Enforced by the nativeLabel runtime validator.",
+            "x-ellie-validator": "nativeLabel"
+          },
+          "grants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/NativeGrant"
+            },
+            "description": "Each target is unique. This first version records only app.open grants; it does not expose native command dispatch.",
+            "x-ellie-unique-key": "target"
+          },
+          "createdAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        },
+        "description": "Public metadata only. expiresAt minus createdAt is exactly 7,776,000,000 milliseconds (90 days). Expired clients do not authenticate.",
+        "x-ellie-lifetime-ms": 7776000000
+      },
+      "NativePairingPayload": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "origin",
+          "certificateSha256",
+          "invitation",
+          "expiresAt",
+          "label",
+          "grants"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "origin": {
+            "type": "string",
+            "format": "uri",
+            "maxLength": 2048,
+            "pattern": "^https://[^/?#@]+$",
+            "description": "Exact canonical HTTPS origin, without credentials, path, query or fragment. This identifies the optional client listener, not the coordinator API."
+          },
+          "certificateSha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "minLength": 64,
+            "maxLength": 64,
+            "description": "SHA-256 of the actual leaf certificate DER, verified along with hostname and validity."
+          },
+          "invitation": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[a-f0-9]{64}$",
+            "writeOnly": false,
+            "x-ellie-sensitive": true
+          },
+          "expiresAt": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "pattern": "\\S",
+            "description": "One to 64 Unicode code points, no Unicode control/format/surrogate/private/unassigned characters, and no leading or trailing ECMAScript whitespace. Enforced by the nativeLabel runtime validator.",
+            "x-ellie-validator": "nativeLabel"
+          },
+          "grants": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/NativeGrant"
+            },
+            "description": "Each target is unique. This first version records only app.open grants; it does not expose native command dispatch.",
+            "x-ellie-unique-key": "target"
+          }
+        },
+        "description": "Single-use bootstrap returned only by controller management. Canonical key order matches this required list. Encode compact ECMAScript JSON as UTF-8, unpadded base64url, prefixed ellie-native:v1:. The complete ASCII envelope is at most 2300 bytes; decoded JSON is at most 4096 bytes. Never place it in a URL, log it or persist the invitation.",
+        "x-ellie-qr-max-bytes": 2300
+      },
+      "NativePairRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "invitation",
+          "token"
+        ],
+        "properties": {
+          "invitation": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[a-f0-9]{64}$",
+            "writeOnly": true
+          },
+          "token": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64,
+            "pattern": "^[a-f0-9]{64}$",
+            "writeOnly": true,
+            "description": "Cryptographically random 32-byte candidate chosen by the native client before this single POST. Retain for read-only GET recovery after an uncertain response."
+          }
+        }
+      },
+      "NativeSessionResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "client"
+        ],
+        "properties": {
+          "client": {
+            "$ref": "#/components/schemas/NativeClient"
+          }
+        }
+      },
+      "NativeLogoutRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 0
+      },
+      "NativeLogoutResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          }
+        }
+      },
+      "NativeError": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "description": "A fixed, redacted server error. Clients display their own state-appropriate text, not raw error content."
+      }
+    }
+  }
+}

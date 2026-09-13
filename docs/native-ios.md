@@ -35,7 +35,7 @@ The canonical QR envelope is bounded to 2,300 ASCII bytes so it remains below th
 - `GET /native/v1/session` accepts the candidate as `Authorization: Bearer <token>` and returns `{client}` containing its public client record. This is the read-only recovery operation for an uncertain pair response.
 - `POST /native/v1/logout` accepts exact empty JSON `{}` and the same native bearer. It revokes that session.
 
-The listener routes deliberately do not inherit controller authentication and are not represented as coordinator operations in `contracts/openapi.v1.json`. A dedicated native-listener OpenAPI contract remains follow-up work before the Swift client is implemented. The reviewed contract for this slice is the protocol parser plus the server integration and synthetic TLS tests.
+The listener routes deliberately do not inherit controller authentication and are not represented as coordinator operations in `contracts/openapi.v1.json`. The dedicated `contracts/native-openapi.v1.json` describes these implemented routes with their separate native bearer scheme. [The native API guide](native-api.md) covers generation, shared Swift/TypeScript fixtures and mutation uncertainty; the protocol parser and synthetic TLS integration tests remain runtime evidence.
 
 The controller CLI exposes `native invite --label NAME --node ID --allow app.open`, `native clients` and `native revoke ID`. Invitation creation validates the label, target, grant and maximum QR bytes before mutating invitation state. QR certificate material always comes from the listener's active leaf certificate.
 
