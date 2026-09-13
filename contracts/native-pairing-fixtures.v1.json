@@ -101,6 +101,26 @@
         ]
       },
       "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL3huLS1jYWYtZG1hLmV4YW1wbGUiLCJjZXJ0aWZpY2F0ZVNoYTI1NiI6ImFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWEiLCJpbnZpdGF0aW9uIjoiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsImV4cGlyZXNBdCI6MTg5MzQ1NjYwMDAwMCwibGFiZWwiOiJUZXN0IGlQaG9uZSIsImdyYW50cyI6W3sidGFyZ2V0Ijoic3ludGhldGljLW1hYyIsImNhcGFiaWxpdGllcyI6WyJhcHAub3BlbiJdfV19"
+    },
+    {
+      "name": "hex-like-dns-origin",
+      "payload": {
+        "version": 1,
+        "origin": "https://abc123:8444",
+        "certificateSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "invitation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "expiresAt": 1893456600000,
+        "label": "Test iPhone",
+        "grants": [
+          {
+            "target": "synthetic-mac",
+            "capabilities": [
+              "app.open"
+            ]
+          }
+        ]
+      },
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2FiYzEyMzo4NDQ0IiwiY2VydGlmaWNhdGVTaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiaW52aXRhdGlvbiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJleHBpcmVzQXQiOjE4OTM0NTY2MDAwMDAsImxhYmVsIjoiVGVzdCBpUGhvbmUiLCJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dfQ"
     }
   ],
   "invalid": [
@@ -151,6 +171,10 @@
     {
       "name": "origin-zero-padded-ipv4",
       "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovLzEyNy4wMDAuMDAwLjAwMTo4NDQ0IiwiY2VydGlmaWNhdGVTaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiaW52aXRhdGlvbiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJleHBpcmVzQXQiOjE4OTM0NTY2MDAwMDAsImxhYmVsIjoiVGVzdCBpUGhvbmUiLCJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dfQ"
+    },
+    {
+      "name": "origin-invalid-numeric-domain",
+      "qr": "ellie-native:v1:eyJ2ZXJzaW9uIjoxLCJvcmlnaW4iOiJodHRwczovL2Nvb3JkaW5hdG9yLjEyMzo4NDQ0IiwiY2VydGlmaWNhdGVTaGEyNTYiOiJhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhIiwiaW52aXRhdGlvbiI6ImJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmIiLCJleHBpcmVzQXQiOjE4OTM0NTY2MDAwMDAsImxhYmVsIjoiVGVzdCBpUGhvbmUiLCJncmFudHMiOlt7InRhcmdldCI6InN5bnRoZXRpYy1tYWMiLCJjYXBhYmlsaXRpZXMiOlsiYXBwLm9wZW4iXX1dfQ"
     },
     {
       "name": "origin-expanded-ipv6",

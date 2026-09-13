@@ -18,6 +18,7 @@ export function nativePairingFixtures() {
     { name: "ipv6-origin", payload: { ...payload, origin: "https://[2001:db8::1]:8444" } },
     { name: "ipv4-origin", payload: { ...payload, origin: "https://127.0.0.1:8444" } },
     { name: "idna-origin", payload: { ...payload, origin: "https://xn--caf-dma.example" } },
+    { name: "hex-like-dns-origin", payload: { ...payload, origin: "https://abc123:8444" } },
   ].map((entry) => ({ ...entry, qr: nativePairingQr(entry.payload) }));
   const raw = (value: unknown) =>
     `ellie-native:v1:${Buffer.from(JSON.stringify(value)).toString("base64url")}`;
@@ -41,6 +42,7 @@ export function nativePairingFixtures() {
       ["origin-integer-ipv4", "https://2130706433:8444"],
       ["origin-hex-ipv4", "https://0x7f000001:8444"],
       ["origin-zero-padded-ipv4", "https://127.000.000.001:8444"],
+      ["origin-invalid-numeric-domain", "https://coordinator.123:8444"],
       ["origin-expanded-ipv6", "https://[2001:db8:0:0:0:0:0:1]:8444"],
       ["origin-uppercase-ipv6", "https://[2001:DB8::1]:8444"],
       ["origin-unicode-host", "https://café.example"],
