@@ -33,8 +33,9 @@ final class NativeSpeechIntegrationTests: XCTestCase {
 
   @MainActor
   func testProductionCancelStopsOwnedTurnAndLeavesNoRecording() async throws {
-    let granted = try credential(id: "speech-granted", token: "e", label: "Speech Granted")
-    let recorder = IntegrationSpeechRecorder(marker: 1)
+    let granted = try credential(
+      id: "speech-cancel", token: "cd", label: "Speech Cancel")
+    let recorder = IntegrationSpeechRecorder(marker: 3)
     let store = SpeechTurnStore(
       credential: granted, recorder: recorder, transport: SpeechTransport())
     store.checkAvailability()
@@ -43,9 +44,10 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     await eventually { store.phase == .recording }
     store.stop()
     await eventually { store.phase == .uploading }
-    try await Task.sleep(for: .milliseconds(300))
+    try await fixtureStatus("cancel/started", credential: granted)
     store.cancelAndDiscard()
     await eventually(timeout: .seconds(5)) { store.phase == .idle }
+    try await fixtureStatus("cancel/settled", credential: granted)
 
     XCTAssertEqual(store.transcript, "")
     let hasArtifact = await recorder.hasOwnedArtifact
@@ -72,21 +74,24 @@ final class NativeSpeechIntegrationTests: XCTestCase {
   }
 
   func testCancelledUploadDisconnectsWithoutReplay() async throws {
-    let recorder = IntegrationSpeechRecorder(marker: 1)
+    let granted = try credential(
+      id: "speech-disconnect", token: "de", label: "Speech Disconnect")
+    let recorder = IntegrationSpeechRecorder(marker: 4)
     try await recorder.start()
     let artifact = try await recorder.stop()
     let transport = SpeechTransport()
     let operation = Task {
       try await transport.transcribe(
         artifact, turnID: UUID(),
-        credential: credential(id: "speech-granted", token: "e", label: "Speech Granted"))
+        credential: granted)
     }
-    try await Task.sleep(for: .milliseconds(300))
+    try await fixtureStatus("disconnect/started", credential: granted)
     operation.cancel()
     do {
       _ = try await operation.value
       XCTFail("Cancelled upload returned a transcript")
     } catch { XCTAssertEqual(error as? SpeechTurnFailure, .cancelled) }
+    try await fixtureStatus("disconnect/settled", credential: granted)
     try await recorder.dispose(artifact)
   }
 
@@ -120,7 +125,7 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     try await recorder.dispose(artifact)
   }
 
-  private func credential(id: String, token: Character, label: String) throws
+  private func credential(id: String, token: String, label: String) throws
     -> NativeEnrollmentCredential
   {
     let bundle = try XCTUnwrap(Bundle.allBundles.first { $0.bundleURL.pathExtension == "xctest" })
@@ -128,7 +133,8 @@ final class NativeSpeechIntegrationTests: XCTestCase {
       (bundle.object(forInfoDictionaryKey: "EllieSpeechTestEnabled") as? String) == "YES"
         ? true : nil,
       "Production speech fixture is required")
-    let origin = try XCTUnwrap(URL(string: try XCTUnwrap(bundle.object(forInfoDictionaryKey: originKey) as? String)))
+    let origin = try XCTUnwrap(
+      URL(string: try XCTUnwrap(bundle.object(forInfoDictionaryKey: originKey) as? String)))
     let pin = try XCTUnwrap(bundle.object(forInfoDictionaryKey: pinKey) as? String)
     return NativeEnrollmentCredential(
       origin: origin, certificateSha256: pin,
@@ -137,7 +143,27 @@ final class NativeSpeechIntegrationTests: XCTestCase {
         grants: [NativeGrant(target: "speech-fixture-no-node", capabilities: ["app.open"])],
         createdAt: 1,
         expiresAt: 9_007_199_254_740_000),
-      token: String(repeating: String(token), count: 64))
+      token: String(repeating: token, count: 64 / token.count))
+  }
+
+  private func fixtureStatus(_ status: String, credential: NativeEnrollmentCredential) async throws
+  {
+    let url = credential.origin.appending(path: "/__ellie-test/speech/\(status)")
+    var request = URLRequest(url: url)
+    request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
+    request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 6
+    configuration.timeoutIntervalForResource = 6
+    configuration.httpCookieStorage = nil
+    configuration.urlCredentialStorage = nil
+    let delegate = FixturePinnedDelegate(
+      host: try XCTUnwrap(credential.origin.host), pin: credential.certificateSha256)
+    let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    defer { session.finishTasksAndInvalidate() }
+    let (body, response) = try await session.data(for: request)
+    XCTAssertEqual(try XCTUnwrap(response as? HTTPURLResponse).statusCode, 200)
+    XCTAssertEqual(body, Data(#"{"ok":true}"#.utf8))
   }
 
   @MainActor
@@ -151,6 +177,36 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     }
     XCTFail("Timed out waiting for speech state")
   }
+}
+
+private final class FixturePinnedDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+  private let host: String
+  private let pin: String
+
+  init(host: String, pin: String) {
+    self.host = host
+    self.pin = pin
+  }
+
+  func urlSession(
+    _ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+      challenge.protectionSpace.host == host, let trust = challenge.protectionSpace.serverTrust,
+      evaluateNativeServerTrust(trust, host: host, expectedPin: pin, at: Date())
+    else {
+      completionHandler(.cancelAuthenticationChallenge, nil)
+      return
+    }
+    completionHandler(.useCredential, URLCredential(trust: trust))
+  }
+
+  func urlSession(
+    _ session: URLSession, task: URLSessionTask,
+    willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+    completionHandler: @escaping (URLRequest?) -> Void
+  ) { completionHandler(nil) }
 }
 
 private actor IntegrationSpeechRecorder: SpeechRecording {
