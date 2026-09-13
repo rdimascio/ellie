@@ -35,6 +35,7 @@ extension WidgetKind {
 
 @MainActor
 struct DashboardView: View {
+    @Environment(\.openWindow) private var openWindow
     @ObservedObject var store: DashboardStore
     @State private var editing = false
     @State private var gallery = false
@@ -131,6 +132,8 @@ struct DashboardView: View {
                 .navigationTitle(dashboard.name)
                 .toolbar {
                     ToolbarItemGroup {
+                        Button { openWindow(id: "devices") } label: { Label("Devices", systemImage: "desktopcomputer") }
+                            .help("Show connected Macs")
                         Button { gallery = true } label: { Label("Add widget", systemImage: "plus") }
                             .help("Add a widget")
                         Button(editing ? "Done" : "Edit") { editing.toggle() }

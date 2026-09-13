@@ -6,6 +6,7 @@ import UniformTypeIdentifiers
 @MainActor
 struct EllieApp: App {
     @StateObject private var store: DashboardStore
+    @StateObject private var coordinator = CoordinatorStore()
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -38,6 +39,21 @@ struct EllieApp: App {
                     .keyboardShortcut("e", modifiers: [.command, .shift])
             }
             SidebarCommands()
+            DeviceCommands()
+        }
+        Window("Devices", id: "devices") {
+            DevicesView(store: coordinator)
+        }
+        .defaultSize(width: 820, height: 560)
+    }
+}
+
+private struct DeviceCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+    var body: some Commands {
+        CommandGroup(after: .sidebar) {
+            Button("Devices") { openWindow(id: "devices") }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
         }
     }
 }

@@ -45,8 +45,24 @@ The versioned JSON schema accepts the browser dashboard editor’s export. Use F
 
 This is the first macOS client slice. Live coordinator controls, model-backed voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain later slices. An ad hoc development signature is not a notarized release.
 
+## Connected device status
+
+Open **Devices** from the dashboard toolbar or View menu (Command-Shift-D). Choose the existing **Coordinator** or **Node** identity on this Mac, then select **Connect**. The app does not initialize an identity or change pairing. A coordinator identity sees household node registrations; a node identity sees only its own registration. The coordinator is not automatically an execution node.
+
+On macOS versions with Local Network privacy controls, Ellie needs its own Local Network consent to reach another Mac. Allow the system prompt, or enable Ellie in System Settings → Privacy & Security → Local Network, then reconnect. Existing terminal or node-service permission does not grant it to this new application. The bundle includes a purpose description and does not alter these privacy settings itself.
+
+Select a Mac to inspect its ID, desktop capabilities and last registration. Online status requires a fresh registration from a reachable, authenticated coordinator. During an interruption, cached rows show **Status unavailable**. Refresh does not run a desktop action.
+
+The app reads the selected role's existing private configuration and pinned certificate under `~/.ellie`. It retrieves the existing Keychain item through the installed Ellie native helper, using only `keychain.get`. Credentials stay in memory; there are no configuration writes, Keychain changes, new service processes or analytics calls. If the identity is missing, finish the existing CLI installation/pairing flow before connecting.
+
+Requests use an ephemeral HTTPS session with exact certificate pinning, a five-second deadline and a bounded response. Redirects, cookies and shared credential/cache storage are disabled. Successful reads refresh every ten seconds while the Devices window is open. Availability failures permit three retries after two, four and eight seconds; then monitoring stops until an explicit reconnect. Invalid trust, rejected credentials and malformed responses stop immediately. Closing Devices or selecting another identity cancels monitoring and drops the connection state.
+
+This slice is read-only. Granted app commands and cancellation/outcome controls will follow separately; no desktop action is queued or replayed by the device screen.
+
 ## Validation and next slices
 
 The [dated validation record](validation/2026-09-13-native-app.md) separates actual Mac UI checks from automated model tests. CI runs the Swift tests and builds/verifies the app bundle on macOS.
+
+The [native connection record](validation/2026-09-13-native-connection.md) covers 44 Swift tests, including real localhost HTTPS, and the physical UI check that identified pending Local Network consent. Live native LAN inventory remains an acceptance step after that consent.
 
 Next, add a native connection and device view using the existing authenticated coordinator protocol, followed by an explicitly targeted granted command. Then add the native iPhone target and pairing flow, and local microphone capture feeding the reviewed transcription adapter. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
