@@ -3,6 +3,18 @@ import XCTest
 @testable import Ellie
 
 final class DashboardModelTests: XCTestCase {
+    func testClockFormattingUsesTheSelectedTimeZone() throws {
+        let date = Date(timeIntervalSince1970: 0)
+        let locale = Locale(identifier: "en_US_POSIX")
+        let utc = try XCTUnwrap(TimeZone(identifier: "UTC"))
+        let losAngeles = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        let utcText = DashboardModel.formattedTime(date, in: utc, locale: locale)
+        let losAngelesText = DashboardModel.formattedTime(date, in: losAngeles, locale: locale)
+        XCTAssertTrue(utcText.hasPrefix("12:00"))
+        XCTAssertTrue(losAngelesText.hasPrefix("4:00"))
+        XCTAssertNotEqual(utcText, losAngelesText)
+    }
+
     func testBrowserExportRoundTripsWithoutChangingItsSchema() throws {
         let input = Data(#"{"version":1,"dashboards":[{"id":"family","name":"Family","widgets":[{"id":"clock-one","type":"clock","title":"Clock","size":"wide","config":{"timeZone":"America/Los_Angeles"}},{"id":"note-one","type":"note","title":"Note","size":"small","config":{"text":"Dinner is at six."}}]}]}"#.utf8)
         let state = try DashboardModel.decode(input)

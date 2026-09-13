@@ -18,6 +18,8 @@
     "build:macos": "node scripts/build-macos.mjs",
     "desktop:build": "node scripts/build-desktop.mjs",
     "desktop:test": "xcrun swift test --package-path apps/desktop --scratch-path apps/desktop/.build",
+    "ios:build": "xcodebuild -project apps/ios/EllieIOS.xcodeproj -scheme EllieIOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build",
+    "ios:test": "node scripts/test-ios.mjs",
     "contracts:generate": "node scripts/generate-contracts.ts",
     "contracts:check": "node scripts/generate-contracts.ts --check",
     "smoke:macos": "node scripts/smoke-macos.mjs",

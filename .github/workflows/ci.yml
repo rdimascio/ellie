@@ -42,6 +42,17 @@ jobs:
         run: bun run desktop:test
       - name: Build and verify native dashboard app
         run: bun run desktop:build
+      - name: Build native iPhone dashboard app
+        run: bun run ios:build
+      - name: Test native iPhone dashboard app
+        run: bun run ios:test
+      - name: Preserve native iPhone failure result
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-iphone-test-result
+          path: test-results/native-ios.xcresult
+          retention-days: 3
   command-center:
     runs-on: ubuntu-latest
     steps:

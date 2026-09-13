@@ -1,6 +1,6 @@
 # Ellie native app
 
-Ellie is a macOS-first SwiftUI application. The initial app provides the dashboard experience as a normal Dock application on macOS 14 and later. Its dashboard model and persistence layer are kept separate from the views so a future iPhone app can share those concepts; an iOS app is not part of the current build.
+Ellie provides native SwiftUI dashboard applications for macOS and iPhone. The macOS app is a normal Dock application on macOS 14 and later. The iPhone target shares its versioned dashboard model and persistence implementation; see the [iPhone development guide](native-ios.md).
 
 ## Requirements
 
@@ -43,10 +43,10 @@ The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, na
 
 The versioned JSON schema accepts the browser dashboard editor’s export. Use File → Import Dashboards to carry layouts and notes over; the app does not reach into browser storage. Native state lives in Application Support/Ellie/dashboardsv1.json with private permissions. Invalid startup data remains intact and blocks writes until explicit import/reset recovery. `--state-path /absolute/private/dashboards.json` selects an isolated file for validation. Existing coordinator/node identities, Keychain credentials and services are untouched.
 
-This is the first macOS client slice. Live coordinator controls, model-backed voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain later slices. An ad hoc development signature is not a notarized release.
+Live coordinator controls, model-backed voice, connected provider widgets, iPhone distribution, shared profiles and signed/notarized macOS distribution remain later slices. An ad hoc development signature is not a notarized release.
 
 ## Validation and next slices
 
 The [dated validation record](validation/2026-09-13-native-app.md) separates actual Mac UI checks from automated model tests. CI runs the Swift tests and builds/verifies the app bundle on macOS.
 
-Next, add a native connection and device view using the existing authenticated coordinator protocol, followed by an explicitly targeted granted command. Then add the native iPhone target and pairing flow, and local microphone capture feeding the reviewed transcription adapter. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
+Next, review the native trust and credential bootstrap described in the iPhone guide before implementing enrollment. Native coordinator commands, local microphone capture, chores and weather can advance independently. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
