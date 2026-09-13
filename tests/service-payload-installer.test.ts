@@ -213,6 +213,47 @@ async function withFixture(
 }
 
 const options = { skip: !mac };
+test("installer stage diagnostics are compiled into test builds only", options, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-diagnostic-")));
+  t.after(() => removeOwned(root));
+  const testing = join(root, "testing-installer");
+  const production = join(root, "production-installer");
+  execFileSync("/usr/bin/xcrun", [
+    "swiftc",
+    "-swift-version",
+    "5",
+    "-parse-as-library",
+    "-D",
+    "ELLIE_INSTALLER_TESTING",
+    source,
+    "-o",
+    testing,
+  ]);
+  execFileSync("/usr/bin/xcrun", [
+    "swiftc",
+    "-swift-version",
+    "5",
+    "-parse-as-library",
+    source,
+    "-o",
+    production,
+  ]);
+
+  const testingFailure = run(testing, []);
+  assert.notEqual(testingFailure.status, 0);
+  assert.match(
+    testingFailure.stderr,
+    /Ellie installer test diagnostic: stage=argument-validation category=validation/,
+  );
+  const productionFailure = run(production, []);
+  assert.notEqual(productionFailure.status, 0);
+  assert.equal(
+    productionFailure.stderr,
+    "Ellie service payload inspection or staging failed; existing installations were preserved.\n",
+  );
+  assert.doesNotMatch(productionFailure.stderr, /diagnostic|stage=|category=/);
+});
+
 test(
   "native installer inspects and publishes one immutable unselected release",
   options,
@@ -359,6 +400,7 @@ test("copy failure and same-ID mismatch preserve prior and unrelated state", opt
       "3",
     ]);
     assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /stage=copy-payload category=validation/);
     assert.deepEqual(await readdir(join(services, "releases")).catch(() => []), []);
     assert.equal(await readFile(unrelated, "utf8"), "unchanged");
     assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
@@ -418,8 +460,34 @@ test(
       ]);
       assert.notEqual(uncertain.status, 0);
       assert.match(uncertain.stderr, /may have staged an unselected service release/);
-      assert.equal((await readdir(join(services, "releases"))).includes(id), true);
+      const incompleteRelease = join(services, "releases", id);
+      assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o700);
+      const refusedLaunch = spawnSync(
+        join(
+          incompleteRelease,
+          "payload/launchers/Ellie Coordinator.app/Contents/MacOS/EllieService",
+        ),
+        ["--launch-agent"],
+        { cwd: incompleteRelease, encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 },
+      );
+      assert.notEqual(refusedLaunch.status, 0);
+
+      const mismatched = join(dirname(release), "mismatched-retry");
+      await cp(release, mismatched, { recursive: true, preserveTimestamps: true });
+      const mismatchedManifestPath = join(mismatched, "manifest.json");
+      const mismatchedManifest = JSON.parse(await readFile(mismatchedManifestPath, "utf8"));
+      mismatchedManifest.files.reverse();
+      await writeFile(mismatchedManifestPath, `${JSON.stringify(mismatchedManifest, null, 2)}\n`, {
+        mode: 0o644,
+      });
+      assert.notEqual(
+        run(installer, ["stage", mismatched, "--test-services-root", services]).status,
+        0,
+      );
+      assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o700);
+
       assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o555);
     });
   },
 );
