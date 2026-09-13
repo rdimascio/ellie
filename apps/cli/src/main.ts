@@ -1,4 +1,5 @@
 import { access, readFile, writeFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
@@ -16,6 +17,7 @@ import {
 import { identifier, jobMetadata, record, string } from "@ellie/protocol";
 import { Client, discoverCertificate, fingerprint } from "@ellie/transport";
 import { MacOSExecutor } from "@ellie/macos";
+import { WhisperCliSpeechInput, whisperCliAvailability } from "@ellie/speech";
 import { Auth, newToken } from "../../server/src/auth.ts";
 import { createEllieServer } from "../../server/src/index.ts";
 import { JobStore } from "../../server/src/jobs.ts";
@@ -114,6 +116,33 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
   };
 }
 async function main(): Promise<void> {
+  if (args[0] === "transcribe") {
+    const usage = "Use: bun run ellie transcribe --audio WAV --model PATH --executable PATH";
+    const option = (name: string): string => {
+      const index = args.indexOf(name);
+      const value = args[index + 1];
+      if (index < 0 || !value) throw new Error(usage);
+      return resolve(value);
+    };
+    if (args.length !== 7) throw new Error(usage);
+    const audioPath = option("--audio");
+    const model = option("--model");
+    const executable = option("--executable");
+    const availability = await whisperCliAvailability({ executable, model });
+    if (!availability.available)
+      throw new Error(
+        `Local transcription is unavailable: ${!availability.executable ? "executable path is missing" : "model path is missing"}.`,
+      );
+    const interrupt = interruptSignal();
+    try {
+      const input = new WhisperCliSpeechInput({ executable, model });
+      for await (const result of input.transcribe(createReadStream(audioPath), interrupt.signal))
+        if (result.final) console.log(result.text);
+    } finally {
+      interrupt.dispose();
+    }
+    return;
+  }
   if (args[0] === "browser") {
     const environment = browserEnvironment;
     if (args[1] === "init" && args.length === 2) {
@@ -467,6 +496,10 @@ async function main(): Promise<void> {
   }
   console.log(
     `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+  );
+  console.log(
+    "  transcribe --audio WAV --model PATH --executable PATH\n" +
+      "                         Transcribe one bounded WAV turn with local whisper.cpp",
   );
 }
 main().catch((error) => {
