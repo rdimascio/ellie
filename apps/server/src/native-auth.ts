@@ -287,6 +287,25 @@ export class NativeAuth {
     );
     return item ? publicClient(item) : undefined;
   }
+  async withAuthenticated<T>(
+    header: unknown,
+    work: (client: NativeClient) => Promise<T> | T,
+  ): Promise<T | undefined> {
+    return this.mutate(async () => {
+      const client = this.authenticateBearer(header);
+      return client ? await work(client) : undefined;
+    });
+  }
+  async withActiveClient<T>(
+    id: unknown,
+    work: (client: NativeClient) => Promise<T> | T,
+  ): Promise<T | undefined> {
+    const checked = identifier(id);
+    return this.mutate(async () => {
+      const client = this.listClients().find((value) => value.id === checked);
+      return client ? await work(client) : undefined;
+    });
+  }
   listClients(): NativeClient[] {
     this.assertUsable();
     return prune(this.state, this.now()).sessions.map(publicClient);

@@ -144,6 +144,8 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
     "/v1/native/invitations",
     "/v1/native/clients",
     "/v1/native/revoke",
+    "/v1/household/authorities",
+    "/v1/household/authorities/revoke",
     "/v1/nodes",
     "/v1/register",
     "/v1/heartbeat",

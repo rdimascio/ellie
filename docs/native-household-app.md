@@ -25,6 +25,6 @@ Open `apps/ios/EllieIOS.xcodeproj` in Xcode. `bun run ios:build` builds for the 
 
 The iPhone currently supports local dashboard editing, notes, clocks, explicit coordinator enrollment and granted app opening. Mac weather, agenda, chores and playlist providers are not yet rendered on iPhone. Imported widget settings survive edits and export. Physical installation still requires signing; simulator results do not validate a phone camera, local-network consent or a phone-to-Mac action.
 
-Dashboards and chores still save independently on each device. Authenticated household synchronization and its explicit private/shared permissions are the next slice. Calendar is an offline snapshot, not a connected Google account. Voice recognition never supplies authorization for a privileged action.
+Dashboards and chores still save independently on each device. The [household-state backend](household-state.md) provides explicit private/shared grants and durable conditional saves; native profile, save and conflict controls are the next client slice. Calendar is an offline snapshot, not a connected Google account. Voice recognition never supplies authorization for a privileged action.
 
 See the [integration validation record](validation/2026-09-13-native-household-integration.md) for exact test scope.

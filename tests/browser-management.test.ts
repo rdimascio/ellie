@@ -11,6 +11,7 @@ import { generateCertificate } from "../apps/cli/src/certificate.ts";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
+import { HouseholdState } from "../apps/server/src/household-state.ts";
 import type { BrowserAuthState } from "../apps/server/src/browser-auth.ts";
 import type {
   BrowserControl,
@@ -37,6 +38,7 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
   const nativeAuth = new NativeAuth(nativeState, async (next) => {
     nativeState = structuredClone(next);
   });
+  const household = HouseholdState.memory();
   let current =
     options.initial ??
     ({
@@ -44,6 +46,7 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
       origin: "https://coordinator.local:8444",
       auth: browserAuth,
       nativeAuth,
+      household,
       certificateSha256: "a".repeat(64),
     } satisfies BrowserControlSnapshot);
   const browser: BrowserControl = { current: () => current };
@@ -141,6 +144,44 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     },
   };
 }
+
+test("household management is controller-only and grants only an active native client", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Phone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const paired = await f.nativeAuth.pair(invitation.code, "c".repeat(64));
+  const grant = { clientId: paired.id, profile: "shared", kind: "dashboards", access: "write" };
+  assert.equal(
+    (await f.call(f.nodeToken, "POST", "/v1/household/authorities", { body: grant })).status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.call(f.controllerToken, "POST", "/v1/household/authorities", {
+        body: { ...grant, clientId: "missing" },
+      })
+    ).status,
+    404,
+  );
+  assert.deepEqual(
+    (await f.call(f.controllerToken, "POST", "/v1/household/authorities", { body: grant })).body,
+    { ok: true, grant },
+  );
+  assert.deepEqual((await f.call(f.controllerToken, "GET", "/v1/household/authorities")).body, {
+    grants: [grant],
+  });
+  assert.deepEqual(
+    (
+      await f.call(f.controllerToken, "POST", "/v1/household/authorities/revoke", {
+        body: { clientId: paired.id, profile: "shared", kind: "dashboards" },
+      })
+    ).body,
+    { ok: true, revoked: true },
+  );
+});
 
 test("browser management status exposes only fixed public state to the controller", async (t) => {
   const f = await fixture();

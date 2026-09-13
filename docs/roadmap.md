@@ -2,7 +2,7 @@
 
 Ellie is working toward a local-first, open-source household command center: a Mac can coordinate the home, a TV can show shared information, and a paired phone can act as a remote. This roadmap is ordered by dependency and learning value. It is not a promise of dates.
 
-The product UI is SwiftUI on macOS and iPhone. The browser prototypes remain compatibility and protocol references. The [combined native app](native-household-app.md) includes Mac dashboards, local household widgets, Devices and pairing management, plus iPhone dashboards, enrollment and granted app controls. Shared household data is the next client slice. See the [integration validation record](validation/2026-09-13-native-household-integration.md) for the distinction between implemented features, simulator checks and physical acceptance.
+The product UI is SwiftUI on macOS and iPhone. The browser prototypes remain compatibility and protocol references. The [combined native app](native-household-app.md) includes Mac dashboards, local household widgets, Devices and pairing management, plus iPhone dashboards, enrollment and granted app controls. The [household-state backend](household-state.md) adds explicitly granted durable documents; native synchronization controls are the next client slice. See the [integration validation record](validation/2026-09-13-native-household-integration.md) for the distinction between implemented features, simulator checks and physical acceptance.
 
 ## Current foundation
 

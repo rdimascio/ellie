@@ -37,10 +37,12 @@ test("shared native QR fixtures follow the real canonical parser and byte limits
 test("native OpenAPI describes the separate runtime routes without controller authority", () => {
   const document = JSON.parse(generatedContracts()["native-openapi.v1.json"]!);
   const routes = { ...NATIVE_SESSION_CONTRACT.routes, ...NATIVE_CONTROL_CONTRACT.routes };
-  assert.deepEqual(
-    Object.keys(document.paths),
-    Object.values(routes).map((route) => route.path),
-  );
+  assert.deepEqual(Object.keys(document.paths), [
+    ...Object.values(NATIVE_SESSION_CONTRACT.routes).map((route) => route.path),
+    "/native/v1/household/authority",
+    "/native/v1/household/{profile}/{kind}",
+    ...Object.values(NATIVE_CONTROL_CONTRACT.routes).map((route) => route.path),
+  ]);
   assert.deepEqual(document.security, [{ nativeBearer: [] }]);
   assert.deepEqual(Object.keys(document.components.securitySchemes), ["nativeBearer"]);
   assert.equal(document.servers[0].url, "{origin}");
@@ -62,6 +64,12 @@ test("native OpenAPI describes the separate runtime routes without controller au
     assert.equal(operation.responses[200].headers["Cache-Control"].schema.const, "no-store");
     assert.ok(operation.responses[503], "Storage uncertainty is documented");
   }
+  assert.equal(
+    document.paths["/native/v1/household/{profile}/{kind}"].put.parameters[0].name,
+    "If-Match",
+  );
+  assert.ok(document.paths["/native/v1/household/{profile}/{kind}"].put.responses[412]);
+  assert.ok(document.paths["/native/v1/household/{profile}/{kind}"].put.responses[428]);
   for (const route of [routes.pair, routes.session]) {
     assert.equal(
       document.paths[route.path][route.method.toLowerCase()].responses[200].content[

@@ -607,6 +607,652 @@
         }
       }
     },
+    "/native/v1/household/authority": {
+      "get": {
+        "parameters": [
+          {
+            "name": "X-Ellie-Version",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "const": "1"
+            }
+          }
+        ],
+        "x-ellie-max-json-post-body-bytes": 4096,
+        "x-ellie-request-channel": {
+          "exactHost": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Host",
+            "Authorization",
+            "X-Ellie-Version"
+          ],
+          "jsonPostRequiresSingleContentType": true
+        },
+        "operationId": "getNativeHouseholdAuthority",
+        "summary": "List this native client's explicit household data grants",
+        "responses": {
+          "200": {
+            "description": "Current data grants.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdAuthorityResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Native credential rejected or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/native/v1/household/{profile}/{kind}": {
+      "parameters": [
+        {
+          "name": "X-Ellie-Version",
+          "in": "header",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "const": "1"
+          }
+        },
+        {
+          "name": "profile",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "shared",
+              "private"
+            ]
+          }
+        },
+        {
+          "name": "kind",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "enum": [
+              "dashboards",
+              "chores"
+            ]
+          }
+        }
+      ],
+      "get": {
+        "operationId": "getNativeHouseholdDocument",
+        "summary": "Read one explicitly granted household document",
+        "x-ellie-request-channel": {
+          "exactHost": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Host",
+            "Authorization",
+            "X-Ellie-Version"
+          ],
+          "jsonPostRequiresSingleContentType": true
+        },
+        "responses": {
+          "200": {
+            "description": "Current document and revision.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdDocumentResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "ETag": {
+                "description": "Exactly matches the JSON revision; use it for an explicit conditional save.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"ellie-revision-(0|[1-9][0-9]*)\"$(?![\\s\\S])"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Native credential rejected or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "putNativeHouseholdDocument",
+        "summary": "Conditionally replace one explicitly granted household document",
+        "x-ellie-request-channel": {
+          "exactHost": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Host",
+            "Authorization",
+            "X-Ellie-Version"
+          ],
+          "jsonPostRequiresSingleContentType": true,
+          "jsonPutRequiresSingleContentType": true
+        },
+        "x-ellie-max-json-body-bytes-by-kind": {
+          "dashboards": 132096,
+          "chores": 263168
+        },
+        "x-ellie-duplicate-if-match-rejected": true,
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 33,
+              "pattern": "^\"ellie-revision-(0|[1-9][0-9]*)\"$",
+              "x-ellie-maximum-revision": 9007199254740991
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HouseholdPutRequest"
+              }
+            }
+          },
+          "description": "The value must match the document kind in the path; accepted values are not normalized."
+        },
+        "responses": {
+          "200": {
+            "description": "Document durably replaced.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdDocumentResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "ETag": {
+                "description": "Exactly matches the JSON revision; use it for an explicit conditional save.",
+                "schema": {
+                  "type": "string",
+                  "pattern": "^\"ellie-revision-(0|[1-9][0-9]*)\"$(?![\\s\\S])"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Native credential rejected or expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "412": {
+            "description": "Revision conflict without document contents.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdConflictResponse"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Request rejected by the native listener.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "428": {
+            "description": "Conditional revision required.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Authorization persistence or listener unavailable; a mutation outcome may be uncertain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NativeError"
+                }
+              }
+            },
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/native/v1/nodes": {
       "get": {
         "parameters": [
@@ -1379,6 +2025,615 @@
           }
         },
         "description": "The command may have executed. Check the selected Mac before another explicit action; never replay automatically."
+      },
+      "HouseholdProfile": {
+        "enum": [
+          "shared",
+          "private"
+        ]
+      },
+      "HouseholdKind": {
+        "enum": [
+          "dashboards",
+          "chores"
+        ]
+      },
+      "HouseholdAccess": {
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
+      "HouseholdRevision": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "DashboardIdentifier": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^(?![\\s\\S]*[^A-Za-z0-9_-])[A-Za-z0-9]"
+      },
+      "HouseholdGrant": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "profile",
+          "kind",
+          "access"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^(?![\\s\\S]*[^A-Za-z0-9._-])[A-Za-z0-9]"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/HouseholdProfile"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HouseholdKind"
+          },
+          "access": {
+            "$ref": "#/components/schemas/HouseholdAccess"
+          }
+        }
+      },
+      "HouseholdAuthorityResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "grants"
+        ],
+        "properties": {
+          "grants": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "$ref": "#/components/schemas/HouseholdGrant"
+            }
+          }
+        }
+      },
+      "HouseholdGrantResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "grant"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "grant": {
+            "$ref": "#/components/schemas/HouseholdGrant"
+          }
+        }
+      },
+      "HouseholdRevokeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "profile",
+          "kind"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^(?![\\s\\S]*[^A-Za-z0-9._-])[A-Za-z0-9]"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/HouseholdProfile"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HouseholdKind"
+          }
+        }
+      },
+      "HouseholdRevokeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "revoked"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "revoked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DashboardWidget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "clock"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "timeZone": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "x-ellie-time-zone": "IANA or Foundation GMT offset"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "note"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "x-ellie-max-utf16-code-units": 2000
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "weather"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "calendar"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "chores"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "playlist"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "youtubePlaylistID": {
+                    "type": "string",
+                    "minLength": 13,
+                    "maxLength": 80,
+                    "pattern": "^(?![\\s\\S]*[^A-Za-z0-9_-])PL"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Dashboard": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "widgets"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/DashboardIdentifier"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "x-ellie-max-utf16-code-units": 80,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "widgets": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/DashboardWidget"
+            }
+          }
+        }
+      },
+      "DashboardDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "dashboards"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "dashboards": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "$ref": "#/components/schemas/Dashboard"
+            }
+          }
+        }
+      },
+      "ChoreDay": {
+        "type": "string",
+        "format": "date",
+        "minLength": 10,
+        "maxLength": 10,
+        "pattern": "^(?!0000-)[0-9]{4}-[0-9]{2}-[0-9]{2}$(?![\\s\\S])"
+      },
+      "ChoreIdentifier": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36,
+        "pattern": "^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$(?![\\s\\S])"
+      },
+      "Chore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "member",
+          "body",
+          "dueDay"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ChoreIdentifier"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "x-ellie-max-utf16-code-units": 120,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "x-ellie-max-utf16-code-units": 60,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 500,
+            "x-ellie-max-utf16-code-units": 500,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "dueDay": {
+            "$ref": "#/components/schemas/ChoreDay"
+          },
+          "completedDay": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChoreDay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ChoresDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "householdTimeZone",
+          "chores"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "householdTimeZone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "x-ellie-time-zone": "IANA or Foundation GMT offset"
+          },
+          "chores": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/Chore"
+            }
+          }
+        }
+      },
+      "HouseholdDocument": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/DashboardDocument"
+          },
+          {
+            "$ref": "#/components/schemas/ChoresDocument"
+          }
+        ]
+      },
+      "HouseholdPutRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "$ref": "#/components/schemas/HouseholdDocument"
+          }
+        }
+      },
+      "HouseholdDocumentResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile",
+              "kind",
+              "revision",
+              "value"
+            ],
+            "properties": {
+              "profile": {
+                "$ref": "#/components/schemas/HouseholdProfile"
+              },
+              "kind": {
+                "const": "dashboards"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/HouseholdRevision"
+              },
+              "value": {
+                "$ref": "#/components/schemas/DashboardDocument"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile",
+              "kind",
+              "revision",
+              "value"
+            ],
+            "properties": {
+              "profile": {
+                "$ref": "#/components/schemas/HouseholdProfile"
+              },
+              "kind": {
+                "const": "chores"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/HouseholdRevision"
+              },
+              "value": {
+                "$ref": "#/components/schemas/ChoresDocument"
+              }
+            }
+          }
+        ]
+      },
+      "HouseholdConflictResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "profile",
+          "kind",
+          "revision"
+        ],
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/HouseholdProfile"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HouseholdKind"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/HouseholdRevision"
+          }
+        }
       }
     }
   }

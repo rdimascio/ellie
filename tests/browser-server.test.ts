@@ -13,6 +13,7 @@ import { BROWSER_SESSION_COOKIE, BrowserAuth } from "../apps/server/src/browser-
 import type { BrowserAuthState, BrowserInvitationSpec } from "../apps/server/src/browser-auth.ts";
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
+import { HouseholdState } from "../apps/server/src/household-state.ts";
 import type { BrowserAssets, BrowserRemote } from "../apps/server/src/browser-server.ts";
 
 const run = promisify(execFile);
@@ -175,7 +176,8 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
   const nativeAuth = new NativeAuth(nativeState, async (next) => {
     nativeState = structuredClone(next);
   });
-  const app = createBrowserServer({ ...tls, origin, auth, nativeAuth, assets, remote });
+  const household = HouseholdState.memory();
+  const app = createBrowserServer({ ...tls, origin, auth, nativeAuth, household, assets, remote });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(port, "127.0.0.1", resolve);
@@ -241,6 +243,7 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
   return {
     auth,
     nativeAuth,
+    household,
     origin,
     port,
     request,
@@ -339,6 +342,64 @@ test("native bearer channel pairs once, recovers by GET, logs out, and rejects b
       })
     ).status,
     401,
+  );
+});
+
+test("native household routes require separate grants and enforce conditional revisions", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Household iPhone",
+    grants: [{ target: "living-room-mini", capabilities: ["app.open"] }],
+  });
+  const token = "8".repeat(64);
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  assert.equal(paired.status, 200);
+  const client = (paired.body as { client: { id: string } }).client;
+  assert.equal(
+    (await f.request("GET", "/native/v1/household/shared/dashboards", { headers })).status,
+    403,
+  );
+  assert.equal(
+    await f.household.grant(f.nativeAuth, {
+      clientId: client.id,
+      profile: "shared",
+      kind: "dashboards",
+      access: "write",
+    }),
+    true,
+  );
+  const empty = await f.request("GET", "/native/v1/household/shared/dashboards", { headers });
+  assert.equal(empty.status, 200);
+  assert.equal(empty.headers.etag, '"ellie-revision-0"');
+  assert.deepEqual(empty.body, {
+    profile: "shared",
+    kind: "dashboards",
+    revision: 0,
+    value: { version: 1, dashboards: [] },
+  });
+  const value = { version: 1, dashboards: [{ id: "home", name: "Home", widgets: [] }] };
+  const saved = await f.request("PUT", "/native/v1/household/shared/dashboards", {
+    body: { value },
+    headers: { ...headers, "if-match": '"ellie-revision-0"' },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.headers.etag, '"ellie-revision-1"');
+  const conflict = await f.request("PUT", "/native/v1/household/shared/dashboards", {
+    body: { value: { version: 1, dashboards: [] } },
+    headers: { ...headers, "if-match": '"ellie-revision-0"' },
+  });
+  assert.deepEqual(conflict.body, { profile: "shared", kind: "dashboards", revision: 1 });
+  assert.equal(conflict.status, 412);
+  assert.equal((await f.request("GET", "/native/v1/nodes", { headers })).status, 503);
+  await f.household.revoke({ clientId: client.id, profile: "shared", kind: "dashboards" });
+  assert.equal(
+    (await f.request("GET", "/native/v1/household/shared/dashboards", { headers })).status,
+    403,
   );
 });
 

@@ -60,6 +60,174 @@ const boundedString = (maxLength: number) => ({
   maxLength,
   pattern: "\\S",
 });
+const householdRef = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+const exactObject = (required: string[], properties: Record<string, Json>) => ({
+  type: "object",
+  additionalProperties: false,
+  required,
+  properties,
+});
+const dashboardIdentifier = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  pattern: "^(?![\\s\\S]*[^A-Za-z0-9_-])[A-Za-z0-9]",
+};
+const dashboardText = (maximum: number) => ({
+  type: "string",
+  minLength: 1,
+  maxLength: maximum,
+  "x-ellie-max-utf16-code-units": maximum,
+  "x-ellie-no-boundary-foundation-whitespace": true,
+});
+const householdClientIdentifier = {
+  ...identifier,
+  pattern: "^(?![\\s\\S]*[^A-Za-z0-9._-])[A-Za-z0-9]",
+};
+const widgetConfig = (properties: Record<string, Json>) => exactObject([], properties);
+const widgetVariant = (type: string, config: Json) =>
+  exactObject(["id", "type", "title", "size", "config"], {
+    id: householdRef("DashboardIdentifier"),
+    type: { const: type },
+    title: dashboardText(80),
+    size: { enum: ["small", "wide"] },
+    config,
+  });
+const householdSchemas: Record<string, Json> = {
+  HouseholdProfile: { enum: ["shared", "private"] },
+  HouseholdKind: { enum: ["dashboards", "chores"] },
+  HouseholdAccess: { enum: ["read", "write"] },
+  HouseholdRevision: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  DashboardIdentifier: dashboardIdentifier,
+  HouseholdGrant: exactObject(["clientId", "profile", "kind", "access"], {
+    clientId: householdClientIdentifier,
+    profile: householdRef("HouseholdProfile"),
+    kind: householdRef("HouseholdKind"),
+    access: householdRef("HouseholdAccess"),
+  }),
+  HouseholdAuthorityResponse: exactObject(["grants"], {
+    grants: { type: "array", maxItems: 128, items: householdRef("HouseholdGrant") },
+  }),
+  HouseholdGrantResponse: exactObject(["ok", "grant"], {
+    ok: { const: true },
+    grant: householdRef("HouseholdGrant"),
+  }),
+  HouseholdRevokeRequest: exactObject(["clientId", "profile", "kind"], {
+    clientId: householdClientIdentifier,
+    profile: householdRef("HouseholdProfile"),
+    kind: householdRef("HouseholdKind"),
+  }),
+  HouseholdRevokeResponse: exactObject(["ok", "revoked"], {
+    ok: { const: true },
+    revoked: { type: "boolean" },
+  }),
+  DashboardWidget: {
+    oneOf: [
+      widgetVariant(
+        "clock",
+        widgetConfig({
+          timeZone: {
+            type: "string",
+            maxLength: 100,
+            "x-ellie-time-zone": "IANA or Foundation GMT offset",
+          },
+        }),
+      ),
+      widgetVariant(
+        "note",
+        widgetConfig({
+          text: { type: "string", maxLength: 2_000, "x-ellie-max-utf16-code-units": 2_000 },
+        }),
+      ),
+      widgetVariant("weather", widgetConfig({})),
+      widgetVariant("calendar", widgetConfig({})),
+      widgetVariant("chores", widgetConfig({})),
+      widgetVariant(
+        "playlist",
+        widgetConfig({
+          youtubePlaylistID: {
+            type: "string",
+            minLength: 13,
+            maxLength: 80,
+            pattern: "^(?![\\s\\S]*[^A-Za-z0-9_-])PL",
+          },
+        }),
+      ),
+    ],
+  },
+  Dashboard: exactObject(["id", "name", "widgets"], {
+    id: householdRef("DashboardIdentifier"),
+    name: dashboardText(80),
+    widgets: { type: "array", maxItems: 24, items: householdRef("DashboardWidget") },
+  }),
+  DashboardDocument: exactObject(["version", "dashboards"], {
+    version: { const: 1 },
+    dashboards: { type: "array", maxItems: 12, items: householdRef("Dashboard") },
+  }),
+  ChoreDay: {
+    type: "string",
+    format: "date",
+    minLength: 10,
+    maxLength: 10,
+    pattern: "^(?!0000-)[0-9]{4}-[0-9]{2}-[0-9]{2}$(?![\\s\\S])",
+  },
+  ChoreIdentifier: {
+    type: "string",
+    minLength: 36,
+    maxLength: 36,
+    pattern: "^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$(?![\\s\\S])",
+  },
+  Chore: exactObject(["id", "title", "member", "body", "dueDay"], {
+    id: householdRef("ChoreIdentifier"),
+    title: dashboardText(120),
+    member: dashboardText(60),
+    body: {
+      type: "string",
+      maxLength: 500,
+      "x-ellie-max-utf16-code-units": 500,
+      "x-ellie-no-boundary-foundation-whitespace": true,
+    },
+    dueDay: householdRef("ChoreDay"),
+    completedDay: { oneOf: [householdRef("ChoreDay"), { type: "null" }] },
+  }),
+  ChoresDocument: exactObject(["version", "householdTimeZone", "chores"], {
+    version: { const: 1 },
+    householdTimeZone: {
+      type: "string",
+      minLength: 1,
+      maxLength: 100,
+      "x-ellie-time-zone": "IANA or Foundation GMT offset",
+    },
+    chores: { type: "array", maxItems: 500, items: householdRef("Chore") },
+  }),
+  HouseholdDocument: {
+    oneOf: [householdRef("DashboardDocument"), householdRef("ChoresDocument")],
+  },
+  HouseholdPutRequest: exactObject(["value"], {
+    value: householdRef("HouseholdDocument"),
+  }),
+  HouseholdDocumentResponse: {
+    oneOf: [
+      exactObject(["profile", "kind", "revision", "value"], {
+        profile: householdRef("HouseholdProfile"),
+        kind: { const: "dashboards" },
+        revision: householdRef("HouseholdRevision"),
+        value: householdRef("DashboardDocument"),
+      }),
+      exactObject(["profile", "kind", "revision", "value"], {
+        profile: householdRef("HouseholdProfile"),
+        kind: { const: "chores" },
+        revision: householdRef("HouseholdRevision"),
+        value: householdRef("ChoresDocument"),
+      }),
+    ],
+  },
+  HouseholdConflictResponse: exactObject(["profile", "kind", "revision"], {
+    profile: householdRef("HouseholdProfile"),
+    kind: householdRef("HouseholdKind"),
+    revision: householdRef("HouseholdRevision"),
+  }),
+};
 const ok = {
   type: "object",
   additionalProperties: false,
@@ -128,6 +296,13 @@ function openApi(): Json {
     Object.fromEntries(codes.map((code) => [code, errorResponses[code]]));
   const versionHeader = [{ $ref: "#/components/parameters/ProtocolVersion" }];
   const operation = (details: Record<string, Json>) => ({ parameters: versionHeader, ...details });
+  const householdManagementChannel = {
+    "x-ellie-request-channel": {
+      controllerBearerOnly: true,
+      forbiddenHeaders: ["Origin", "Cookie", "Sec-Fetch-*"],
+      duplicateHeadersRejected: ["Authorization", "X-Ellie-Version"],
+    },
+  };
   const schemas = openApiRefs(
     (protocolSchema() as { $defs: Record<string, Json> }).$defs as unknown as Json,
   ) as Record<string, Json>;
@@ -276,6 +451,43 @@ function openApi(): Json {
           requestBody: request(ref("BrowserRevokeRequest")),
           responses: {
             "200": response("Native revocation result.", ref("BrowserRevokeResponse")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/household/authorities": {
+        get: operation({
+          ...householdManagementChannel,
+          operationId: "listHouseholdAuthorities",
+          summary: "List explicit native household-data grants",
+          description:
+            "Controller bearer identity required. Pairing and app.open grants confer no household-data authority.",
+          responses: {
+            "200": response("Current bounded grants.", ref("HouseholdAuthorityResponse")),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+        post: operation({
+          ...householdManagementChannel,
+          operationId: "grantHouseholdAuthority",
+          summary: "Grant one active native client household-data access",
+          description: "Controller bearer identity required. The grant is durable before success.",
+          requestBody: request(ref("HouseholdGrant")),
+          responses: {
+            "200": response("Grant durably saved.", ref("HouseholdGrantResponse")),
+            ...errors("400", "401", "403", "404", "415", "503"),
+          },
+        }),
+      },
+      "/v1/household/authorities/revoke": {
+        post: operation({
+          ...householdManagementChannel,
+          operationId: "revokeHouseholdAuthority",
+          summary: "Revoke one native client's household-data grant",
+          description: "Controller bearer identity required. Revocation is durable before success.",
+          requestBody: request(ref("HouseholdRevokeRequest")),
+          responses: {
+            "200": response("Revocation durably saved.", ref("HouseholdRevokeResponse")),
             ...errors("400", "401", "403", "415", "503"),
           },
         }),
@@ -462,6 +674,7 @@ function openApi(): Json {
       ),
       schemas: {
         ...schemas,
+        ...householdSchemas,
         PairRequest: {
           type: "object",
           required: ["code", "id"],
@@ -799,6 +1012,20 @@ function nativeOpenApi(): Json {
     content: { "application/json": { schema } },
     headers: { "Cache-Control": { schema: { const: "no-store" } } },
   });
+  const documentResponse = (description: string) => {
+    const result = response(description, ref("HouseholdDocumentResponse"));
+    return {
+      ...result,
+      headers: {
+        ...result.headers,
+        ETag: {
+          description:
+            "Exactly matches the JSON revision; use it for an explicit conditional save.",
+          schema: { type: "string", pattern: '^"ellie-revision-(0|[1-9][0-9]*)"$(?![\\s\\S])' },
+        },
+      },
+    };
+  };
   const request = (schema: Json) => ({
     required: true,
     content: { "application/json": { schema } },
@@ -901,6 +1128,73 @@ function nativeOpenApi(): Json {
           },
         },
       },
+      "/native/v1/household/authority": {
+        get: {
+          ...common,
+          operationId: "getNativeHouseholdAuthority",
+          summary: "List this native client's explicit household data grants",
+          responses: {
+            ...errors,
+            "200": response("Current data grants.", ref("HouseholdAuthorityResponse")),
+          },
+        },
+      },
+      "/native/v1/household/{profile}/{kind}": {
+        parameters: [
+          ...common.parameters,
+          { name: "profile", in: "path", required: true, schema: { enum: ["shared", "private"] } },
+          { name: "kind", in: "path", required: true, schema: { enum: ["dashboards", "chores"] } },
+        ],
+        get: {
+          operationId: "getNativeHouseholdDocument",
+          summary: "Read one explicitly granted household document",
+          "x-ellie-request-channel": common["x-ellie-request-channel"],
+          responses: {
+            ...errors,
+            "200": documentResponse("Current document and revision."),
+          },
+        },
+        put: {
+          operationId: "putNativeHouseholdDocument",
+          summary: "Conditionally replace one explicitly granted household document",
+          "x-ellie-request-channel": {
+            ...common["x-ellie-request-channel"],
+            jsonPutRequiresSingleContentType: true,
+          },
+          "x-ellie-max-json-body-bytes-by-kind": {
+            dashboards: 128 * 1024 + 1024,
+            chores: 256 * 1024 + 1024,
+          },
+          "x-ellie-duplicate-if-match-rejected": true,
+          parameters: [
+            {
+              name: "If-Match",
+              in: "header",
+              required: true,
+              schema: {
+                type: "string",
+                maxLength: 33,
+                pattern: '^"ellie-revision-(0|[1-9][0-9]*)"$',
+                "x-ellie-maximum-revision": Number.MAX_SAFE_INTEGER,
+              },
+            },
+          ],
+          requestBody: {
+            ...request(ref("HouseholdPutRequest")),
+            description:
+              "The value must match the document kind in the path; accepted values are not normalized.",
+          },
+          responses: {
+            ...errors,
+            "200": documentResponse("Document durably replaced."),
+            "412": response(
+              "Revision conflict without document contents.",
+              ref("HouseholdConflictResponse"),
+            ),
+            "428": response("Conditional revision required.", ref("NativeError")),
+          },
+        },
+      },
       [NATIVE_CONTROL_CONTRACT.routes.nodes.path]: {
         get: {
           ...common,
@@ -943,7 +1237,7 @@ function nativeOpenApi(): Json {
             "The separate native candidate/session token. Never a controller token, node token, browser cookie or invitation.",
         },
       },
-      schemas: { ...nativeSessionSchemas(), ...nativeControlSchemas() },
+      schemas: { ...nativeSessionSchemas(), ...nativeControlSchemas(), ...householdSchemas },
     },
   } as Json;
 }

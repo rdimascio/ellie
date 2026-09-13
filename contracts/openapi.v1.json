@@ -467,6 +467,177 @@
         }
       }
     },
+    "/v1/household/authorities": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "x-ellie-request-channel": {
+          "controllerBearerOnly": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Authorization",
+            "X-Ellie-Version"
+          ]
+        },
+        "operationId": "listHouseholdAuthorities",
+        "summary": "List explicit native household-data grants",
+        "description": "Controller bearer identity required. Pairing and app.open grants confer no household-data authority.",
+        "responses": {
+          "200": {
+            "description": "Current bounded grants.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdAuthorityResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      },
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "x-ellie-request-channel": {
+          "controllerBearerOnly": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Authorization",
+            "X-Ellie-Version"
+          ]
+        },
+        "operationId": "grantHouseholdAuthority",
+        "summary": "Grant one active native client household-data access",
+        "description": "Controller bearer identity required. The grant is durable before success.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HouseholdGrant"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Grant durably saved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdGrantResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
+    "/v1/household/authorities/revoke": {
+      "post": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "x-ellie-request-channel": {
+          "controllerBearerOnly": true,
+          "forbiddenHeaders": [
+            "Origin",
+            "Cookie",
+            "Sec-Fetch-*"
+          ],
+          "duplicateHeadersRejected": [
+            "Authorization",
+            "X-Ellie-Version"
+          ]
+        },
+        "operationId": "revokeHouseholdAuthority",
+        "summary": "Revoke one native client's household-data grant",
+        "description": "Controller bearer identity required. Revocation is durable before success.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HouseholdRevokeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revocation durably saved.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HouseholdRevokeResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "503": {
+            "$ref": "#/components/responses/ServiceUnavailable"
+          }
+        }
+      }
+    },
     "/v1/nodes": {
       "get": {
         "parameters": [
@@ -1296,6 +1467,615 @@
             "items": {
               "$ref": "#/components/schemas/Action"
             }
+          }
+        }
+      },
+      "HouseholdProfile": {
+        "enum": [
+          "shared",
+          "private"
+        ]
+      },
+      "HouseholdKind": {
+        "enum": [
+          "dashboards",
+          "chores"
+        ]
+      },
+      "HouseholdAccess": {
+        "enum": [
+          "read",
+          "write"
+        ]
+      },
+      "HouseholdRevision": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991
+      },
+      "DashboardIdentifier": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 64,
+        "pattern": "^(?![\\s\\S]*[^A-Za-z0-9_-])[A-Za-z0-9]"
+      },
+      "HouseholdGrant": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "profile",
+          "kind",
+          "access"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^(?![\\s\\S]*[^A-Za-z0-9._-])[A-Za-z0-9]"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/HouseholdProfile"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HouseholdKind"
+          },
+          "access": {
+            "$ref": "#/components/schemas/HouseholdAccess"
+          }
+        }
+      },
+      "HouseholdAuthorityResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "grants"
+        ],
+        "properties": {
+          "grants": {
+            "type": "array",
+            "maxItems": 128,
+            "items": {
+              "$ref": "#/components/schemas/HouseholdGrant"
+            }
+          }
+        }
+      },
+      "HouseholdGrantResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "grant"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "grant": {
+            "$ref": "#/components/schemas/HouseholdGrant"
+          }
+        }
+      },
+      "HouseholdRevokeRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "clientId",
+          "profile",
+          "kind"
+        ],
+        "properties": {
+          "clientId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^(?![\\s\\S]*[^A-Za-z0-9._-])[A-Za-z0-9]"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/HouseholdProfile"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HouseholdKind"
+          }
+        }
+      },
+      "HouseholdRevokeResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "ok",
+          "revoked"
+        ],
+        "properties": {
+          "ok": {
+            "const": true
+          },
+          "revoked": {
+            "type": "boolean"
+          }
+        }
+      },
+      "DashboardWidget": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "clock"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "timeZone": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "x-ellie-time-zone": "IANA or Foundation GMT offset"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "note"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "text": {
+                    "type": "string",
+                    "maxLength": 2000,
+                    "x-ellie-max-utf16-code-units": 2000
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "weather"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "calendar"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "chores"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {}
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "type",
+              "title",
+              "size",
+              "config"
+            ],
+            "properties": {
+              "id": {
+                "$ref": "#/components/schemas/DashboardIdentifier"
+              },
+              "type": {
+                "const": "playlist"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80,
+                "x-ellie-max-utf16-code-units": 80,
+                "x-ellie-no-boundary-foundation-whitespace": true
+              },
+              "size": {
+                "enum": [
+                  "small",
+                  "wide"
+                ]
+              },
+              "config": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [],
+                "properties": {
+                  "youtubePlaylistID": {
+                    "type": "string",
+                    "minLength": 13,
+                    "maxLength": 80,
+                    "pattern": "^(?![\\s\\S]*[^A-Za-z0-9_-])PL"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "Dashboard": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "widgets"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/DashboardIdentifier"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "x-ellie-max-utf16-code-units": 80,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "widgets": {
+            "type": "array",
+            "maxItems": 24,
+            "items": {
+              "$ref": "#/components/schemas/DashboardWidget"
+            }
+          }
+        }
+      },
+      "DashboardDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "dashboards"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "dashboards": {
+            "type": "array",
+            "maxItems": 12,
+            "items": {
+              "$ref": "#/components/schemas/Dashboard"
+            }
+          }
+        }
+      },
+      "ChoreDay": {
+        "type": "string",
+        "format": "date",
+        "minLength": 10,
+        "maxLength": 10,
+        "pattern": "^(?!0000-)[0-9]{4}-[0-9]{2}-[0-9]{2}$(?![\\s\\S])"
+      },
+      "ChoreIdentifier": {
+        "type": "string",
+        "minLength": 36,
+        "maxLength": 36,
+        "pattern": "^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$(?![\\s\\S])"
+      },
+      "Chore": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "title",
+          "member",
+          "body",
+          "dueDay"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/ChoreIdentifier"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 120,
+            "x-ellie-max-utf16-code-units": 120,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "member": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 60,
+            "x-ellie-max-utf16-code-units": 60,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "body": {
+            "type": "string",
+            "maxLength": 500,
+            "x-ellie-max-utf16-code-units": 500,
+            "x-ellie-no-boundary-foundation-whitespace": true
+          },
+          "dueDay": {
+            "$ref": "#/components/schemas/ChoreDay"
+          },
+          "completedDay": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChoreDay"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "ChoresDocument": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "version",
+          "householdTimeZone",
+          "chores"
+        ],
+        "properties": {
+          "version": {
+            "const": 1
+          },
+          "householdTimeZone": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "x-ellie-time-zone": "IANA or Foundation GMT offset"
+          },
+          "chores": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "$ref": "#/components/schemas/Chore"
+            }
+          }
+        }
+      },
+      "HouseholdDocument": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/DashboardDocument"
+          },
+          {
+            "$ref": "#/components/schemas/ChoresDocument"
+          }
+        ]
+      },
+      "HouseholdPutRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "value"
+        ],
+        "properties": {
+          "value": {
+            "$ref": "#/components/schemas/HouseholdDocument"
+          }
+        }
+      },
+      "HouseholdDocumentResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile",
+              "kind",
+              "revision",
+              "value"
+            ],
+            "properties": {
+              "profile": {
+                "$ref": "#/components/schemas/HouseholdProfile"
+              },
+              "kind": {
+                "const": "dashboards"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/HouseholdRevision"
+              },
+              "value": {
+                "$ref": "#/components/schemas/DashboardDocument"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "profile",
+              "kind",
+              "revision",
+              "value"
+            ],
+            "properties": {
+              "profile": {
+                "$ref": "#/components/schemas/HouseholdProfile"
+              },
+              "kind": {
+                "const": "chores"
+              },
+              "revision": {
+                "$ref": "#/components/schemas/HouseholdRevision"
+              },
+              "value": {
+                "$ref": "#/components/schemas/ChoresDocument"
+              }
+            }
+          }
+        ]
+      },
+      "HouseholdConflictResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "profile",
+          "kind",
+          "revision"
+        ],
+        "properties": {
+          "profile": {
+            "$ref": "#/components/schemas/HouseholdProfile"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HouseholdKind"
+          },
+          "revision": {
+            "$ref": "#/components/schemas/HouseholdRevision"
           }
         }
       },

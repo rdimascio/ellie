@@ -9,6 +9,8 @@ import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
 import type { NativeAuth } from "./native-auth.ts";
 import { NativeAuthError } from "./native-auth.ts";
 import { NativeControls } from "./native-controls.ts";
+import type { HouseholdState } from "./household-state.ts";
+import { handleNativeHousehold } from "./native-household.ts";
 export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
@@ -42,6 +44,7 @@ export interface BrowserServerOptions {
   origin: string;
   auth: BrowserAuth;
   nativeAuth?: NativeAuth;
+  household?: HouseholdState;
   assets?: BrowserAssets;
   remote?: BrowserRemote;
 }
@@ -186,7 +189,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 503, { error: "Native enrollment unavailable." }, {}, true);
             return;
           }
-          if (method === "POST" && !isJson(request)) {
+          if ((method === "POST" || method === "PUT") && !isJson(request)) {
             send(response, 415, { error: "JSON required." }, {}, true);
             return;
           }
@@ -224,6 +227,22 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
               : undefined;
           if (!client) {
             send(response, 401, { error: "Native session required." }, {}, true);
+            return;
+          }
+          if (options.household) {
+            const handled = await handleNativeHousehold(
+              request,
+              response,
+              path,
+              options.nativeAuth,
+              options.household,
+              authorizations[0]!,
+              (status, body, headers = {}) => send(response, status, body, headers, true),
+            );
+            if (handled) return;
+          }
+          if (!options.household && path.startsWith("/native/v1/household/")) {
+            send(response, 503, { error: "Household state unavailable." }, {}, true);
             return;
           }
           if (method === nativeRoutes.session.method && path === nativeRoutes.session.path) {
