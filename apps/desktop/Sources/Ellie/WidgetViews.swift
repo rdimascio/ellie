@@ -6,6 +6,7 @@ struct NativeWidgetCard: View {
     @ObservedObject var choresStore: ChoresStore
     let openChores: () -> Void
     let editing: Bool
+    @ObservedObject var weatherStore: WeatherStore
     let configure: () -> Void
     let earlier: () -> Void
     let later: () -> Void
@@ -62,6 +63,10 @@ struct NativeWidgetCard: View {
                     .frame(minHeight: 155, alignment: .topLeading)
                 } else if widget.type == .chores {
                     ChoresWidgetContent(store: choresStore, open: openChores)
+                } else if widget.type == .weather {
+                    NativeWeather(store: weatherStore, configure: configure)
+                } else if widget.type == .playlist {
+                    NativePlaylist(widget: widget, configure: configure)
                 } else {
                     VStack(alignment: .leading, spacing: 14) {
                         Image(systemName: widget.type.symbol)
@@ -207,7 +212,7 @@ struct WidgetGallery: View {
                     .accessibilityLabel("Add \(kind.displayName)")
                 }
             }
-            Text("Clock, notes, and local chores work on this Mac. Connected widgets need their providers.")
+            Text("Clock, notes, local chores, weather, and selected playlists work on this Mac.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .padding(28).frame(width: 570)
@@ -217,19 +222,31 @@ struct WidgetGallery: View {
 struct WidgetInspector: View {
     @Environment(\.dismiss) private var dismiss
     let widget: DashboardWidget
+    @ObservedObject var weatherStore: WeatherStore
     let save: (String, WidgetSize, [String: String]) -> Void
     @State private var title: String
     @State private var size: WidgetSize
     @State private var note: String
     @State private var zone: String
+    @State private var weatherEnabled: Bool
+    @State private var placeName: String
+    @State private var latitude: String
+    @State private var longitude: String
+    @State private var playlistInput: String
 
-    init(widget: DashboardWidget, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
+    init(widget: DashboardWidget, weatherStore: WeatherStore, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
         self.widget = widget
+        self.weatherStore = weatherStore
         self.save = save
         _title = State(initialValue: widget.title)
         _size = State(initialValue: widget.size)
         _note = State(initialValue: widget.config["text"] ?? "")
         _zone = State(initialValue: widget.config["timeZone"] ?? "")
+        _weatherEnabled = State(initialValue: weatherStore.state.enabled)
+        _placeName = State(initialValue: weatherStore.state.place?.name ?? "")
+        _latitude = State(initialValue: weatherStore.state.place.map { String($0.latitude) } ?? "")
+        _longitude = State(initialValue: weatherStore.state.place.map { String($0.longitude) } ?? "")
+        _playlistInput = State(initialValue: widget.config["youtubePlaylistID"] ?? "")
     }
 
     var body: some View {
@@ -257,6 +274,38 @@ struct WidgetInspector: View {
                     Text("Leave blank for local time, or enter a name such as Europe/London.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                if widget.type == .weather {
+                    Section("Forecast") {
+                        Toggle("Use Open-Meteo forecasts", isOn: $weatherEnabled)
+                        if weatherEnabled {
+                            TextField("Place name", text: $placeName, prompt: Text("Home, London, …"))
+                            TextField("Latitude", text: $latitude, prompt: Text("37.7749"))
+                            TextField("Longitude", text: $longitude, prompt: Text("−122.4194"))
+                            Text("Ellie sends these coordinates to Open-Meteo only when enabled. It never requests your Mac’s location.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("These settings apply to every weather widget.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Link("Weather data by Open-Meteo.com", destination: URL(string: "https://open-meteo.com/")!)
+                                .font(.caption)
+                        } else {
+                            Text("Weather stays entirely offline. Turning this off deletes the saved place and forecast.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if let message = weatherStore.message {
+                            Text(message).font(.caption).foregroundStyle(.red)
+                        }
+                    }
+                }
+                if widget.type == .playlist {
+                    Section("YouTube playlist") {
+                        TextField("Playlist URL or ID", text: $playlistInput,
+                                  prompt: Text("https://www.youtube.com/playlist?list=…"))
+                        Text("Use a public playlist whose ID begins with PL. Ellie contacts YouTube only when you press Play.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Playback uses YouTube’s privacy-enhanced embedded player without your account cookies.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .formStyle(.grouped)
             HStack {
@@ -266,13 +315,94 @@ struct WidgetInspector: View {
                     var config = widget.config
                     if widget.type == .note { config = ["text": note] }
                     if widget.type == .clock { config = zone.isEmpty ? [:] : ["timeZone": zone] }
+                    if widget.type == .playlist {
+                        let trimmed = playlistInput.trimmingCharacters(in: .whitespacesAndNewlines)
+                        config = trimmed.isEmpty ? [:] : ["youtubePlaylistID": YouTubePlaylist.parse(trimmed)!]
+                    }
+                    if widget.type == .weather {
+                        if weatherEnabled {
+                            guard weatherStore.configure(name: placeName, latitudeText: latitude, longitudeText: longitude) else { return }
+                        } else if !weatherStore.disable() { return }
+                    }
                     save(title, size, config)
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.count > 80 || note.count > 2000)
+                .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.count > 80 || note.count > 2000 ||
+                    (widget.type == .weather && weatherEnabled && !validWeatherPlace) ||
+                    (widget.type == .playlist && !validPlaylist))
             }
             .padding(20)
         }
         .frame(width: 460)
+    }
+
+    private var validWeatherPlace: Bool {
+        let name = placeName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.utf16.count <= 80,
+              let latitude = Double(latitude), let longitude = Double(longitude) else { return false }
+        return latitude.isFinite && longitude.isFinite && (-90...90).contains(latitude) && (-180...180).contains(longitude)
+    }
+
+    private var validPlaylist: Bool {
+        let trimmed = playlistInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty || YouTubePlaylist.parse(trimmed) != nil
+    }
+}
+
+struct NativeWeather: View {
+    @ObservedObject var store: WeatherStore
+    let configure: () -> Void
+
+    var body: some View {
+        Group {
+            if !store.state.enabled {
+                VStack(alignment: .leading, spacing: 13) {
+                    Image(systemName: "location.slash").font(.system(size: 32, weight: .light)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    Text("Choose a place").font(.system(size: 19, weight: .semibold))
+                    Text("Weather is off until you add coordinates and enable Open-Meteo.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Button("Set Up Weather…", action: configure).buttonStyle(.bordered)
+                }
+            } else if let place = store.state.place, let snapshot = store.state.snapshot {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .top) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(place.name).font(.system(size: 13, weight: .medium)).foregroundStyle(.secondary).lineLimit(1)
+                            Text("\(Int(snapshot.temperature.rounded()))°").font(.system(size: 54, weight: .thin)).tracking(-2)
+                        }
+                        Spacer()
+                        Image(systemName: snapshot.symbol).symbolRenderingMode(.multicolor).font(.system(size: 42))
+                    }
+                    Text(snapshot.condition).font(.system(size: 18, weight: .medium))
+                    Text("Conditions as of \(snapshot.observedAt.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Feels like \(Int(snapshot.apparentTemperature.rounded()))°  ·  Wind \(Int(snapshot.windSpeed.rounded())) mph")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        HStack(spacing: 6) {
+                            Text(store.message ?? store.freshness(at: context.date))
+                            Spacer()
+                            Button { store.refresh(force: true) } label: {
+                                Image(systemName: "arrow.clockwise")
+                            }.buttonStyle(.borderless).disabled(store.isRefreshing).help("Refresh forecast")
+                        }.font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                    Link("Weather data by Open-Meteo.com", destination: URL(string: "https://open-meteo.com/")!)
+                        .font(.system(size: 10))
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 13) {
+                    if store.isRefreshing { ProgressView().controlSize(.small) }
+                    else { Image(systemName: "exclamationmark.triangle").foregroundStyle(.secondary) }
+                    Spacer(minLength: 0)
+                    Text(store.state.place?.name ?? "Weather").font(.system(size: 19, weight: .semibold))
+                    Text(store.message ?? "Fetching the first forecast…").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Button("Try Again") { store.refresh(force: true) }.disabled(store.isRefreshing)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, minHeight: 155, alignment: .leading)
+        .task { store.refresh() }
     }
 }

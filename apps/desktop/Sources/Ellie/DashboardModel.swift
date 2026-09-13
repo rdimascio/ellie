@@ -90,6 +90,13 @@ enum DashboardModel {
     static let maximumNoteLength = 2_000
     static let maximumSerializedBytes = 128 * 1_024
 
+    static func isValidYouTubePlaylistID(_ value: String) -> Bool {
+        guard value.utf8.count >= 13, value.utf8.count <= 80, value.hasPrefix("PL") else { return false }
+        return value.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte) || byte == 45 || byte == 95
+        }
+    }
+
     static let initialState = DashboardState(dashboards: [
         Dashboard(id: "home", name: "Home", widgets: [
             DashboardWidget(id: "clock", type: .clock, title: "Right now", size: .wide, config: [:]),
@@ -147,6 +154,7 @@ enum DashboardModel {
         switch widget.type {
         case .clock: allowedKeys = ["timeZone"]
         case .note: allowedKeys = ["text"]
+        case .playlist: allowedKeys = ["youtubePlaylistID"]
         default: allowedKeys = []
         }
         guard Set(widget.config.keys).isSubset(of: allowedKeys) else { throw DashboardModelError.invalidConfig }
@@ -154,6 +162,7 @@ enum DashboardModel {
             let maximum = key == "text" ? maximumNoteLength : 100
             guard value.utf16.count <= maximum else { throw DashboardModelError.invalidConfig }
             if key == "timeZone", TimeZone(identifier: value) == nil { throw DashboardModelError.invalidTimeZone }
+            if key == "youtubePlaylistID", !isValidYouTubePlaylistID(value) { throw DashboardModelError.invalidConfig }
         }
     }
 
