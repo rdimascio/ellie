@@ -4,6 +4,7 @@ import UniformTypeIdentifiers
 @MainActor
 struct IOSDashboardList: View {
     @ObservedObject var store: DashboardStore
+    @ObservedObject var enrollment: NativeEnrollmentStore
     @State private var creating = false
     @State private var name = ""
     @State private var importing = false
@@ -26,6 +27,9 @@ struct IOSDashboardList: View {
                     }
                 } header: { Text("Dashboards") }
                 footer: { Text("Layouts and notes stay on this iPhone until you export them.") }
+                Section("Coordinator") {
+                    NavigationLink { NativeEnrollmentView(store: enrollment) } label: { Label("Pair this iPhone", systemImage: "link") }
+                }
             }
             .navigationTitle("Ellie")
             .toolbar {
@@ -137,6 +141,7 @@ private struct IOSDashboardDetail: View {
                     Button("Delete Dashboard", role: .destructive) { deleting = true }
                         .disabled(store.state.dashboards.count < 2)
                 } label: { Label("Dashboard options", systemImage: "ellipsis") }
+                    .accessibilityIdentifier("dashboard-options")
             }
         }
         .sheet(isPresented: $adding) { IOSWidgetGallery { select(); store.addWidget(kind: $0); adding = false } }
