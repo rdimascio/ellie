@@ -281,10 +281,18 @@ protocol NativeEnrollmentTransporting: Sendable {
 }
 
 func isNativeHexToken(_ value: String) -> Bool {
-  value.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil
+  let bytes = value.utf8
+  return bytes.count == 64 && bytes.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
 }
 func validNativeIdentifier(_ value: String) -> Bool {
-  value.range(of: #"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$"#, options: .regularExpression) != nil
+  let bytes = value.utf8
+  guard (1...100).contains(bytes.count), let first = bytes.first,
+    (48...57).contains(first) || (65...90).contains(first) || (97...122).contains(first)
+  else { return false }
+  return bytes.dropFirst().allSatisfy {
+    (48...57).contains($0) || (65...90).contains($0) || (97...122).contains($0) || $0 == 46
+      || $0 == 95 || $0 == 45
+  }
 }
 func validNativeLabel(_ value: String) -> Bool {
   value == value.trimmingCharacters(in: .whitespacesAndNewlines)

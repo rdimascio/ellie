@@ -20,6 +20,22 @@ final class NativeEnrollmentTests: XCTestCase {
     XCTAssertThrowsError(try NativePairingPayload.parse(envelope(reordered)))
   }
 
+  func testTokensAndIdentifiersRequireTheEntireASCIIString() {
+    let token = String(repeating: "a", count: 64)
+    let identifier = "studio-mac_1.local"
+    XCTAssertTrue(isNativeHexToken(token))
+    XCTAssertTrue(validNativeIdentifier(identifier))
+    for suffix in ["\n", "\r", "\r\n"] {
+      XCTAssertFalse(isNativeHexToken(token + suffix), "token suffix \(suffix.debugDescription)")
+      XCTAssertFalse(
+        validNativeIdentifier(identifier + suffix), "identifier suffix \(suffix.debugDescription)")
+    }
+    XCTAssertFalse(isNativeHexToken(token + "x"))
+    XCTAssertFalse(validNativeIdentifier(identifier + "!"))
+    XCTAssertFalse(isNativeHexToken(String(repeating: "A", count: 64)))
+    XCTAssertFalse(validNativeIdentifier("éllie"))
+  }
+
   func testSharedCanonicalPairingFixtures() throws {
     struct Fixtures: Decodable {
       struct Valid: Decodable {

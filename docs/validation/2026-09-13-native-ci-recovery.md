@@ -15,3 +15,5 @@ Validation:
 - Swift formatting, Node syntax and diff checks passed. Owned remote validation directories were removed.
 
 All certificates, server requests, test identities and simulator data were synthetic. No physical phone, installed household service, owner Keychain identity or privacy permission was changed. GitHub acceptance must be read from the new published commit, separately from these local results.
+
+A final parser review replaced Foundation regular-expression end anchors with whole-string ASCII validation for native tokens and identifiers. Terminal LF/CR/CRLF can no longer match a valid prefix. The focused regression passed and the final full Swift suite passed 29 tests. One initial test mistakenly treated an alphanumeric identifier suffix as invalid; the assertion was corrected to use a disallowed punctuation suffix without changing the production fix. These remain synthetic parser tests.
