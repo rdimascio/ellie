@@ -2,6 +2,8 @@ import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { IncomingMessage, ServerResponse } from "node:http";
+import type { LifeEmbeddedContext } from "./server.ts";
 import { LocalModelReadiness, validateLocalModelConfiguration } from "./model-status.ts";
 import { loadGoogleClient } from "./google-client.ts";
 import { openAuthorizationUrl } from "./authorization-browser.ts";
@@ -268,6 +270,19 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
       connectorStoreClosed = false;
     return {
       server,
+      async prepareEmbedded() {
+        try {
+          await server.prepareEmbedded();
+          taskRuntime.start();
+          if (server.canEvaluateBackground()) await connectors!.resume(trustedActor.userId);
+        } catch (error) {
+          await this.close();
+          throw error;
+        }
+      },
+      handle(request: IncomingMessage, response: ServerResponse, context: LifeEmbeddedContext) {
+        return server.handleEmbedded(request, response, context);
+      },
       async listen() {
         try {
           const ready = await server.listen();

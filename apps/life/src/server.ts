@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createReadStream, lstatSync, statSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -246,6 +247,18 @@ export interface ListeningLifeServer {
   url: string;
   launchUrl: string;
 }
+/** Supplied only by the authenticated coordinator gateway, never by HTTP payloads. */
+export interface LifeEmbeddedContext {
+  actorId: string;
+  clientId: string;
+  origin: string;
+  signal: AbortSignal;
+  isCurrent(): boolean;
+}
+interface EmbeddedRequest {
+  context: LifeEmbeddedContext;
+  cleanups: Set<() => void>;
+}
 
 function digest(value: string): Buffer {
   return createHash("sha256").update(value).digest();
@@ -411,6 +424,8 @@ export class LifeHttpServer {
     promise: Promise<ReturnType<LifeStore["getPersonalReset"]>>;
   };
   private accepting = true;
+  private embeddedReady = false;
+  private readonly embeddedRequest = new AsyncLocalStorage<EmbeddedRequest | undefined>();
   private server?: Server;
   private bound?: ListeningLifeServer;
   private readonly now: () => number;
@@ -532,12 +547,7 @@ export class LifeHttpServer {
   canEvaluateBackground(): boolean {
     return this.accepting && !this.personalResetActive;
   }
-  async listen(): Promise<ListeningLifeServer> {
-    if (this.bound) return this.bound;
-    const host = this.options.host ?? "127.0.0.1",
-      port = this.options.port ?? 7440;
-    if (host !== "127.0.0.1" || !Number.isInteger(port) || port < 0 || port > 65535)
-      throw new Error("Invalid life listener.");
+  private prepareMemory(): void {
     if (!this.personalResetActive) {
       // Only retained, actor-owned conversations are backfilled. The store bounds
       // history; each batch is bounded and inaccessible groups are excluded in SQL.
@@ -551,23 +561,80 @@ export class LifeHttpServer {
       for (const group of this.options.store.listGroups(this.actor))
         this.automaticMemory.sync(this.actor, { type: "group", id: group.id });
     }
+  }
+  async prepareEmbedded(): Promise<void> {
+    if (this.embeddedReady) return;
+    this.prepareMemory();
+    this.accepting = true;
+    this.embeddedReady = true;
+    this.options.preparationMonitor?.start();
+  }
+  private track(request: IncomingMessage, active: Promise<void>): Promise<void> {
+    this.activeRequests.add(active);
+    const path = (request.url ?? "").split("?", 1)[0] ?? "";
+    const mutation =
+      ((request.method !== "GET" && request.method !== "HEAD") ||
+        path === "/api/connections/callback") &&
+      !path.startsWith("/api/life/personal-data/reset");
+    if (mutation) this.mutationRequests.add(active);
+    void active
+      .finally(() => {
+        this.activeRequests.delete(active);
+        if (mutation) this.mutationRequests.delete(active);
+      })
+      .catch(() => {});
+    return active;
+  }
+  async handleEmbedded(
+    request: IncomingMessage,
+    response: ServerResponse,
+    context: LifeEmbeddedContext,
+  ): Promise<boolean> {
+    const origin = new URL(context.origin);
+    if (origin.protocol !== "https:" || origin.origin !== context.origin)
+      throw new Error("Invalid embedded Life origin.");
+    const url = new URL(request.url ?? "/", origin);
+    if (url.origin !== origin.origin) throw new Error("Invalid embedded Life route.");
+    if (
+      url.pathname !== "/life/" &&
+      !/^\/life\/assets\/[A-Za-z0-9._-]+$/.test(url.pathname) &&
+      !url.pathname.startsWith("/api/life/") &&
+      url.pathname !== "/api/connections" &&
+      !url.pathname.startsWith("/api/connections/")
+    )
+      return false;
+    if (!this.embeddedReady || !this.accepting) {
+      this.send(response, 503, { error: "Life is not ready." });
+      return true;
+    }
+    const captured: LifeEmbeddedContext = { ...context, isCurrent: () => context.isCurrent() };
+    const state: EmbeddedRequest = { context: captured, cleanups: new Set() };
+    await this.embeddedRequest.run(state, async () => {
+      try {
+        this.assertRequestAuthority();
+        await this.track(request, this.handle(request, response));
+      } catch (error) {
+        this.fail(response, error);
+      } finally {
+        for (const cleanup of state.cleanups) cleanup();
+      }
+    });
+    return true;
+  }
+  async listen(): Promise<ListeningLifeServer> {
+    if (this.bound) return this.bound;
+    const host = this.options.host ?? "127.0.0.1",
+      port = this.options.port ?? 7440;
+    if (host !== "127.0.0.1" || !Number.isInteger(port) || port < 0 || port > 65535)
+      throw new Error("Invalid life listener.");
+    if (!this.embeddedReady) this.prepareMemory();
     this.accepting = true;
     this.server = createServer((request, response) => {
       if (!this.accepting) {
         this.send(response, 503, { error: "Service is shutting down." });
         return;
       }
-      const active = this.handle(request, response);
-      this.activeRequests.add(active);
-      const path = (request.url ?? "").split("?", 1)[0] ?? "";
-      if (
-        ((request.method !== "GET" && request.method !== "HEAD") ||
-          path === "/api/connections/callback") &&
-        !path.startsWith("/api/life/personal-data/reset")
-      )
-        this.mutationRequests.add(active);
-      void active.finally(() => this.activeRequests.delete(active)).catch(() => {});
-      void active.finally(() => this.mutationRequests.delete(active)).catch(() => {});
+      void this.track(request, this.handle(request, response));
     });
     // Route readers enforce tighter ordinary deadlines; raw local extraction may use the full minute.
     this.server.requestTimeout = BINARY_DEADLINE_MS;
@@ -597,6 +664,7 @@ export class LifeHttpServer {
   }
   async close(): Promise<void> {
     this.accepting = false;
+    this.embeddedReady = false;
     this.options.preparationMonitor?.stop();
     for (const controller of this.extractionControllers) controller.abort();
     for (const controller of this.pluginBuildControllers) controller.abort();
@@ -632,7 +700,41 @@ export class LifeHttpServer {
     )
       throw new Error("Improvement reviews are still active; retry close after they settle.");
   }
+  private authorityCurrent(): boolean {
+    return this.captureAuthority()();
+  }
+  private captureAuthority(): () => boolean {
+    const context = this.embeddedRequest.getStore()?.context;
+    return () => this.contextIsCurrent(context);
+  }
+  private contextIsCurrent(context?: LifeEmbeddedContext): boolean {
+    if (!context) return true;
+    try {
+      return (
+        context.actorId === this.actor.userId && !context.signal.aborted && context.isCurrent()
+      );
+    } catch {
+      return false;
+    }
+  }
+  private assertRequestAuthority(): void {
+    if (!this.authorityCurrent()) throw new HttpError(401, "Life access is no longer available.");
+  }
+  private requestController(): AbortController {
+    const controller = new AbortController();
+    const state = this.embeddedRequest.getStore();
+    if (state) {
+      const abort = () => controller.abort(new Error("Life access is no longer available."));
+      if (!this.authorityCurrent()) abort();
+      else {
+        state.context.signal.addEventListener("abort", abort, { once: true });
+        state.cleanups.add(() => state.context.signal.removeEventListener("abort", abort));
+      }
+    }
+    return controller;
+  }
   private headers(response: ServerResponse, extra: Record<string, string> = {}): void {
+    this.assertRequestAuthority();
     for (const [key, value] of Object.entries({ ...BASE_HEADERS, ...extra }))
       response.setHeader(key, value);
   }
@@ -662,13 +764,17 @@ export class LifeHttpServer {
               : error instanceof TypeError || error instanceof PluginError
                 ? 400
                 : 500;
-    this.send(response, status, {
-      error:
-        status === 500
-          ? "Request failed."
-          : error instanceof Error
-            ? error.message
-            : "Request failed.",
+    const authorized = this.authorityCurrent();
+    this.embeddedRequest.run(undefined, () => {
+      this.send(response, authorized ? status : 401, {
+        error: !authorized
+          ? "Life access is no longer available."
+          : status === 500
+            ? "Request failed."
+            : error instanceof Error
+              ? error.message
+              : "Request failed.",
+      });
     });
   }
   private validateHost(request: IncomingMessage): string {
@@ -711,11 +817,13 @@ export class LifeHttpServer {
     const deadline = setTimeout(() => request.destroy(new Error("deadline")), DEADLINE_MS);
     try {
       for await (const part of request) {
+        this.assertRequestAuthority();
         const chunk = Buffer.from(part);
         size += chunk.length;
         if (size > limit) throw new HttpError(413, "Request body is too large.");
         parts.push(chunk);
       }
+      this.assertRequestAuthority();
       try {
         return JSON.parse(Buffer.concat(parts).toString("utf8"));
       } catch {
@@ -726,6 +834,7 @@ export class LifeHttpServer {
     }
   }
   private scope(value: unknown): LifeScope {
+    this.assertRequestAuthority();
     let type: unknown, id: unknown;
     if (typeof value === "string") {
       const split = value.indexOf(":");
@@ -812,10 +921,26 @@ export class LifeHttpServer {
   }
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     try {
-      const origin = this.validateHost(request);
-      this.validateOrigin(request, origin);
+      this.assertRequestAuthority();
+      const embedded = this.embeddedRequest.getStore()?.context;
+      const origin = embedded?.origin ?? this.validateHost(request);
+      if (!embedded) this.validateOrigin(request, origin);
       const url = new URL(request.url ?? "/", origin),
         path = url.pathname;
+      if (embedded) {
+        if (path === "/api/life/session") throw new HttpError(404, "Route not found.");
+        if (path === "/api/connections/start" || path === "/api/connections/callback")
+          throw new HttpError(409, "Connect accounts directly on the Mac hosting Ellie.");
+        if (path === "/life/" || path.startsWith("/life/assets/")) {
+          if (request.method !== "GET" && request.method !== "HEAD")
+            throw new HttpError(405, "Method not allowed.");
+          return await this.static(
+            response,
+            path === "/life/" ? "/" : path.slice("/life".length),
+            request.method === "HEAD",
+          );
+        }
+      }
       if (
         request.method === "GET" &&
         (path === "/connections/complete" || path === "/connections/cancelled")
@@ -874,6 +999,7 @@ export class LifeHttpServer {
       }
       if (
         (path.startsWith("/api/life/") || path.startsWith("/api/connections")) &&
+        !embedded &&
         !this.authenticated(request)
       )
         throw new HttpError(401, "Authentication required.");
@@ -884,10 +1010,23 @@ export class LifeHttpServer {
       )
         throw new HttpError(423, "Personal reset is in progress.");
       if (path === "/api/connections" && request.method === "GET") {
+        const listing = this.options.connectors?.list(this.actor.userId) ?? {
+          connections: [],
+          providers: [],
+        };
         this.send(
           response,
           200,
-          this.options.connectors?.list(this.actor.userId) ?? { connections: [], providers: [] },
+          embedded
+            ? {
+                ...listing,
+                providers: listing.providers.map((provider) => ({
+                  ...provider,
+                  configured: false,
+                  setupMessage: "Connect accounts directly on the Mac hosting Ellie.",
+                })),
+              }
+            : listing,
         );
         return;
       }
@@ -1331,7 +1470,7 @@ export class LifeHttpServer {
       journal = this.options.store.advancePersonalReset(this.actor, operationId, "completed");
       this.personalResetActive = false;
       this.options.connectors?.unblock(this.actor.userId);
-      if (this.bound) this.options.preparationMonitor?.start();
+      if (this.bound || this.embeddedReady) this.options.preparationMonitor?.start();
       this.personalReviews.clear();
     }
     return journal;
@@ -1357,7 +1496,7 @@ export class LifeHttpServer {
     if (!(await this.settleActorMutations())) {
       this.personalResetActive = false;
       this.options.connectors?.unblock(this.actor.userId);
-      if (this.bound) this.options.preparationMonitor?.start();
+      if (this.bound || this.embeddedReady) this.options.preparationMonitor?.start();
       throw new HttpError(409, "Active personal work did not settle; review reset again.");
     }
     // Preflight every generation before creating the durable authorization journal.
@@ -1376,6 +1515,7 @@ export class LifeHttpServer {
         this.options.connectors.store.generation(this.actor.userId) !== review.connectors
       )
         throw new HttpError(409, "Connected data changed; review reset again.");
+      this.assertRequestAuthority();
       this.options.store.beginPersonalReset(this.actor, {
         operationId,
         reviewTokenHash: digest(String(body.reviewToken)).toString("hex"),
@@ -1386,10 +1526,12 @@ export class LifeHttpServer {
     } catch (error) {
       this.personalResetActive = false;
       this.options.connectors?.unblock(this.actor.userId);
-      if (this.bound) this.options.preparationMonitor?.start();
+      if (this.bound || this.embeddedReady) this.options.preparationMonitor?.start();
       throw error;
     }
-    const journal = await this.continuePersonalReset(operationId, true);
+    const journal = await this.embeddedRequest.run(undefined, () =>
+      this.continuePersonalReset(operationId, true),
+    );
     this.send(response, journal?.state === "completed" ? 200 : 202, this.resetStatus(journal!));
   }
   private personalDataResetStatus(path: string, response: ServerResponse): void {
@@ -1412,7 +1554,9 @@ export class LifeHttpServer {
   ): Promise<void> {
     jsonObject(await this.body(request));
     const operationId = identifier(decodeURIComponent(path.split("/").at(-2)!), "operationId");
-    const journal = await this.continuePersonalReset(operationId);
+    const journal = await this.embeddedRequest.run(undefined, () =>
+      this.continuePersonalReset(operationId),
+    );
     this.send(response, journal?.state === "completed" ? 200 : 202, this.resetStatus(journal!));
   }
   private async bootstrap(url: URL, response: ServerResponse): Promise<void> {
@@ -1806,7 +1950,7 @@ export class LifeHttpServer {
       } catch {
         throw new HttpError(400, "Invalid base64 source.");
       }
-      const controller = new AbortController(),
+      const controller = this.requestController(),
         deadline = setTimeout(() => controller.abort(), DEADLINE_MS),
         disconnect = () => {
           if (!response.writableFinished)
@@ -1878,7 +2022,7 @@ export class LifeHttpServer {
         ? bounded(url.searchParams.get("title"), "title", 2000)
         : filename,
       bytes = Buffer.allocUnsafe(length),
-      controller = new AbortController();
+      controller = this.requestController();
     let offset = 0;
     const deadline = setTimeout(
         () => controller.abort(new Error("Binary upload deadline exceeded.")),
@@ -2187,14 +2331,16 @@ export class LifeHttpServer {
     });
     if (new Set(feedback.map(({ id }) => id)).size !== feedback.length)
       throw new HttpError(400, "Feedback selection must be distinct.");
-    const controller = new AbortController(),
+    const controller = this.requestController(),
       disconnect = () => {
         if (!response.writableFinished)
           controller.abort(new Error("Improvement review client disconnected."));
       },
       epoch = this.options.store.chatEpoch(this.actor),
+      currentAuthority = this.captureAuthority(),
       isContextCurrent = () =>
         !controller.signal.aborted &&
+        currentAuthority() &&
         this.accepting &&
         !this.personalResetActive &&
         this.options.store.chatEpoch(this.actor) === epoch;
@@ -2422,7 +2568,7 @@ export class LifeHttpServer {
       );
       return;
     }
-    const controller = new AbortController();
+    const controller = this.requestController();
     this.pluginBuildControllers.add(controller);
     const memory = this.automaticMemory.modelContext(this.actor, {
         scope,
@@ -2435,8 +2581,15 @@ export class LifeHttpServer {
         begun.conversation.id,
       ),
       fingerprint = begun.contextFingerprint,
+      currentAuthority = this.captureAuthority(),
       contextCurrent = () => {
-        if (controller.signal.aborted || this.personalResetActive || !this.accepting) return false;
+        if (
+          controller.signal.aborted ||
+          !currentAuthority() ||
+          this.personalResetActive ||
+          !this.accepting
+        )
+          return false;
         try {
           return (
             this.options.store.conversationContextFingerprint(this.actor, begun.conversation.id) ===
@@ -2902,6 +3055,7 @@ export class LifeHttpServer {
     });
     await previous;
     try {
+      this.assertRequestAuthority();
       const suggestions = this.options.context.evaluate(
         this.actor,
         scope,
@@ -3113,13 +3267,19 @@ export class LifeHttpServer {
     let plugin: LifePlugin;
     if (manifest) plugin = this.options.plugins.install(owner(scope), manifest);
     else if (this.options.harness.buildPlugin) {
-      const controller = new AbortController(),
+      const controller = this.requestController(),
         disconnect = () => {
           if (!response.writableFinished)
             controller.abort(new Error("Plugin build client disconnected."));
         },
+        currentAuthority = this.captureAuthority(),
         isContextCurrent = () => {
-          if (controller.signal.aborted || this.personalResetActive || !this.accepting)
+          if (
+            controller.signal.aborted ||
+            !currentAuthority() ||
+            this.personalResetActive ||
+            !this.accepting
+          )
             return false;
           try {
             this.recheckOwner(owner(scope));
@@ -3241,13 +3401,20 @@ frame.srcdoc=new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(enco
       body = jsonObject(await this.body(request)),
       [scopeType, ...scopeId] = found.owner.split(":"),
       scope = { type: scopeType as "user" | "group", id: scopeId.join(":") },
-      controller = new AbortController(),
+      controller = this.requestController(),
       disconnect = () => {
         if (!response.writableFinished)
           controller.abort(new Error("Plugin revision client disconnected."));
       },
+      currentAuthority = this.captureAuthority(),
       isContextCurrent = () => {
-        if (controller.signal.aborted || this.personalResetActive || !this.accepting) return false;
+        if (
+          controller.signal.aborted ||
+          !currentAuthority() ||
+          this.personalResetActive ||
+          !this.accepting
+        )
+          return false;
         try {
           this.recheckOwner(found.owner);
           return true;
@@ -3328,14 +3495,32 @@ frame.srcdoc=new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(enco
     this.headers(response, {
       "content-type": mime(path),
       "content-security-policy": APP_CSP,
-      "cache-control": path.endsWith("index.html") ? "no-store" : "public, max-age=3600",
+      "cache-control":
+        this.embeddedRequest.getStore() || path.endsWith("index.html")
+          ? "no-store"
+          : "public, max-age=3600",
     });
     response.statusCode = 200;
     if (head) response.end();
     else {
       const stream = createReadStream(path);
-      stream.on("error", () => response.destroy());
-      stream.pipe(response);
+      await new Promise<void>((done) => {
+        const settled = () => {
+          response.off("finish", settled);
+          response.off("close", settled);
+          stream.off("error", failed);
+          stream.destroy();
+          done();
+        };
+        const failed = () => {
+          response.destroy();
+          settled();
+        };
+        response.once("finish", settled);
+        response.once("close", settled);
+        stream.once("error", failed);
+        stream.pipe(response);
+      });
     }
   }
 }

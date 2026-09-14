@@ -10,6 +10,7 @@ struct EllieApp: App {
   @StateObject private var choresStore: ChoresStore
   @StateObject private var weatherStore: WeatherStore
   @StateObject private var agendaStore: AgendaStore
+  @StateObject private var lifeEnrollment = NativeEnrollmentStore()
 
   init() {
     let arguments = ProcessInfo.processInfo.arguments
@@ -63,6 +64,10 @@ struct EllieApp: App {
       DevicesView(store: coordinator)
     }
     .defaultSize(width: 820, height: 560)
+    Window("Life", id: "life") {
+      MacLifeEnrollmentView(enrollment: lifeEnrollment)
+    }
+    .defaultSize(width: 1100, height: 760)
   }
 }
 
@@ -72,6 +77,8 @@ private struct DeviceCommands: Commands {
     CommandGroup(after: .sidebar) {
       Button("Devices") { openWindow(id: "devices") }
         .keyboardShortcut("d", modifiers: [.command, .shift])
+      Button("Life") { openWindow(id: "life") }
+        .keyboardShortcut("l", modifiers: [.command, .shift])
     }
   }
 }

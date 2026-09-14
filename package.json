@@ -19,6 +19,7 @@
     "life:start": "node apps/life/src/main.ts",
     "life:test": "bun run life:build && node apps/life-ui/tests/life.e2e.ts",
     "life:test:connections": "bun run life:build && node apps/life-ui/tests/connections.e2e.ts",
+    "life:test:native": "bun run life:build && node apps/life-ui/tests/native.e2e.ts",
     "life": "bun run life:build && bun run life:start",
     "build:macos": "node scripts/build-macos.mjs",
     "desktop:build": "node scripts/build-desktop.mjs",

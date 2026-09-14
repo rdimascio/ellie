@@ -5,6 +5,7 @@ import { BrowserAuth, browserInvitationSpec, browserOrigin } from "./browser-aut
 import type { NativeAuth } from "./native-auth.ts";
 import type { HouseholdState } from "./household-state.ts";
 import type { NativeSpeech } from "./native-speech.ts";
+import type { NativeLifeAuthority } from "./native-life.ts";
 
 const MAX_BROWSER_MANAGEMENT_BODY_BYTES = 4096;
 const paths = new Set([
@@ -34,6 +35,7 @@ export type BrowserControlSnapshot =
       nativeAuth?: NativeAuth;
       household?: HouseholdState;
       speech?: NativeSpeech;
+      nativeLife?: NativeLifeAuthority;
       certificateSha256?: string;
     }
   | { status: "disabled" }

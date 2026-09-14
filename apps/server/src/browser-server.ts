@@ -13,6 +13,8 @@ import type { HouseholdState } from "./household-state.ts";
 import { handleNativeHousehold } from "./native-household.ts";
 import type { NativeSpeech } from "./native-speech.ts";
 import { handleNativeSpeech } from "./native-speech-routes.ts";
+import type { NativeLifeApplication } from "./native-life.ts";
+import { NativeLifeAuthority, NativeLifeError } from "./native-life.ts";
 export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
@@ -48,6 +50,8 @@ export interface BrowserServerOptions {
   nativeAuth?: NativeAuth;
   household?: HouseholdState;
   speech?: NativeSpeech;
+  nativeLife?: NativeLifeAuthority;
+  lifeApplication?: NativeLifeApplication;
   assets?: BrowserAssets;
   remote?: BrowserRemote;
 }
@@ -122,6 +126,33 @@ function requestPath(request: IncomingMessage, origin: string): string | undefin
   return url.pathname;
 }
 
+function lifeTarget(request: IncomingMessage, origin: string): URL | undefined {
+  const target = request.url;
+  if (!target?.startsWith("/") || target.startsWith("//")) return;
+  const url = new URL(target, origin);
+  if (url.origin !== origin || url.hash) return;
+  const entryPath = url.pathname === "/life/";
+  const assetPath = url.pathname.startsWith("/life/assets/");
+  const apiPath =
+    url.pathname.startsWith("/api/life/") ||
+    url.pathname === "/api/connections" ||
+    url.pathname.startsWith("/api/connections/");
+  if ((!entryPath && !assetPath && !apiPath) || (assetPath && url.search)) return;
+  return url;
+}
+
+function lifeCookie(request: IncomingMessage): string | undefined {
+  const values = rawHeaderValues(request, "cookie");
+  if (values.length !== 1) return;
+  const matches = values[0]!
+    .split(";")
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith("__Host-ellie_life="));
+  if (matches.length !== 1) return;
+  const token = matches[0]!.slice("__Host-ellie_life=".length);
+  return /^[a-f0-9]{64}$/.test(token) ? token : undefined;
+}
+
 function invalidRequest(socket: Duplex): void {
   if (!socket.writable) {
     socket.destroy();
@@ -163,6 +194,12 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
       handshakeTimeout: 5000,
     },
     (request, response) => {
+      const routeDeadline = setTimeout(() => request.destroy(), 10_000);
+      const clearRouteDeadline = () => clearTimeout(routeDeadline);
+      // Bound the upload, not the action executed after its body is complete.
+      request.once("end", clearRouteDeadline);
+      response.once("finish", clearRouteDeadline);
+      response.once("close", clearRouteDeadline);
       void (async () => {
         const hosts = rawHeaderValues(request, "host");
         const origins = rawHeaderValues(request, "origin");
@@ -233,6 +270,38 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
             send(response, 401, { error: "Native session required." }, {}, true);
             return;
           }
+          if ((method === "GET" || method === "POST") && path === "/native/v1/life/session") {
+            if (!options.nativeLife || !options.lifeApplication) {
+              send(response, 503, { error: "Native Life unavailable." }, {}, true);
+              return;
+            }
+            try {
+              if (method === "GET") {
+                if (!(await options.nativeLife.allowed(authorizations[0]!)))
+                  throw new NativeLifeError("forbidden");
+                send(response, 200, { allowed: true }, {}, true);
+              } else {
+                if (!isEmptyObject(await readJson(request, 2)))
+                  throw new NativeLifeError("invalid");
+                send(response, 200, await options.nativeLife.session(authorizations[0]!), {}, true);
+              }
+            } catch (error) {
+              const kind = error instanceof NativeLifeError ? error.kind : "unavailable";
+              send(
+                response,
+                kind === "forbidden" ? 403 : kind === "busy" ? 409 : kind === "invalid" ? 400 : 503,
+                {
+                  error:
+                    kind === "forbidden"
+                      ? "Native Life is not allowed."
+                      : "Native Life unavailable.",
+                },
+                {},
+                true,
+              );
+            }
+            return;
+          }
           if (
             await handleNativeSpeech(
               request,
@@ -295,6 +364,72 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
           )
             return;
           send(response, 404, { error: "Native route not found." }, {}, true);
+          return;
+        }
+        const life = lifeTarget(request, expected.origin);
+        if (life) {
+          clearRouteDeadline();
+          const writes = method !== "GET" && method !== "HEAD";
+          if (
+            hosts.length !== 1 ||
+            hosts[0] !== expected.host ||
+            authorizations.length !== 0 ||
+            cookies.length !== 1 ||
+            !["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"].includes(method) ||
+            (writes && (origins.length !== 1 || origins[0] !== expected.origin)) ||
+            (!writes &&
+              origins.length > 0 &&
+              (origins.length !== 1 || origins[0] !== expected.origin))
+          ) {
+            send(response, 403, { error: "Native Life request rejected." }, {}, true);
+            return;
+          }
+          const token = lifeCookie(request),
+            authority = options.nativeLife,
+            admitted = token ? authority?.admission(token) : undefined;
+          if (admitted?.status === "busy") {
+            send(response, 429, { error: "Native Life is busy. Try again shortly." });
+            return;
+          }
+          if (!admitted || !authority || !options.lifeApplication) {
+            send(response, 401, { error: "Native Life session required." }, {}, true);
+            return;
+          }
+          request.socket.setTimeout(125_000);
+          const disconnected = () => admitted.controller.abort();
+          request.once("aborted", disconnected);
+          response.once("close", disconnected);
+          try {
+            const handled = await options.lifeApplication.handle(request, response, {
+              actorId: admitted.session.actorId,
+              clientId: admitted.session.clientId,
+              origin: expected.origin,
+              signal: admitted.controller.signal,
+              isCurrent: admitted.isCurrent,
+            });
+            if (!handled && !response.writableEnded)
+              send(response, 404, { error: "Native Life route not found." }, {}, true);
+            else if (!admitted.isCurrent() && !response.writableEnded)
+              send(response, 401, { error: "Native Life session expired." }, {}, true);
+          } catch {
+            if (!response.writableEnded)
+              send(
+                response,
+                admitted.controller.signal.aborted ? 499 : 503,
+                {
+                  error: admitted.controller.signal.aborted
+                    ? "Native Life stopped."
+                    : "Native Life unavailable.",
+                },
+                {},
+                true,
+              );
+          } finally {
+            request.removeListener("aborted", disconnected);
+            response.removeListener("close", disconnected);
+            authority.finish(admitted.session.clientId, admitted.controller);
+            if (!request.socket.destroyed) request.socket.setTimeout(10_000);
+          }
           return;
         }
         if (hosts.length !== 1 || origins.length > 1 || authorizations.length > 1) {
@@ -520,7 +655,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
     },
   );
 
-  server.requestTimeout = 10_000;
+  server.requestTimeout = 65_000;
   server.headersTimeout = 5_000;
   server.keepAliveTimeout = 5_000;
   server.maxConnections = 32;
