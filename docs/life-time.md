@@ -1,0 +1,13 @@
+# Calendar and clock semantics
+
+`@ellie/life-time` provides Gregorian calendar dates and precise conversion between local wall-clock fields and instants. A calendar date is `{year, month, day}`, with years 1 through 9999. Date arithmetic preserves those fields without treating an all-day event as UTC midnight. `calendarDateKey` and `parseCalendarDate` use strict `YYYY-MM-DD` values. `localParts` uses the selected IANA zone through the installed runtime's time-zone database.
+
+`parseInstant` accepts safe epoch milliseconds within the native date range or a strict ISO timestamp with an explicit `Z` or numeric offset. It validates the real date, clock and offset before conversion, preserves milliseconds and early years, and rejects values such as February 30 rather than rolling them into March. Calendar consumers additionally validate the resulting local year against the supported calendar range. Date-only and unzoned strings are not instants.
+
+`zonedCandidates` examines offsets around a requested date and verifies the complete year, month, day, hour, minute and second. It returns no candidates for a skipped clock time, one for an ordinary time and multiple for a repeated time. `resolveZoned` rejects missing or repeated times by default; callers can explicitly choose the earlier or later repeated occurrence. It never rounds a half-hour transition to the next hour. Calendar imports can report ambiguity, while recurring schedules can use a documented deterministic policy.
+
+`nextAnnualDate` finds an actual calendar occurrence on or after the user's current local day. February 29 advances to a real leap year, including the eight-year gap across a non-leap century. The caller chooses any preparation deadline or alert hour. `nextWeekdayDate` excludes today unless explicitly requested. `parseClock` accepts ordinary twelve-hour or twenty-four-hour input and rejects values such as `0 am`, `13 pm` and `24:00`.
+
+`startOfLocalDay` finds the earliest instant in the selected calendar day, including a day whose midnight is skipped. It returns no instant when the entire local day is skipped. Preparation uses this boundary to expire all-day notices in the correct zone, with the actual 23/24/25-hour day length. It checks current and next-two-day all-day events, and timed events within 48 hours. Unzoned timestamp strings are not silently interpreted in the server's system zone.
+
+Tests cover Los Angeles gaps and overlaps, Lord Howe half-hour transitions, Nepal's offset, UTC+14 dates, Gregorian leap rules and early years, a skipped midnight in São Paulo and a skipped date in Apia. No external calendar account or operating-system time setting is changed.

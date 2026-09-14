@@ -1,0 +1,31 @@
+name: Life browser acceptance
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  life-browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - run: bun run life:test
+        env:
+          ELLIE_E2E_ARTIFACT_DIR: test-results/life
+      - name: Preserve life browser artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: life-browser-artifacts
+          path: test-results/life
+          retention-days: 3

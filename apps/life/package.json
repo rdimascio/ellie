@@ -1,0 +1,19 @@
+{
+  "name": "@ellie/life",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/server.ts",
+  "dependencies": {
+    "@ellie/life-auto-memory": "workspace:*",
+    "@ellie/life-context": "workspace:*",
+    "@ellie/life-core": "workspace:*",
+    "@ellie/life-harness": "workspace:*",
+    "@ellie/life-import": "workspace:*",
+    "@ellie/life-ingest": "workspace:*",
+    "@ellie/life-learning": "workspace:*",
+    "@ellie/life-plugins": "workspace:*",
+    "@ellie/life-teaching": "workspace:*",
+    "@ellie/task-runtime": "workspace:*"
+  }
+}

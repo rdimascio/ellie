@@ -6,6 +6,8 @@ The primary Mac and iPhone interfaces are SwiftUI applications. This development
 
 In-page media control is a core requirement: catalogue scrolling, row navigation, title selection and verified playback across Netflix, YouTube, YouTube TV and Disney+. See the [browser media plan](browser-media-control.md) for WebMCP discovery, the browser companion, native remote integration and per-service acceptance. URL opening and embedded playlist playback do not satisfy this milestone.
 
+A separate, opt-in **Ellie Life** web client exercises conversational memory, teaching, background work and generated applications against persistent local stores; see its [implementation checkpoint](overnight-build.md) and [runbook](life-runbook.md). It has not been connected to native clients or paired-device identity.
+
 ## Current foundation
 
 The repository currently provides a developer milestone, not a household product:
@@ -19,11 +21,19 @@ The repository currently provides a developer milestone, not a household product
 - A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. The operator has validated a MacBook coordinator and LAN-paired Mac mini for foreground app opening, window tiling, Netflix, and Messages beside Arc. Direct model inference, same-Mac scheduling, one LAN request, distinct two-worker placement, and inference cancellation have bounded hardware validation. Sustained load, runner or network interruption, sleep/wake, and distributed MLX remain unvalidated. See [the dated inference record](validation/2026-09-12-inference.md).
 - Per-user GUI LaunchAgents provide source-checkout service lifecycle commands and bounded redacted logs. Role-specific diagnostics inspect configuration, Keychain, certificates, helper permissions, service state, and connectivity. Dedicated Ellie app identities and icons are implemented. Two-Mac native commands, queued cancellation, delivered-job crash recovery, and coordinator endpoint reconnection have partial physical acceptance. The owner also passed one MacBook sleep/wake cycle with subsequent Safari execution on the awake mini, using the existing native preview and checkout-backed services. Node-host sleep, repeated cycles and active native cancellation remain pending; see [the owner acceptance record](validation/2026-09-13-native-cross-mac-owner-acceptance.md). See [the dated service validation record](validation/2026-09-12-services.md).
 
+<<<<<<< HEAD
+A browser phone/TV prototype remains available for compatibility testing. Native Mac and iPhone clients are implemented in the reviewable integration above; local push-to-talk has synthetic-audio model validation, and calendar imports private offline snapshots. Ellie Life adds local scoped routines, reminder schedules, reviewed source imports, task orchestration and versioned extensions. Authenticated household synchronization, household profiles in native clients, live Google account integration, native Life integration, a TV application, an MCP server, a packaged installer and automatic updates remain future work in this branch. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for server and CLI execution, and Swift for native applications, macOS Accessibility and Keychain integration.
+
+The broader [life harness plan](life-harness-plan.md) sets the direction for a conversational assistant that can remember, anticipate and build capabilities. Delivery proceeds through complete user workflows, with automated local acceptance recorded in the checkpoint. Native location, cross-application context, account connectors and model-weight training are not implied by the local implementation.
+=======
+
 A browser phone/TV prototype remains available for compatibility testing, and the opt-in authenticated phone app-control demo has user-reported physical acceptance. The native clients and explicitly granted household synchronization are implemented as development features. Packaged-service tooling can build, stage and select development payloads, while authenticated capture remains unselectable and cannot authorize installation or launch. Production signing, notarization, installed-service acceptance, live Google account integration, routines, a TV application, an MCP server, analytics and automatic updates remain pending. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for server and CLI execution, and Swift for native applications, macOS Accessibility and Keychain integration.
 
 ## Active product queue
 
 The maintained [delivery queue](delivery-queue.md) records the remaining distribution, installed-lifecycle and physical acceptance gates. Product interfaces use native SwiftUI on macOS and iPhone; the browser prototype remains a compatibility reference, including version 1 dashboard import and export. Simulator Swift-to-Node HTTPS interoperability and synthetic Mac UI checks are recorded separately from physical phone, LAN and installed-service acceptance. [iPhone testing](iphone-testing.md) separates browser automation from physical camera, microphone and trust setup.
+
+> > > > > > > 862fe876ce993da88f2befff3f6e5ab625a1001f
 
 ## Foundation sequence and current queue
 
