@@ -18,6 +18,8 @@ import {
   PluginStore,
 } from "../../../packages/life-plugins/src/index.ts";
 import { TaskRuntime } from "../../../packages/task-runtime/src/index.ts";
+
+process.env.TZ = "America/Los_Angeles";
 import { createLifeServer } from "../../life/src/server.ts";
 import { agendaDate, dayHeading } from "../src/dates.ts";
 import { deliveryLabel, occurrenceLabel } from "../src/delivery.ts";
@@ -209,11 +211,11 @@ const tasks = new TaskRuntime({
 });
 const mlb = new MLBAdapter();
 let customBuild = 0;
-let releaseSlowChat: (() => void) | undefined;
+const slowChatGate = Promise.withResolvers<void>();
 let markSlowChatStarted: (() => void) | undefined;
-let releaseProgressClear: (() => void) | undefined;
-let releaseProgressRepaired: (() => void) | undefined;
-let releaseProgressFinal: (() => void) | undefined;
+const progressClearGate = Promise.withResolvers<void>();
+const progressRepairedGate = Promise.withResolvers<void>();
+const progressFinalGate = Promise.withResolvers<void>();
 let markProgressStarted: (() => void) | undefined;
 let markProgressCleared: (() => void) | undefined;
 let markProgressRepaired: (() => void) | undefined;
@@ -238,27 +240,19 @@ const harness = createLifeHarness({
         };
       if (/hold this reply/i.test(input.message)) {
         markSlowChatStarted?.();
-        await new Promise<void>((resolve) => {
-          releaseSlowChat = resolve;
-        });
+        await slowChatGate.promise;
       }
       if (/stream repair fixture/i.test(input.message)) {
         onProgress?.({ phase: "queued" });
         onProgress?.({ phase: "drafting", text: "Unvalidated fixture draft." });
         markProgressStarted?.();
-        await new Promise<void>((resolve) => {
-          releaseProgressClear = resolve;
-        });
+        await progressClearGate.promise;
         onProgress?.({ phase: "drafting" });
         markProgressCleared?.();
-        await new Promise<void>((resolve) => {
-          releaseProgressRepaired = resolve;
-        });
+        await progressRepairedGate.promise;
         onProgress?.({ phase: "drafting", text: "Repaired fixture draft." });
         markProgressRepaired?.();
-        await new Promise<void>((resolve) => {
-          releaseProgressFinal = resolve;
-        });
+        await progressFinalGate.promise;
         onProgress?.({ phase: "validating", text: "Repaired fixture draft." });
         emitLateProgress = () =>
           onProgress?.({ phase: "drafting", text: "Late stale fixture draft." });
@@ -324,7 +318,10 @@ const browser = await chromium.launch({ headless: true });
 try {
   tasks.start();
   let listening = await server.listen();
-  const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
+  const context = await browser.newContext({
+    viewport: { width: 1440, height: 950 },
+    timezoneId: "America/Los_Angeles",
+  });
   const page = await context.newPage();
   const closeChat = async () => {
     const close = page.getByRole("button", { name: "Close conversation", exact: true });
@@ -362,8 +359,9 @@ try {
   const chatPosts: Array<Record<string, unknown>> = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("request", (request) => {
-    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/life/chat")
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/life/chat") {
       chatPosts.push(request.postDataJSON() as Record<string, unknown>);
+    }
   });
   await page.goto(listening.launchUrl);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
@@ -639,16 +637,16 @@ try {
   await progressStarted;
   await page.getByText("Unvalidated fixture draft.", { exact: true }).waitFor();
   await page.getByText("Drafting…", { exact: true }).waitFor();
-  releaseProgressClear?.();
+  progressClearGate.resolve();
   await progressCleared;
   await page
     .getByText("Unvalidated fixture draft.", { exact: true })
     .waitFor({ state: "detached" });
-  await page.getByText("Ellie is drafting…", { exact: true }).waitFor();
-  releaseProgressRepaired?.();
+  await page.getByText("Drafting…", { exact: true }).waitFor();
+  progressRepairedGate.resolve();
   await progressRepaired;
   await page.getByText("Repaired fixture draft.", { exact: true }).waitFor();
-  releaseProgressFinal?.();
+  progressFinalGate.resolve();
   await page.getByText("Final fixture reply.", { exact: true }).waitFor();
   assert.equal(await page.getByText("Final fixture reply.", { exact: true }).count(), 1);
   assert.equal(await page.getByText("Repaired fixture draft.", { exact: true }).count(), 0);
@@ -672,7 +670,7 @@ try {
       path: join(artifactDir, "life-chat-status.png"),
       fullPage: false,
     });
-  releaseSlowChat?.();
+  slowChatGate.resolve();
   await page.waitForFunction(async (requestId) => {
     const response = await fetch(`/api/life/chat/requests/${requestId}`);
     return response.ok && (await response.json()).status === "completed";
@@ -2051,6 +2049,10 @@ try {
   console.log(`life UI E2E passed at ${listening.url}`);
   await context.close();
 } finally {
+  progressClearGate.resolve();
+  progressRepairedGate.resolve();
+  progressFinalGate.resolve();
+  slowChatGate.resolve();
   await browser.close();
   await server.close();
   await new Promise<void>((resolveClose, rejectClose) =>

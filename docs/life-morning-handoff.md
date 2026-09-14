@@ -2,11 +2,11 @@
 
 September 14, 2026 · Working local life-harness implementation
 
-The implementation is in `/Users/ryan/ellie-life-harness` on `codex/life-harness-build`. It is an isolated, reviewable application. The original checkout, household installation, Keychain and native services were preserved; this branch was not merged or deployed.
+The implementation is in `/Users/ryan/ellie-life-harness` on `codex/life-harness-build`. It is an isolated, reviewable application. The original checkout, household installation, Keychain and native services were preserved; deployment remains separate from the tested PR integration.
 
 ## Use it
 
-The verified preview is already open in the Codex in-app browser at `http://127.0.0.1:55869/`. Its authenticated browser session and isolated local model are left running. The overnight heartbeat is paused.
+The verified preview is already open in the Codex in-app browser at `http://127.0.0.1:49632/`. Its authenticated browser session and isolated local model are left running. The overnight heartbeat is paused.
 
 The morning preview uses private state at `/Users/ryan/.ellie-life-preview` and the hash-verified local Qwen 4B model used for acceptance. Its browser launch link is issued when the preview starts. The link is single-use and expires after ten minutes; an established browser session lasts twelve hours.
 
@@ -31,6 +31,8 @@ The [runbook](life-runbook.md) covers model configuration, private data controls
 
 ## Working features
 
+- Streamed provisional replies, foreground inference priority and compact query-relevant context.
+- Private repeated-dismissal backoff with preserved unfinished needs.
 - Automatic private Markdown memory from every accepted prompt, with retained-conversation backfill, cached summaries and later-session context.
 - Durable contacts, birthdays, needs, events, timers, reminders, routines and named shared spaces.
 - Default, group, user and conversation preferences, with private chat history and feedback.
@@ -55,7 +57,7 @@ The restored dashboard holds upcoming commitments, plans and generated app widge
 
 ## Evidence and remaining work
 
-The final integrated checks passed: **568 tests, 567 passed, one existing skip, zero failures**, plus lint, formatting, contracts, all TypeScript projects and both builds. Real authenticated browser acceptance passed. Actual local-model checks exercised conversational actions, app persistence, private improvement review and checklist creation/readback. Exact results and synthetic artifacts are recorded in the [overnight checkpoint](overnight-build.md) and [model validation report](life-model-validation.md).
+The final integrated checks passed: **632 tests, 631 passed, one existing skip, zero failures**, plus lint, formatting, contracts, all TypeScript projects and both builds. Real authenticated browser acceptance passed. Actual local-model checks exercised conversational actions, app persistence, private improvement review and checklist creation/readback. Exact results and synthetic artifacts are recorded in the [overnight checkpoint](overnight-build.md) and [model validation report](life-model-validation.md).
 
 This is not the entire unrestricted product vision. Native continuous location, notifications while the Mac is asleep, account connectors, multi-device identity/invitations/sync, arbitrary server-side plugins, cloud processing and model-weight training still need separate integrations. Current context suggestions use explicit fresh signals. Plans save checklist text; their steps do not execute automatically.
 
