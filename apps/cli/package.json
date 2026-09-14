@@ -8,6 +8,7 @@
     "@ellie/config": "*",
     "@ellie/macos": "*",
     "@ellie/protocol": "*",
+    "@ellie/speech": "*",
     "@ellie/transport": "*",
     "qrcode": "1.5.4"
   }
