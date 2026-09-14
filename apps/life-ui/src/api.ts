@@ -41,6 +41,24 @@ export type ChatResponse = {
     revision: number;
   };
 };
+export type ConnectorProviderId = "google-calendar" | "gmail" | "plaid";
+export type ConnectorMode = "observe" | "prepare";
+export type ConnectorState = "connecting" | "connected" | "paused" | "error" | "revoked";
+export interface ConnectorConnection {
+  id: string;
+  provider: ConnectorProviderId;
+  label: string;
+  state: ConnectorState;
+  lastSyncAt?: number;
+  mode: ConnectorMode;
+  error?: string;
+}
+export interface ConnectorProvider {
+  id: ConnectorProviderId;
+  label: string;
+  configured: boolean;
+  setupMessage?: string;
+}
 export const isNewerChatProgress = (currentRevision: number, nextRevision: number) =>
   Number.isInteger(nextRevision) && nextRevision > currentRevision;
 export type PluginBridgeRequest = {
@@ -103,6 +121,32 @@ export async function establishSessionFromFragment() {
   return true;
 }
 export const api = {
+  connections: {
+    list: () =>
+      request<{ connections: ConnectorConnection[]; providers: ConnectorProvider[] }>(
+        "/api/connections",
+      ),
+    start: (provider: ConnectorProviderId, mode: ConnectorMode) =>
+      request<{ authorizationUrl: string; openedExternally?: boolean }>("/api/connections/start", {
+        method: "POST",
+        body: JSON.stringify({ provider, mode }),
+      }),
+    refresh: (id: string) =>
+      request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/refresh`, {
+        method: "POST",
+        body: "{}",
+      }),
+    revoke: (id: string) =>
+      request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/revoke`, {
+        method: "POST",
+        body: "{}",
+      }),
+    mode: (id: string, mode: ConnectorMode) =>
+      request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/mode`, {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      }),
+  },
   groups: {
     list: () => request<{ groups: Group[] }>("/api/life/groups"),
     create: (name: string) =>
@@ -512,7 +556,7 @@ export const api = {
     review: () => request<PersonalDataReview>("/api/life/personal-data/review"),
     exportPage: (
       reviewToken: string,
-      store: "life" | "tasks" | "plugins",
+      store: "life" | "tasks" | "plugins" | "connectors",
       cursor?: string,
       signal?: AbortSignal,
     ) => {

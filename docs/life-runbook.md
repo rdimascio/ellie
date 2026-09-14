@@ -29,7 +29,27 @@ bun run life:start --state-dir /absolute/private/directory --port 7441
 
 The directory must be outside the source checkout, owned by the current OS user, and private (0700). Existing `~/.ellie` service state is deliberately rejected. Do not copy private life databases into Git.
 
-## Try a complete workflow
+## Automatic connected assistance
+
+Open Settings → Connected accounts. Connecting with “Automatically create private preparation plans” selected gives Ellie standing permission to maintain private plans and reminders from that account. Observe keeps the analysis and inferred memories without creating preparations. A connection starts a durable sync and three bounded specialist checks; hourly sync and daily planning maintenance continue while the Life process runs. The ordinary dashboard, plan widget and conversation orb remain the interface.
+
+The current Google Calendar and Gmail adapters need a registered Google desktop OAuth client supplied by the host. The native loopback flow uses PKCE and read-only scopes. Provider credentials live in a private encrypted vault under the separate Life state directory; they never enter generated widgets or personal exports. Plaid's read adapter accepts host-provisioned credentials, but consumer Link onboarding is not implemented. See [connected-life architecture and status](life-connected-plan.md) for supported providers and setup dependencies.
+
+For developer account setup, append `--google-client-id REGISTERED_DESKTOP_CLIENT_ID` to `bun run life:start`. If Google issued a client secret, use `--google-oauth-client /absolute/private/google-desktop-client.json` instead. The loader accepts Google's downloaded `installed` client JSON; the file must be outside the repository, owned by the current user, and mode 0600. Token endpoints remain fixed. Registration and any required provider verification must be completed with Google; the application does not include a shared registered client. Ordinary account owners use the Connect button once the host is configured.
+
+With suitable connected evidence, Ellie can infer a tentative morning appointment preference, prepare for a confirmed doctor visit, recognize communication cadence and identify recurring settled expenses. Explicit preferences and corrections take precedence. A calendar booking or a message snippet does not prove an unfinished step was completed. Missing history remains missing evidence.
+
+Run the complete connected workflow without real accounts or credentials:
+
+```sh
+bun run life:test:connections
+```
+
+This starts an isolated synthetic service, exercises background sync and plan creation, checks the existing mobile dashboard and account controls, and verifies export, disconnect and reset. It closes the fixture afterward. These tests do not connect your accounts.
+
+## Direct chat requests and manual acceptance examples
+
+Ordinary conversation captures and summarizes memories automatically; no Markdown upload is needed. The commands below remain useful for explicit corrections, new requests and developer acceptance. They are not a required setup script for connected assistance.
 
 - “Remember that I prefer morning appointments.”
 - “My friend's birthday is next Saturday. They love gardening. Help me get something under $40.”

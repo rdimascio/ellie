@@ -24,6 +24,7 @@ import type {
 } from "./types";
 import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
 import { deliveryLabel, occurrenceLabel } from "./delivery";
+import { Connections } from "./Connections";
 import ellieIcon from "../../../packages/macos/assets/Ellie.png";
 
 type View = "dashboard" | "chat" | "today" | "world" | "space" | "activity" | "settings";
@@ -2696,7 +2697,8 @@ function Plans({ scope, revision }: { scope: string; revision: string }) {
         <div>
           <h2>Plans</h2>
           <p>
-            Saved checklists you complete yourself. Plans do not run actions or create reminders.
+            Ellie prepares private checklists from connected activity. You can adjust them as plans
+            change.
           </p>
         </div>
         <button
@@ -2731,7 +2733,7 @@ function Plans({ scope, revision }: { scope: string; revision: string }) {
         <Empty
           title={unavailableCount ? "Saved plans need review" : "No saved plans yet"}
           body={
-            "In chat, try “Create a plan called Doctor visit: Confirm appointment; Gather forms; Prepare questions”."
+            "Connect your calendar in Settings and Ellie can prepare for upcoming appointments automatically. You can also describe a plan in chat."
           }
         />
       )}
@@ -2747,9 +2749,8 @@ function Plans({ scope, revision }: { scope: string; revision: string }) {
         </p>
       )}
       <p className="plan-chat-help">
-        In chat, try <strong>List plans</strong>,{" "}
-        <strong>Complete step 2 of plan Doctor visit</strong>, or{" "}
-        <strong>Reopen step 2 of plan Doctor visit</strong>.
+        Tell Ellie when something changes, or update a step here. Steps stay open until completion
+        is confirmed.
       </p>
       {error && !selected && (
         <p className="settings-error" role="alert">
@@ -2762,6 +2763,7 @@ function Plans({ scope, revision }: { scope: string; revision: string }) {
             Saved checklist · {selected.completedSteps} of {selected.totalSteps} complete. Changing
             a step does not execute it or schedule a reminder.
           </p>
+          {selected.record.body && <p className="impact">{selected.record.body}</p>}
           <div className="plan-steps">
             {selected.steps.map((step) => (
               <label key={step.id} className="inline-check">
@@ -4741,6 +4743,7 @@ function Settings({
       >
         {busy ? "Saving…" : "Save settings"}
       </button>
+      {settingsScope === `user:${data.profile.id}` && <Connections />}
       <PersonalDataControls profileId={data.profile.id} />
     </Page>
   );
@@ -4843,7 +4846,13 @@ function PersonalDataControls({ profileId }: { profileId: string }) {
       let pages = 0;
       let bytes = 0;
       let itemCount = 0;
-      for (const store of ["life", "tasks", "plugins"] as const) {
+      const stores = [
+        "life",
+        "tasks",
+        "plugins",
+        ...(review.generations.connectors === undefined ? [] : (["connectors"] as const)),
+      ] as const;
+      for (const store of stores) {
         const items: unknown[] = [];
         let cursor: string | undefined;
         let format = "";
@@ -4928,9 +4937,9 @@ function PersonalDataControls({ profileId }: { profileId: string }) {
         </button>
       </header>
       <p>
-        These controls cover your private records, settings, work, guidance, apps, and app storage.
-        Shared group records, apps, tasks, and memberships stay in place. Your own storage inside a
-        shared app is removed by reset.
+        These controls cover your private records, settings, work, guidance, connected accounts and
+        evidence, apps, and app storage. Shared group records, apps, tasks, and memberships stay in
+        place. Your own storage inside a shared app is removed by reset.
       </p>
       {review && (
         <div className="data-review">
@@ -4955,6 +4964,16 @@ function PersonalDataControls({ profileId }: { profileId: string }) {
               <dt>Personal apps</dt>
               <dd>{review.counts.plugins}</dd>
             </div>
+            {review.counts.connections !== undefined && (
+              <div>
+                <dt>Connected evidence</dt>
+                <dd>
+                  {review.counts.connections} account
+                  {review.counts.connections === 1 ? "" : "s"} ·{" "}
+                  {review.counts.connectedEvidence ?? 0}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>App storage keys</dt>
               <dd>{review.counts.pluginStorageKeys + review.counts.sharedPluginStorageKeys}</dd>
