@@ -12,7 +12,7 @@ The three work lanes have separate owners. Root reviews, integrates and publishe
 
 | Lane                         | Owner and branch                                      | Concrete output                                                                                                                          |
 | ---------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Node runtime hardening       | native_credentials, `codex/node-hardening-validation` | Validate a narrow entitlement set with a finite, isolated harness before changing the production builder.                                |
+| Node runtime hardening       | native_credentials, `codex/node-hardening-validation` | PR75 published after review: eight focused checks, 305-pass/one-skip full gate and physical Mini workload passed; GitHub checks pending. |
 | Distribution authentication  | root and native_ios, design review                    | Bind the complete manifest to an independently trusted sealed bootstrap, then bind receipts and launch without a development downgrade.  |
 | Installed service acceptance | root, awaiting isolated GUI context                   | Run the audited packaged lifecycle and permission-continuity sequence in a fresh logged-in user/VM or a separately authorized migration. |
 
