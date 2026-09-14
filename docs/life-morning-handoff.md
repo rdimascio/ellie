@@ -6,6 +6,8 @@ The implementation is in `/Users/ryan/ellie-life-harness` on `codex/life-harness
 
 ## Use it
 
+The verified preview is already open in the Codex in-app browser at `http://127.0.0.1:49569/`. Its authenticated browser session and isolated local model are left running. The overnight heartbeat is paused.
+
 The morning preview uses private state at `/Users/ryan/.ellie-life-preview` and the hash-verified local Qwen 4B model used for acceptance. Its browser launch link is issued when the preview starts. The link is single-use and expires after ten minutes; an established browser session lasts twelve hours.
 
 The machine-local shortcut, while its temporary model assets remain available, is:

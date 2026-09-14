@@ -89,7 +89,7 @@ Twenty-three adapter and seven world-context checks pass. The actual local model
 
 Two Sol engineers hit the account usage limit during this slice; their edits were retained. Root finished UI integration and acceptance, and the remaining Sol engineer independently audited the core/service code with 45/45 focused tests passing. No reset credit was consumed. The preview launcher left running during the interruption (PID 36640, runner 36642, session 91608; ports 63050/63043) was stopped cleanly and both ports were verified closed after acceptance. A fresh preview start remains necessary for the morning handoff.
 
-Next work is the morning preview and handoff. Do not begin another feature slice before completing the handoff. Do not modify the separately owned native installer or live household services. Keep the remaining integration limits explicit rather than declaring the entire product vision finished.
+The morning preview and handoff are complete. Do not resume another feature slice without a new request. The separately owned native installer and live household services remain unchanged. The remaining integration limits below still apply.
 
 The raw core-only deletion API remains a store-local primitive; the Settings workflow coordinates the full personal reset. Do not claim cross-database atomicity, external undo, erased downloaded exports or model unlearning.
 
@@ -97,7 +97,7 @@ Native continuous location, alerts during sleep, third-party account connectors,
 
 ## Overnight continuation
 
-Heartbeat `build-ellie-life-harness-overnight` continues every thirty minutes using this checkpoint, branch and existing agents. Owned `/usr/bin/caffeinate -i -t 31620` (exec session `54237`, started around 06:13 UTC) prevents idle sleep until approximately 08:00 local, then exits. It does not change saved power settings. If ending early, stop only this handle.
+Heartbeat `build-ellie-life-harness-overnight` was paused through the Codex automation tool at approximately **08:03 America/Los_Angeles on September 14, 2026**, after final integration and verification. The overnight build will not continue automatically. Owned `/usr/bin/caffeinate -i -t 31620` (exec session `54237`, started around 06:13 UTC) was time-bounded to approximately 08:00 local. It does not change saved power settings.
 
 At or after **September 14, 2026 at 08:00 America/Los_Angeles**, finish the current bounded integration, run final checks, provide the morning handoff and pause this heartbeat. Keep unchanged runs quiet. Do not mark the entire vision complete because a development slice passes.
 
@@ -108,3 +108,5 @@ See the [runbook](life-runbook.md) for launch commands and [product plan](life-h
 A fresh isolated preview was started at 07:49:59 America/Los_Angeles and verified in the Codex in-app browser at `http://127.0.0.1:49569/`. The one-use token was exchanged successfully; the app shows an empty private conversation and the configured local model ready. No synthetic records were added to preview state. The user-facing browser tab is retained as a deliverable. Launcher PID 44333, runner PID 44335, exec session 49485; model endpoint `http://127.0.0.1:49562/v1`, exact alias `ellie-qwen4b-0c5b9960`. These owned preview processes are intentionally left running for the handoff. Do not stop them by port alone; verify their current command/ownership first.
 
 A final default-greeting copy correction removes the placeholder name “You”; the UI build and visible browser reload passed. The [morning handoff](life-morning-handoff.md) provides working features, launch commands, verification and remaining dependencies.
+
+The reviewed preview handoff is committed as `64db344` (`Prepare the verified morning preview handoff`). This final documentation checkpoint records the successful heartbeat pause. The isolated preview remains running for the user; there is no deployment or merge to main.
