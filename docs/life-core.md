@@ -1,0 +1,19 @@
+# Life core
+
+`@ellie/life-core` is Ellie's local durable store for private and explicitly shared life data. The service supplies a trusted `{ userId }`; callers cannot claim group membership in an operation. The database owns group membership, resource scopes, records, settings, source chunks, relationships, and provenance.
+
+Records use a generic JSON `data` object and one of the supported kinds: memory, contact, place, reminder, timer, event, birthday, holiday, need, goal, routine, source, or feedback. Titles, bodies, identifiers, nesting, arrays, and serialized JSON are bounded. Reminder and event clients can store `dueAt` as epoch milliseconds, `timeZone` as an IANA identifier, and `completed` as a boolean. Updates require the revision returned by the preceding read and throw `LifeConflictError` after a concurrent change.
+
+Scopes are either `{ type: "user", id: userId }` or `{ type: "group", id: groupId }`. A user can only create or read their own private records. Group members can read and write group records; owners manage membership and group settings. Removing a membership immediately removes access. Personal export includes private records, effective user settings, and group names/roles. Personal deletion removes private records, source chunks through cascading deletion, user settings, and ordinary memberships; it deliberately retains groups where the user is the last owner so shared data is not silently orphaned or destroyed.
+
+Settings resolve in default, active group, user, then task order and return an origin for every effective key. Values can be any bounded JSON value. Keys related to permission, authority, authentication, capabilities, roles, or membership are rejected at every setting level; permission remains a separate authority.
+
+Text, Markdown, HTML, email, and transcript sources are normalized into bounded chunks. Metadata is generic JSON and should include `filename` and `mimeType` when known. Binary formats use `BinaryExtractor`, keeping parser dependencies outside this package. Search is lexical, bounded, cited by source and chunk, and filters authorized scopes before scoring. Source content is inert data: HTML scripts are removed during normalization, and records mark source content as untrusted. Updating or deleting a source replaces/removes its chunks and adds `invalidatedAt` to provenance entries in derived records. Clients can present a memory as valid when no provenance entry is invalidated and as needing review otherwise.
+
+`commitImport` validates an entire calendar or contact import before opening one transaction. It writes the inert source, normalized chunks, selected records, relationships, and scoped provenance together. Source hashes and item keys derive stable identities, so repeating an import is idempotent. Imported records carry their managed revision; a later import preserves and reports any record the user edited instead of overwriting it.
+
+`updateNotification` dismisses a notification with a required revision. Its `complete` action also marks a linked reminder, need, or goal complete in the same transaction. `createProactiveNotification` atomically checks the source record revision and cooldown while creating the notification and updating its delivery marker.
+
+`recordFeedback` always retains an inspectable feedback record. It changes a lasting setting only when `explicitPreference` is present. `inferTone` returns a temporary signal and writes nothing.
+
+The first schema has no encryption layer or semantic/vector search. SQLite file and directory access is limited to the current OS user through ownership, mode, symlink, and hard-link checks. Backup encryption and at-rest key management belong to the service deployment design.

@@ -1,0 +1,47 @@
+# Durable task runtime
+
+`@ellie/task-runtime` is the local coordinator for background tasks, reminders, routines, event watches, and handler-backed subagent jobs. It is separate from compute workers: a compute worker supplies machine capacity, while a task is a logical unit of authorized work. The runtime does not invoke a model or tool executor by itself.
+
+Create `TaskRuntime` with a private `directory` and register a fixed set of typed handlers. Handler names are the only persisted executable references. Inputs are JSON data and are never interpreted as commands or shell text. The service is responsible for validating handler-specific input before enqueueing it.
+
+```ts
+const tasks = new TaskRuntime({
+  directory: privateStateDirectory,
+  capabilityResolver: (scope) => grants.forScope(scope),
+});
+
+tasks.registerHandler({
+  name: "reminder.notify",
+  requiredCapabilities: ["notification.record.create"],
+  async run(context, input: { recordId: string; scope: string; userId: string }) {
+    context.progress({ message: "Recording reminder delivery" });
+    return notifications.record(input, context.idempotencyKey, context.signal);
+  },
+  checkOutcome: (_context, result) => result.persisted === true,
+});
+
+const task = tasks.schedule({
+  owner: "user:alice",
+  handler: "reminder.notify",
+  input: { recordId: "reminder-1", scope: "user:alice", userId: "alice" },
+  schedule: { kind: "daily", time: "08:30", timeZone: "America/Los_Angeles" },
+});
+```
+
+All timestamps are integer Unix milliseconds. Owner scopes are canonical `user:<id>` or `group:<id>` strings. Callers must pass the authenticated active scope to `get`, `list`, `pause`, `resume`, `cancel`, and `runNow`; a mismatched scope reveals no task. HTTP clients should select operations and inputs only. They must not supply capability claims: the service maps approved operations to internal handler requirements, and `capabilityResolver` reloads current grants immediately before every dispatch.
+
+`enqueue` and `schedule` return a `TaskRecord`. The lifecycle states are `queued`, `running`, `waiting`, `scheduled`, `paused`, `succeeded`, `failed`, `cancelled`, `expired`, and `unknown`. A successful handler return is not sufficient for success: handlers need `checkOutcome`, otherwise the record ends as `failed` with `outcome_unverified`. Progress is durable and available with `progress(taskId, owner)`.
+
+Schedules support one-shot Unix times, anchored intervals, and daily or weekly wall-clock recurrence in an IANA time zone. `nextOccurrence(schedule, after)` is a pure helper. Recurrence uses local calendar time, skips nonexistent spring-forward wall times, and emits one occurrence during a repeated fall-back wall time. Persisted occurrence keys and a unique index make concurrent or repeated ticks idempotent. Missed runs can be skipped, collapsed to the latest occurrence, or caught up to an explicit limit.
+
+`watch` persists an owner-scoped topic subscription. `publish` durably deduplicates an event by owner, topic, and caller-provided key, then enqueues matching handler work. Watch payloads remain inert JSON. Event adapters decide which external changes are trustworthy and normalize their keys.
+
+Parent and child tasks share the root task-count and concurrency budget and an explicit capability ceiling. A child handler cannot require authority outside its parent’s `allowedCapabilities`, even when the current scope resolver has a broader grant. `maxRuntimeMs` bounds each handler invocation; an explicit root `deadlineAt` bounds elapsed time across the whole tree and is inherited by children. Dependencies and global concurrency add further bounds. Each recurring occurrence starts an independent bounded subtree, so a long-lived routine does not exhaust its lifetime budget merely by firing normally. Cancelling a parent marks descendants cancelled and aborts running handlers through `AbortSignal`; this stops future work but does not undo side effects already applied. Child agents are implemented only by registering a scoped handler backed by the service's model/tool executor.
+
+Watch templates are owner scoped and capped at 1,000 per owner. `listWatches`, `pauseWatch`, `resumeWatch`, and `removeWatch` provide scoped lifecycle controls. Template inputs, capabilities, retry policy, deadlines, and budgets are validated before persistence.
+
+The SQLite store uses a private exclusively owned file, transactions, dispatch compare-and-set, task leases, a stable logical-operation idempotency key, and durable progress. A second coordinator cannot open the live store. On restart, an interrupted external or unsafe handler becomes `unknown` and is not replayed. A task is requeued only when its handler is explicitly `resumable` and the task has an explicit retry policy with attempts remaining. Handlers should reconcile uncertain downstream state before retrying and pass the stable idempotency key to systems that support it.
+
+Inputs and results are limited to 256 KB of JSON, capability and dependency lists are bounded, progress messages are limited to 4 KB, and each task retains at most 1,000 progress rows. Queries return at most 500 tasks. Terminal task records and watch-event deduplication keys expire after 90 days and are capped at 10,000 rows. Active and scheduled work is never removed by retention.
+
+Call `tick()` for deterministic tests or host-driven scheduling. `start()` installs one unref'ed interval, `stop()` clears it and waits for active handlers, and `close()` stops and closes SQLite. A sleeping coordinator cannot deliver a timer; device-local alerts require a native scheduler. The runtime does not provide encryption, cross-device replication, distributed leases, OS notifications, or exactly-once external side effects.

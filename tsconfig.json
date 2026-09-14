@@ -14,5 +14,5 @@
     "types": ["node"]
   },
   "include": ["apps/**/*.ts", "packages/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["apps/command-center"]
+  "exclude": ["apps/command-center", "apps/life-ui"]
 }

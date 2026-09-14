@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Around the diamond</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #f7f4ed;
+        color: #263931;
+        font-family: system-ui, sans-serif;
+      }
+      main {
+        max-width: 1080px;
+        margin: auto;
+        padding: 30px;
+      }
+      header {
+        display: flex;
+        align-items: start;
+        justify-content: space-between;
+        gap: 20px;
+      }
+      h1 {
+        font-family: Georgia, serif;
+        font-size: clamp(32px, 6vw, 55px);
+        font-weight: 400;
+        letter-spacing: -0.04em;
+        margin: 8px 0;
+      }
+      p {
+        font-size: 13px;
+        line-height: 1.6;
+        color: #67736a;
+      }
+      small {
+        font-size: 11px;
+        letter-spacing: 0.13em;
+        color: #827664;
+      }
+      button {
+        border: 1px solid #bdc7bb;
+        background: transparent;
+        border-radius: 99px;
+        padding: 10px 16px;
+        font: inherit;
+        cursor: pointer;
+        color: inherit;
+      }
+      button:hover {
+        background: #e8eddf;
+      }
+      button:focus-visible {
+        outline: 3px solid #bc684e;
+        outline-offset: 3px;
+      }
+      nav {
+        display: flex;
+        gap: 8px;
+        margin: 24px 0;
+        border-bottom: 1px solid #d9ddcf;
+        padding-bottom: 16px;
+      }
+      nav button[aria-pressed="true"] {
+        background: #263931;
+        color: #f7f4ed;
+      }
+      #status {
+        padding: 12px 0;
+        min-height: 42px;
+      }
+      #content {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+        gap: 18px;
+      }
+      .game,
+      .division {
+        border: 1px solid #d9ddcf;
+        border-radius: 10px;
+        padding: 18px;
+        background: #fffdf8;
+      }
+      .game small {
+        letter-spacing: 0.02em;
+      }
+      .team {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 17px;
+        margin-top: 16px;
+        gap: 12px;
+      }
+      .team b {
+        font-size: 25px;
+      }
+      .division h2 {
+        font-family: Georgia, serif;
+        font-size: 24px;
+        font-weight: 400;
+        margin: 0 0 18px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      th {
+        font-size: 10px;
+        color: #67736a;
+        font-weight: 400;
+        text-align: right;
+        padding-bottom: 9px;
+      }
+      td {
+        padding: 10px 0;
+        border-top: 1px solid #e9ecdf;
+        text-align: right;
+      }
+      td:first-child,
+      th:first-child {
+        text-align: left;
+        padding-right: 8px;
+      }
+      footer {
+        margin-top: 24px;
+        color: #67736a;
+        font-size: 11px;
+      }
+      @media (max-width: 500px) {
+        main {
+          padding: 18px;
+        }
+        header {
+          display: block;
+        }
+        #refresh {
+          margin-top: 10px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <small>ELLIE · BASEBALL</small>
+          <h1>Around the diamond.</h1>
+          <p id="date">Today's games and the season so far.</p>
+        </div>
+        <button id="refresh">Refresh</button>
+      </header>
+      <nav aria-label="Baseball view">
+        <button id="games" aria-pressed="true">Today's games</button
+        ><button id="standings" aria-pressed="false">Standings</button>
+      </nav>
+      <p id="status" role="status">Connecting to Ellie…</p>
+      <section id="content" aria-label="Baseball results"></section>
+      <footer>
+        MLB data · Refreshes once a minute while this view is open. Last-known results are labeled
+        when a refresh fails.
+      </footer>
+    </main>
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let port,
+        sequence = 0,
+        pending = new Map(),
+        snapshot,
+        view = "games",
+        loading = false;
+      function call() {
+        return new Promise((resolve, reject) => {
+          if (!port) {
+            reject(Error("Not connected to Ellie."));
+            return;
+          }
+          const id = String(++sequence),
+            timeout = setTimeout(() => {
+              pending.delete(id);
+              reject(Error("MLB did not respond. Try again."));
+            }, 25000);
+          pending.set(id, { resolve, reject, timeout });
+          port.postMessage({ id, method: "mlb.snapshot" });
+        });
+      }
+      window.addEventListener("message", (event) => {
+        if (
+          port ||
+          event.source !== window ||
+          event.data?.type !== "ellie:connect" ||
+          !event.ports[0]
+        )
+          return;
+        port = event.ports[0];
+        port.onmessage = (e) => {
+          const row = pending.get(e.data?.id);
+          if (!row) return;
+          clearTimeout(row.timeout);
+          pending.delete(e.data.id);
+          e.data.ok
+            ? row.resolve(e.data.result)
+            : row.reject(Error(e.data.error || "MLB unavailable"));
+        };
+        port.start();
+        void load();
+      });
+      function el(tag, text, cls) {
+        const node = document.createElement(tag);
+        if (text !== undefined) node.textContent = String(text);
+        if (cls) node.className = cls;
+        return node;
+      }
+      function render() {
+        if (!snapshot) return;
+        $("content").replaceChildren();
+        $("date").textContent = snapshot.date
+          ? new Date(snapshot.date + "T12:00:00").toLocaleDateString(undefined, {
+              weekday: "long",
+              month: "long",
+              day: "numeric",
+            })
+          : "Baseball";
+        $("status").textContent =
+          snapshot.error ||
+          (snapshot.updatedAt
+            ? "Updated " +
+              new Date(snapshot.updatedAt).toLocaleTimeString(undefined, {
+                hour: "numeric",
+                minute: "2-digit",
+              })
+            : "Waiting for an update.");
+        if (view === "games") {
+          if (!snapshot.games?.length) {
+            $("content").append(
+              el(
+                "p",
+                snapshot.error ? "Games could not be loaded." : "No games scheduled for this day.",
+              ),
+            );
+            return;
+          }
+          for (const game of snapshot.games) {
+            const card = el("article", undefined, "game");
+            card.append(el("small", game.status + (game.inning ? " · " + game.inning : "")));
+            for (const [name, score] of [
+              [game.away, game.awayScore],
+              [game.home, game.homeScore],
+            ]) {
+              const team = el("div", undefined, "team");
+              team.append(el("span", name), el("b", score ?? "—"));
+              card.append(team);
+            }
+            if (game.start)
+              card.append(
+                el(
+                  "p",
+                  new Date(game.start).toLocaleTimeString(undefined, {
+                    hour: "numeric",
+                    minute: "2-digit",
+                  }),
+                ),
+              );
+            $("content").append(card);
+          }
+        } else {
+          if (!snapshot.standings?.length) {
+            $("content").append(el("p", "Standings are not available yet."));
+            return;
+          }
+          for (const division of snapshot.standings) {
+            const card = el("article", undefined, "division");
+            card.append(el("h2", division.division));
+            const table = el("table"),
+              head = el("tr");
+            for (const label of ["Team", "W", "L", "PCT", "GB"]) head.append(el("th", label));
+            const thead = el("thead");
+            thead.append(head);
+            table.append(thead);
+            const tbody = el("tbody");
+            for (const team of division.teams) {
+              const row = el("tr");
+              for (const value of [team.name, team.wins, team.losses, team.pct, team.gamesBack])
+                row.append(el("td", value));
+              tbody.append(row);
+            }
+            table.append(tbody);
+            card.append(table);
+            $("content").append(card);
+          }
+        }
+      }
+      async function load() {
+        if (loading || document.hidden) return;
+        loading = true;
+        $("refresh").disabled = true;
+        $("status").textContent = "Checking MLB…";
+        try {
+          snapshot = await call();
+          render();
+        } catch (error) {
+          $("status").textContent =
+            error.message + (snapshot ? " Showing the last successful update." : "");
+        } finally {
+          loading = false;
+          $("refresh").disabled = false;
+        }
+      }
+      for (const name of ["games", "standings"])
+        $(name).addEventListener("click", () => {
+          view = name;
+          $("games").setAttribute("aria-pressed", String(view === "games"));
+          $("standings").setAttribute("aria-pressed", String(view === "standings"));
+          render();
+        });
+      $("refresh").addEventListener("click", load);
+      setInterval(load, 60000);
+      document.addEventListener("visibilitychange", () => {
+        if (!document.hidden) void load();
+      });
+    </script>
+  </body>
+</html>

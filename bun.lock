@@ -38,6 +38,26 @@
         "react-dom": "19.3.0",
       },
     },
+    "apps/life": {
+      "name": "@ellie/life",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-context": "workspace:*",
+        "@ellie/life-core": "workspace:*",
+        "@ellie/life-harness": "workspace:*",
+        "@ellie/life-ingest": "workspace:*",
+        "@ellie/life-plugins": "workspace:*",
+        "@ellie/task-runtime": "workspace:*",
+      },
+    },
+    "apps/life-ui": {
+      "name": "@ellie/life-ui",
+      "version": "0.1.0",
+      "dependencies": {
+        "react": "19.3.0",
+        "react-dom": "19.3.0",
+      },
+    },
     "apps/node": {
       "name": "@ellie/node",
       "version": "0.1.0",
@@ -84,6 +104,49 @@
       "name": "@ellie/knowledge",
       "version": "0.1.0",
     },
+    "packages/life-context": {
+      "name": "@ellie/life-context",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-core": "workspace:*",
+      },
+    },
+    "packages/life-core": {
+      "name": "@ellie/life-core",
+      "version": "0.1.0",
+    },
+    "packages/life-harness": {
+      "name": "@ellie/life-harness",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-context": "*",
+        "@ellie/life-core": "*",
+        "@ellie/life-plugins": "*",
+        "@ellie/task-runtime": "*",
+      },
+    },
+    "packages/life-import": {
+      "name": "@ellie/life-import",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-core": "*",
+      },
+    },
+    "packages/life-ingest": {
+      "name": "@ellie/life-ingest",
+      "version": "0.1.0",
+    },
+    "packages/life-learning": {
+      "name": "@ellie/life-learning",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-core": "workspace:*",
+      },
+    },
+    "packages/life-plugins": {
+      "name": "@ellie/life-plugins",
+      "version": "0.1.0",
+    },
     "packages/macos": {
       "name": "@ellie/macos",
       "version": "0.1.0",
@@ -124,6 +187,10 @@
       "name": "@ellie/speech",
       "version": "0.1.0",
     },
+    "packages/task-runtime": {
+      "name": "@ellie/task-runtime",
+      "version": "0.1.0",
+    },
     "packages/transport": {
       "name": "@ellie/transport",
       "version": "0.1.0",
@@ -149,6 +216,24 @@
 
     "@ellie/knowledge": ["@ellie/knowledge@workspace:packages/knowledge"],
 
+    "@ellie/life": ["@ellie/life@workspace:apps/life"],
+
+    "@ellie/life-context": ["@ellie/life-context@workspace:packages/life-context"],
+
+    "@ellie/life-core": ["@ellie/life-core@workspace:packages/life-core"],
+
+    "@ellie/life-harness": ["@ellie/life-harness@workspace:packages/life-harness"],
+
+    "@ellie/life-import": ["@ellie/life-import@workspace:packages/life-import"],
+
+    "@ellie/life-ingest": ["@ellie/life-ingest@workspace:packages/life-ingest"],
+
+    "@ellie/life-learning": ["@ellie/life-learning@workspace:packages/life-learning"],
+
+    "@ellie/life-plugins": ["@ellie/life-plugins@workspace:packages/life-plugins"],
+
+    "@ellie/life-ui": ["@ellie/life-ui@workspace:apps/life-ui"],
+
     "@ellie/macos": ["@ellie/macos@workspace:packages/macos"],
 
     "@ellie/memory": ["@ellie/memory@workspace:packages/memory"],
@@ -166,6 +251,8 @@
     "@ellie/server": ["@ellie/server@workspace:apps/server"],
 
     "@ellie/speech": ["@ellie/speech@workspace:packages/speech"],
+
+    "@ellie/task-runtime": ["@ellie/task-runtime@workspace:packages/task-runtime"],
 
     "@ellie/transport": ["@ellie/transport@workspace:packages/transport"],
 

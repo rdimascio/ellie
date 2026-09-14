@@ -1,0 +1,16 @@
+{
+  "name": "@ellie/life-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./model": "./src/model.ts"
+  },
+  "dependencies": {
+    "@ellie/life-context": "*",
+    "@ellie/life-core": "*",
+    "@ellie/life-plugins": "*",
+    "@ellie/task-runtime": "*"
+  }
+}

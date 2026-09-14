@@ -1,0 +1,11 @@
+# Proactive context matching
+
+`ProactivityEngine` connects explicit context signals to authorized open life records. It supports a shopping-store signal, a location observation, a reported price, and an upcoming-event preparation check. Signals are observations rather than instructions or credentials.
+
+Shopping matches require a need with `data.store` or `data.stores`. Location additionally needs a saved place with `latitude`, `longitude`, and an optional `radiusMeters`; both measurement accuracy and distance must fit that place. Positions and offers more than fifteen minutes old are ignored, as are future-dated observations. Raw coordinates are not retained by this engine.
+
+Prices match the need's `budget` or `targetPrice` and its stated currency. Notifications describe the reporting source rather than claiming independent retailer verification. Preparation checks look for events within the next 48 hours. Completed, cancelled or expired needs and records with invalidated source provenance do not generate new suggestions.
+
+The engine honors `proactiveSuggestions: false` (with legacy `proactive` fallback) and structured `quietHours: { enabled: true, start: 22, end: 7 }` in the effective settings, using the selected `timeZone`. It emits at most three matches per signal and retains a per-record cooldown across restart. The cooldown update and notification creation commit in one transaction. Results become scoped feedback records with `notification: true`, an explanation, a related-record link, and expiry. The host can show or dismiss them.
+
+Tests use synthetic places and needs and verify freshness, relevance, private scope, currency/budget constraints, cooldown persistence and completion suppression. No native geofence subscription, automatic cross-app observation, independent retailer inventory feed, or unattended purchasing is enabled by this package. Those are future signal providers behind explicit device or connector permissions.

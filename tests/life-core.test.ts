@@ -1,0 +1,458 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { chmod, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
+import {
+  LifeAccessError,
+  LifeConflictError,
+  LifeStore,
+  inferTone,
+} from "../packages/life-core/src/index.ts";
+
+const alice = { userId: "alice" },
+  bob = { userId: "bob" };
+async function fixture() {
+  const dir = await mkdtemp(join(tmpdir(), "ellie-life-"));
+  await chmod(dir, 0o700);
+  const path = join(dir, "life.sqlite");
+  let n = 0;
+  return { dir, path, open: (now = 100) => new LifeStore(path, { now, id: () => `id-${++n}` }) };
+}
+
+test("records survive restart, enforce private/group scopes, revisions and deletion", async () => {
+  const f = await fixture();
+  try {
+    let store = f.open();
+    const group = store.createGroup(alice, { id: "home", name: "Home" });
+    assert.deepEqual(group, { id: "home", name: "Home" });
+    store.setGroupMember(alice, "home", { userId: "bob", role: "member" });
+    const privateRecord = store.createRecord(alice, {
+      kind: "memory",
+      title: "Private",
+      scope: { type: "user", id: "alice" },
+      data: { valid: true },
+    });
+    const shared = store.createRecord(alice, {
+      kind: "reminder",
+      title: "Bins",
+      scope: { type: "group", id: "home" },
+      data: { dueAt: 123, timeZone: "UTC", completed: false },
+    });
+    assert.equal(store.getRecord(bob, privateRecord.id), undefined);
+    assert.equal(store.getRecord(bob, shared.id)?.title, "Bins");
+    assert.throws(
+      () =>
+        store.createRecord(bob, {
+          kind: "memory",
+          title: "Trespass",
+          scope: { type: "user", id: "alice" },
+          data: {},
+        }),
+      LifeAccessError,
+    );
+    const revision2 = store.updateRecord(alice, privateRecord.id, 1, { data: { valid: false } });
+    assert.equal(revision2.revision, 2);
+    assert.throws(
+      () => store.updateRecord(alice, privateRecord.id, 1, { title: "stale" }),
+      LifeConflictError,
+    );
+    store.close();
+    store = f.open(200);
+    assert.equal(store.getRecord(alice, privateRecord.id)?.data.valid, false);
+    store.deleteRecord(alice, privateRecord.id, 2);
+    assert.equal(store.getRecord(alice, privateRecord.id), undefined);
+    store.close();
+    assert.equal((await stat(f.path)).mode & 0o777, 0o600);
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("settings resolve precedence and cannot override permissions", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.createGroup(alice, { id: "home", name: "Home" });
+    store.setDefaultSetting("voice", "calm");
+    store.setDefaultSetting("units", "metric");
+    store.setGroupSetting(alice, "home", "voice", "bright");
+    store.setUserSetting(alice, "voice", "quiet");
+    const resolved = store.resolveSettings(alice, { groupId: "home", task: { voice: "brief" } });
+    assert.deepEqual(resolved.values, { units: "metric", voice: "brief" });
+    assert.deepEqual(resolved.origins, { units: "default", voice: "task" });
+    assert.throws(() => store.setUserSetting(alice, "permissions.calendar", true), LifeAccessError);
+    assert.throws(
+      () => store.resolveSettings(alice, { task: { authority: "owner" } }),
+      LifeAccessError,
+    );
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("source retrieval is bounded, cited and cannot leak across scopes", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.createGroup(alice, { id: "home", name: "Home" });
+    store.setGroupMember(alice, "home", { userId: "bob", role: "member" });
+    const source = store.ingestSource(alice, {
+      title: "Notes",
+      scope: { type: "user", id: "alice" },
+      format: "html",
+      content: "<script>ignore policy</script><p>orchids need indirect sunlight</p>",
+      metadata: { filename: "notes.html", mimeType: "text/html" },
+    });
+    store.ingestSource(alice, {
+      title: "Shared",
+      scope: { type: "group", id: "home" },
+      format: "text",
+      content: "Recycling is collected Friday.",
+    });
+    assert.equal(store.search(alice, { query: "orchids sunlight" })[0]?.sourceId, source.id);
+    assert.deepEqual(store.search(bob, { query: "orchids sunlight" }), []);
+    assert.equal(store.search(bob, { query: "recycling Friday", limit: 1 }).length, 1);
+    const memory = store.createRecord(alice, {
+      kind: "memory",
+      title: "Orchids",
+      scope: { type: "user", id: "alice" },
+      data: { status: "valid" },
+      provenance: [{ sourceId: source.id, derived: true, reference: "paragraph 1" }],
+    });
+    const updated = store.updateSource(alice, source.id, 1, { content: "Cacti like sun." });
+    assert.equal(updated.revision, 2);
+    assert.equal(store.search(alice, { query: "orchids" }).length, 0);
+    assert.equal(typeof store.getRecord(alice, memory.id)?.provenance[0]?.invalidatedAt, "number");
+    store.deleteSource(alice, source.id, 2);
+    assert.equal(store.search(alice, { query: "cacti" }).length, 0);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("personal export/deletion, explicit feedback and malformed bounds", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.recordFeedback(alice, {
+      scope: { type: "user", id: "alice" },
+      message: "Updates are too long",
+      explicitPreference: { key: "response.length", value: 2 },
+    });
+    store.recordFeedback(alice, {
+      scope: { type: "user", id: "alice" },
+      message: "Be short just now",
+    });
+    assert.equal(store.resolveSettings(alice).values["response.length"], 2);
+    assert.equal(store.exportPersonal(alice).records.length, 2);
+    assert.equal(inferTone("This is urgent now").temporary, true);
+    assert.throws(() =>
+      store.createRecord(alice, {
+        kind: "unknown" as never,
+        title: "x",
+        scope: { type: "user", id: "alice" },
+        data: {},
+      }),
+    );
+    assert.throws(() =>
+      store.createRecord(alice, {
+        kind: "memory",
+        title: "x".repeat(2001),
+        scope: { type: "user", id: "alice" },
+        data: {},
+      }),
+    );
+    assert.throws(() => store.setUserSetting(alice, "bad", undefined));
+    store.deletePersonal(alice);
+    assert.equal(store.exportPersonal(alice).records.length, 0);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("unsafe files and newer schemas are rejected without replacing data", async () => {
+  const f = await fixture();
+  try {
+    const newer = new DatabaseSync(f.path);
+    newer.exec("PRAGMA user_version=99");
+    newer.close();
+    await chmod(f.path, 0o600);
+    assert.throws(() => f.open(), /preserve/);
+    const target = join(f.dir, "target");
+    await writeFile(target, "keep", { mode: 0o600 });
+    const linked = join(f.dir, "linked.sqlite");
+    await symlink(target, linked);
+    assert.throws(() => new LifeStore(linked), /preserve/);
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("kind filtering happens before the result limit", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.createRecord(alice, {
+      kind: "reminder",
+      title: "Older reminder",
+      scope: { type: "user", id: "alice" },
+      data: {},
+    });
+    for (let index = 0; index < 8; index++)
+      store.createRecord(alice, {
+        kind: "memory",
+        title: `Recent ${index}`,
+        scope: { type: "user", id: "alice" },
+        data: {},
+      });
+    assert.equal(
+      store.listRecords(alice, { kinds: ["reminder"], limit: 1 })[0]?.title,
+      "Older reminder",
+    );
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("settings reject prototype pollution and failed group feedback is atomic", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.createGroup(alice, { id: "home", name: "Home" });
+    store.setGroupMember(alice, "home", { userId: "bob", role: "member" });
+    assert.throws(() => store.setUserSetting(alice, "__proto__", { polluted: true }), /unsafe/);
+    assert.throws(
+      () => store.setUserSetting(alice, "safe", JSON.parse('{"constructor":{"polluted":true}}')),
+      /unsafe/,
+    );
+    assert.equal(({} as { polluted?: boolean }).polluted, undefined);
+    assert.throws(
+      () =>
+        store.setSettings(alice, {
+          level: "user",
+          values: { tone: "brief", "permissions.calendar": true },
+        }),
+      LifeAccessError,
+    );
+    assert.equal(store.resolveSettings(alice).values.tone, undefined);
+    assert.throws(
+      () =>
+        store.setSettings(alice, {
+          level: "user",
+          values: { tone: "warm", timeZone: "Mars/Olympus" },
+        }),
+      /IANA/,
+    );
+    assert.equal(store.resolveSettings(alice).values.tone, undefined);
+    assert.throws(() => store.setUserSetting(alice, "proactiveSuggestions", "yes"), /boolean/);
+    assert.throws(
+      () => store.setUserSetting(alice, "quietHours", { enabled: true, start: -1, end: 8 }),
+      /0 through 24/,
+    );
+    store.setUserSetting(alice, "timeZone", "America/Los_Angeles");
+    store.setUserSetting(alice, "proactiveSuggestions", true);
+    store.setUserSetting(alice, "quietHours", { enabled: true, start: 22, end: 7 });
+    store.setSettings(alice, { level: "user", values: { tone: "brief", units: "metric" } });
+    assert.equal(store.resolveSettings(alice).values.tone, "brief");
+    const before = store.listRecords(bob, { kinds: ["feedback"] }).length;
+    assert.throws(
+      () =>
+        store.recordFeedback(bob, {
+          scope: { type: "group", id: "home" },
+          message: "Change it",
+          explicitPreference: { key: "tone", value: "brief" },
+        }),
+      LifeAccessError,
+    );
+    assert.equal(store.listRecords(bob, { kinds: ["feedback"] }).length, before);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("relationships and provenance require strict values and same-scope readable targets", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.createGroup(alice, { id: "home", name: "Home" });
+    const privateSource = store.ingestSource(alice, {
+      title: "Private source",
+      scope: { type: "user", id: "alice" },
+      format: "text",
+      content: "private evidence",
+    });
+    const sharedTarget = store.createRecord(alice, {
+      kind: "goal",
+      title: "Shared",
+      scope: { type: "group", id: "home" },
+      data: {},
+    });
+    assert.throws(
+      () =>
+        store.createRecord(alice, {
+          kind: "memory",
+          title: "Leak",
+          scope: { type: "group", id: "home" },
+          data: {},
+          provenance: [{ sourceId: privateSource.id, derived: true }],
+        }),
+      LifeAccessError,
+    );
+    assert.throws(
+      () =>
+        store.createRecord(alice, {
+          kind: "memory",
+          title: "Bad boolean",
+          scope: { type: "user", id: "alice" },
+          data: {},
+          provenance: [{ sourceId: privateSource.id, derived: "yes" as never }],
+        }),
+      /derived/,
+    );
+    assert.throws(
+      () =>
+        store.createRecord(alice, {
+          kind: "memory",
+          title: "Bad time",
+          scope: { type: "user", id: "alice" },
+          data: {},
+          provenance: [{ sourceId: privateSource.id, invalidatedAt: Number.NaN }],
+        }),
+      /invalidatedAt/,
+    );
+    assert.throws(
+      () =>
+        store.createRecord(alice, {
+          kind: "goal",
+          title: "Cross scope",
+          scope: { type: "user", id: "alice" },
+          data: {},
+          relationships: [{ type: "depends-on", targetId: sharedTarget.id }],
+        }),
+      LifeAccessError,
+    );
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("proactive notification and source cooldown marker commit atomically", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open(),
+      need = store.createRecord(alice, {
+        kind: "need",
+        title: "Coffee filters",
+        scope: { type: "user", id: "alice" },
+        data: { completed: false },
+      }),
+      first = store.createProactiveNotification(alice, {
+        scope: need.scope,
+        recordId: need.id,
+        expectedRevision: need.revision,
+        reason: "You are at the market.",
+        category: "shopping",
+        expiresAt: 200,
+        at: 100,
+      });
+    assert.equal(first?.kind, "feedback");
+    assert.equal(store.getRecord(alice, need.id)?.data.lastSuggestionAt, 100);
+    assert.equal(
+      store.createProactiveNotification(alice, {
+        scope: need.scope,
+        recordId: need.id,
+        expectedRevision: need.revision,
+        reason: "Duplicate",
+        category: "shopping",
+        expiresAt: 201,
+        at: 101,
+      }),
+      undefined,
+    );
+    assert.equal(store.listRecords(alice, { kinds: ["feedback"] }).length, 1);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("imports are atomic, stable, related and preserve edited records", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open(),
+      content = "BEGIN:VCALENDAR\nsynthetic\nEND:VCALENDAR",
+      contentHash = createHash("sha256").update(content).digest("hex"),
+      input = {
+        scope: { type: "user" as const, id: "alice" },
+        format: "ics" as const,
+        content,
+        sourceTitle: "calendar.ics",
+        contentHash,
+        items: [
+          {
+            key: "event:a",
+            kind: "event" as const,
+            title: "Dinner",
+            data: { startAt: 500 },
+            relatedKeys: [{ type: "precedes", targetKey: "event:b" }],
+            warnings: [],
+          },
+          {
+            key: "event:b",
+            kind: "event" as const,
+            title: "Dessert",
+            data: { startAt: 600 },
+            relatedKeys: [],
+            warnings: ["Synthetic warning"],
+          },
+        ],
+      },
+      first = store.commitImport(alice, input);
+    assert.deepEqual(
+      { created: first.created, updated: first.updated, unchanged: first.unchanged },
+      { created: 2, updated: 0, unchanged: 0 },
+    );
+    assert.equal(first.records[0]?.relationships[0]?.targetId, first.records[1]?.id);
+    assert.equal(first.records[0]?.provenance[0]?.sourceId, first.source.id);
+    const second = store.commitImport(alice, input);
+    assert.equal(second.source.id, first.source.id);
+    assert.equal(second.unchanged, 2);
+    const edited = store.updateRecord(alice, first.records[0]!.id, 1, { title: "My dinner" }),
+      changedContent = `${content}\nupdated`,
+      changed = store.commitImport(alice, {
+        ...input,
+        content: changedContent,
+        contentHash: createHash("sha256").update(changedContent).digest("hex"),
+        sourceId: first.source.id,
+        items: input.items.map((item) =>
+          item.key === "event:a" ? { ...item, title: "Imported dinner" } : item,
+        ),
+      });
+    assert.equal(changed.conflicts[0]?.recordId, edited.id);
+    assert.equal(store.getRecord(alice, edited.id)?.title, "My dinner");
+    assert.equal(changed.updated, 0);
+    assert.equal(changed.unchanged, 1);
+    const before = store.listRecords(alice).length;
+    assert.throws(
+      () =>
+        store.commitImport(alice, {
+          ...input,
+          items: [{ ...input.items[0]!, relatedKeys: [{ type: "bad", targetKey: "missing" }] }],
+        }),
+      /selected items/,
+    );
+    assert.equal(store.listRecords(alice).length, before);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Star arcade</title>
+    <style>
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: #101521;
+        color: #f8ead4;
+        font-family: ui-monospace, SFMono-Regular, monospace;
+        overflow: hidden;
+      }
+      main {
+        height: 100dvh;
+        min-height: 360px;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+      }
+      header {
+        padding: 15px 22px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        border-bottom: 1px solid #ffffff20;
+        gap: 15px;
+      }
+      h1 {
+        font-size: 15px;
+        letter-spacing: 0.08em;
+        margin: 0;
+      }
+      header p {
+        margin: 0;
+        font-size: 12px;
+        color: #bac1cd;
+      }
+      .stats {
+        display: flex;
+        gap: 22px;
+      }
+      .stats b {
+        display: block;
+        font-size: 24px;
+        color: #ffc78b;
+      }
+      .stats small {
+        font-size: 10px;
+        color: #bac1cd;
+      }
+      #scene {
+        position: relative;
+        min-height: 0;
+      }
+      canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+        touch-action: none;
+      }
+      #overlay {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-content: center;
+        text-align: center;
+        padding: 24px;
+        background: #101521b8;
+      }
+      #overlay.hidden {
+        display: none;
+      }
+      h2 {
+        font-family: Georgia, serif;
+        font-size: clamp(36px, 7vw, 72px);
+        font-weight: 400;
+        margin: 0 0 15px;
+      }
+      #overlay p {
+        max-width: 390px;
+        line-height: 1.7;
+        font-size: 13px;
+        color: #d8d5d0;
+      }
+      button {
+        font: inherit;
+        border: 1px solid #ffffff30;
+        color: #f8ead4;
+        background: #25313e;
+        border-radius: 10px;
+        padding: 12px 18px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #354455;
+      }
+      button:focus-visible {
+        outline: 3px solid #ffc78b;
+        outline-offset: 3px;
+      }
+      #start {
+        background: #ef916d;
+        color: #101521;
+        border: 0;
+        font-weight: bold;
+        margin: 14px auto;
+        min-width: 150px;
+      }
+      footer {
+        padding: 12px 22px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        font-size: 11px;
+        color: #bac1cd;
+        border-top: 1px solid #ffffff20;
+      }
+      .controls {
+        display: flex;
+        gap: 6px;
+      }
+      .controls button {
+        padding: 9px 12px;
+        touch-action: none;
+        user-select: none;
+      }
+      .controls #shoot {
+        background: #854e47;
+      }
+      #status {
+        max-width: 330px;
+        line-height: 1.4;
+      }
+      @media (max-width: 600px) {
+        header {
+          padding: 12px;
+        }
+        .stats {
+          gap: 12px;
+        }
+        .stats b {
+          font-size: 18px;
+        }
+        footer {
+          padding: 10px;
+          display: block;
+        }
+        #status {
+          margin-bottom: 8px;
+        }
+        .controls {
+          justify-content: center;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        * {
+          scroll-behavior: auto;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>STAR ARCADE</h1>
+          <p>A little escape, with Ellie.</p>
+        </div>
+        <div class="stats">
+          <div><small>SCORE</small><b id="score">0</b></div>
+          <div><small>BEST</small><b id="best">—</b></div>
+          <div><small>TIME</small><b id="time">60</b></div>
+        </div>
+      </header>
+      <section id="scene" aria-label="First-person arcade arena">
+        <canvas
+          id="canvas"
+          tabindex="0"
+          aria-label="Use W and S to move, A and D to turn, and Space to shoot illuminated targets."
+        ></canvas>
+        <div id="overlay">
+          <h2>Make a little<br />space to play.</h2>
+          <p id="description">
+            Explore the arena. Aim at the glowing stars. You have 60 seconds to set a new best.
+          </p>
+          <button id="start">Let's play</button>
+        </div>
+      </section>
+      <footer>
+        <div id="status" role="status">W/S to move · A/D to turn · Space or click to shoot</div>
+        <div class="controls" aria-label="Touch controls">
+          <button data-key="a" aria-label="Turn left">↶</button
+          ><button data-key="w" aria-label="Move forward">↑</button
+          ><button data-key="s" aria-label="Move backward">↓</button
+          ><button data-key="d" aria-label="Turn right">↷</button><button id="shoot">Shoot</button>
+        </div>
+      </footer>
+    </main>
+    <script>
+      const $ = (id) => document.getElementById(id),
+        canvas = $("canvas"),
+        ctx = canvas.getContext("2d");
+      let port,
+        sequence = 0,
+        pending = new Map();
+      function call(method, key, value) {
+        return new Promise((resolve, reject) => {
+          if (!port) {
+            reject(Error("Score storage is not connected."));
+            return;
+          }
+          const id = String(++sequence);
+          const timeout = setTimeout(() => {
+            pending.delete(id);
+            reject(Error("Score storage did not respond."));
+          }, 5000);
+          pending.set(id, { resolve, reject, timeout });
+          port.postMessage({ id, method, key, value });
+        });
+      }
+      window.addEventListener("message", (event) => {
+        if (
+          port ||
+          event.source !== window ||
+          event.data?.type !== "ellie:connect" ||
+          !event.ports[0]
+        )
+          return;
+        port = event.ports[0];
+        port.onmessage = (e) => {
+          const row = pending.get(e.data?.id);
+          if (!row) return;
+          clearTimeout(row.timeout);
+          pending.delete(e.data.id);
+          e.data.ok
+            ? row.resolve(e.data.result)
+            : row.reject(Error(e.data.error || "Storage unavailable"));
+        };
+        port.start();
+        call("storage.get", "highScore")
+          .then((value) => {
+            best = Number(value) || 0;
+            $("best").textContent = String(best);
+          })
+          .catch((error) => ($("status").textContent = error.message));
+      });
+      const map = [
+        "11111111111111",
+        "10000000000001",
+        "10001000010001",
+        "10001000010001",
+        "10000000000001",
+        "10000011000001",
+        "10000011000001",
+        "10000000000001",
+        "10011000011001",
+        "10000000000001",
+        "10000000000001",
+        "10001000100001",
+        "10000000000001",
+        "11111111111111",
+      ];
+      const spaces = [];
+      for (let y = 1; y < 13; y++)
+        for (let x = 1; x < 13; x++) if (map[y][x] === "0") spaces.push({ x: x + 0.5, y: y + 0.5 });
+      let px = 2.5,
+        py = 4.5,
+        angle = 0,
+        score = 0,
+        best = 0,
+        remaining = 60,
+        playing = false,
+        last = performance.now(),
+        shotAt = -1000,
+        flash = 0,
+        targets = [],
+        keys = new Set(),
+        width = 0,
+        height = 0,
+        depth = [];
+      const wall = (x, y) => map[Math.floor(y)]?.[Math.floor(x)] !== "0";
+      function addTarget() {
+        for (let tries = 0; tries < 60; tries++) {
+          const spot = spaces[Math.floor(Math.random() * spaces.length)];
+          if (
+            Math.hypot(spot.x - px, spot.y - py) > 2 &&
+            !targets.some((t) => Math.hypot(t.x - spot.x, t.y - spot.y) < 1)
+          ) {
+            targets.push({ ...spot, pulse: Math.random() * 6.28 });
+            return;
+          }
+        }
+      }
+      function resize() {
+        const r = canvas.getBoundingClientRect();
+        width = Math.max(1, Math.floor(r.width));
+        height = Math.max(1, Math.floor(r.height));
+        canvas.width = width;
+        canvas.height = height;
+        depth = new Array(width);
+      }
+      new ResizeObserver(resize).observe(canvas);
+      function ray(a, max = 25) {
+        const dx = Math.cos(a),
+          dy = Math.sin(a);
+        let d = 0;
+        while (d < max && !wall(px + dx * d, py + dy * d)) d += 0.035;
+        return d;
+      }
+      function delta(a) {
+        while (a > Math.PI) a -= Math.PI * 2;
+        while (a < -Math.PI) a += Math.PI * 2;
+        return a;
+      }
+      function shoot() {
+        if (!playing || performance.now() - shotAt < 220) return;
+        shotAt = performance.now();
+        flash = 0.12;
+        let hit = -1,
+          nearest = 30;
+        targets.forEach((t, i) => {
+          const d = Math.hypot(t.x - px, t.y - py),
+            diff = Math.abs(delta(Math.atan2(t.y - py, t.x - px) - angle));
+          if (diff < Math.max(0.055, 0.32 / d) && ray(angle, d + 0.2) >= d - 0.4 && d < nearest) {
+            hit = i;
+            nearest = d;
+          }
+        });
+        if (hit >= 0) {
+          targets.splice(hit, 1);
+          score += 100 + Math.round(nearest * 10);
+          $("score").textContent = String(score);
+          addTarget();
+        }
+      }
+      function start() {
+        px = 2.5;
+        py = 4.5;
+        angle = 0;
+        score = 0;
+        remaining = 60;
+        // Start facing open space with one visible target so the first shot teaches the game.
+        targets = [{ x: 5.5, y: 4.5, pulse: 0 }];
+        for (let i = 0; i < 8; i++) addTarget();
+        playing = true;
+        keys.clear();
+        $("score").textContent = "0";
+        $("time").textContent = "60";
+        $("overlay").classList.add("hidden");
+        $("status").textContent = "W/S to move · A/D to turn · Space or click to shoot";
+        canvas.focus();
+        last = performance.now();
+      }
+      async function finish() {
+        playing = false;
+        keys.clear();
+        $("overlay").classList.remove("hidden");
+        $("overlay").querySelector("h2").textContent =
+          score > best ? "A new little record." : "Nicely played.";
+        $("description").textContent =
+          "You scored " + score.toLocaleString() + " points. Another round?";
+        $("start").textContent = "Play again";
+        best = Math.max(best, score);
+        $("best").textContent = String(best);
+        try {
+          const value = await call("storage.set", "highScore", best);
+          best = Number(value) || best;
+          $("status").textContent = "High score saved with Ellie.";
+        } catch (error) {
+          $("status").textContent = "This round is complete. " + error.message;
+        }
+      }
+      $("start").addEventListener("click", start);
+      $("shoot").addEventListener("click", shoot);
+      canvas.addEventListener("pointerdown", shoot);
+      window.addEventListener("keydown", (e) => {
+        const k = e.key.toLowerCase();
+        if (
+          ["w", "a", "s", "d", "arrowup", "arrowdown", "arrowleft", "arrowright", " "].includes(k)
+        ) {
+          e.preventDefault();
+          keys.add(k);
+          if (k === " ") shoot();
+        }
+        if (e.key === "Escape" && playing) {
+          playing = false;
+          keys.clear();
+          $("overlay").classList.remove("hidden");
+          $("overlay").querySelector("h2").textContent = "Take a breath.";
+          $("description").textContent = "Start a fresh round whenever you are ready.";
+          $("start").textContent = "Start again";
+        }
+      });
+      window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+      window.addEventListener("blur", () => keys.clear());
+      document.addEventListener("visibilitychange", () => {
+        keys.clear();
+        last = performance.now();
+      });
+      for (const button of document.querySelectorAll("[data-key]")) {
+        button.addEventListener("pointerdown", (e) => {
+          e.preventDefault();
+          button.setPointerCapture(e.pointerId);
+          keys.add(button.dataset.key);
+        });
+        for (const event of ["pointerup", "pointercancel", "lostpointercapture"])
+          button.addEventListener(event, () => keys.delete(button.dataset.key));
+      }
+      function render(now) {
+        const dt = Math.min(0.05, (now - last) / 1000);
+        last = now;
+        if (!width || !height) {
+          requestAnimationFrame(render);
+          return;
+        }
+        if (playing && !document.hidden) {
+          remaining -= dt;
+          if (remaining <= 0) {
+            remaining = 0;
+            void finish();
+          }
+          $("time").textContent = String(Math.ceil(remaining));
+          if (keys.has("a") || keys.has("arrowleft")) angle -= dt * 2;
+          if (keys.has("d") || keys.has("arrowright")) angle += dt * 2;
+          let movement =
+            (keys.has("w") || keys.has("arrowup") ? 1 : 0) -
+            (keys.has("s") || keys.has("arrowdown") ? 1 : 0);
+          const nx = px + Math.cos(angle) * movement * dt * 2.8,
+            ny = py + Math.sin(angle) * movement * dt * 2.8;
+          if (!wall(nx + 0.18, py) && !wall(nx - 0.18, py)) px = nx;
+          if (!wall(px, ny + 0.18) && !wall(px, ny - 0.18)) py = ny;
+          if (keys.has(" ")) shoot();
+        }
+        ctx.fillStyle = "#121d2b";
+        ctx.fillRect(0, 0, width, height / 2);
+        const floor = ctx.createLinearGradient(0, height / 2, 0, height);
+        floor.addColorStop(0, "#152330");
+        floor.addColorStop(1, "#354657");
+        ctx.fillStyle = floor;
+        ctx.fillRect(0, height / 2, width, height / 2);
+        const fov = Math.PI / 3,
+          step = Math.max(2, Math.floor(width / 400));
+        for (let x = 0; x < width; x += step) {
+          const a = angle + (x / width - 0.5) * fov,
+            d = ray(a) * Math.cos(a - angle),
+            h = Math.min(height * 3, height / Math.max(0.08, d)),
+            shade = Math.max(20, 120 - d * 8);
+          ctx.fillStyle =
+            "rgb(" +
+            Math.round(shade * 0.57) +
+            "," +
+            Math.round(shade * 0.9) +
+            "," +
+            Math.round(shade) +
+            ")";
+          ctx.fillRect(x, (height - h) / 2, step + 1, h);
+          ctx.fillStyle = "#8cd0d522";
+          ctx.fillRect(x, (height - h) / 2, step + 1, 2);
+          for (let j = 0; j < step && x + j < width; j++) depth[x + j] = d;
+        }
+        targets
+          .map((t) => ({
+            ...t,
+            d: Math.hypot(t.x - px, t.y - py),
+            a: delta(Math.atan2(t.y - py, t.x - px) - angle),
+          }))
+          .sort((a, b) => b.d - a.d)
+          .forEach((t) => {
+            if (Math.abs(t.a) > fov * 0.7) return;
+            const x = (0.5 + t.a / fov) * width,
+              size = Math.min(height, (height / Math.max(0.5, t.d)) * 0.55);
+            if (x < 0 || x >= width || depth[Math.floor(x)] < t.d - 0.3) return;
+            const y = height / 2 + Math.sin(now / 650 + t.pulse) * size * 0.12;
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate(now / 1700 + t.pulse);
+            ctx.fillStyle = "#ffc78b";
+            ctx.shadowColor = "#ff9a73";
+            ctx.shadowBlur = 18;
+            ctx.beginPath();
+            for (let i = 0; i < 8; i++) {
+              const a = (i * Math.PI) / 4,
+                r = i % 2 ? size * 0.17 : size * 0.45;
+              const xx = Math.cos(a) * r,
+                yy = Math.sin(a) * r;
+              i ? ctx.lineTo(xx, yy) : ctx.moveTo(xx, yy);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          });
+        ctx.strokeStyle = flash > 0 ? "#ffc78b" : "#f8ead4";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(width / 2 - 9, height / 2);
+        ctx.lineTo(width / 2 - 3, height / 2);
+        ctx.moveTo(width / 2 + 3, height / 2);
+        ctx.lineTo(width / 2 + 9, height / 2);
+        ctx.moveTo(width / 2, height / 2 - 9);
+        ctx.lineTo(width / 2, height / 2 - 3);
+        ctx.moveTo(width / 2, height / 2 + 3);
+        ctx.lineTo(width / 2, height / 2 + 9);
+        ctx.stroke();
+        if (flash > 0) {
+          flash -= dt;
+          ctx.fillStyle = "#ffc78b20";
+          ctx.fillRect(0, 0, width, height);
+        }
+        requestAnimationFrame(render);
+      }
+      resize();
+      requestAnimationFrame(render);
+    </script>
+  </body>
+</html>
