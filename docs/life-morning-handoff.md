@@ -57,7 +57,7 @@ The restored dashboard holds upcoming commitments, plans and generated app widge
 
 ## Evidence and remaining work
 
-The final integrated checks passed: **632 tests, 631 passed, one existing skip, zero failures**, plus lint, formatting, contracts, all TypeScript projects and both builds. Real authenticated browser acceptance passed. Actual local-model checks exercised conversational actions, app persistence, private improvement review and checklist creation/readback. Exact results and synthetic artifacts are recorded in the [overnight checkpoint](overnight-build.md) and [model validation report](life-model-validation.md).
+The final integrated checks passed: **645 tests, 644 passed, one existing skip, zero failures**, plus lint, formatting, contracts, all TypeScript projects and both builds. Real authenticated browser acceptance passed. Actual local-model checks exercised conversational actions, app persistence, private improvement review and checklist creation/readback. Exact results and synthetic artifacts are recorded in the [overnight checkpoint](overnight-build.md) and [model validation report](life-model-validation.md).
 
 This is not the entire unrestricted product vision. Native continuous location, notifications while the Mac is asleep, account connectors, multi-device identity/invitations/sync, arbitrary server-side plugins, cloud processing and model-weight training still need separate integrations. Current context suggestions use explicit fresh signals. Plans save checklist text; their steps do not execute automatically.
 
