@@ -17,6 +17,21 @@ struct AuthenticatedEnvelope {
   let sourceSHA256: String
   let manifestData: Data
   let sourceData: Data
+  let authorizationRecordSHA256: String
+  let authorizationDevice: dev_t
+  let authorizationInode: ino_t
+}
+
+struct AuthorizationCaptureFile {
+  let path: String
+  let data: Data
+  let executable: Bool
+}
+
+struct AuthorizationCaptureSnapshot {
+  let files: [AuthorizationCaptureFile]
+  let device: dev_t
+  let inode: ino_t
 }
 
 private struct AuthorizationRecord: Codable {
@@ -360,7 +375,42 @@ func verifyAuthenticatedManifestEnvelope(
   return AuthenticatedEnvelope(
     version: record.version, policyDigest: record.policyDigest,
     manifestSHA256: record.manifestSHA256, sourceSHA256: record.sourceSHA256,
-    manifestData: Data(sealedManifest), sourceData: Data(sealedSource))
+    manifestData: Data(sealedManifest), sourceData: Data(sealedSource),
+    authorizationRecordSHA256: authorizationHash(recordData),
+    authorizationDevice: heldBundleInfo.st_dev, authorizationInode: heldBundleInfo.st_ino)
+}
+
+func authorizationCaptureFiles(_ authorizationPath: String) throws -> AuthorizationCaptureSnapshot {
+  let bundle = try authorizationOpenAbsoluteDirectory(authorizationPath)
+  defer { close(bundle) }
+  var bundleInfo = stat()
+  guard fstat(bundle, &bundleInfo) == 0 else { throw AuthorizationFailure.rejected }
+  guard try authorizationNames(bundle) == ["Contents"] else { throw AuthorizationFailure.rejected }
+  let contents = try authorizationOpenDirectory(bundle, "Contents")
+  defer { close(contents) }
+  let macOS = try authorizationOpenDirectory(contents, "MacOS")
+  defer { close(macOS) }
+  let resources = try authorizationOpenDirectory(contents, "Resources")
+  defer { close(resources) }
+  let signature = try authorizationOpenDirectory(contents, "_CodeSignature")
+  defer { close(signature) }
+  return AuthorizationCaptureSnapshot(files: [
+    AuthorizationCaptureFile(path: "Contents/Info.plist", data: try authorizationRead(contents, "Info.plist", maximum: 64 * 1024, allowedModes: [0o444, 0o644]), executable: false),
+    AuthorizationCaptureFile(path: "Contents/MacOS/EllieServiceAuthorization", data: try authorizationRead(macOS, "EllieServiceAuthorization", maximum: 16 * 1024 * 1024, allowedModes: [0o555, 0o755]), executable: true),
+    AuthorizationCaptureFile(path: "Contents/Resources/SOURCE.txt", data: try authorizationRead(resources, "SOURCE.txt", maximum: authorizationSourceLimit, allowedModes: [0o444, 0o644]), executable: false),
+    AuthorizationCaptureFile(path: "Contents/Resources/authorization.json", data: try authorizationRead(resources, "authorization.json", maximum: authorizationRecordLimit, allowedModes: [0o444, 0o644]), executable: false),
+    AuthorizationCaptureFile(path: "Contents/Resources/manifest.json", data: try authorizationRead(resources, "manifest.json", maximum: authorizationManifestLimit, allowedModes: [0o444, 0o644]), executable: false),
+    AuthorizationCaptureFile(path: "Contents/_CodeSignature/CodeResources", data: try authorizationRead(signature, "CodeResources", maximum: 1024 * 1024, allowedModes: [0o444, 0o644]), executable: false),
+  ], device: bundleInfo.st_dev, inode: bundleInfo.st_ino)
+}
+
+func rebindAuthorizationSource(_ envelope: AuthenticatedEnvelope, path: String) throws {
+  let bundle = try authorizationOpenAbsoluteDirectory(path)
+  defer { close(bundle) }
+  var info = stat()
+  guard fstat(bundle, &info) == 0, info.st_dev == envelope.authorizationDevice,
+    info.st_ino == envelope.authorizationInode
+  else { throw AuthorizationFailure.rejected }
 }
 
 func runAuthorizationInspection(_ arguments: [String]) throws -> Never {
