@@ -3,11 +3,11 @@ import CryptoKit
 import Darwin
 import Foundation
 
-private let maximumManifestBytes = 4 * 1024 * 1024
-private let maximumPayloadFiles = 2_048
-private let maximumPayloadBytes = 512 * 1024 * 1024
-private let maximumPayloadEntries = 4_096
-private let maximumPayloadDepth = 16
+private let launcherMaximumManifestBytes = 4 * 1024 * 1024
+private let launcherMaximumPayloadFiles = 2_048
+private let launcherMaximumPayloadBytes = 512 * 1024 * 1024
+private let launcherMaximumPayloadEntries = 4_096
+private let launcherMaximumPayloadDepth = 16
 
 private struct PayloadFile: Decodable {
     let path: String
@@ -131,7 +131,7 @@ private func payloadFiles(
     depth: Int,
     entryCount: inout Int
 ) throws -> [String] {
-    guard depth <= maximumPayloadDepth else { throw LauncherFailure.invalid }
+    guard depth <= launcherMaximumPayloadDepth else { throw LauncherFailure.invalid }
     try validateDirectory(directory)
     var result: [String] = []
     guard let stream = opendir(directory) else { throw LauncherFailure.invalid }
@@ -150,7 +150,7 @@ private func payloadFiles(
         if name == "." || name == ".." { continue }
         guard safeComponent(name) else { throw LauncherFailure.invalid }
         entryCount += 1
-        guard entryCount <= maximumPayloadEntries else { throw LauncherFailure.invalid }
+        guard entryCount <= launcherMaximumPayloadEntries else { throw LauncherFailure.invalid }
         let path = directory + "/" + name
         let relative = relativeDirectory.isEmpty ? name : relativeDirectory + "/" + name
         var information = stat()
@@ -196,7 +196,7 @@ private func validatedRuntime(root: String) throws -> (node: String, entrypoint:
     try validateDirectory(root)
     let payload = root + "/payload"
     try validateDirectory(payload)
-    let manifestData = try readRegular(root + "/manifest.json", maximum: maximumManifestBytes)
+    let manifestData = try readRegular(root + "/manifest.json", maximum: launcherMaximumManifestBytes)
     let manifest = try JSONDecoder().decode(Manifest.self, from: manifestData)
     guard manifest.version == 1,
           manifest.platform == "darwin",
@@ -206,7 +206,7 @@ private func validatedRuntime(root: String) throws -> (node: String, entrypoint:
           exactLowercaseHex(manifest.sourceRevision, count: 40)
     else { throw LauncherFailure.invalid }
 
-    guard !manifest.files.isEmpty, manifest.files.count <= maximumPayloadFiles else {
+    guard !manifest.files.isEmpty, manifest.files.count <= launcherMaximumPayloadFiles else {
         throw LauncherFailure.invalid
     }
     var declared: [String: PayloadFile] = [:]
@@ -220,7 +220,7 @@ private func validatedRuntime(root: String) throws -> (node: String, entrypoint:
               exactLowercaseHex(record.sha256, count: 64)
         else { throw LauncherFailure.invalid }
         totalSize += record.size
-        guard totalSize <= maximumPayloadBytes else { throw LauncherFailure.invalid }
+        guard totalSize <= launcherMaximumPayloadBytes else { throw LauncherFailure.invalid }
         declared[record.path] = record
     }
     let requiredModes = [
@@ -270,9 +270,6 @@ private func validatedRuntime(root: String) throws -> (node: String, entrypoint:
 @main
 enum ElliePackagedService {
     static func main() {
-        #if ELLIE_POLICY_AUDIT_TESTING
-        if runCompiledActivationPolicyAudit(Array(CommandLine.arguments.dropFirst())) { return }
-        #endif
         if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--register" {
             exit(LSRegisterURL(Bundle.main.bundleURL as CFURL, true) == noErr ? 0 : 70)
         }

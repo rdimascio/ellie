@@ -62,9 +62,12 @@ test("shipping launchers validate a complete installed payload and exec one fixe
   if (process.platform !== "darwin") return t.skip("Packaged launchers require macOS build tools.");
   const directory = await mkdtemp(join(tmpdir(), "ellie-packaged-launchers-"));
   await chmod(directory, 0o700);
+  let completed = false;
   t.after(async () => {
-    await makeWritable(directory);
-    await rm(directory, { recursive: true, force: true });
+    if (completed) {
+      await makeWritable(directory);
+      await rm(directory, { recursive: true, force: true });
+    } else t.diagnostic(`Retained owned fixture: ${directory}`);
   });
   const release = join(directory, "release");
   const payload = join(release, "payload");
@@ -196,4 +199,5 @@ test("shipping launchers validate a complete installed payload and exec one fixe
     assert.equal(rejected(), 78);
     await makeWritable(payload);
   }
+  completed = true;
 });

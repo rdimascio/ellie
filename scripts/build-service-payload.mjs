@@ -20,7 +20,16 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { unavailableActivationPolicySource } from "./activation-policy-source.mjs";
+import {
+  captureActivationPolicyBuildDirectory,
+  inspectActivationPolicyBlob,
+  readActivationPolicyBuildFile,
+  runActivationPolicyBuildCommand,
+  unavailableActivationPolicySource,
+  verifyActivationPolicyBuildDirectory,
+} from "./activation-policy-source.mjs";
+
+const unavailablePolicyBytes = Buffer.from("ELLIE-ACTIVATION-POLICY-UNAVAILABLE-V1\n");
 
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MAX_COMMAND_OUTPUT = 1024 * 1024;
@@ -31,6 +40,28 @@ const SOURCE_AREAS = ["apps/cli", "apps/node", "apps/server", "packages"];
 const RELEASE = /^node-(v24\.\d+\.\d+)-darwin-(arm64|x64)\.tar\.xz$/;
 const PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const MINIMUM_MACOS = "14.0";
+const policyCompilerNames = [
+  "EllieActivationPolicyBlob.h",
+  "module.modulemap",
+  "CompiledActivationPolicyBlob.swift",
+  "ServicePayloadAuthorization.swift",
+  "ServicePayloadAuthenticatedInspection.swift",
+  "AuthenticatedActivationPolicy.swift",
+  "AuthenticatedCandidateVerifier.swift",
+  "ServicePayloadCapture.swift",
+  "ServicePayloadSelection.swift",
+  "ServicePayloadLifecycle.swift",
+  "ServicePayloadMigration.swift",
+  "ServicePayloadInstaller.swift",
+];
+
+class ServicePayloadBuildFailure extends Error {
+  constructor(retainedScratch, cause) {
+    super("Service payload build failed with retained owned scratch.", { cause });
+    this.name = "ServicePayloadBuildFailure";
+    this.retainedScratch = retainedScratch;
+  }
+}
 
 function command(file, args, options = {}) {
   return execFileSync(file, args, {
@@ -338,11 +369,36 @@ export async function buildPackagedLaunchers(options) {
   const iconset = join(work, "Ellie.iconset");
   const icon = join(work, "Ellie.icns");
   await mkdir(iconset, { recursive: true, mode: 0o700 });
-  const resolvedPolicySource = join(work, "CompiledAuthenticatedActivationPolicy.swift");
+  const resolvedPolicySource = join(work, "CompiledAuthenticatedActivationPolicy.c");
+  const policyObject = join(work, "CompiledAuthenticatedActivationPolicy.o");
+  const compilerInputs = await capturePolicyCompilerInputs(source, join(work, "policy-inputs"), [
+    "PackagedServiceLauncher.swift",
+  ]);
   await writeFile(resolvedPolicySource, unavailableActivationPolicySource(), {
     mode: 0o600,
     flag: "wx",
   });
+  await chmod(resolvedPolicySource, 0o400);
+  const policySourceState = await policyObjectEvidence(resolvedPolicySource);
+  await runActivationPolicyBuildCommand(
+    "/usr/bin/xcrun",
+    [
+      "clang",
+      "-c",
+      "-Os",
+      "-target",
+      `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+      "-I",
+      compilerInputs.directory,
+      resolvedPolicySource,
+      "-o",
+      policyObject,
+    ],
+    { cwd: work },
+  );
+  await policyObjectEvidence(resolvedPolicySource, policySourceState);
+  await chmod(policyObject, 0o400);
+  const policyObjectState = await policyObjectEvidence(policyObject);
   for (const size of [16, 32, 128, 256, 512]) {
     for (const scale of [1, 2]) {
       command(
@@ -363,12 +419,15 @@ export async function buildPackagedLaunchers(options) {
 
   const result = [];
   for (const [role, value] of Object.entries(launcherRoles)) {
+    await verifyPolicyCompilerInputs(compilerInputs);
+    await policyObjectEvidence(resolvedPolicySource, policySourceState);
+    await policyObjectEvidence(policyObject, policyObjectState);
     const app = join(payload, "launchers", `${value.name}.app`);
     const executable = join(app, "Contents/MacOS/EllieService");
     const resources = join(app, "Contents/Resources");
     await mkdir(dirname(executable), { recursive: true, mode: 0o755 });
     await mkdir(resources, { recursive: true, mode: 0o755 });
-    command(
+    await runActivationPolicyBuildCommand(
       "/usr/bin/xcrun",
       [
         "swiftc",
@@ -376,16 +435,22 @@ export async function buildPackagedLaunchers(options) {
         "5",
         "-O",
         "-parse-as-library",
+        "-suppress-warnings",
         "-target",
         `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
         "-D",
         value.define,
-        resolvedPolicySource,
-        join(source, "packages/macos/native/PackagedServiceLauncher.swift"),
+        "-D",
+        "ELLIE_POLICY_LIBRARY",
+        "-I",
+        compilerInputs.directory,
+        policyObject,
+        ...policyCompilerNames.slice(2).map((name) => join(compilerInputs.directory, name)),
+        join(compilerInputs.directory, "PackagedServiceLauncher.swift"),
         "-o",
         executable,
       ],
-      { stdio: "ignore" },
+      { cwd: work },
     );
     await chmod(executable, 0o755);
     await cp(icon, join(resources, "Ellie.icns"));
@@ -400,6 +465,10 @@ export async function buildPackagedLaunchers(options) {
       },
     );
     command("/usr/bin/codesign", ["--verify", "--strict", app], { stdio: "ignore" });
+    await verifyPolicyCompilerInputs(compilerInputs);
+    await policyObjectEvidence(resolvedPolicySource, policySourceState);
+    await policyObjectEvidence(policyObject, policyObjectState);
+    await inspectActivationPolicyBlob(executable, architecture, unavailablePolicyBytes);
     result.push({
       role,
       name: value.name,
@@ -617,6 +686,106 @@ async function regularFile(path, expectedMode, maximum) {
   }
 }
 
+async function policyObjectEvidence(path, expected) {
+  const current = await readActivationPolicyBuildFile(path, 64 * 1024 * 1024, 0o400);
+  const evidence = { identity: current.identity, digest: sha256(current.data) };
+  if (
+    expected &&
+    (expected.digest !== evidence.digest ||
+      Object.keys(current.identity).some((key) => current.identity[key] !== expected.identity[key]))
+  )
+    throw new Error("Compiled activation policy object changed before linking.");
+  return evidence;
+}
+
+async function capturePolicyCompilerInputs(source, destination, extraNames = []) {
+  await mkdir(destination, { mode: 0o700 });
+  const sourceDirectory = await captureActivationPolicyBuildDirectory(
+    join(source, "packages/macos/native"),
+  );
+  const destinationDirectory = await captureActivationPolicyBuildDirectory(destination);
+  const identity = await lstat(destination, { bigint: true });
+  if (
+    !identity.isDirectory() ||
+    identity.uid !== BigInt(process.getuid()) ||
+    (identity.mode & 0o7777n) !== 0o700n
+  )
+    throw new Error("Activation policy compiler input directory is unsafe.");
+  const names = [...policyCompilerNames, ...extraNames];
+  const expected = new Map();
+  for (const name of names) {
+    await verifyActivationPolicyBuildDirectory(sourceDirectory);
+    await verifyActivationPolicyBuildDirectory(destinationDirectory);
+    const original = await readActivationPolicyBuildFile(
+      join(source, "packages/macos/native", name),
+      4 * 1024 * 1024,
+      0o644,
+    );
+    await writeFile(join(destination, name), original.data, { mode: 0o400, flag: "wx" });
+    expected.set(name, { digest: sha256(original.data), original: original.identity });
+  }
+  await verifyActivationPolicyBuildDirectory(sourceDirectory);
+  await verifyActivationPolicyBuildDirectory(destinationDirectory);
+  return {
+    directory: destination,
+    destinationDirectory,
+    expected,
+    names,
+    identity,
+    source,
+    sourceDirectory,
+  };
+}
+
+async function verifyPolicyCompilerInputs(snapshot) {
+  await verifyActivationPolicyBuildDirectory(snapshot.sourceDirectory);
+  await verifyActivationPolicyBuildDirectory(snapshot.destinationDirectory);
+  const current = await lstat(snapshot.directory, { bigint: true });
+  if (
+    !current.isDirectory() ||
+    [current.dev, current.ino, current.uid, current.mode].some(
+      (value, index) =>
+        value !==
+        [
+          snapshot.identity.dev,
+          snapshot.identity.ino,
+          snapshot.identity.uid,
+          snapshot.identity.mode,
+        ][index],
+    )
+  )
+    throw new Error("Activation policy compiler input directory changed.");
+  if (
+    JSON.stringify((await readdir(snapshot.directory)).sort()) !==
+    JSON.stringify(snapshot.names.slice().sort())
+  )
+    throw new Error("Activation policy compiler input inventory changed.");
+  for (const [name, evidence] of snapshot.expected) {
+    await verifyActivationPolicyBuildDirectory(snapshot.sourceDirectory);
+    await verifyActivationPolicyBuildDirectory(snapshot.destinationDirectory);
+    const captured = await readActivationPolicyBuildFile(
+      join(snapshot.directory, name),
+      4 * 1024 * 1024,
+      0o400,
+    );
+    const original = await readActivationPolicyBuildFile(
+      join(snapshot.source, "packages/macos/native", name),
+      4 * 1024 * 1024,
+      0o644,
+    );
+    if (
+      sha256(captured.data) !== evidence.digest ||
+      sha256(original.data) !== evidence.digest ||
+      Object.keys(original.identity).some(
+        (key) => original.identity[key] !== evidence.original[key],
+      )
+    )
+      throw new Error("Activation policy compiler input changed.");
+  }
+  await verifyActivationPolicyBuildDirectory(snapshot.sourceDirectory);
+  await verifyActivationPolicyBuildDirectory(snapshot.destinationDirectory);
+}
+
 export async function verifyManifest(release) {
   const releaseInfo = await lstat(release);
   if (!releaseInfo.isDirectory() || releaseInfo.isSymbolicLink())
@@ -740,6 +909,9 @@ export async function buildServicePayload(options) {
   }
   const scratch = await mkdtemp(join(tmpdir(), "ellie-service-payload-"));
   await chmod(scratch, 0o700);
+  let completed = false;
+  let buildResult;
+  let cleanupFailure;
   try {
     const buildSource = join(scratch, "source");
     await mkdir(buildSource, { mode: 0o700 });
@@ -808,8 +980,34 @@ export async function buildServicePayload(options) {
     const minimumPattern = new RegExp(`minos ${MINIMUM_MACOS.replace(".", "\\.")}(?:\\s|$)`);
     if (!/platform MACOS/.test(buildVersion) || !minimumPattern.test(buildVersion))
       throw new Error("Native helper minimum macOS version does not match the payload.");
-    const policySource = join(scratch, "CompiledAuthenticatedActivationPolicy.swift");
+    const policySource = join(scratch, "CompiledAuthenticatedActivationPolicy.c");
+    const policyObject = join(scratch, "CompiledAuthenticatedActivationPolicy.o");
+    const compilerInputs = await capturePolicyCompilerInputs(
+      buildSource,
+      join(scratch, "installer-policy-inputs"),
+    );
     await writeFile(policySource, unavailableActivationPolicySource(), { mode: 0o600, flag: "wx" });
+    await chmod(policySource, 0o400);
+    const policySourceState = await policyObjectEvidence(policySource);
+    await runActivationPolicyBuildCommand(
+      "/usr/bin/xcrun",
+      [
+        "clang",
+        "-c",
+        "-Os",
+        "-target",
+        `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+        "-I",
+        compilerInputs.directory,
+        policySource,
+        "-o",
+        policyObject,
+      ],
+      { cwd: scratch },
+    );
+    await policyObjectEvidence(policySource, policySourceState);
+    await chmod(policyObject, 0o400);
+    const policyObjectState = await policyObjectEvidence(policyObject);
     const launchers = await buildPackagedLaunchers({
       source: buildSource,
       payload,
@@ -817,7 +1015,10 @@ export async function buildServicePayload(options) {
       work: join(scratch, "launcher-build"),
     });
     const installer = join(payload, "bin/ellie-service-installer");
-    command(
+    await verifyPolicyCompilerInputs(compilerInputs);
+    await policyObjectEvidence(policySource, policySourceState);
+    await policyObjectEvidence(policyObject, policyObjectState);
+    await runActivationPolicyBuildCommand(
       "/usr/bin/xcrun",
       [
         "swiftc",
@@ -825,22 +1026,17 @@ export async function buildServicePayload(options) {
         "5",
         "-O",
         "-parse-as-library",
+        "-suppress-warnings",
         "-target",
         `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
-        policySource,
-        join(buildSource, "packages/macos/native/ServicePayloadAuthorization.swift"),
-        join(buildSource, "packages/macos/native/ServicePayloadAuthenticatedInspection.swift"),
-        join(buildSource, "packages/macos/native/AuthenticatedActivationPolicy.swift"),
-        join(buildSource, "packages/macos/native/AuthenticatedCandidateVerifier.swift"),
-        join(buildSource, "packages/macos/native/ServicePayloadCapture.swift"),
-        join(buildSource, "packages/macos/native/ServicePayloadSelection.swift"),
-        join(buildSource, "packages/macos/native/ServicePayloadLifecycle.swift"),
-        join(buildSource, "packages/macos/native/ServicePayloadMigration.swift"),
-        join(buildSource, "packages/macos/native/ServicePayloadInstaller.swift"),
+        "-I",
+        compilerInputs.directory,
+        policyObject,
+        ...policyCompilerNames.slice(2).map((name) => join(compilerInputs.directory, name)),
         "-o",
         installer,
       ],
-      { stdio: "ignore" },
+      { cwd: scratch },
     );
     await chmod(installer, 0o755);
     command(
@@ -849,6 +1045,10 @@ export async function buildServicePayload(options) {
       { stdio: "ignore" },
     );
     command("/usr/bin/codesign", ["--verify", "--strict", installer], { stdio: "ignore" });
+    await verifyPolicyCompilerInputs(compilerInputs);
+    await policyObjectEvidence(policySource, policySourceState);
+    await policyObjectEvidence(policyObject, policyObjectState);
+    await inspectActivationPolicyBlob(installer, architecture, unavailablePolicyBytes);
     if (command("/usr/bin/lipo", ["-archs", installer]).trim() !== helperArchitecture)
       throw new Error("Native installer architecture does not match the payload.");
     const installerBuild = command("/usr/bin/xcrun", ["vtool", "-show-build", installer]);
@@ -936,16 +1136,27 @@ export async function buildServicePayload(options) {
       throw new Error("Source revision changed during the build.");
     await mkdir(dirname(output), { recursive: true });
     await rename(stagedOutput, output);
-    return {
+    buildResult = {
       output,
       release: join(output, name),
       archive: join(output, archiveName),
       digest,
       manifest,
     };
+    completed = true;
+  } catch (error) {
+    throw new ServicePayloadBuildFailure(scratch, error);
   } finally {
-    await rm(scratch, { recursive: true, force: true });
+    if (completed) {
+      try {
+        await rm(scratch, { recursive: true, force: true });
+      } catch (error) {
+        cleanupFailure = error;
+      }
+    }
   }
+  if (cleanupFailure) throw new ServicePayloadBuildFailure(scratch, cleanupFailure);
+  return buildResult;
 }
 
 function parse(argv) {
@@ -968,10 +1179,12 @@ function parse(argv) {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   buildServicePayload(parse(process.argv.slice(2)))
     .then((result) => console.log(`Built ${result.output}`))
-    .catch(() => {
+    .catch((error) => {
       console.error(
         "Service payload build failed. Verify the clean source, explicit Node archive and checksum, Bun 1.4.2, Xcode tools, and output path.",
       );
+      if (error instanceof ServicePayloadBuildFailure)
+        console.error(`Retained owned scratch: ${error.retainedScratch}`);
       process.exitCode = 1;
     });
 }

@@ -1,4 +1,28 @@
 export function unavailableActivationPolicySource(): string;
+export function readActivationPolicyBuildFile(
+  path: string,
+  maximum: number,
+  expectedMode?: number,
+): Promise<{
+  data: Buffer;
+  identity: {
+    dev: bigint;
+    ino: bigint;
+    uid: bigint;
+    mode: bigint;
+    nlink: bigint;
+    size: bigint;
+    mtimeNs: bigint;
+    ctimeNs: bigint;
+  };
+}>;
+export function captureActivationPolicyBuildDirectory(path: string): Promise<unknown>;
+export function verifyActivationPolicyBuildDirectory(directory: unknown): Promise<void>;
+export function inspectActivationPolicyBlob(
+  path: string,
+  architecture: "arm64" | "x64",
+  expected: Buffer,
+): Promise<Buffer>;
 
 export function generateActivationPolicySource(options: {
   source: string;

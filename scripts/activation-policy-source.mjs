@@ -137,52 +137,160 @@ export function runActivationPolicyBuildCommand(file, args, options) {
   });
 }
 
-function swiftSource(policy, configured) {
-  const value = configured
-    ? policy
-    : {
-        teamID: "",
-        architecture: "",
-        envelope: "",
-        payload: "",
-        digest: "",
-        data: Buffer.alloc(0),
-      };
-  return `import Foundation
-
-enum CompiledAuthenticatedActivationPolicy {
-  static let configured = ${configured}
-  static let publisherTeamID = "${value.teamID}"
-  static let targetArchitecture = "${value.architecture}"
-  static let envelopePolicyDigest = "${value.envelope}"
-  static let payloadPolicyDigest = "${value.payload}"
-  static let trustedPolicyDigest = "${value.digest}"
-  static let canonicalPolicyBase64 = "${value.data.toString("base64")}"
-}
-
-#if ELLIE_POLICY_AUDIT_TESTING
-  func runCompiledActivationPolicyAudit(_ arguments: [String]) -> Bool {
-    guard arguments == ["test-compiled-activation-policy"] else { return false }
-    guard CompiledAuthenticatedActivationPolicy.configured,
-      let data = Data(base64Encoded: CompiledAuthenticatedActivationPolicy.canonicalPolicyBase64)
-    else { exit(78) }
-    let header = [CompiledAuthenticatedActivationPolicy.publisherTeamID,
-      CompiledAuthenticatedActivationPolicy.targetArchitecture,
-      CompiledAuthenticatedActivationPolicy.envelopePolicyDigest,
-      CompiledAuthenticatedActivationPolicy.payloadPolicyDigest,
-      CompiledAuthenticatedActivationPolicy.trustedPolicyDigest].joined(separator: "|") + "\\n"
-    var output = Data(header.utf8)
-    output.append(data)
-    output.append(Data((CompiledAuthenticatedActivationPolicy.trustedPolicyDigest + "\\n").utf8))
-    FileHandle.standardOutput.write(output)
-    exit(0)
-  }
-#endif
+function blobSource(data) {
+  const bytes = [...data].map((value) => `0x${value.toString(16).padStart(2, "0")}`).join(",");
+  return `#include "EllieActivationPolicyBlob.h"
+__attribute__((used, section("__TEXT,__ellie_policy"), aligned(1)))
+static const uint8_t ellie_policy[] = {${bytes}};
+const uint8_t *ellie_activation_policy_bytes(void) { return ellie_policy; }
+size_t ellie_activation_policy_size(void) { return sizeof(ellie_policy); }
 `;
 }
 
 export function unavailableActivationPolicySource() {
-  return swiftSource(undefined, false);
+  return blobSource(Buffer.from("ELLIE-ACTIVATION-POLICY-UNAVAILABLE-V1\n"));
+}
+
+function paddedName(data, offset) {
+  const value = data.subarray(offset, offset + 16);
+  const zero = value.indexOf(0);
+  const end = zero < 0 ? 16 : zero;
+  if (value.subarray(0, end).some((byte) => byte < 0x20 || byte > 0x7e))
+    throw new Error("Activation policy Mach-O name is malformed.");
+  if (zero >= 0 && value.subarray(zero).some((byte) => byte !== 0))
+    throw new Error("Activation policy Mach-O name is malformed.");
+  return value.subarray(0, end).toString("ascii");
+}
+
+export async function inspectActivationPolicyBlob(path, architecture, authority) {
+  if (
+    typeof path !== "string" ||
+    !isAbsolute(path) ||
+    !["arm64", "x64"].includes(architecture) ||
+    !Buffer.isBuffer(authority) ||
+    authority.length < 1 ||
+    authority.length > 16 * 1024
+  )
+    throw new Error("Invalid activation policy audit input.");
+  authority = Buffer.from(authority);
+  const { data } = await readRegular(path, 64 * 1024 * 1024);
+  if (data.length < 32 || data.readUInt32LE(0) !== 0xfeedfacf)
+    throw new Error("Activation policy binary is not a supported thin Mach-O.");
+  const expectedCPU = architecture === "arm64" ? [0x0100000c, 0] : [0x01000007, 3];
+  if (
+    data.readUInt32LE(4) !== expectedCPU[0] ||
+    data.readUInt32LE(8) !== expectedCPU[1] ||
+    data.readUInt32LE(12) !== 2 ||
+    data.readUInt32LE(28) !== 0
+  )
+    throw new Error("Activation policy binary architecture is invalid.");
+  const commands = data.readUInt32LE(16),
+    commandBytes = data.readUInt32LE(20);
+  if (
+    commands < 1 ||
+    commands > 128 ||
+    commandBytes > 1024 * 1024 ||
+    32 + commandBytes > data.length
+  )
+    throw new Error("Activation policy Mach-O commands are invalid.");
+  let cursor = 32;
+  const matches = [];
+  const mappings = [];
+  let textSegments = 0;
+  for (let index = 0; index < commands; index += 1) {
+    if (cursor + 8 > 32 + commandBytes) throw new Error("Activation policy Mach-O is truncated.");
+    const command = data.readUInt32LE(cursor),
+      size = data.readUInt32LE(cursor + 4);
+    if (size < 8 || size % 8 !== 0 || cursor + size > 32 + commandBytes)
+      throw new Error("Activation policy Mach-O command is invalid.");
+    if (command === 1) throw new Error("Activation policy Mach-O contains a 32-bit segment.");
+    if (command === 0x19) {
+      if (size < 72) throw new Error("Activation policy Mach-O segment is invalid.");
+      const segment = paddedName(data, cursor + 8);
+      const vmAddress = data.readBigUInt64LE(cursor + 24),
+        vmSize = data.readBigUInt64LE(cursor + 32);
+      const fileOffset = data.readBigUInt64LE(cursor + 40),
+        fileSize = data.readBigUInt64LE(cursor + 48);
+      const maxProtection = data.readUInt32LE(cursor + 56),
+        initialProtection = data.readUInt32LE(cursor + 60);
+      const sections = data.readUInt32LE(cursor + 64);
+      const segmentFlags = data.readUInt32LE(cursor + 68);
+      if (
+        sections > 256 ||
+        size !== 72 + sections * 80 ||
+        fileOffset + fileSize > BigInt(data.length) ||
+        fileOffset + fileSize > 0xffff_ffff_ffff_ffffn ||
+        vmAddress + vmSize > 0xffff_ffff_ffff_ffffn ||
+        vmSize < fileSize
+      )
+        throw new Error("Activation policy Mach-O segment is invalid.");
+      if (segment === "__TEXT") {
+        textSegments += 1;
+        if (segmentFlags !== 0 || maxProtection !== 5 || initialProtection !== 5)
+          throw new Error("Activation policy text segment is invalid.");
+      }
+      for (const prior of mappings) {
+        const fileOverlap =
+          fileSize > 0n &&
+          prior.fileSize > 0n &&
+          fileOffset < prior.fileOffset + prior.fileSize &&
+          prior.fileOffset < fileOffset + fileSize;
+        const virtualOverlap =
+          vmSize > 0n &&
+          prior.vmSize > 0n &&
+          vmAddress < prior.vmAddress + prior.vmSize &&
+          prior.vmAddress < vmAddress + vmSize;
+        if (fileOverlap || virtualOverlap)
+          throw new Error("Activation policy Mach-O segments overlap.");
+      }
+      mappings.push({ fileOffset, fileSize, vmAddress, vmSize });
+      for (let sectionIndex = 0; sectionIndex < sections; sectionIndex += 1) {
+        const section = cursor + 72 + sectionIndex * 80;
+        const name = paddedName(data, section),
+          sectionSegment = paddedName(data, section + 16);
+        if (name !== "__ellie_policy") continue;
+        const address = data.readBigUInt64LE(section + 32),
+          length = data.readBigUInt64LE(section + 40);
+        const offset = data.readUInt32LE(section + 48),
+          alignment = data.readUInt32LE(section + 52);
+        const relocationOffset = data.readUInt32LE(section + 56),
+          relocations = data.readUInt32LE(section + 60);
+        const flags = data.readUInt32LE(section + 64),
+          reserved1 = data.readUInt32LE(section + 68),
+          reserved2 = data.readUInt32LE(section + 72),
+          reserved3 = data.readUInt32LE(section + 76);
+        const relative = BigInt(offset) - fileOffset;
+        if (
+          segment !== "__TEXT" ||
+          sectionSegment !== "__TEXT" ||
+          maxProtection !== 5 ||
+          initialProtection !== 5 ||
+          length < 1n ||
+          length > 16n * 1024n ||
+          offset < 32 + commandBytes ||
+          relative < 0n ||
+          relative + length > fileSize ||
+          address !== vmAddress + relative ||
+          BigInt(offset) + length > BigInt(data.length) ||
+          alignment !== 0 ||
+          relocationOffset !== 0 ||
+          relocations !== 0 ||
+          flags !== 0 ||
+          reserved1 !== 0 ||
+          reserved2 !== 0 ||
+          reserved3 !== 0
+        )
+          throw new Error("Activation policy Mach-O section is invalid.");
+        matches.push(Buffer.from(data.subarray(offset, offset + Number(length))));
+      }
+    }
+    cursor += size;
+  }
+  if (cursor !== 32 + commandBytes || textSegments !== 1 || matches.length !== 1)
+    throw new Error("Activation policy Mach-O section is missing or duplicated.");
+  if (!matches[0].equals(authority))
+    throw new Error("Activation policy Mach-O bytes do not match build authority.");
+  return matches[0];
 }
 
 const sameIdentity = (a, b) =>
@@ -262,6 +370,53 @@ async function readRegular(path, maximum, expectedMode) {
   } finally {
     await input.close();
   }
+}
+
+export async function readActivationPolicyBuildFile(path, maximum, expectedMode) {
+  if (
+    typeof path !== "string" ||
+    !isAbsolute(path) ||
+    !Number.isSafeInteger(maximum) ||
+    maximum < 1 ||
+    maximum > 64 * 1024 * 1024 ||
+    (expectedMode !== undefined &&
+      ![0o400, 0o444, 0o600, 0o644, 0o700, 0o755].includes(expectedMode))
+  )
+    throw new Error("Invalid activation policy file input.");
+  const directory = await directoryChain(dirname(path));
+  const result = await readRegular(path, maximum, expectedMode);
+  await rebindDirectory(directory);
+  return {
+    data: result.data,
+    identity: {
+      dev: result.info.dev,
+      ino: result.info.ino,
+      uid: result.info.uid,
+      mode: result.info.mode,
+      nlink: result.info.nlink,
+      size: result.info.size,
+      mtimeNs: result.info.mtimeNs,
+      ctimeNs: result.info.ctimeNs,
+    },
+  };
+}
+
+export async function captureActivationPolicyBuildDirectory(path) {
+  if (typeof path !== "string" || !isAbsolute(path) || path.includes("\0"))
+    throw new Error("Invalid activation policy directory input.");
+  return directoryChain(path);
+}
+
+export async function verifyActivationPolicyBuildDirectory(directory) {
+  if (
+    !directory ||
+    typeof directory !== "object" ||
+    typeof directory.original !== "string" ||
+    typeof directory.canonical !== "string" ||
+    !Array.isArray(directory.chain)
+  )
+    throw new Error("Invalid activation policy directory evidence.");
+  await rebindDirectory(directory);
 }
 
 function canonicalJSON(value) {
@@ -485,17 +640,7 @@ export async function generateActivationPolicySource(options) {
       if (!sameFile(current.info, item.info) || sha256(current.data) !== item.digest)
         throw new Error("Activation policy source changed during generation.");
     }
-    const generated = swiftSource(
-      {
-        data: policy.data,
-        teamID: publisherTeamID,
-        architecture,
-        envelope: policy.envelopePolicyDigest,
-        payload: policy.payloadPolicyDigest,
-        digest: policy.digest,
-      },
-      true,
-    );
+    const generated = blobSource(policy.data);
     await rebindDirectory(destination);
     const temporary = join(destination.canonical, ".ellie-policy-" + randomUUID());
     const handle = await open(
