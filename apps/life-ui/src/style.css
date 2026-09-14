@@ -578,6 +578,13 @@ button.life-widget {
   .dashboard-title h1 {
     font-size: 30px;
   }
+  .dashboard-title {
+    display: block;
+  }
+  .dashboard-title-actions {
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
   .mobile-board-select {
     display: grid;
     gap: 2px;
