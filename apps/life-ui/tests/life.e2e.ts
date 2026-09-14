@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer as createHttpServer } from "node:http";
@@ -7,7 +8,11 @@ import { chromium } from "@playwright/test";
 import { LifeStore } from "../../../packages/life-core/src/index.ts";
 import { createLifeHarness } from "../../../packages/life-harness/src/index.ts";
 import { extractDocument } from "../../../packages/life-ingest/src/index.ts";
-import { MLBAdapter, PluginStore } from "../../../packages/life-plugins/src/index.ts";
+import {
+  groupStorageKey,
+  MLBAdapter,
+  PluginStore,
+} from "../../../packages/life-plugins/src/index.ts";
 import { TaskRuntime } from "../../../packages/task-runtime/src/index.ts";
 import { createLifeServer } from "../../life/src/server.ts";
 import { agendaDate, dayHeading } from "../src/dates.ts";
@@ -38,6 +43,32 @@ const taskDir = join(root, "tasks");
 await mkdir(taskDir, { mode: 0o700 });
 const store = new LifeStore(join(root, "life.sqlite"));
 const plugins = new PluginStore(join(root, "plugins.sqlite"));
+const sharedGroup = store.createGroup(
+  { userId: "e2e-user" },
+  { id: "e2e-family", name: "E2E family" },
+);
+const sharedRecord = store.createRecord(
+  { userId: "e2e-user" },
+  {
+    kind: "memory",
+    title: "Shared record survives reset",
+    scope: { type: "group", id: sharedGroup.id },
+    data: { explicit: true },
+  },
+);
+const sharedPlugin = plugins.install(`group:${sharedGroup.id}`, {
+  name: "Shared reset sentinel",
+  description: "This shared app remains installed",
+  kind: "custom",
+  capabilities: ["storage"],
+  html: "<!doctype html><p>shared</p>",
+});
+plugins.storageSet(
+  `group:${sharedGroup.id}`,
+  sharedPlugin.id,
+  groupStorageKey("e2e-user", "sentinel"),
+  "remove-me",
+);
 let hostileReached = false;
 const hostileServer = createHttpServer((_request, response) => {
   hostileReached = true;
@@ -83,7 +114,17 @@ const harness = createLifeHarness({
     },
   },
 });
-const server = createLifeServer({
+const sharedTask = tasks.schedule({
+  owner: `group:${sharedGroup.id}`,
+  handler: "reminder.notify",
+  input: {
+    recordId: sharedRecord.id,
+    scope: { type: "group", id: sharedGroup.id },
+    userId: "e2e-user",
+  },
+  schedule: { kind: "once", at: Date.now() + 86_400_000 },
+});
+let server = createLifeServer({
   stateDir: root,
   assetsDir: resolve("apps/life-ui/dist"),
   store,
@@ -100,7 +141,7 @@ const server = createLifeServer({
 const browser = await chromium.launch({ headless: true });
 try {
   tasks.start();
-  const listening = await server.listen();
+  let listening = await server.listen();
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
   const page = await context.newPage();
   const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
@@ -182,7 +223,7 @@ try {
   await page.getByText("Fixture summary of the cited source.").waitFor();
   await page.locator(".task-result strong").getByText("garden.txt", { exact: true }).waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-task-result.png"), fullPage: true });
+    await page.screenshot({ path: join(artifactDir, "life-task-result.png"), fullPage: false });
   await page.getByRole("button", { name: "Close" }).click();
   const gardenSource = store
     .listRecords(
@@ -191,6 +232,24 @@ try {
     )
     .find((record) => record.title === "garden.txt");
   assert.ok(gardenSource);
+  const teachingGuideId = await page.evaluate(
+    async ({ sourceId, sourceRevision }) => {
+      const response = await fetch("/api/life/teaching", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          scope: "user:e2e-user",
+          title: "Garden answer style",
+          instructions: "Answer garden questions in short steps.",
+          sources: [{ id: sourceId, revision: sourceRevision }],
+          enabled: true,
+        }),
+      });
+      if (!response.ok) throw new Error(`Teaching fixture failed (${response.status})`);
+      return ((await response.json()) as { record: { id: string } }).record.id;
+    },
+    { sourceId: gardenSource.id, sourceRevision: gardenSource.revision },
+  );
   const revisedGarden = store.updateRecord(
     { userId: "e2e-user" },
     gardenSource.id,
@@ -223,6 +282,57 @@ try {
     { previousId: summaryRoot.id, revision: revisedGarden.revision },
   );
   await page.getByRole("button", { name: /Your world/ }).click();
+  await page.getByRole("button", { name: "guidance", exact: true }).click();
+  const guideRow = page.locator(".guide-list button").filter({ hasText: "Garden answer style" });
+  await guideRow.getByText(/Source changed — review needed/).waitFor();
+  await guideRow.click();
+  assert.equal(
+    await page.getByRole("button", { name: "Adopt reviewed revision" }).isDisabled(),
+    true,
+  );
+  await page
+    .locator(".source-choices label")
+    .filter({ hasText: "garden.txt" })
+    .getByRole("checkbox")
+    .check();
+  await page
+    .getByLabel("Explicit instructions")
+    .fill("Answer garden questions in three clear steps.");
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-guidance-review.png"), fullPage: false });
+  await page.getByRole("button", { name: "Adopt reviewed revision" }).click();
+  await page.getByText("Guidance revised").waitFor();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await guideRow.click();
+  await page.getByRole("dialog").getByRole("button", { name: "Pause" }).click();
+  await page.getByText("Guidance paused").waitFor();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await guideRow.getByText(/Paused/).waitFor();
+  await guideRow.click();
+  await page.getByRole("dialog").getByRole("button", { name: "Resume" }).click();
+  await page.getByText("Guidance resumed").waitFor();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await guideRow.click();
+  await page
+    .getByLabel("Explicit instructions")
+    .fill("Answer garden questions in four clear steps.");
+  await page.getByRole("dialog").getByRole("button", { name: "Create new version" }).click();
+  await page.getByText("Guidance revised").waitFor();
+  await page.getByRole("dialog").waitFor({ state: "detached" });
+  await guideRow.click();
+  await page.getByLabel("Earlier version").selectOption("2");
+  await page.getByRole("dialog").getByRole("button", { name: "Restore selected" }).click();
+  await page.getByText("Earlier guidance restored as a new version").waitFor();
+  const guideAfterRollback = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/life/teaching/${id}`);
+    return (await response.json()) as {
+      version: number;
+      record: { body: string };
+    };
+  }, teachingGuideId);
+  assert.ok(guideAfterRollback.version >= 4);
+  assert.equal(guideAfterRollback.record.body, "Answer garden questions in three clear steps.");
+  await page.getByRole("button", { name: "all", exact: true }).click();
   const pdfChooser = page.waitForEvent("filechooser");
   await page.getByText("Teach Ellie from a file").click();
   await (
@@ -500,9 +610,9 @@ try {
   await page.getByText("App revision created").waitFor();
   await notebook.getByText("Notebook revision 2").waitFor();
   await notebook.getByRole("button", { name: "Manage" }).click();
-  if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-plugin-manage.png"), fullPage: true });
   await page.getByLabel("Revision to restore").selectOption("1");
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-plugin-manage.png"), fullPage: false });
   await page.getByRole("button", { name: "Restore selected" }).click();
   await page.getByText("Restored version 1 as a new revision").waitFor();
   await notebook.getByText("Notebook revision 1").waitFor();
@@ -632,6 +742,116 @@ try {
   );
   await page.getByRole("button", { name: "Today" }).click();
   await page.getByText("Buried appointment").waitFor();
+
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("button", { name: "Inspect my data" }).click();
+  await page.getByText("Private records").waitFor();
+  assert.ok(Number(await page.locator(".data-review dd").first().textContent()) > 0);
+  const archiveDownload = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download my archive" }).click();
+  const archive = await archiveDownload;
+  const archivePath = join(root, "personal-archive.json");
+  await archive.saveAs(archivePath);
+  const archiveText = await readFile(archivePath, "utf8");
+  assert.match(archiveText, /Morning appointment preference/);
+  assert.match(archiveText, /Garden answer style/);
+  assert.equal(
+    archiveText.includes("Shared record survives reset"),
+    false,
+    "personal archive excludes shared group records",
+  );
+  assert.equal(
+    archiveText.includes("Shared reset sentinel"),
+    false,
+    "personal archive excludes shared apps",
+  );
+  await page.getByRole("button", { name: "Review reset" }).click();
+  await page.getByLabel(/Type RESET MY PRIVATE DATA/).fill("RESET MY PRIVATE DATA");
+  if (artifactDir)
+    await page.screenshot({
+      path: join(artifactDir, "life-data-reset-review.png"),
+      fullPage: false,
+    });
+  const pendingReview = await page.evaluate(async () => {
+    const response = await fetch("/api/life/personal-data/review");
+    return (await response.json()) as {
+      reviewToken: string;
+      generations: { life: number; tasks: number; plugins: number };
+    };
+  });
+  const pendingOperationId = randomUUID();
+  await server.close();
+  store.beginPersonalReset(
+    { userId: "e2e-user" },
+    {
+      operationId: pendingOperationId,
+      reviewTokenHash: createHash("sha256").update(pendingReview.reviewToken).digest("hex"),
+      lifeGeneration: pendingReview.generations.life,
+      taskGeneration: pendingReview.generations.tasks,
+      pluginGeneration: pendingReview.generations.plugins,
+    },
+  );
+  server = createLifeServer({
+    stateDir: root,
+    assetsDir: resolve("apps/life-ui/dist"),
+    store,
+    plugins,
+    tasks,
+    harness,
+    mlb,
+    extractor: ({ signal, ...input }) => extractDocument(input, { signal }),
+    port: 0,
+    userId: "e2e-user",
+    userName: "Ellie E2E",
+    timeZone: "America/Los_Angeles",
+  });
+  listening = await server.listen();
+  await page.goto(listening.launchUrl);
+  await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByText("Reset in progress").waitFor();
+  await page.getByRole("button", { name: "Retry now" }).click();
+  await page.getByText("Private data reset complete").waitFor({ timeout: 15_000 });
+  assert.equal(
+    store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, limit: 500 },
+    ).length,
+    0,
+  );
+  assert.ok(
+    store
+      .listRecords(
+        { userId: "e2e-user" },
+        { scope: { type: "group", id: sharedGroup.id }, limit: 500 },
+      )
+      .some((record) => record.id === sharedRecord.id),
+  );
+  assert.ok(
+    plugins.list(`group:${sharedGroup.id}`).some((plugin) => plugin.id === sharedPlugin.id),
+  );
+  assert.equal(
+    plugins.storageGet(
+      `group:${sharedGroup.id}`,
+      sharedPlugin.id,
+      groupStorageKey("e2e-user", "sentinel"),
+    ),
+    null,
+    "reset removes this user's storage inside a shared app",
+  );
+  assert.equal(tasks.list({ owner: "user:e2e-user" }).length, 0);
+  assert.ok(
+    tasks.list({ owner: `group:${sharedGroup.id}` }).some((task) => task.id === sharedTask.id),
+  );
+  assert.ok(store.listGroups({ userId: "e2e-user" }).some((group) => group.id === sharedGroup.id));
+
+  await page.getByRole("button", { name: "Reload Ellie" }).click();
+  await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
+  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
+  await page.locator("aside nav button").filter({ hasText: "Your world" }).click();
+  await page.getByText("Shared record survives reset").waitFor();
+  await page.getByRole("button", { name: "Your space" }).click();
+  await page.getByText("Shared reset sentinel").waitFor();
   assert.deepEqual(errors, []);
   console.log(`life UI E2E passed at ${listening.url}`);
   await context.close();

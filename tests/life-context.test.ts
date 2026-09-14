@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LifeStore } from "../packages/life-core/src/index.ts";
-import { ProactivityEngine } from "../packages/life-context/src/index.ts";
+import { PreparationMonitor, ProactivityEngine } from "../packages/life-context/src/index.ts";
 
 test("shopping opportunities are relevant, scoped, quiet, persistent and stop after completion", () => {
   const directory = mkdtempSync(join(tmpdir(), "ellie-context-test-"));
@@ -218,4 +218,127 @@ test("changed source evidence stops proactive event preparation until reviewed",
     store.close();
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("preparation monitoring creates notices on startup, respects privacy admission, and survives restart", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ellie-preparation-monitor-"));
+  const now = Date.parse("2026-09-14T16:00:00Z");
+  let store = new LifeStore(join(directory, "life.sqlite"));
+  const actor = { userId: "alice" },
+    scope = { type: "user" as const, id: "alice" };
+  let admitted = false;
+  let monitor: PreparationMonitor | undefined;
+  const makeMonitor = () =>
+    new PreparationMonitor({
+      engine: new ProactivityEngine(store, () => now),
+      actor,
+      scopes: () => [scope],
+      canEvaluate: () => admitted,
+      now: () => now,
+    });
+  try {
+    store.createRecord(actor, {
+      kind: "event",
+      scope,
+      title: "Dentist",
+      data: { startAt: now + 86400000 },
+    });
+    monitor = makeMonitor();
+    monitor.start();
+    assert.equal(monitor.status().running, true);
+    assert.equal(monitor.status().lastCheck?.skipped, true);
+    assert.equal(store.listRecords(actor, { scope, kinds: ["feedback"] }).length, 0);
+    admitted = true;
+    assert.equal(monitor.checkNow().suggestionsCreated, 1);
+    assert.equal(store.listRecords(actor, { scope, kinds: ["feedback"] })[0]?.title, "Dentist");
+    monitor.stop();
+    assert.equal(monitor.status().running, false);
+    store.close();
+    store = new LifeStore(join(directory, "life.sqlite"));
+    monitor = makeMonitor();
+    monitor.start();
+    assert.equal(monitor.status().lastCheck?.suggestionsCreated, 0);
+    assert.equal(store.listRecords(actor, { scope, kinds: ["feedback"] }).length, 1);
+    store.createRecord(actor, {
+      kind: "event",
+      scope,
+      title: "Eye exam",
+      data: { startAt: now + 3600000 },
+    });
+    store.setUserSetting(actor, "proactiveSuggestions", false);
+    assert.equal(monitor.checkNow().suggestionsCreated, 0);
+    store.setUserSetting(actor, "proactiveSuggestions", true);
+    assert.equal(monitor.checkNow().suggestionsCreated, 1);
+  } finally {
+    monitor?.stop();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("preparation checks rotate bounded scopes, refresh membership, and isolate errors", () => {
+  let scopes = ["one", "revoked", "three", "four"].map((id) => ({
+    type: "group" as const,
+    id,
+  }));
+  const calls: string[] = [];
+  let admitted = true;
+  const monitor = new PreparationMonitor({
+    actor: { userId: "alice" },
+    scopes: () => scopes,
+    canEvaluate: () => admitted,
+    maxScopesPerCheck: 2,
+    now: () => 12345,
+    engine: {
+      evaluate: (_actor, scope, signal) => {
+        assert.deepEqual(signal, { type: "check", at: 12345 });
+        calls.push(scope.id);
+        if (scope.id === "revoked") throw new Error("Private group details must not escape.");
+        return [];
+      },
+    },
+  });
+  assert.deepEqual(monitor.checkNow(), {
+    at: 12345,
+    scopesChecked: 2,
+    suggestionsCreated: 0,
+    errors: 1,
+    skipped: false,
+  });
+  assert.equal(monitor.checkNow().scopesChecked, 2);
+  assert.deepEqual(calls, ["one", "revoked", "three", "four"]);
+  scopes = [{ type: "group", id: "new-group" }];
+  monitor.checkNow();
+  assert.equal(calls.at(-1), "new-group");
+  admitted = false;
+  assert.equal(monitor.checkNow().scopesChecked, 0);
+  assert.equal(calls.length, 5);
+  assert.equal(JSON.stringify(monitor.status()).includes("Private"), false);
+  const snapshot = monitor.status();
+  snapshot.lastCheck!.errors = 100;
+  assert.equal(monitor.status().lastCheck?.errors, 0);
+});
+
+test("stopping the monitor prevents subsequent interval work", async () => {
+  let checks = 0;
+  const monitor = new PreparationMonitor({
+    actor: { userId: "alice" },
+    scopes: () => [{ type: "user", id: "alice" }],
+    intervalMs: 100,
+    engine: {
+      evaluate: () => {
+        checks++;
+        return [];
+      },
+    },
+  });
+  monitor.start();
+  monitor.start();
+  assert.equal(checks, 1);
+  monitor.stop();
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(checks, 1);
+  monitor.start();
+  assert.equal(checks, 2);
+  monitor.stop();
 });

@@ -437,6 +437,38 @@ test("proactive notification and source cooldown marker commit atomically", asyn
       undefined,
     );
     assert.equal(store.listRecords(alice, { kinds: ["feedback"] }).length, 1);
+    const event = store.createRecord(alice, {
+      kind: "event",
+      title: "Trip",
+      scope: need.scope,
+      data: {},
+    });
+    assert.ok(
+      store.createProactiveNotification(alice, {
+        scope: event.scope,
+        recordId: event.id,
+        expectedRevision: event.revision,
+        reason: "Pack now",
+        category: "preparation",
+        expiresAt: 1_000,
+        at: 100,
+        cooldownMs: 0,
+      }),
+    );
+    const marked = store.getRecord(alice, event.id)!;
+    assert.equal(
+      store.createProactiveNotification(alice, {
+        scope: event.scope,
+        recordId: event.id,
+        expectedRevision: marked.revision,
+        reason: "Pack again",
+        category: "preparation",
+        expiresAt: 1_100,
+        at: 200,
+        cooldownMs: 0,
+      }),
+      undefined,
+    );
     store.close();
   } finally {
     await rm(f.dir, { recursive: true, force: true });
@@ -561,6 +593,114 @@ test("compact record summaries page stably across equal timestamps and restart",
         }),
       /cursor/,
     );
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("personal export is generation-bound and reset preserves shared membership", async () => {
+  const f = await fixture();
+  try {
+    let store = f.open(700);
+    store.createGroup(alice, { id: "family", name: "Family" });
+    store.setGroupMember(alice, "family", { userId: "bob", role: "member" });
+    store.createRecord(alice, {
+      kind: "source",
+      title: "Private source",
+      body: "full private text",
+      scope: { type: "user", id: "alice" },
+      data: {},
+    });
+    store.createRecord(alice, {
+      kind: "event",
+      title: "Shared dinner",
+      scope: { type: "group", id: "family" },
+      data: { startAt: 900 },
+    });
+    store.setSettings(alice, { level: "user", values: { tone: "brief" } });
+    const review = store.personalSummary(alice),
+      first = store.exportPersonalPage(alice, { limit: 1, expectedGeneration: review.generation });
+    assert.equal(first.items.length, 1);
+    assert.ok(first.nextCursor);
+    store.createRecord(alice, {
+      kind: "memory",
+      title: "Changed",
+      scope: { type: "user", id: "alice" },
+      data: {},
+    });
+    assert.throws(
+      () =>
+        store.exportPersonalPage(alice, {
+          cursor: first.nextCursor,
+          expectedGeneration: review.generation,
+        }),
+      LifeConflictError,
+    );
+    const current = store.personalSummary(alice),
+      journal = store.beginPersonalReset(alice, {
+        operationId: "reset-1",
+        reviewTokenHash: "a".repeat(64),
+        lifeGeneration: current.generation,
+        taskGeneration: 3,
+        pluginGeneration: 4,
+      });
+    assert.equal(journal.state, "draining");
+    store.close();
+    store = f.open(701);
+    assert.equal(store.getPersonalReset(alice)?.operationId, "reset-1");
+    const after = store.deletePersonal(alice, { preserveMemberships: true });
+    assert.equal(after.records, 0);
+    assert.equal(store.listGroups(bob)[0]?.id, "family");
+    assert.equal(
+      store.listRecords(bob, { scope: { type: "group", id: "family" } })[0]?.title,
+      "Shared dinner",
+    );
+    for (const state of ["tasks-deleted", "plugins-deleted", "life-deleted", "completed"] as const)
+      store.advancePersonalReset(alice, "reset-1", state);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("personal export pages bound large source payloads without losing the next item", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open(900),
+      body = "x".repeat(3_100_000);
+    store.createRecord(alice, {
+      kind: "source",
+      title: "One",
+      body,
+      scope: { type: "user", id: "alice" },
+      data: {},
+    });
+    store.createRecord(alice, {
+      kind: "source",
+      title: "Two",
+      body,
+      scope: { type: "user", id: "alice" },
+      data: {},
+    });
+    const generation = store.personalSummary(alice).generation,
+      first = store.exportPersonalPage(alice, { limit: 100, expectedGeneration: generation });
+    assert.equal(first.items.length, 1);
+    assert.ok(first.nextCursor);
+    const second = store.exportPersonalPage(alice, {
+      cursor: first.nextCursor,
+      limit: 100,
+      expectedGeneration: generation,
+    });
+    assert.equal(second.items.length, 1);
+    assert.equal(second.nextCursor, undefined);
+    store.createRecord(bob, {
+      kind: "memory",
+      title: "Bob",
+      scope: { type: "user", id: "bob" },
+      data: {},
+    });
+    assert.throws(() => store.exportPersonalPage(bob, { cursor: first.nextCursor }), /cursor/);
     store.close();
   } finally {
     await rm(f.dir, { recursive: true, force: true });

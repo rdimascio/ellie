@@ -10,6 +10,12 @@ Installed code is versioned, retaining the latest 100 revisions per extension. R
 
 `PluginStore` provides `install`, `list`, `get`, `history`, `update`, `rollback`, `remove`, `storageGet`, `storageSet`, `authorize`, and `view`. History returns retained revision metadata without generated HTML. Every method takes a canonical owner scope. The HTTP host derives owner scope from the authenticated user and current group membership; code inside the plugin cannot choose another owner or plugin identity.
 
+## Personal archive and reset
+
+`personalSummary(userId)` reports counts, payload bytes and a per-user generation. `exportPersonal(userId, {expectedGeneration, cursor, limit})` returns at most 100 items and approximately 4 MiB of item payload per page. The archive contains private plugins, retained code versions, their storage and that user's encoded storage entries in shared plugins. It excludes shared plugin code and other people's values. Cursors bind the owner, generation and offset; a relevant mutation invalidates the archive continuation instead of silently mixing versions. Mutations by unrelated users do not invalidate it. Schema v2 migrates existing v1 stores and retains generations across restart.
+
+`deletePersonal(userId, expectedGeneration?)` removes that same personal scope in one local transaction, preserving shared plugin installations and other users' data. An empty repeat is idempotent. The Life service coordinates admission and durable reset across the memory, task and plugin stores; callers of the raw store API must settle writes before deleting. Reset is logical deletion from local application stores, not a claim of secure erasure from device backups or previously downloaded archives. Earlier ambiguous raw-prefix group values are excluded from automatic ownership assignment.
+
 ## Browser bridge
 
 The host embeds a trusted broker with `sandbox="allow-scripts"`, without same-origin access. The broker creates a second opaque frame for the extension. A trusted bootstrap in that original document sends a fresh channel outward; the broker passes authenticated host results through that channel. The extension receives its end in a local window message:

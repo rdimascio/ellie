@@ -143,21 +143,34 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
         model,
         context,
       }),
-      server = serverPackage.createLifeServer({
-        stateDir,
-        assetsDir:
-          options.assetsDir ??
-          resolve(fileURLToPath(new URL("../../life-ui/dist", import.meta.url))),
-        store: lifeStore,
-        tasks: taskRuntime,
-        plugins: pluginStore,
-        harness,
-        mlb,
-        context,
-        port: options.port,
-        userId: options.userId,
-        extractor: (input) => ingestPackage.extractDocument(input, { signal: input.signal }),
-      });
+      trustedActor = { userId: options.userId ?? "local" };
+    let server: ReturnType<typeof serverPackage.createLifeServer>;
+    const preparationMonitor = new contextPackage.PreparationMonitor({
+      engine: context,
+      actor: trustedActor,
+      scopes: () => [
+        { type: "user" as const, id: trustedActor.userId },
+        ...lifeStore
+          .listGroups(trustedActor)
+          .map((group) => ({ type: "group" as const, id: group.id })),
+      ],
+      canEvaluate: () => Boolean(server?.canEvaluateBackground()),
+    });
+    server = serverPackage.createLifeServer({
+      stateDir,
+      assetsDir:
+        options.assetsDir ?? resolve(fileURLToPath(new URL("../../life-ui/dist", import.meta.url))),
+      store: lifeStore,
+      tasks: taskRuntime,
+      plugins: pluginStore,
+      harness,
+      mlb,
+      context,
+      preparationMonitor,
+      port: options.port,
+      userId: options.userId,
+      extractor: (input) => ingestPackage.extractDocument(input, { signal: input.signal }),
+    });
     let closed = false,
       closeInFlight: Promise<void> | undefined,
       pluginsClosed = false,

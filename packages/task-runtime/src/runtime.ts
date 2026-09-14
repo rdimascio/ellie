@@ -9,7 +9,11 @@ import type {
   HandlerContext,
   MissedRunPolicy,
   OwnerScope,
+  PersonalDeletion,
+  PersonalTaskExportPage,
+  PersonalTaskSummary,
   ProgressRecord,
+  RetryPolicy,
   RuntimeOptions,
   ScheduleTask,
   TaskHandler,
@@ -45,6 +49,39 @@ export class TaskRuntime {
   private assertOwner(owner: OwnerScope): void {
     if (!/^(user|group):[^:\s][^\s]{0,199}$/.test(owner))
       throw new Error("A canonical owner is required.");
+  }
+  private personalOwner(owner: OwnerScope): asserts owner is `user:${string}` {
+    this.assertOwner(owner);
+    if (!owner.startsWith("user:")) throw new Error("Personal operations require a user owner.");
+  }
+  private assertAdmission(owner: OwnerScope): void {
+    const row = this.db
+      .prepare("SELECT state FROM owner_deletions WHERE owner_scope=?")
+      .get(owner) as Row | undefined;
+    if (row && row.state !== "completed")
+      throw new Error("Task admission is frozen for personal deletion.");
+  }
+  private generation(owner: OwnerScope): number {
+    return Number(
+      (
+        this.db
+          .prepare("SELECT generation FROM owner_generations WHERE owner_scope=?")
+          .get(owner) as Row | undefined
+      )?.generation ?? 0,
+    );
+  }
+  private deletion(row: Row | undefined): PersonalDeletion | undefined {
+    if (!row) return undefined;
+    return {
+      owner: String(row.owner_scope) as `user:${string}`,
+      operationId: String(row.operation_id),
+      state: String(row.state) as PersonalDeletion["state"],
+      generation: Number(row.generation),
+      requestedAt: Number(row.requested_at),
+      ...(row.ready_at == null ? {} : { readyAt: Number(row.ready_at) }),
+      ...(row.completed_at == null ? {} : { completedAt: Number(row.completed_at) }),
+      unknownTaskIds: json<string[]>(row.unknown_task_ids, []),
+    };
   }
 
   constructor(options: RuntimeOptions) {
@@ -131,7 +168,7 @@ export class TaskRuntime {
 
   private migrate(): void {
     const version = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version);
-    if (version > 1)
+    if (version > 2)
       throw new Error("Unsupported task runtime schema; preserve the database and upgrade Ellie.");
     if (version === 0)
       this.db.exec(`
@@ -158,6 +195,26 @@ export class TaskRuntime {
       PRAGMA user_version = 1;
       COMMIT;
     `);
+    if (version <= 1)
+      this.db.exec(`
+      BEGIN;
+      CREATE TABLE owner_generations(owner_scope TEXT PRIMARY KEY,generation INTEGER NOT NULL) STRICT;
+      CREATE TABLE owner_deletions(owner_scope TEXT PRIMARY KEY,operation_id TEXT NOT NULL,state TEXT NOT NULL,
+        generation INTEGER NOT NULL,requested_at INTEGER NOT NULL,ready_at INTEGER,completed_at INTEGER,
+        unknown_task_ids TEXT NOT NULL) STRICT;
+      CREATE TRIGGER tasks_generation_insert AFTER INSERT ON tasks BEGIN INSERT INTO owner_generations VALUES(NEW.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER tasks_generation_update AFTER UPDATE ON tasks BEGIN INSERT INTO owner_generations VALUES(NEW.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER tasks_generation_delete AFTER DELETE ON tasks BEGIN INSERT INTO owner_generations VALUES(OLD.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER watches_generation_insert AFTER INSERT ON watches BEGIN INSERT INTO owner_generations VALUES(NEW.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER watches_generation_update AFTER UPDATE ON watches BEGIN INSERT INTO owner_generations VALUES(NEW.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER watches_generation_delete AFTER DELETE ON watches BEGIN INSERT INTO owner_generations VALUES(OLD.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER watch_events_generation_insert AFTER INSERT ON watch_events BEGIN INSERT INTO owner_generations VALUES(NEW.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER watch_events_generation_delete AFTER DELETE ON watch_events BEGIN INSERT INTO owner_generations VALUES(OLD.owner_scope,1) ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER progress_generation_insert AFTER INSERT ON progress BEGIN INSERT INTO owner_generations SELECT owner_scope,1 FROM tasks WHERE id=NEW.task_id ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      CREATE TRIGGER progress_generation_delete AFTER DELETE ON progress BEGIN INSERT INTO owner_generations SELECT owner_scope,1 FROM tasks WHERE id=OLD.task_id ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
+      PRAGMA user_version = 2;
+      COMMIT;
+    `);
   }
 
   registerHandler<Input, Result>(handler: TaskHandler<Input, Result>): void {
@@ -168,11 +225,13 @@ export class TaskRuntime {
   }
 
   enqueue(request: EnqueueTask): TaskRecord {
+    this.assertAdmission(request.owner);
     return this.insert(request, "queued");
   }
 
   /** Atomically creates a cancellable root whose execution waits for every child. */
   enqueueWorkflow(request: EnqueueWorkflow): WorkflowRecord {
+    this.assertAdmission(request.root.owner);
     if (
       !Array.isArray(request.children) ||
       request.children.length < 1 ||
@@ -229,6 +288,7 @@ export class TaskRuntime {
   }
 
   watch(request: WatchTask): string {
+    this.assertAdmission(request.owner);
     if (!this.handlers.has(request.handler))
       throw new Error(`Unknown task handler: ${request.handler}`);
     if (
@@ -356,7 +416,311 @@ export class TaskRuntime {
     );
   }
 
+  exportPersonal(request: {
+    owner: `user:${string}`;
+    cursor?: string;
+    limit?: number;
+    expectedGeneration?: number;
+  }): PersonalTaskExportPage {
+    this.personalOwner(request.owner);
+    const generation = this.generation(request.owner);
+    if (request.expectedGeneration !== undefined && request.expectedGeneration !== generation)
+      throw new Error("Personal task export changed; restart from the first page.");
+    const requestedLimit = request.limit ?? 4;
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 100)
+      throw new Error("Personal task export limit is invalid.");
+    const limit = Math.min(4, requestedLimit);
+    let section: "tasks" | "watches" | "watchEvents" | "progress" = "tasks",
+      offset = 0;
+    if (request.cursor) {
+      if (request.cursor.length > 1_000) throw new Error("Personal task export cursor is invalid.");
+      let cursor: unknown;
+      try {
+        cursor = JSON.parse(Buffer.from(request.cursor, "base64url").toString("utf8"));
+      } catch {
+        throw new Error("Personal task export cursor is invalid.");
+      }
+      if (!cursor || typeof cursor !== "object" || Array.isArray(cursor))
+        throw new Error("Personal task export cursor is invalid.");
+      const value = cursor as Record<string, unknown>;
+      if (
+        value.owner !== request.owner ||
+        value.generation !== generation ||
+        !["tasks", "watches", "watchEvents", "progress"].includes(String(value.section)) ||
+        !Number.isSafeInteger(value.offset) ||
+        Number(value.offset) < 0 ||
+        Number(value.offset) > 1_000_000
+      )
+        throw new Error("Personal task export changed; restart from the first page.");
+      section = value.section as typeof section;
+      offset = Number(value.offset);
+    }
+    const items: PersonalTaskExportPage["items"] = [];
+    while (items.length < limit) {
+      const remaining = limit - items.length;
+      if (section === "tasks") {
+        const rows = this.db
+          .prepare(
+            "SELECT * FROM tasks WHERE owner_scope=? ORDER BY created_at,id LIMIT ? OFFSET ?",
+          )
+          .all(request.owner, remaining, offset) as Row[];
+        items.push(...rows.map((row) => ({ type: "task" as const, task: this.fromRow(row)! })));
+        offset += rows.length;
+        if (rows.length === remaining) break;
+        section = "watches";
+        offset = 0;
+      } else if (section === "watches") {
+        const rows = this.db
+          .prepare(
+            "SELECT * FROM watches WHERE owner_scope=? ORDER BY created_at,id LIMIT ? OFFSET ?",
+          )
+          .all(request.owner, remaining, offset) as Row[];
+        items.push(
+          ...rows.map((row) => ({
+            type: "watch" as const,
+            watch: {
+              id: String(row.id),
+              owner: String(row.owner_scope) as OwnerScope,
+              topic: String(row.topic),
+              handler: String(row.handler),
+              paused: Boolean(row.paused),
+              createdAt: Number(row.created_at),
+              input: json(row.input, null),
+              capabilities: json<string[]>(row.capabilities, []),
+              budget: json(row.budget, {}),
+              ...(row.deadline_at == null ? {} : { deadlineAt: Number(row.deadline_at) }),
+              ...(row.expires_at == null ? {} : { expiresAt: Number(row.expires_at) }),
+              ...(row.retry == null
+                ? {}
+                : { retry: json<RetryPolicy>(row.retry, { maxAttempts: 1 }) }),
+            },
+          })),
+        );
+        offset += rows.length;
+        if (rows.length === remaining) break;
+        section = "watchEvents";
+        offset = 0;
+      } else if (section === "watchEvents") {
+        const rows = this.db
+          .prepare(
+            "SELECT * FROM watch_events WHERE owner_scope=? ORDER BY created_at,topic,dedupe_key LIMIT ? OFFSET ?",
+          )
+          .all(request.owner, remaining, offset) as Row[];
+        items.push(
+          ...rows.map((row) => ({
+            type: "watchEvent" as const,
+            event: {
+              owner: String(row.owner_scope) as OwnerScope,
+              topic: String(row.topic),
+              dedupeKey: String(row.dedupe_key),
+              payload: json(row.payload, null),
+              createdAt: Number(row.created_at),
+            },
+          })),
+        );
+        offset += rows.length;
+        if (rows.length === remaining) break;
+        section = "progress";
+        offset = 0;
+      } else {
+        const rows = this.db
+          .prepare(
+            "SELECT p.* FROM progress p JOIN tasks t ON t.id=p.task_id WHERE t.owner_scope=? ORDER BY p.id LIMIT ? OFFSET ?",
+          )
+          .all(request.owner, remaining, offset) as Row[];
+        items.push(
+          ...rows.map((row) => ({
+            type: "progress" as const,
+            progress: {
+              id: Number(row.id),
+              taskId: String(row.task_id),
+              at: Number(row.at),
+              message: String(row.message),
+              ...(row.current == null ? {} : { current: Number(row.current) }),
+              ...(row.total == null ? {} : { total: Number(row.total) }),
+            },
+          })),
+        );
+        offset += rows.length;
+        if (rows.length < remaining)
+          return {
+            format: "ellie-task-runtime-v1",
+            owner: request.owner,
+            generation,
+            items,
+          };
+        break;
+      }
+    }
+    return {
+      format: "ellie-task-runtime-v1",
+      owner: request.owner,
+      generation,
+      items,
+      nextCursor: Buffer.from(
+        JSON.stringify({ owner: request.owner, generation, section, offset }),
+      ).toString("base64url"),
+    };
+  }
+
+  personalSummary(owner: `user:${string}`): PersonalTaskSummary {
+    this.personalOwner(owner);
+    const row = this.db
+      .prepare(
+        `SELECT
+        (SELECT count(*) FROM tasks WHERE owner_scope=?) tasks,
+        (SELECT count(*) FROM watches WHERE owner_scope=?) watches,
+        (SELECT count(*) FROM watch_events WHERE owner_scope=?) watch_events,
+        (SELECT count(*) FROM progress p JOIN tasks t ON t.id=p.task_id WHERE t.owner_scope=?) progress,
+        COALESCE((SELECT sum(length(CAST(input AS BLOB))+length(CAST(COALESCE(result,'') AS BLOB))) FROM tasks WHERE owner_scope=?),0)+
+        COALESCE((SELECT sum(length(CAST(input AS BLOB))+length(CAST(capabilities AS BLOB))+length(CAST(budget AS BLOB))) FROM watches WHERE owner_scope=?),0)+
+        COALESCE((SELECT sum(length(CAST(payload AS BLOB))) FROM watch_events WHERE owner_scope=?),0)+
+        COALESCE((SELECT sum(length(CAST(p.message AS BLOB))) FROM progress p JOIN tasks t ON t.id=p.task_id WHERE t.owner_scope=?),0) bytes`,
+      )
+      .get(owner, owner, owner, owner, owner, owner, owner, owner) as Row;
+    return {
+      generation: this.generation(owner),
+      tasks: Number(row.tasks),
+      watches: Number(row.watches),
+      watchEvents: Number(row.watch_events),
+      progress: Number(row.progress),
+      bytes: Number(row.bytes),
+    };
+  }
+
+  getPersonalDeletion(owner: `user:${string}`): PersonalDeletion | undefined {
+    this.personalOwner(owner);
+    return this.deletion(
+      this.db.prepare("SELECT * FROM owner_deletions WHERE owner_scope=?").get(owner) as
+        | Row
+        | undefined,
+    );
+  }
+
+  beginPersonalDeletion(
+    owner: `user:${string}`,
+    operationId: string = randomUUID(),
+    options: { expectedGeneration?: number } = {},
+  ): PersonalDeletion {
+    this.personalOwner(owner);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(operationId))
+      throw new Error("Personal deletion operation id is invalid.");
+    const previous = this.getPersonalDeletion(owner);
+    if (previous && previous.operationId === operationId) return previous;
+    if (previous && previous.state !== "completed")
+      throw new Error("A different personal deletion operation is already active.");
+    const generation = this.generation(owner);
+    if (options.expectedGeneration !== undefined && options.expectedGeneration !== generation)
+      throw new Error("Personal task data changed after deletion review.");
+    const at = this.now();
+    this.db.exec("BEGIN IMMEDIATE");
+    let unknownTaskIds: string[];
+    try {
+      unknownTaskIds = (
+        this.db
+          .prepare("SELECT id FROM tasks WHERE owner_scope=? AND state='running' ORDER BY id")
+          .all(owner) as Row[]
+      ).map((row) => String(row.id));
+      this.db
+        .prepare(
+          `INSERT INTO owner_deletions(owner_scope,operation_id,state,generation,requested_at,ready_at,completed_at,unknown_task_ids)
+           VALUES(?,?,'draining',?,?,NULL,NULL,?) ON CONFLICT(owner_scope) DO UPDATE SET
+           operation_id=excluded.operation_id,state='draining',generation=excluded.generation,requested_at=excluded.requested_at,
+           ready_at=NULL,completed_at=NULL,unknown_task_ids=excluded.unknown_task_ids`,
+        )
+        .run(owner, operationId, generation, at, JSON.stringify(unknownTaskIds));
+      this.db
+        .prepare(
+          `UPDATE tasks SET state=CASE WHEN state='running' THEN 'unknown' ELSE 'cancelled' END,
+           input='null',result=NULL,outcome_code=CASE WHEN state='running' THEN 'personal_deletion_outcome_unknown' ELSE 'personal_deletion_cancelled' END,
+           outcome_verified=0,lease_until=NULL,updated_at=? WHERE owner_scope=? AND state NOT IN ('succeeded','failed','cancelled','expired','unknown')`,
+        )
+        .run(at, owner);
+      this.db.prepare("UPDATE tasks SET input='null',result=NULL WHERE owner_scope=?").run(owner);
+      this.db
+        .prepare("DELETE FROM progress WHERE task_id IN (SELECT id FROM tasks WHERE owner_scope=?)")
+        .run(owner);
+      this.db.prepare("DELETE FROM watches WHERE owner_scope=?").run(owner);
+      this.db.prepare("DELETE FROM watch_events WHERE owner_scope=?").run(owner);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    for (const id of unknownTaskIds)
+      this.active.get(id)?.controller.abort(new Error("Personal deletion requested."));
+    return this.getPersonalDeletion(owner)!;
+  }
+
+  async drainPersonalDeletion(
+    owner: `user:${string}`,
+    operationId: string,
+    options: { timeoutMs?: number } = {},
+  ): Promise<PersonalDeletion> {
+    this.personalOwner(owner);
+    const deletion = this.getPersonalDeletion(owner);
+    if (!deletion || deletion.operationId !== operationId)
+      throw new Error("Personal deletion operation is unavailable.");
+    if (deletion.state !== "draining") return deletion;
+    const timeoutMs = Math.max(1, Math.min(5_000, Math.trunc(options.timeoutMs ?? 5_000)));
+    const active = [...this.active.entries()].filter(
+      ([id]) => this.getInternal(id)?.owner === owner,
+    );
+    for (const [, value] of active)
+      value.controller.abort(new Error("Personal deletion requested."));
+    let timer: NodeJS.Timeout | undefined;
+    const outcome = await Promise.race([
+      Promise.allSettled(active.map(([, value]) => value.promise)).then(() => "settled" as const),
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (outcome === "timeout") return this.getPersonalDeletion(owner)!;
+    const current = this.getPersonalDeletion(owner);
+    if (!current || current.operationId !== operationId)
+      throw new Error("Personal deletion operation is unavailable.");
+    if (current.state !== "draining") return current;
+    const at = this.now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare("DELETE FROM progress WHERE task_id IN (SELECT id FROM tasks WHERE owner_scope=?)")
+        .run(owner);
+      this.db.prepare("DELETE FROM tasks WHERE owner_scope=?").run(owner);
+      this.db.prepare("DELETE FROM watches WHERE owner_scope=?").run(owner);
+      this.db.prepare("DELETE FROM watch_events WHERE owner_scope=?").run(owner);
+      this.db
+        .prepare(
+          "UPDATE owner_deletions SET state='ready',ready_at=? WHERE owner_scope=? AND operation_id=? AND state='draining'",
+        )
+        .run(at, owner, operationId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.getPersonalDeletion(owner)!;
+  }
+
+  completePersonalDeletion(owner: `user:${string}`, operationId: string): PersonalDeletion {
+    this.personalOwner(owner);
+    const deletion = this.getPersonalDeletion(owner);
+    if (!deletion || deletion.operationId !== operationId)
+      throw new Error("Personal deletion operation is unavailable.");
+    if (deletion.state === "completed") return deletion;
+    if (deletion.state !== "ready")
+      throw new Error("Personal deletion cannot complete before task callbacks drain.");
+    this.db
+      .prepare(
+        "UPDATE owner_deletions SET state='completed',completed_at=?,unknown_task_ids='[]' WHERE owner_scope=? AND operation_id=? AND state='ready'",
+      )
+      .run(this.now(), owner, operationId);
+    return this.getPersonalDeletion(owner)!;
+  }
+
   publish(event: WatchEvent): TaskRecord[] {
+    this.assertAdmission(event.owner);
     const at = this.now();
     if (
       !/^(user|group):[^:\s][^\s]{0,199}$/.test(event.owner) ||
@@ -416,6 +780,7 @@ export class TaskRuntime {
     occurrence?: string,
     independentRoot = false,
   ): TaskRecord {
+    this.assertAdmission(request.owner);
     this.prune(this.now());
     if (!this.handlers.has(request.handler))
       throw new Error(`Unknown task handler: ${request.handler}`);
@@ -690,6 +1055,7 @@ export class TaskRuntime {
     return this.transition(id, owner, ["queued", "scheduled", "waiting"], "paused");
   }
   resume(id: string, owner: OwnerScope): boolean {
+    this.assertAdmission(owner);
     return this.transition(id, owner, ["paused", "waiting"], "queued");
   }
 
@@ -725,6 +1091,7 @@ export class TaskRuntime {
   }
 
   async runNow(id: string, owner: OwnerScope): Promise<void> {
+    this.assertAdmission(owner);
     const task = this.get(id, owner);
     if (!task) throw new Error("Task not found in owner scope.");
     if (terminal.has(task.state))
@@ -940,6 +1307,7 @@ export class TaskRuntime {
       signal: controller.signal,
       idempotencyKey: current.idempotencyKey,
       progress: (update) => {
+        if (this.getInternal(current.id)?.state !== "running") return;
         if (
           typeof update.message !== "string" ||
           !update.message.trim() ||
@@ -1123,6 +1491,7 @@ export class TaskRuntime {
     if (this.closed) return;
     await this.stop();
     this.closed = true;
+    this.db.exec("PRAGMA locking_mode=NORMAL");
     this.db.close();
   }
 }

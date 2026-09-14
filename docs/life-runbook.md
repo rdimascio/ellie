@@ -47,9 +47,17 @@ The directory must be outside the source checkout, owned by the current OS user,
 
 Use Your world to inspect and correct the resulting records, teach from files, or review a calendar/contact import. Source lists use compact previews; opening a record loads its full content. Your space holds playable and readable extensions with retained revision controls. Activity shows durable work, source-worker progress, cited summaries and feedback. Today shows current commitments and delivered notifications. Settings supports default, active group and user preferences; authority remains separate from those preferences.
 
-Adopted guidance is versioned configuration. Pause or resume a listed guide through chat using its title. Source changes disable stale guidance until the current content is reviewed. Background summaries coordinate up to four source workers; deleted or changed source content is omitted, and an old stored result becomes unavailable when its citations are no longer current. See [teaching through content](life-teaching.md).
+Adopted guidance is versioned configuration. Pause or resume a listed guide through chat using its title, or open Guidance in Your world to review linked sources, revise instructions and restore a retained version. Source changes exclude stale guidance until the current content is reviewed. Background summaries coordinate up to four source workers; deleted or changed source content is omitted, and an old stored result becomes unavailable when its citations are no longer current. See [teaching through content](life-teaching.md).
+
+While the service is running, Ellie checks upcoming timed events on startup and every fifteen minutes. Preparation appears in Today using your proactivity preference and quiet hours. Pending preparation notices are deduplicated; checking again does not create a pile of reminders for the same event.
 
 Place-linked suggestions currently depend on explicit fresh context signals, including “I'm shopping at …”. They do not imply continuous phone location, access to unrelated apps, a retailer account, or a price-feed subscription. A sleeping or stopped coordinator cannot deliver new browser notifications. Timers that must sound while the coordinator is asleep need a future native local-delivery integration.
+
+## Your personal data
+
+In Settings, use **Inspect my data** to review the private records, sources, guidance, background work, apps and storage held by Ellie. **Download my archive** collects the personal store exports after checking their revisions. Shared group records, apps and tasks are excluded; your own values stored inside a shared app are included. A change during export requires a fresh review so the file cannot silently mix revisions.
+
+**Review reset** shows the scope before you explicitly reset your private data. Reset pauses new mutations, settles active requests and private background work, and journals progress across the three stores. It preserves shared group content and memberships, and removes your own storage in shared apps. If work cannot stop immediately, the status remains pending and can be retried. A restarted service restores the pending pause. Previously downloaded files, device backups and external systems are outside this local reset.
 
 ## Optional local model
 

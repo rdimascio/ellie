@@ -231,3 +231,129 @@ export class ProactivityEngine {
     } else if (signal.type !== "check") throw new TypeError("Signal type is invalid.");
   }
 }
+
+export interface PreparationCheck {
+  at: number;
+  scopesChecked: number;
+  suggestionsCreated: number;
+  errors: number;
+  skipped: boolean;
+}
+
+/** Local, bounded preparation checks. No model calls or external actions occur here. */
+export class PreparationMonitor {
+  private readonly engine: Pick<ProactivityEngine, "evaluate">;
+  private readonly actor: LifeActor;
+  private readonly scopes: () => LifeScope[];
+  private readonly canEvaluate: () => boolean;
+  private readonly now: () => number;
+  private readonly intervalMs: number;
+  private readonly maxScopesPerCheck: number;
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private nextScope = 0;
+  private checking = false;
+  private lastCheck: PreparationCheck | undefined;
+
+  constructor(options: {
+    engine: Pick<ProactivityEngine, "evaluate">;
+    actor: LifeActor;
+    /** Resolve membership afresh on every pass; the engine enforces access again. */
+    scopes: () => LifeScope[];
+    /** Stop admitting work while personal reset or service shutdown is in progress. */
+    canEvaluate?: () => boolean;
+    now?: () => number;
+    intervalMs?: number;
+    maxScopesPerCheck?: number;
+  }) {
+    this.engine = options.engine;
+    this.actor = { ...options.actor };
+    this.scopes = options.scopes;
+    this.canEvaluate = options.canEvaluate ?? (() => true);
+    this.now = options.now ?? Date.now;
+    this.intervalMs = options.intervalMs ?? 15 * 60_000;
+    this.maxScopesPerCheck = options.maxScopesPerCheck ?? 8;
+    if (
+      !Number.isSafeInteger(this.intervalMs) ||
+      this.intervalMs < 100 ||
+      this.intervalMs > 24 * 60 * 60_000 ||
+      !Number.isSafeInteger(this.maxScopesPerCheck) ||
+      this.maxScopesPerCheck < 1 ||
+      this.maxScopesPerCheck > 100
+    )
+      throw new TypeError("Preparation monitor bounds are invalid.");
+  }
+
+  start(): void {
+    if (this.timer) return;
+    this.timer = setInterval(() => {
+      if (this.timer) this.checkNow();
+    }, this.intervalMs);
+    this.timer.unref();
+    this.checkNow();
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = undefined;
+  }
+
+  status(): { running: boolean; lastCheck?: PreparationCheck } {
+    return {
+      running: this.timer !== undefined,
+      ...(this.lastCheck ? { lastCheck: { ...this.lastCheck } } : {}),
+    };
+  }
+
+  /** Synchronous evaluation makes each pass atomic with respect to service admission changes. */
+  checkNow(): PreparationCheck {
+    const result: PreparationCheck = {
+      at: this.now(),
+      scopesChecked: 0,
+      suggestionsCreated: 0,
+      errors: 0,
+      skipped: false,
+    };
+    if (this.checking) return { ...result, skipped: true };
+    this.checking = true;
+    try {
+      if (!this.canEvaluate()) {
+        result.skipped = true;
+        return result;
+      }
+      const unique = new Map<string, LifeScope>();
+      for (const scope of this.scopes()) unique.set(JSON.stringify([scope.type, scope.id]), scope);
+      const scopes = [...unique.values()];
+      if (!scopes.length) {
+        result.skipped = true;
+        return result;
+      }
+      this.nextScope %= scopes.length;
+      const count = Math.min(scopes.length, this.maxScopesPerCheck);
+      for (let index = 0; index < count; index++) {
+        if (!this.canEvaluate()) {
+          result.skipped = true;
+          break;
+        }
+        const scope = scopes[this.nextScope]!;
+        this.nextScope = (this.nextScope + 1) % scopes.length;
+        result.scopesChecked++;
+        try {
+          result.suggestionsCreated += this.engine.evaluate(this.actor, scope, {
+            type: "check",
+            at: result.at,
+          }).length;
+        } catch {
+          // A revoked group or one bad scope cannot starve the remaining checks.
+          result.errors++;
+        }
+      }
+    } catch {
+      // Status includes counts only; private record titles and source text never become logs.
+      result.errors++;
+    } finally {
+      this.checking = false;
+      this.lastCheck = { ...result };
+    }
+    return result;
+  }
+}

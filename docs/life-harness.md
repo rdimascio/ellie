@@ -14,6 +14,8 @@ If every selected source becomes unavailable, the verified result contains no ci
 
 `invalidateContext(actor, scope)` clears all bounded in-memory conversation history for that actor and scope. The harness calls it after conversational correction or forgetting. Services call it after successful record, source, or import mutations so removed text cannot survive in a later model prompt.
 
+`invalidateActorContext(actor)` clears personal and group conversation caches for that actor and invalidates their in-flight foreground model replies. It is used during personal reset; it does not delete or modify shared group records.
+
 “Teach Ellie: …” creates and immediately enables a versioned guide in the current scope. “Use &lt;source title&gt; as guidance” is the only path that adopts source text, requires an exact source title and at most 4,000 characters, and pins the source revision. “List guidance”, “Pause guidance &lt;name&gt;”, and “Resume guidance &lt;name&gt;” expose its state. Changed, deleted, or inaccessible source revisions disable the guide. Adopted guidance can shape a model response, while the direct user request has priority and guidance never grants tools or permissions.
 
 Source passages are passed to a model under an `untrustedEvidence` label. Document text is never parsed as commands or permission. The optional model can choose only `reply`, `search_sources`, or `create_memory` in a strictly validated plan. A model-proposed memory is saved only when the current user message directly asks Ellie to remember it; recall questions and negated requests cannot authorize a write. The harness does not evaluate generated code or expose a general tool executor.

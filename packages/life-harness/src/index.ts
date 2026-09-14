@@ -46,6 +46,7 @@ export interface ChatResponse {
 export interface LifeHarness {
   chat(request: ChatRequest): Promise<ChatResponse>;
   invalidateContext(actor: LifeActor, scope: LifeScope): void;
+  invalidateActorContext(actor: LifeActor): void;
   rerunBackgroundSummary(request: {
     actor: LifeActor;
     scope: LifeScope;
@@ -241,6 +242,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   const teaching = options.teaching ?? new LifeTeaching(options.store, now);
   const sessions = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
   const contextGenerations = new Map<string, number>();
+  const actorGenerations = new Map<string, number>();
   registerHandlers(options.store, options.tasks, options.model, now);
 
   const sessionId = (actor: LifeActor, scope: LifeScope, id: string) => {
@@ -261,6 +263,12 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     const generationKey = contextKey(actor, scope);
     contextGenerations.set(generationKey, (contextGenerations.get(generationKey) ?? 0) + 1);
     const prefix = `${generationKey}\0`;
+    for (const key of sessions.keys()) if (key.startsWith(prefix)) sessions.delete(key);
+  };
+  const invalidateActorContext = (actor: LifeActor) => {
+    options.store.listRecords(actor, { limit: 1 });
+    actorGenerations.set(actor.userId, (actorGenerations.get(actor.userId) ?? 0) + 1);
+    const prefix = `${actor.userId}\0`;
     for (const key of sessions.keys()) if (key.startsWith(prefix)) sessions.delete(key);
   };
   const enqueueBackgroundSummary = (
@@ -1127,6 +1135,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
       const generationKey = contextKey(request.actor, request.scope);
       const generation = contextGenerations.get(generationKey) ?? 0;
+      const actorGeneration = actorGenerations.get(request.actor.userId) ?? 0;
       const plan = await options.model.plan({
         message,
         evidence: found.map((item) => ({
@@ -1138,7 +1147,10 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         history: sessions.get(conversationKey)?.slice(0, -1) ?? [],
         ...modelContext(options.store, teaching, request.actor, request.scope, message),
       });
-      if ((contextGenerations.get(generationKey) ?? 0) !== generation)
+      if (
+        (contextGenerations.get(generationKey) ?? 0) !== generation ||
+        (actorGenerations.get(request.actor.userId) ?? 0) !== actorGeneration
+      )
         return {
           reply:
             "The saved context changed while I was answering. Please ask again so I can use the current version.",
@@ -1168,6 +1180,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   return {
     chat,
     invalidateContext,
+    invalidateActorContext,
     rerunBackgroundSummary,
     buildPlugin,
     revisePlugin,

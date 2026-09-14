@@ -12,6 +12,7 @@
     "@ellie/life-ingest": "workspace:*",
     "@ellie/life-learning": "workspace:*",
     "@ellie/life-plugins": "workspace:*",
+    "@ellie/life-teaching": "workspace:*",
     "@ellie/task-runtime": "workspace:*"
   }
 }

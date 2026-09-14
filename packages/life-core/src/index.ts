@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-export const LIFE_SCHEMA_VERSION = 1;
+export const LIFE_SCHEMA_VERSION = 2;
 export const LIFE_RECORD_KINDS = [
   "memory",
   "contact",
@@ -95,6 +95,35 @@ export interface ImportCommitResult {
 export interface NotificationUpdateResult {
   notification: LifeRecord;
   linked?: LifeRecord;
+}
+export type PersonalLifeExportItem =
+  | { type: "record"; record: LifeRecord }
+  | { type: "setting"; key: string; value: unknown; updatedAt: number };
+export interface PersonalLifeSummary {
+  generation: number;
+  records: number;
+  sources: number;
+  feedback: number;
+  guidance: number;
+  settings: number;
+  bytes: number;
+}
+export interface PersonalLifeExportPage {
+  format: "ellie-life-v1";
+  generation: number;
+  items: PersonalLifeExportItem[];
+  nextCursor?: string;
+}
+export interface PersonalResetJournal {
+  userId: string;
+  operationId: string;
+  reviewTokenHash: string;
+  state: "draining" | "tasks-deleted" | "plugins-deleted" | "life-deleted" | "completed";
+  lifeGeneration: number;
+  taskGeneration: number;
+  pluginGeneration: number;
+  requestedAt: number;
+  updatedAt: number;
 }
 export type SourceFormat = "text" | "markdown" | "html" | "email" | "transcript" | "binary";
 export type TextSourceFormat = Exclude<SourceFormat, "binary">;
@@ -330,6 +359,7 @@ export class LifeStore {
       const version = Number(this.db.prepare("PRAGMA user_version").get()?.user_version);
       if (version > LIFE_SCHEMA_VERSION) throw new Error("newer schema");
       if (version === 0) this.migrate();
+      else if (version === 1) this.migrateV2();
     } catch (error) {
       try {
         this.db!.close();
@@ -361,6 +391,21 @@ export class LifeStore {
     CREATE TABLE source_chunks(source_id TEXT NOT NULL REFERENCES records(id) ON DELETE CASCADE,chunk_index INTEGER NOT NULL,text TEXT NOT NULL,reference TEXT,search_text TEXT NOT NULL,PRIMARY KEY(source_id,chunk_index)) STRICT;
     CREATE INDEX chunks_search ON source_chunks(search_text);
     PRAGMA user_version=1;`),
+    );
+    this.migrateV2();
+  }
+  private migrateV2(): void {
+    this.transaction(() =>
+      this.db.exec(`
+    CREATE TABLE IF NOT EXISTS personal_generations(user_id TEXT PRIMARY KEY,generation INTEGER NOT NULL DEFAULT 0) STRICT;
+    CREATE TABLE IF NOT EXISTS personal_reset_journal(user_id TEXT PRIMARY KEY,operation_id TEXT NOT NULL UNIQUE,review_token_hash TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN('draining','tasks-deleted','plugins-deleted','life-deleted','completed')),life_generation INTEGER NOT NULL,task_generation INTEGER NOT NULL,plugin_generation INTEGER NOT NULL,requested_at INTEGER NOT NULL,updated_at INTEGER NOT NULL) STRICT;
+    CREATE TRIGGER IF NOT EXISTS records_personal_insert AFTER INSERT ON records WHEN NEW.scope_type='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(NEW.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER IF NOT EXISTS records_personal_update AFTER UPDATE ON records WHEN OLD.scope_type='user' OR NEW.scope_type='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(OLD.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; INSERT INTO personal_generations(user_id,generation) SELECT NEW.scope_id,1 WHERE NEW.scope_id<>OLD.scope_id ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER IF NOT EXISTS records_personal_delete AFTER DELETE ON records WHEN OLD.scope_type='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(OLD.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER IF NOT EXISTS settings_personal_insert AFTER INSERT ON settings WHEN NEW.level='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(NEW.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER IF NOT EXISTS settings_personal_update AFTER UPDATE ON settings WHEN OLD.level='user' OR NEW.level='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(OLD.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER IF NOT EXISTS settings_personal_delete AFTER DELETE ON settings WHEN OLD.level='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(OLD.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    PRAGMA user_version=2;`),
     );
   }
   private actor(actor: LifeActor): string {
@@ -1407,8 +1452,24 @@ export class LifeStore {
       throw new TypeError("Proactive notification timing is invalid");
     return this.transaction(() => {
       const current = this.getRecord(actor, recordId);
+      const duplicatePreparation =
+        category === "preparation" &&
+        Boolean(
+          this.db
+            .prepare(
+              `SELECT 1 FROM records WHERE kind='feedback' AND scope_type=? AND scope_id=?
+               AND json_extract(data_json,'$.notification')=1
+               AND json_extract(data_json,'$.category')='preparation'
+               AND json_extract(data_json,'$.relatedRecordId')=?
+               AND coalesce(json_extract(data_json,'$.dismissed'),0)=0
+               AND coalesce(json_extract(data_json,'$.completed'),0)=0
+               AND json_extract(data_json,'$.expiresAt')>? LIMIT 1`,
+            )
+            .get(scope.type, scope.id, recordId, input.at),
+        );
       if (
         !current ||
+        duplicatePreparation ||
         current.revision !== input.expectedRevision ||
         current.scope.type !== scope.type ||
         current.scope.id !== scope.id ||
@@ -1490,6 +1551,125 @@ export class LifeStore {
       };
     });
   }
+  personalSummary(actor: LifeActor): PersonalLifeSummary {
+    const user = this.actor(actor),
+      row = this.db
+        .prepare(`SELECT
+          (SELECT generation FROM personal_generations WHERE user_id=?) generation,
+          count(*) records,
+          sum(kind='source') sources,
+          sum(kind='feedback') feedback,
+          sum(kind='routine' AND json_extract(data_json,'$.type')='teaching-guide-v1') guidance,
+          (SELECT count(*) FROM settings WHERE level='user' AND scope_id=?) settings,
+          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?) bytes
+          FROM records WHERE scope_type='user' AND scope_id=?`)
+        .get(user, user, user, user) as Record<string, unknown>;
+    return {
+      generation: Number(row.generation ?? 0),
+      records: Number(row.records),
+      sources: Number(row.sources),
+      feedback: Number(row.feedback),
+      guidance: Number(row.guidance),
+      settings: Number(row.settings),
+      bytes: Number(row.bytes),
+    };
+  }
+  exportPersonalPage(
+    actor: LifeActor,
+    options: { cursor?: string; limit?: number; expectedGeneration?: number } = {},
+  ): PersonalLifeExportPage {
+    const user = this.actor(actor),
+      generation = this.personalSummary(actor).generation,
+      limit = options.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new TypeError("Personal export limit must be from 1 through 100");
+    if (options.expectedGeneration !== undefined && options.expectedGeneration !== generation)
+      throw new LifeConflictError("Personal data changed; review a fresh export.");
+    let cursor:
+      | { user: string; updatedAt: number; type: string; key: string; generation: number }
+      | undefined;
+    if (options.cursor) {
+      try {
+        if (options.cursor.length > 500) throw new Error();
+        cursor = JSON.parse(Buffer.from(options.cursor, "base64url").toString("utf8"));
+        if (
+          cursor?.user !== user ||
+          cursor.generation !== generation ||
+          !Number.isSafeInteger(cursor.updatedAt) ||
+          !["record", "setting"].includes(cursor.type) ||
+          typeof cursor.key !== "string"
+        )
+          throw new Error();
+      } catch {
+        throw new TypeError("Personal export cursor is invalid");
+      }
+    }
+    const rows = this.db
+      .prepare(`SELECT type,key,updated_at FROM (
+        SELECT 'record' type,id key,updated_at FROM records WHERE scope_type='user' AND scope_id=?
+        UNION ALL SELECT 'setting' type,key,updated_at FROM settings WHERE level='user' AND scope_id=?
+      ) WHERE (? IS NULL OR updated_at<? OR (updated_at=? AND (type<? OR (type=? AND key<?))))
+      ORDER BY updated_at DESC,type DESC,key DESC LIMIT ?`)
+      .all(
+        user,
+        user,
+        cursor?.key ?? null,
+        cursor?.updatedAt ?? 0,
+        cursor?.updatedAt ?? 0,
+        cursor?.type ?? "",
+        cursor?.type ?? "",
+        cursor?.key ?? "",
+        limit + 1,
+      ) as Array<{ type: "record" | "setting"; key: string; updated_at: number }>;
+    const pageRows: typeof rows = [],
+      recordStatement = this.db.prepare(
+        "SELECT * FROM records WHERE id=? AND scope_type='user' AND scope_id=?",
+      ),
+      settingStatement = this.db.prepare(
+        "SELECT value_json,updated_at FROM settings WHERE level='user' AND scope_id=? AND key=?",
+      ),
+      items: PersonalLifeExportItem[] = [];
+    let pageBytes = 0;
+    for (const row of rows.slice(0, limit)) {
+      let item: PersonalLifeExportItem;
+      if (row.type === "record") {
+        const record = recordStatement.get(row.key, user) as Record<string, unknown> | undefined;
+        if (!record) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        item = { type: "record", record: this.record(record) };
+      } else {
+        const setting = settingStatement.get(user, row.key) as Record<string, unknown> | undefined;
+        if (!setting) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        item = {
+          type: "setting",
+          key: row.key,
+          value: JSON.parse(String(setting.value_json)),
+          updatedAt: Number(setting.updated_at),
+        };
+      }
+      const itemBytes = Buffer.byteLength(JSON.stringify(item));
+      if (items.length && pageBytes + itemBytes > 6_000_000) break;
+      items.push(item);
+      pageRows.push(row);
+      pageBytes += itemBytes;
+    }
+    if (this.personalSummary(actor).generation !== generation)
+      throw new LifeConflictError("Personal data changed; review a fresh export.");
+    const result: PersonalLifeExportPage = { format: "ellie-life-v1", generation, items };
+    if (rows.length > pageRows.length && pageRows.length) {
+      const last = pageRows.at(-1)!;
+      result.nextCursor = Buffer.from(
+        JSON.stringify({
+          user,
+          generation,
+          updatedAt: last.updated_at,
+          type: last.type,
+          key: last.key,
+        }),
+      ).toString("base64url");
+    }
+    return result;
+  }
+  /** Legacy bounded callers should prefer exportPersonalPage. */
   exportPersonal(actor: LifeActor): {
     records: LifeRecord[];
     settings: Record<string, unknown>;
@@ -1506,8 +1686,113 @@ export class LifeStore {
       settings = this.resolveSettings(actor).values;
     return { records, settings, groups: this.listGroups(actor) };
   }
-  deletePersonal(actor: LifeActor): void {
+  beginPersonalReset(
+    actor: LifeActor,
+    input: {
+      operationId: string;
+      reviewTokenHash: string;
+      lifeGeneration: number;
+      taskGeneration: number;
+      pluginGeneration: number;
+    },
+  ): PersonalResetJournal {
+    const user = this.actor(actor),
+      operationId = identifier(input.operationId, "operationId"),
+      token = text(input.reviewTokenHash, "reviewTokenHash", 128);
+    if (
+      ![input.lifeGeneration, input.taskGeneration, input.pluginGeneration].every(
+        (v) => Number.isSafeInteger(v) && v >= 0,
+      )
+    )
+      throw new TypeError("Reset generations are invalid");
+    if (this.personalSummary(actor).generation !== input.lifeGeneration)
+      throw new LifeConflictError("Personal data changed; review reset again.");
+    const existing = this.getPersonalReset(actor);
+    if (existing && existing.state !== "completed") {
+      if (existing.operationId !== operationId)
+        throw new LifeConflictError("A personal reset is already in progress.");
+      return existing;
+    }
+    const now = this.clock();
+    this.db
+      .prepare(
+        "INSERT INTO personal_reset_journal(user_id,operation_id,review_token_hash,state,life_generation,task_generation,plugin_generation,requested_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET operation_id=excluded.operation_id,review_token_hash=excluded.review_token_hash,state=excluded.state,life_generation=excluded.life_generation,task_generation=excluded.task_generation,plugin_generation=excluded.plugin_generation,requested_at=excluded.requested_at,updated_at=excluded.updated_at",
+      )
+      .run(
+        user,
+        operationId,
+        token,
+        "draining",
+        input.lifeGeneration,
+        input.taskGeneration,
+        input.pluginGeneration,
+        now,
+        now,
+      );
+    return this.getPersonalReset(actor)!;
+  }
+  getPersonalReset(actor: LifeActor): PersonalResetJournal | undefined {
+    const user = this.actor(actor),
+      row = this.db.prepare("SELECT * FROM personal_reset_journal WHERE user_id=?").get(user) as
+        | Record<string, unknown>
+        | undefined;
+    if (!row) return undefined;
+    return {
+      userId: user,
+      operationId: String(row.operation_id),
+      reviewTokenHash: String(row.review_token_hash),
+      state: String(row.state) as PersonalResetJournal["state"],
+      lifeGeneration: Number(row.life_generation),
+      taskGeneration: Number(row.task_generation),
+      pluginGeneration: Number(row.plugin_generation),
+      requestedAt: Number(row.requested_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+  advancePersonalReset(
+    actor: LifeActor,
+    operationId: string,
+    state: PersonalResetJournal["state"],
+  ): PersonalResetJournal {
+    const user = this.actor(actor),
+      id = identifier(operationId, "operationId");
+    if (
+      !["draining", "tasks-deleted", "plugins-deleted", "life-deleted", "completed"].includes(state)
+    )
+      throw new TypeError("Reset state is invalid");
+    const order: PersonalResetJournal["state"][] = [
+      "draining",
+      "tasks-deleted",
+      "plugins-deleted",
+      "life-deleted",
+      "completed",
+    ];
+    return this.transaction(() => {
+      const current = this.getPersonalReset(actor);
+      if (!current || current.operationId !== id)
+        throw new LifeAccessError("Personal reset is unavailable.");
+      if (order.indexOf(state) < order.indexOf(current.state))
+        throw new LifeConflictError("Personal reset cannot move backward.");
+      if (order.indexOf(state) > order.indexOf(current.state) + 1)
+        throw new LifeConflictError("Personal reset phase was skipped.");
+      this.db
+        .prepare(
+          "UPDATE personal_reset_journal SET state=?,updated_at=? WHERE user_id=? AND operation_id=?",
+        )
+        .run(state, this.clock(), user, id);
+      return this.getPersonalReset(actor)!;
+    });
+  }
+  deletePersonal(
+    actor: LifeActor,
+    options: { preserveMemberships?: boolean; expectedGeneration?: number } = {},
+  ): PersonalLifeSummary {
     const user = this.actor(actor);
+    if (
+      options.expectedGeneration !== undefined &&
+      this.personalSummary(actor).generation !== options.expectedGeneration
+    )
+      throw new LifeConflictError("Personal data changed; review reset again.");
     this.transaction(() => {
       const sources = this.db
         .prepare("SELECT id FROM records WHERE kind='source' AND scope_type='user' AND scope_id=?")
@@ -1516,8 +1801,10 @@ export class LifeStore {
       const now = this.clock();
       for (const source of sources) this.invalidateProvenance(source.id, now);
       this.db.prepare("DELETE FROM settings WHERE level='user' AND scope_id=?").run(user);
-      this.db.prepare("DELETE FROM group_members WHERE user_id=? AND role='member'").run(user);
+      if (!options.preserveMemberships)
+        this.db.prepare("DELETE FROM group_members WHERE user_id=? AND role='member'").run(user);
     });
+    return this.personalSummary(actor);
   }
   close(): void {
     this.db.close();

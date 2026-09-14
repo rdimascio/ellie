@@ -104,3 +104,51 @@ export interface Bootstrap {
   notifications: NotificationSummary[];
   capabilities: Record<string, unknown>;
 }
+export interface TeachingSource {
+  id: string;
+  revision: number;
+}
+export interface TeachingVersion {
+  version: number;
+  instructions: string;
+  sources: TeachingSource[];
+  adoptedBy: string;
+  adoptedAt: string | number;
+}
+export interface TeachingGuide {
+  record: LifeRecord;
+  version: number;
+  enabled: boolean;
+  status: "active" | "paused" | "source-changed";
+  versions: TeachingVersion[];
+}
+export interface PersonalDataReview {
+  reviewToken: string;
+  expiresAt: string | number;
+  generations: { life: number; tasks: number; plugins: number };
+  counts: {
+    privateRecords: number;
+    sources: number;
+    feedback: number;
+    guidance: number;
+    userSettings: number;
+    tasks: number;
+    watches: number;
+    taskProgress?: number;
+    plugins: number;
+    pluginVersions: number;
+    pluginStorageKeys: number;
+    sharedPluginStorageKeys: number;
+  };
+  bytes: number;
+  truncated?: boolean;
+  preserves?: string[];
+}
+export interface PersonalResetStatus {
+  operationId: string;
+  state: "draining" | "tasks-deleted" | "plugins-deleted" | "life-deleted" | "completed";
+  runtimeState?: "draining" | "ready" | "completed";
+  unknownTaskIds?: string[];
+  counts?: Record<string, number>;
+  error?: string;
+}

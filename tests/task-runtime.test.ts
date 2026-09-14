@@ -732,3 +732,287 @@ test("recurring occurrences receive independent subtree budgets", async () => {
     await f.close();
   }
 });
+
+test("personal export is paged, generation-bound, and excludes group work", async () => {
+  const f = await fixture();
+  try {
+    f.runtime.registerHandler({
+      name: "exportable",
+      async run(context, input) {
+        context.progress({ message: "private progress" });
+        return input;
+      },
+      checkOutcome: () => true,
+    });
+    f.runtime.enqueue({ owner, handler: "exportable", input: { private: "value" } });
+    f.runtime.enqueue({ owner: "group:home", handler: "exportable", input: { shared: true } });
+    f.runtime.watch({ owner, topic: "export", handler: "exportable", input: { watched: true } });
+    await f.runtime.tick();
+    f.runtime.publish({
+      owner,
+      topic: "export",
+      dedupeKey: "event-1",
+      payload: { event: "private" },
+    });
+    assert.deepEqual(f.runtime.personalSummary(owner), {
+      generation: f.runtime.exportPersonal({ owner }).generation,
+      tasks: 2,
+      watches: 1,
+      watchEvents: 1,
+      progress: 1,
+      bytes: f.runtime.personalSummary(owner).bytes,
+    });
+    assert.ok(f.runtime.personalSummary(owner).bytes > 0);
+    const first = f.runtime.exportPersonal({ owner, limit: 1 });
+    const items = [...first.items];
+    let cursor = first.nextCursor;
+    while (cursor) {
+      const page = f.runtime.exportPersonal({
+        owner,
+        cursor,
+        limit: 1,
+        expectedGeneration: first.generation,
+      });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    }
+    assert.ok(
+      items.some((item) => item.type === "task" && JSON.stringify(item).includes("private")),
+    );
+    assert.ok(
+      items.some((item) => item.type === "watch" && JSON.stringify(item).includes("watched")),
+    );
+    assert.ok(
+      items.some(
+        (item) => item.type === "progress" && JSON.stringify(item).includes("private progress"),
+      ),
+    );
+    assert.ok(
+      items.some((item) => item.type === "watchEvent" && JSON.stringify(item).includes("event-1")),
+    );
+    assert.doesNotMatch(JSON.stringify(items), /shared/);
+    f.runtime.enqueue({ owner, handler: "exportable" });
+    assert.throws(
+      () =>
+        f.runtime.exportPersonal({
+          owner,
+          cursor: first.nextCursor,
+          expectedGeneration: first.generation,
+        }),
+      /changed/,
+    );
+    assert.throws(
+      () => f.runtime.exportPersonal({ owner, cursor: "x".repeat(1_001) }),
+      /cursor is invalid/,
+    );
+    const wrongOwnerCursor = Buffer.from(
+      JSON.stringify({
+        owner: "user:someone-else",
+        generation: f.runtime.exportPersonal({ owner }).generation,
+        section: "tasks",
+        offset: 0,
+      }),
+    ).toString("base64url");
+    assert.throws(() => f.runtime.exportPersonal({ owner, cursor: wrongOwnerCursor }), /changed/);
+    assert.throws(
+      () => f.runtime.exportPersonal({ owner: "group:home" as `user:${string}` }),
+      /user owner/,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("personal deletion freezes admission across restart and preserves group tasks", async () => {
+  const f = await fixture();
+  try {
+    f.runtime.registerHandler(handler("personal"));
+    const personal = f.runtime.enqueue({ owner, handler: "personal", input: "erase me" });
+    const shared = f.runtime.enqueue({
+      owner: "group:home",
+      handler: "personal",
+      input: "keep me",
+    });
+    f.runtime.watch({ owner, topic: "personal", handler: "personal" });
+    const reviewedGeneration = f.runtime.exportPersonal({ owner }).generation;
+    assert.throws(
+      () =>
+        f.runtime.beginPersonalDeletion(owner, "stale-review", {
+          expectedGeneration: reviewedGeneration - 1,
+        }),
+      /changed after deletion review/,
+    );
+    const deletion = f.runtime.beginPersonalDeletion(owner, "delete-1", {
+      expectedGeneration: reviewedGeneration,
+    });
+    assert.equal(deletion.state, "draining");
+    assert.equal(f.runtime.get(personal.id, owner)?.input, null);
+    assert.equal(f.runtime.get(shared.id, "group:home")?.input, "keep me");
+    for (const blocked of [
+      () => f.runtime.enqueue({ owner, handler: "personal" }),
+      () =>
+        f.runtime.schedule({ owner, handler: "personal", schedule: { kind: "once", at: 2_000 } }),
+      () => f.runtime.watch({ owner, topic: "blocked", handler: "personal" }),
+      () => f.runtime.publish({ owner, topic: "personal", dedupeKey: "blocked" }),
+      () =>
+        f.runtime.enqueueWorkflow({
+          root: { owner, handler: "personal" },
+          children: [{ handler: "personal" }],
+        }),
+      () => f.runtime.resume(personal.id, owner),
+    ])
+      assert.throws(blocked, /frozen/);
+    await assert.rejects(() => f.runtime.runNow(personal.id, owner), /frozen/);
+    await f.runtime.close();
+
+    const reopened = new TaskRuntime({ directory: f.directory, now: () => 2_000 });
+    reopened.registerHandler(handler("personal"));
+    assert.equal(reopened.getPersonalDeletion(owner)?.operationId, "delete-1");
+    assert.throws(() => reopened.enqueue({ owner, handler: "personal" }), /frozen/);
+    const ready = await reopened.drainPersonalDeletion(owner, "delete-1");
+    assert.equal(ready.state, "ready");
+    assert.deepEqual(reopened.list({ owner }), []);
+    assert.equal(reopened.get(shared.id, "group:home")?.input, "keep me");
+    const completed = reopened.completePersonalDeletion(owner, "delete-1");
+    assert.equal(completed.state, "completed");
+    assert.deepEqual(completed.unknownTaskIds, []);
+    assert.equal(reopened.completePersonalDeletion(owner, "delete-1").state, "completed");
+    assert.ok(reopened.enqueue({ owner, handler: "personal" }));
+    await reopened.close();
+  } finally {
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
+
+test("schema version one migrates without losing queued work", async () => {
+  const f = await fixture();
+  f.runtime.registerHandler(handler("migrated"));
+  const task = f.runtime.enqueue({ owner, handler: "migrated", input: "preserved" });
+  await f.runtime.close();
+  const database = new DatabaseSync(join(f.directory, "task-runtime.sqlite"));
+  for (const row of database
+    .prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%generation%'")
+    .all() as Array<{ name: string }>)
+    database.exec(`DROP TRIGGER ${row.name}`);
+  database.exec("DROP TABLE owner_deletions; DROP TABLE owner_generations; PRAGMA user_version=1;");
+  database.close();
+  const reopened = new TaskRuntime({ directory: f.directory });
+  try {
+    reopened.registerHandler(handler("migrated"));
+    assert.equal(reopened.get(task.id, owner)?.input, "preserved");
+    assert.equal(reopened.exportPersonal({ owner }).items[0]?.type, "task");
+  } finally {
+    await reopened.close();
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
+
+test("personal deletion reports running outcomes unknown and blocks late persistence", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  try {
+    f.runtime.registerHandler({
+      name: "external",
+      async run(context) {
+        await blocked;
+        context.progress({ message: "late secret" });
+        return { secret: "late result" };
+      },
+      checkOutcome: () => true,
+    });
+    const task = f.runtime.enqueue({ owner, handler: "external", input: { secret: "input" } });
+    const ticking = f.runtime.tick();
+    await delay(5);
+    const deletion = f.runtime.beginPersonalDeletion(owner, "delete-running");
+    assert.deepEqual(deletion.unknownTaskIds, [task.id]);
+    assert.equal(f.runtime.get(task.id, owner)?.state, "unknown");
+    assert.equal(f.runtime.get(task.id, owner)?.outcomeCode, "personal_deletion_outcome_unknown");
+    assert.equal(f.runtime.get(task.id, owner)?.input, null);
+    assert.equal(
+      (await f.runtime.drainPersonalDeletion(owner, "delete-running", { timeoutMs: 5 })).state,
+      "draining",
+    );
+    release();
+    await ticking;
+    const ready = await f.runtime.drainPersonalDeletion(owner, "delete-running");
+    assert.equal(ready.state, "ready");
+    assert.deepEqual(f.runtime.progress(task.id, owner), []);
+    assert.equal(f.runtime.get(task.id, owner), undefined);
+  } finally {
+    await f.runtime.close();
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
+
+test("a stale personal drain cannot purge tasks admitted after another drain completes", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  try {
+    f.runtime.registerHandler({
+      name: "drain-race",
+      async run() {
+        await blocked;
+      },
+      checkOutcome: () => true,
+    });
+    f.runtime.enqueue({ owner, handler: "drain-race", input: "private" });
+    const ticking = f.runtime.tick();
+    await delay(5);
+    f.runtime.beginPersonalDeletion(owner, "delete-concurrently");
+    const staleDrain = f.runtime.drainPersonalDeletion(owner, "delete-concurrently");
+    const database = (f.runtime as unknown as { db: DatabaseSync }).db;
+    database
+      .prepare(
+        "UPDATE owner_deletions SET state='ready',ready_at=? WHERE owner_scope=? AND operation_id=?",
+      )
+      .run(Date.now(), owner, "delete-concurrently");
+    f.runtime.completePersonalDeletion(owner, "delete-concurrently");
+    const admitted = f.runtime.enqueue({ owner, handler: "drain-race", input: "new work" });
+    release();
+    await ticking;
+    assert.equal((await staleDrain).state, "completed");
+    assert.equal(f.runtime.get(admitted.id, owner)?.input, "new work");
+  } finally {
+    await f.runtime.close();
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
+
+test("personal deletion does not abort or erase a running group-owned callback", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  try {
+    f.runtime.registerHandler({
+      name: "shared-running",
+      async run() {
+        await blocked;
+        return { shared: "retained" };
+      },
+      checkOutcome: () => true,
+    });
+    const shared = f.runtime.enqueue({
+      owner: "group:home",
+      handler: "shared-running",
+      input: { shared: "input" },
+    });
+    const ticking = f.runtime.tick();
+    await delay(5);
+    const deletion = f.runtime.beginPersonalDeletion(owner, "delete-personal-only");
+    assert.deepEqual(deletion.unknownTaskIds, []);
+    assert.equal(f.runtime.get(shared.id, "group:home")?.state, "running");
+    assert.equal(
+      (await f.runtime.drainPersonalDeletion(owner, "delete-personal-only")).state,
+      "ready",
+    );
+    release();
+    await ticking;
+    assert.equal(f.runtime.get(shared.id, "group:home")?.state, "succeeded");
+    assert.deepEqual(f.runtime.get(shared.id, "group:home")?.result, { shared: "retained" });
+  } finally {
+    await f.runtime.close();
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createReadStream, lstatSync, statSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -21,6 +21,7 @@ import {
   type LifeImportFormat,
 } from "../../../packages/life-import/src/index.ts";
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
+import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
 import type { LifePlugin, PluginStore } from "../../../packages/life-plugins/src/index.ts";
 import {
   PluginError,
@@ -69,6 +70,7 @@ export interface LifeHarnessLike {
     expectedVersion: number;
   }): Promise<LifePlugin>;
   invalidateContext?(actor: LifeActor, scope: LifeScope): void;
+  invalidateActorContext?(actor: LifeActor): void;
   rerunBackgroundSummary?(input: {
     actor: LifeActor;
     scope: LifeScope;
@@ -90,6 +92,7 @@ export interface LifeServerOptions {
   harness: LifeHarnessLike;
   mlb?: MlbLike;
   context?: ContextLike;
+  preparationMonitor?: { start(): void; stop(): void };
   host?: "127.0.0.1";
   port?: number;
   userId?: string;
@@ -249,6 +252,16 @@ export class LifeHttpServer {
   private contextTail: Promise<void> = Promise.resolve();
   private readonly activeRequests = new Set<Promise<void>>();
   private readonly extractionControllers = new Set<AbortController>();
+  private readonly mutationRequests = new Set<Promise<void>>();
+  private readonly personalReviews = new Map<
+    string,
+    { expiresAt: number; life: number; tasks: number; plugins: number }
+  >();
+  private personalResetActive = false;
+  private resetInFlight?: {
+    operationId: string;
+    promise: Promise<ReturnType<LifeStore["getPersonalReset"]>>;
+  };
   private accepting = true;
   private server?: Server;
   private bound?: ListeningLifeServer;
@@ -256,11 +269,19 @@ export class LifeHttpServer {
   private readonly actor: LifeActor;
   private readonly options: LifeServerOptions;
   private readonly learning: LifeLearning;
+  private readonly teaching: LifeTeaching;
   constructor(options: LifeServerOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
     this.actor = { userId: identifier(options.userId ?? "local", "userId") };
     this.learning = new LifeLearning(options.store);
+    this.teaching = new LifeTeaching(options.store, this.now);
+    const pendingReset = options.store.getPersonalReset(this.actor);
+    this.personalResetActive = Boolean(pendingReset && pendingReset.state !== "completed");
+    if (pendingReset && pendingReset.state !== "completed") {
+      options.tasks.beginPersonalDeletion(`user:${this.actor.userId}`, pendingReset.operationId);
+      options.harness.invalidateActorContext?.(this.actor);
+    }
     this.token = options.token ?? randomBytes(32).toString("base64url");
     if (this.token.length < 32 || this.token.length > 256)
       throw new Error("Launch token is invalid.");
@@ -281,6 +302,9 @@ export class LifeHttpServer {
     )
       throw new Error("Life state directory failed private ownership checks.");
   }
+  canEvaluateBackground(): boolean {
+    return this.accepting && !this.personalResetActive;
+  }
   async listen(): Promise<ListeningLifeServer> {
     if (this.bound) return this.bound;
     const host = this.options.host ?? "127.0.0.1",
@@ -295,7 +319,15 @@ export class LifeHttpServer {
       }
       const active = this.handle(request, response);
       this.activeRequests.add(active);
+      const path = (request.url ?? "").split("?", 1)[0] ?? "";
+      if (
+        request.method !== "GET" &&
+        request.method !== "HEAD" &&
+        !path.startsWith("/api/life/personal-data/reset")
+      )
+        this.mutationRequests.add(active);
       void active.finally(() => this.activeRequests.delete(active)).catch(() => {});
+      void active.finally(() => this.mutationRequests.delete(active)).catch(() => {});
     });
     this.server.requestTimeout = DEADLINE_MS;
     this.server.headersTimeout = 10_000;
@@ -313,15 +345,18 @@ export class LifeHttpServer {
     const address = this.server.address();
     if (!address || typeof address === "string") throw new Error("Life listener did not bind.");
     const url = `http://${host}:${address.port}`;
-    return (this.bound = {
+    this.bound = {
       host,
       port: address.port,
       url,
       launchUrl: `${url}/#token=${encodeURIComponent(this.token)}`,
-    });
+    };
+    this.options.preparationMonitor?.start();
+    return this.bound;
   }
   async close(): Promise<void> {
     this.accepting = false;
+    this.options.preparationMonitor?.stop();
     for (const controller of this.extractionControllers) controller.abort();
     if (this.server) {
       const closing = this.server;
@@ -539,6 +574,27 @@ export class LifeHttpServer {
       }
       if (path.startsWith("/api/life/") && !this.authenticated(request))
         throw new HttpError(401, "Authentication required.");
+      if (
+        this.personalResetActive &&
+        request.method !== "GET" &&
+        !path.startsWith("/api/life/personal-data/reset")
+      )
+        throw new HttpError(423, "Personal reset is in progress.");
+      if (path === "/api/life/personal-data/review" && request.method === "GET")
+        return this.personalDataReview(response);
+      if (path === "/api/life/personal-data/export" && request.method === "GET")
+        return this.personalDataExport(url, response);
+      if (path === "/api/life/personal-data/reset" && request.method === "POST")
+        return await this.personalDataReset(request, response);
+      if (path === "/api/life/personal-data/reset" && request.method === "GET")
+        return this.personalDataCurrentReset(response);
+      if (/^\/api\/life\/personal-data\/reset\/[^/]+$/.test(path) && request.method === "GET")
+        return this.personalDataResetStatus(path, response);
+      if (
+        /^\/api\/life\/personal-data\/reset\/[^/]+\/retry$/.test(path) &&
+        request.method === "POST"
+      )
+        return await this.personalDataResetRetry(request, path, response);
       if (path === "/api/life/bootstrap" && request.method === "GET")
         return await this.bootstrap(url, response);
       if (path === "/api/life/groups" && request.method === "POST")
@@ -574,6 +630,17 @@ export class LifeHttpServer {
         return await this.learningSelection(request, response, path);
       if (path === "/api/life/learning/export" && request.method === "POST")
         return await this.learningExport(request, response);
+      if (path === "/api/life/teaching" && request.method === "GET")
+        return this.teachingList(url, response);
+      if (path === "/api/life/teaching" && request.method === "POST")
+        return await this.teachingCreate(request, response);
+      if (/^\/api\/life\/teaching\/[^/]+$/.test(path) && request.method === "GET")
+        return this.teachingDetail(path, response);
+      if (
+        /^\/api\/life\/teaching\/[^/]+\/(revise|enabled|rollback)$/.test(path) &&
+        request.method === "POST"
+      )
+        return await this.teachingMutation(request, response, path);
       if (path === "/api/life/chat" && request.method === "POST")
         return await this.chat(request, response);
       if (path === "/api/life/signals" && request.method === "POST")
@@ -634,6 +701,261 @@ export class LifeHttpServer {
     this.send(response, 204, undefined, {
       "set-cookie": `${SESSION_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor((this.options.sessionTtlMs ?? 43_200_000) / 1000)}`,
     });
+  }
+  private taskPersonalSummary(expectedGeneration?: number): {
+    generation: number;
+    tasks: number;
+    watches: number;
+    watchEvents: number;
+    progress: number;
+    bytes: number;
+    truncated: boolean;
+  } {
+    const summary = this.options.tasks.personalSummary(`user:${this.actor.userId}`);
+    if (expectedGeneration !== undefined && summary.generation !== expectedGeneration)
+      throw new LifeConflictError("Personal task data changed; review again.");
+    return { ...summary, truncated: false };
+  }
+  private personalDataReview(response: ServerResponse): void {
+    if (this.personalResetActive)
+      throw new HttpError(409, "A personal reset is already in progress.");
+    const life = this.options.store.personalSummary(this.actor),
+      tasks = this.taskPersonalSummary(),
+      plugins = this.options.plugins.personalSummary(this.actor.userId),
+      token = randomBytes(32).toString("base64url"),
+      expiresAt = this.now() + 600_000;
+    this.personalReviews.clear();
+    this.personalReviews.set(digest(token).toString("hex"), {
+      expiresAt,
+      life: life.generation,
+      tasks: tasks.generation,
+      plugins: plugins.generation,
+    });
+    this.send(response, 200, {
+      reviewToken: token,
+      expiresAt: new Date(expiresAt).toISOString(),
+      generations: { life: life.generation, tasks: tasks.generation, plugins: plugins.generation },
+      counts: {
+        privateRecords: life.records,
+        sources: life.sources,
+        feedback: life.feedback,
+        guidance: life.guidance,
+        userSettings: life.settings,
+        tasks: tasks.tasks,
+        watches: tasks.watches,
+        watchEvents: tasks.watchEvents,
+        taskProgress: tasks.progress,
+        plugins: plugins.plugins,
+        pluginVersions: plugins.versions,
+        pluginStorageKeys: plugins.storageKeys,
+        sharedPluginStorageKeys: plugins.sharedStorageKeys,
+      },
+      bytes: life.bytes + tasks.bytes + plugins.bytes,
+      truncated: tasks.truncated,
+      preserves: ["group memberships", "shared records", "shared apps", "shared tasks"],
+    });
+  }
+  private personalReview(token: unknown): {
+    expiresAt: number;
+    life: number;
+    tasks: number;
+    plugins: number;
+  } {
+    if (typeof token !== "string" || token.length > 256)
+      throw new HttpError(403, "A fresh personal-data review is required.");
+    const found = this.personalReviews.get(digest(token).toString("hex"));
+    if (!found || found.expiresAt <= this.now())
+      throw new HttpError(403, "A fresh personal-data review is required.");
+    return found;
+  }
+  private personalDataExport(url: URL, response: ServerResponse): void {
+    const review = this.personalReview(url.searchParams.get("reviewToken")),
+      store = url.searchParams.get("store"),
+      cursor = url.searchParams.get("cursor") ?? undefined,
+      rawLimit = url.searchParams.get("limit"),
+      limit = rawLimit === null ? undefined : Number(rawLimit);
+    if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1 || limit > 100))
+      throw new HttpError(400, "Export limit must be from 1 through 100.");
+    let page: unknown;
+    if (store === "life")
+      page = this.options.store.exportPersonalPage(this.actor, {
+        cursor,
+        limit,
+        expectedGeneration: review.life,
+      });
+    else if (store === "tasks")
+      page = this.options.tasks.exportPersonal({
+        owner: `user:${this.actor.userId}`,
+        cursor,
+        limit,
+        expectedGeneration: review.tasks,
+      });
+    else if (store === "plugins")
+      page = this.options.plugins.exportPersonal(this.actor.userId, {
+        cursor,
+        limit,
+        expectedGeneration: review.plugins,
+      });
+    else throw new HttpError(400, "Export store must be life, tasks, or plugins.");
+    this.send(response, 200, page);
+  }
+  private resetStatus(
+    value: NonNullable<ReturnType<LifeStore["getPersonalReset"]>>,
+  ): Record<string, unknown> {
+    const runtime = this.options.tasks.getPersonalDeletion(`user:${this.actor.userId}`);
+    return {
+      operationId: value.operationId,
+      state: value.state,
+      requestedAt: new Date(value.requestedAt).toISOString(),
+      updatedAt: new Date(value.updatedAt).toISOString(),
+      runtimeState: runtime?.state,
+      unknownTaskIds: runtime?.unknownTaskIds ?? [],
+    };
+  }
+  private async settleActorMutations(): Promise<boolean> {
+    for (const controller of this.extractionControllers) controller.abort();
+    if (!this.mutationRequests.size) return true;
+    let timer: NodeJS.Timeout | undefined;
+    const settled = await Promise.race([
+      Promise.allSettled(this.mutationRequests).then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), 5_000);
+        timer.unref();
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return settled;
+  }
+  private async continuePersonalReset(
+    operationId: string,
+    requireReviewedTaskGeneration = false,
+  ): Promise<ReturnType<LifeStore["getPersonalReset"]>> {
+    if (this.resetInFlight) {
+      if (this.resetInFlight.operationId !== operationId)
+        throw new HttpError(409, "Another personal reset is in progress.");
+      return this.resetInFlight.promise;
+    }
+    const promise = this.performPersonalReset(operationId, requireReviewedTaskGeneration);
+    this.resetInFlight = { operationId, promise };
+    try {
+      return await promise;
+    } finally {
+      if (this.resetInFlight?.promise === promise) this.resetInFlight = undefined;
+    }
+  }
+  private async performPersonalReset(
+    operationId: string,
+    requireReviewedTaskGeneration: boolean,
+  ): Promise<ReturnType<LifeStore["getPersonalReset"]>> {
+    const ownerId = `user:${this.actor.userId}` as const;
+    let journal = this.options.store.getPersonalReset(this.actor);
+    if (!journal || journal.operationId !== operationId)
+      throw new HttpError(404, "Personal reset is unavailable.");
+    if (journal.state === "completed") {
+      return journal;
+    }
+    this.personalResetActive = true;
+    this.options.preparationMonitor?.stop();
+    this.options.harness.invalidateActorContext?.(this.actor);
+    const runtimeDeletion = this.options.tasks.getPersonalDeletion(ownerId);
+    this.options.tasks.beginPersonalDeletion(
+      ownerId,
+      operationId,
+      runtimeDeletion?.operationId === operationId || !requireReviewedTaskGeneration
+        ? {}
+        : { expectedGeneration: journal.taskGeneration },
+    );
+    if (journal.state === "draining") {
+      if (!(await this.settleActorMutations())) return journal;
+      const runtime = await this.options.tasks.drainPersonalDeletion(ownerId, operationId, {
+        timeoutMs: 5_000,
+      });
+      if (runtime.state !== "ready" && runtime.state !== "completed") return journal;
+      journal = this.options.store.advancePersonalReset(this.actor, operationId, "tasks-deleted");
+    }
+    if (journal.state === "tasks-deleted") {
+      this.options.plugins.deletePersonal(this.actor.userId);
+      journal = this.options.store.advancePersonalReset(this.actor, operationId, "plugins-deleted");
+    }
+    if (journal.state === "plugins-deleted") {
+      this.options.store.deletePersonal(this.actor, { preserveMemberships: true });
+      journal = this.options.store.advancePersonalReset(this.actor, operationId, "life-deleted");
+    }
+    if (journal.state === "life-deleted") {
+      this.options.harness.invalidateActorContext?.(this.actor);
+      this.options.tasks.completePersonalDeletion(ownerId, operationId);
+      journal = this.options.store.advancePersonalReset(this.actor, operationId, "completed");
+      this.personalResetActive = false;
+      if (this.bound) this.options.preparationMonitor?.start();
+      this.personalReviews.clear();
+    }
+    return journal;
+  }
+  private async personalDataReset(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = jsonObject(await this.body(request)),
+      review = this.personalReview(body.reviewToken),
+      operationId = randomUUID();
+    if (this.personalResetActive || this.resetInFlight)
+      throw new HttpError(409, "A personal reset is already in progress.");
+    this.personalResetActive = true;
+    this.options.preparationMonitor?.stop();
+    this.options.harness.invalidateActorContext?.(this.actor);
+    if (!(await this.settleActorMutations())) {
+      this.personalResetActive = false;
+      if (this.bound) this.options.preparationMonitor?.start();
+      throw new HttpError(409, "Active personal work did not settle; review reset again.");
+    }
+    // Preflight every generation before creating the durable authorization journal.
+    try {
+      this.options.store.exportPersonalPage(this.actor, {
+        limit: 1,
+        expectedGeneration: review.life,
+      });
+      this.taskPersonalSummary(review.tasks);
+      this.options.plugins.exportPersonal(this.actor.userId, {
+        limit: 1,
+        expectedGeneration: review.plugins,
+      });
+      this.options.store.beginPersonalReset(this.actor, {
+        operationId,
+        reviewTokenHash: digest(String(body.reviewToken)).toString("hex"),
+        lifeGeneration: review.life,
+        taskGeneration: review.tasks,
+        pluginGeneration: review.plugins,
+      });
+    } catch (error) {
+      this.personalResetActive = false;
+      if (this.bound) this.options.preparationMonitor?.start();
+      throw error;
+    }
+    const journal = await this.continuePersonalReset(operationId, true);
+    this.send(response, journal?.state === "completed" ? 200 : 202, this.resetStatus(journal!));
+  }
+  private personalDataResetStatus(path: string, response: ServerResponse): void {
+    const operationId = identifier(decodeURIComponent(path.split("/").at(-1)!), "operationId"),
+      journal = this.options.store.getPersonalReset(this.actor);
+    if (!journal || journal.operationId !== operationId)
+      throw new HttpError(404, "Personal reset is unavailable.");
+    this.send(response, 200, this.resetStatus(journal));
+  }
+  private personalDataCurrentReset(response: ServerResponse): void {
+    const journal = this.options.store.getPersonalReset(this.actor);
+    this.send(response, 200, {
+      reset: journal && journal.state !== "completed" ? this.resetStatus(journal) : null,
+    });
+  }
+  private async personalDataResetRetry(
+    request: IncomingMessage,
+    path: string,
+    response: ServerResponse,
+  ): Promise<void> {
+    jsonObject(await this.body(request));
+    const operationId = identifier(decodeURIComponent(path.split("/").at(-2)!), "operationId");
+    const journal = await this.continuePersonalReset(operationId);
+    this.send(response, journal?.state === "completed" ? 200 : 202, this.resetStatus(journal!));
   }
   private async bootstrap(url: URL, response: ServerResponse): Promise<void> {
     const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
@@ -1065,6 +1387,73 @@ export class LifeHttpServer {
     if (!Array.isArray(body.ids)) throw new HttpError(400, "ids must be an array.");
     const ids = body.ids.map((id) => identifier(id, "feedback id"));
     this.send(response, 200, this.learning.exportExamples(this.actor, ids));
+  }
+  private teachingGuide(value: ReturnType<LifeTeaching["get"]>): Record<string, unknown> {
+    return {
+      record: serializeRecord(value.record),
+      version: value.version,
+      enabled: value.enabled,
+      status: value.status,
+      versions: value.versions.map((version) => ({
+        ...version,
+        adoptedAt: new Date(version.adoptedAt).toISOString(),
+      })),
+    };
+  }
+  private teachingList(url: URL, response: ServerResponse): void {
+    const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`);
+    this.send(response, 200, {
+      guides: this.teaching.list(this.actor, scope).map((guide) => this.teachingGuide(guide)),
+    });
+  }
+  private teachingDetail(path: string, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!), "teaching id");
+    this.send(response, 200, this.teachingGuide(this.teaching.get(this.actor, id)));
+  }
+  private async teachingCreate(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = jsonObject(await this.body(request)),
+      scope = this.scope(body.scope),
+      guide = this.teaching.create(this.actor, {
+        scope,
+        title: bounded(body.title, "title", 200),
+        instructions: bounded(body.instructions, "instructions", 4_000),
+        ...(body.sources === undefined ? {} : { sources: body.sources as never }),
+        ...(body.enabled === undefined ? {} : { enabled: body.enabled as boolean }),
+      });
+    this.options.harness.invalidateContext?.(this.actor, scope);
+    this.send(response, 201, this.teachingGuide(guide));
+  }
+  private async teachingMutation(
+    request: IncomingMessage,
+    response: ServerResponse,
+    path: string,
+  ): Promise<void> {
+    const parts = path.split("/"),
+      action = parts.at(-1)!,
+      id = identifier(decodeURIComponent(parts.at(-2)!), "teaching id"),
+      body = jsonObject(await this.body(request));
+    let guide;
+    if (action === "revise")
+      guide = this.teaching.revise(this.actor, id, Number(body.expectedRevision), {
+        instructions: bounded(body.instructions, "instructions", 4_000),
+        ...(body.sources === undefined ? {} : { sources: body.sources as never }),
+      });
+    else if (action === "enabled")
+      guide = this.teaching.setEnabled(
+        this.actor,
+        id,
+        Number(body.expectedRevision),
+        body.enabled as boolean,
+      );
+    else
+      guide = this.teaching.rollback(
+        this.actor,
+        id,
+        Number(body.expectedRevision),
+        Number(body.targetVersion),
+      );
+    this.options.harness.invalidateContext?.(this.actor, guide.record.scope);
+    this.send(response, 200, this.teachingGuide(guide));
   }
   private async chat(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = jsonObject(await this.body(request)),

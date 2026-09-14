@@ -6,6 +6,10 @@ import type {
   PluginSummary,
   Scope,
   TaskDetail,
+  TeachingGuide,
+  TeachingSource,
+  PersonalDataReview,
+  PersonalResetStatus,
 } from "./types";
 export class ApiError extends Error {
   constructor(
@@ -214,5 +218,73 @@ export const api = {
       { method: "POST", body: JSON.stringify({ action, payload }) },
     );
     return response.value;
+  },
+  teaching: {
+    list: (scope: string) =>
+      request<{ guides: TeachingGuide[] }>(`/api/life/teaching?scope=${encodeURIComponent(scope)}`),
+    detail: (id: string) => request<TeachingGuide>(`/api/life/teaching/${encodeURIComponent(id)}`),
+    create: (value: {
+      scope: string;
+      title: string;
+      instructions: string;
+      sources?: TeachingSource[];
+      enabled?: boolean;
+    }) =>
+      request<TeachingGuide>("/api/life/teaching", { method: "POST", body: JSON.stringify(value) }),
+    revise: (
+      id: string,
+      expectedRevision: number,
+      instructions: string,
+      sources?: TeachingSource[],
+    ) =>
+      request<TeachingGuide>(`/api/life/teaching/${encodeURIComponent(id)}/revise`, {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision, instructions, ...(sources ? { sources } : {}) }),
+      }),
+    enabled: (id: string, expectedRevision: number, enabled: boolean) =>
+      request<TeachingGuide>(`/api/life/teaching/${encodeURIComponent(id)}/enabled`, {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision, enabled }),
+      }),
+    rollback: (id: string, expectedRevision: number, targetVersion: number) =>
+      request<TeachingGuide>(`/api/life/teaching/${encodeURIComponent(id)}/rollback`, {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision, targetVersion }),
+      }),
+  },
+  personalData: {
+    review: () => request<PersonalDataReview>("/api/life/personal-data/review"),
+    exportPage: (
+      reviewToken: string,
+      store: "life" | "tasks" | "plugins",
+      cursor?: string,
+      signal?: AbortSignal,
+    ) => {
+      const query = new URLSearchParams({ reviewToken, store, limit: "100" });
+      if (cursor) query.set("cursor", cursor);
+      return request<{ format: string; generation: number; items: unknown[]; nextCursor?: string }>(
+        `/api/life/personal-data/export?${query}`,
+        { signal },
+      );
+    },
+    reset: (reviewToken: string) =>
+      request<PersonalResetStatus>("/api/life/personal-data/reset", {
+        method: "POST",
+        body: JSON.stringify({ reviewToken }),
+      }),
+    currentReset: () =>
+      request<{ reset: PersonalResetStatus | null }>("/api/life/personal-data/reset"),
+    resetStatus: (operationId: string) =>
+      request<PersonalResetStatus>(
+        `/api/life/personal-data/reset/${encodeURIComponent(operationId)}`,
+      ),
+    retryReset: (operationId: string) =>
+      request<PersonalResetStatus>(
+        `/api/life/personal-data/reset/${encodeURIComponent(operationId)}/retry`,
+        {
+          method: "POST",
+          body: "{}",
+        },
+      ),
   },
 };

@@ -6,6 +6,8 @@
 
 Model context can use `resolve(actor, scope)`, which returns at most eight active guides and 16,000 instruction characters. A source replacement, deletion, invalidated provenance, or lost access excludes the affected guide. Review the new source and explicitly revise the guide to restore it. The current list uses the latest 500 routine records; this is a bounded working window rather than a full archive query.
 
+The Life service exposes scoped list/detail/create and revision-checked revise, enable and rollback routes. Your world's Guidance view displays instructions and retained versions, opens current linked sources for review, and requires explicit selection when adopting updated evidence. Ordinary record editing does not bypass this version history. Each change invalidates the corresponding conversation context so a reply already in flight cannot reintroduce the older guidance.
+
 Adopted guidance customizes responses and planning within the existing capability boundary. It cannot grant tools, change identity, widen sharing, or authorize a consequential external action. Instructions inside ordinary source evidence remain data. A user's current instruction takes precedence over an older guide.
 
 Tests cover inert ingestion, explicit activation and restart, scoped sharing, source replacement/deletion, revoked membership, stale revisions, bounded history/context, rollback and unversioned edits. This is inspectable configuration; it does not alter model weights or claim to undo information in an already downloaded export.

@@ -29,6 +29,25 @@ export interface PluginRevision {
   capabilities: PluginCapability[];
   active: boolean;
 }
+export interface PersonalPluginSummary {
+  generation: number;
+  plugins: number;
+  versions: number;
+  storageKeys: number;
+  sharedStorageKeys: number;
+  bytes: number;
+}
+export type PersonalPluginItem =
+  | { type: "plugin"; plugin: LifePlugin }
+  | { type: "plugin-version"; pluginId: string; version: number; manifest: PluginManifest }
+  | { type: "plugin-storage"; pluginId: string; key: string; value: unknown }
+  | { type: "shared-plugin-storage"; pluginId: string; owner: string; key: string; value: unknown };
+export interface PersonalPluginExport {
+  format: "ellie-plugins-v1";
+  generation: number;
+  items: PersonalPluginItem[];
+  nextCursor?: string;
+}
 export class PluginError extends Error {
   readonly code: "invalid" | "forbidden" | "not_found" | "conflict" | "unavailable";
   constructor(code: PluginError["code"]) {
@@ -53,6 +72,17 @@ export function groupStoragePrefix(userId: string): string {
 }
 export function groupStorageKey(userId: string, key: string): string {
   return identifier(`${groupStoragePrefix(userId)}${identifier(key)}`);
+}
+function encodedKeyOwner(key: string): string | undefined {
+  const encoded = /^user64:([A-Za-z0-9_-]+):/.exec(key)?.[1];
+  if (!encoded) return;
+  const userId = Buffer.from(encoded, "base64url").toString("utf8");
+  try {
+    if (Buffer.from(userId).toString("base64url") !== encoded) return;
+    return ownerScope(`user:${identifier(userId)}`);
+  } catch {
+    return;
+  }
 }
 function bounded(value: unknown, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > max)
@@ -149,13 +179,17 @@ export class PluginStore {
         "PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;",
       );
       const version = Number(this.db.prepare("PRAGMA user_version").get()?.user_version);
-      if (version > 1) throw new PluginError("unavailable");
+      if (version > 2) throw new PluginError("unavailable");
       if (version === 0)
         this.db.exec(`BEGIN;
         CREATE TABLE plugins(id TEXT PRIMARY KEY,owner TEXT NOT NULL,manifest TEXT NOT NULL,version INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
         CREATE TABLE plugin_versions(plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,version INTEGER NOT NULL,manifest TEXT NOT NULL,PRIMARY KEY(plugin_id,version));
         CREATE TABLE plugin_storage(plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(plugin_id,key));
         PRAGMA user_version=1; COMMIT;`);
+      if (version < 2)
+        this.db.exec(`BEGIN;
+        CREATE TABLE personal_generations(owner TEXT PRIMARY KEY,generation INTEGER NOT NULL);
+        PRAGMA user_version=2; COMMIT;`);
     } catch (error) {
       this.db.close();
       throw error;
@@ -208,6 +242,7 @@ export class PluginStore {
     try {
       this.db.prepare("INSERT INTO plugins VALUES(?,?,?,?,?,?)").run(id, owner, json, 1, now, now);
       this.db.prepare("INSERT INTO plugin_versions VALUES(?,?,?)").run(id, 1, json);
+      this.noteMutation(owner);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -237,6 +272,7 @@ export class PluginStore {
       this.db
         .prepare("DELETE FROM plugin_versions WHERE plugin_id=? AND version < ?")
         .run(id, version - 99);
+      this.noteMutation(owner);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -259,7 +295,19 @@ export class PluginStore {
   }
   remove(owner: string, id: string): void {
     this.get(owner, id);
-    this.db.prepare("DELETE FROM plugins WHERE id=? AND owner=?").run(id, owner);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const keys = this.db
+        .prepare("SELECT key FROM plugin_storage WHERE plugin_id=?")
+        .all(id)
+        .map((row) => String(row.key));
+      this.db.prepare("DELETE FROM plugins WHERE id=? AND owner=?").run(id, owner);
+      this.noteMutation(owner, keys);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
   storageGet(owner: string, id: string, key: string): unknown {
     this.authorize(owner, id, "storage");
@@ -291,12 +339,178 @@ export class PluginStore {
       !this.db.prepare("SELECT key FROM plugin_storage WHERE plugin_id=? AND key=?").get(id, key)
     )
       throw new PluginError("invalid");
-    this.db
-      .prepare(
-        "INSERT INTO plugin_storage VALUES(?,?,?) ON CONFLICT(plugin_id,key) DO UPDATE SET value=excluded.value",
-      )
-      .run(id, key, JSON.stringify(value));
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO plugin_storage VALUES(?,?,?) ON CONFLICT(plugin_id,key) DO UPDATE SET value=excluded.value",
+        )
+        .run(id, key, JSON.stringify(value));
+      this.noteMutation(owner, [key]);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return value;
+  }
+  personalSummary(userId: string): PersonalPluginSummary {
+    const prefix = groupStoragePrefix(userId),
+      owner = `user:${userId}`;
+    const row = this.db
+      .prepare(`SELECT
+      (SELECT count(*) FROM plugins WHERE owner=?) plugins,
+      (SELECT count(*) FROM plugin_versions v JOIN plugins p ON p.id=v.plugin_id WHERE p.owner=?) versions,
+      (SELECT count(*) FROM plugin_storage s JOIN plugins p ON p.id=s.plugin_id WHERE p.owner=?) storage_keys,
+      (SELECT count(*) FROM plugin_storage s JOIN plugins p ON p.id=s.plugin_id WHERE p.owner LIKE 'group:%' AND substr(s.key,1,?)=?) shared_storage_keys,
+      COALESCE((SELECT sum(length(CAST(manifest AS BLOB))) FROM plugins WHERE owner=?),0)+
+      COALESCE((SELECT sum(length(CAST(v.manifest AS BLOB))) FROM plugin_versions v JOIN plugins p ON p.id=v.plugin_id WHERE p.owner=?),0)+
+      COALESCE((SELECT sum(length(CAST(s.value AS BLOB))) FROM plugin_storage s JOIN plugins p ON p.id=s.plugin_id WHERE p.owner=? OR (p.owner LIKE 'group:%' AND substr(s.key,1,?)=?)),0) bytes`)
+      .get(owner, owner, owner, prefix.length, prefix, owner, owner, owner, prefix.length, prefix)!;
+    return {
+      generation: this.generation(owner),
+      plugins: Number(row.plugins),
+      versions: Number(row.versions),
+      storageKeys: Number(row.storage_keys),
+      sharedStorageKeys: Number(row.shared_storage_keys),
+      bytes: Number(row.bytes),
+    };
+  }
+  exportPersonal(
+    userId: string,
+    options: { expectedGeneration?: number; cursor?: string; limit?: number } = {},
+  ): PersonalPluginExport {
+    const prefix = groupStoragePrefix(userId),
+      owner = `user:${userId}`,
+      generation = this.generation(owner);
+    const limit = options.limit ?? 50;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new PluginError("invalid");
+    this.checkGeneration(owner, options.expectedGeneration);
+    let offset = 0;
+    if (options.cursor !== undefined) {
+      try {
+        if (options.cursor.length > 1000) throw new Error();
+        const cursor = JSON.parse(Buffer.from(options.cursor, "base64url").toString("utf8"));
+        if (
+          cursor.owner !== owner ||
+          !Number.isSafeInteger(cursor.generation) ||
+          !Number.isSafeInteger(cursor.offset) ||
+          cursor.offset < 0 ||
+          cursor.offset > 1_000_000
+        )
+          throw new Error();
+        if (cursor.generation !== generation) throw new PluginError("conflict");
+        offset = cursor.offset;
+      } catch (error) {
+        if (error instanceof PluginError) throw error;
+        throw new PluginError("invalid");
+      }
+    }
+    const rows = this.db
+      .prepare(`SELECT 0 section,id plugin_id,version revision,'' storage_key,owner,manifest payload,created_at,updated_at FROM plugins WHERE owner=?
+      UNION ALL SELECT 1,v.plugin_id,v.version,'',p.owner,v.manifest,0,0 FROM plugin_versions v JOIN plugins p ON p.id=v.plugin_id WHERE p.owner=?
+      UNION ALL SELECT 2,s.plugin_id,0,s.key,p.owner,s.value,0,0 FROM plugin_storage s JOIN plugins p ON p.id=s.plugin_id WHERE p.owner=?
+      UNION ALL SELECT 3,s.plugin_id,0,s.key,p.owner,s.value,0,0 FROM plugin_storage s JOIN plugins p ON p.id=s.plugin_id WHERE p.owner LIKE 'group:%' AND substr(s.key,1,?)=?
+      ORDER BY section,plugin_id,revision,storage_key LIMIT ? OFFSET ?`)
+      .all(owner, owner, owner, prefix.length, prefix, limit + 1, offset);
+    const items: PersonalPluginItem[] = [];
+    let bytes = 0;
+    for (const row of rows.slice(0, limit)) {
+      const size = Buffer.byteLength(String(row.payload)) + 1500;
+      if (items.length && bytes + size > 4_000_000) break;
+      bytes += size;
+      const pluginId = String(row.plugin_id);
+      if (Number(row.section) === 0)
+        items.push({
+          type: "plugin",
+          plugin: unpack({
+            id: pluginId,
+            owner,
+            manifest: row.payload,
+            version: row.revision,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+          }),
+        });
+      else if (Number(row.section) === 1)
+        items.push({
+          type: "plugin-version",
+          pluginId,
+          version: Number(row.revision),
+          manifest: validateManifest(JSON.parse(String(row.payload))),
+        });
+      else if (Number(row.section) === 2)
+        items.push({
+          type: "plugin-storage",
+          pluginId,
+          key: String(row.storage_key),
+          value: JSON.parse(String(row.payload)),
+        });
+      else
+        items.push({
+          type: "shared-plugin-storage",
+          pluginId,
+          owner: String(row.owner),
+          key: String(row.storage_key).slice(prefix.length),
+          value: JSON.parse(String(row.payload)),
+        });
+    }
+    return {
+      format: "ellie-plugins-v1",
+      generation,
+      items,
+      ...(rows.length > items.length
+        ? {
+            nextCursor: Buffer.from(
+              JSON.stringify({ owner, generation, offset: offset + items.length }),
+            ).toString("base64url"),
+          }
+        : {}),
+    };
+  }
+  /** The application freezes and drains actor writes before this idempotent, store-local transaction. */
+  deletePersonal(userId: string, expectedGeneration?: number): PersonalPluginSummary {
+    const prefix = groupStoragePrefix(userId),
+      owner = `user:${userId}`;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.checkGeneration(owner, expectedGeneration);
+      const privateRows = this.db.prepare("DELETE FROM plugins WHERE owner=?").run(owner);
+      const sharedRows = this.db
+        .prepare(
+          "DELETE FROM plugin_storage WHERE plugin_id IN (SELECT id FROM plugins WHERE owner LIKE 'group:%') AND substr(key,1,?)=?",
+        )
+        .run(prefix.length, prefix);
+      if (Number(privateRows.changes) || Number(sharedRows.changes)) this.noteMutation(owner);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.personalSummary(userId);
+  }
+  private generation(owner: string): number {
+    return Number(
+      this.db.prepare("SELECT generation FROM personal_generations WHERE owner=?").get(owner)
+        ?.generation ?? 0,
+    );
+  }
+  private checkGeneration(owner: string, expected: number | undefined): void {
+    if (expected !== undefined && (!Number.isSafeInteger(expected) || expected < 0))
+      throw new PluginError("invalid");
+    if (expected !== undefined && expected !== this.generation(owner))
+      throw new PluginError("conflict");
+  }
+  private noteMutation(owner: string, keys: string[] = []): void {
+    const owners = new Set(
+      owner.startsWith("user:")
+        ? [owner]
+        : keys.map(encodedKeyOwner).filter((value): value is string => value !== undefined),
+    );
+    const bump = this.db.prepare(
+      "INSERT INTO personal_generations VALUES(?,1) ON CONFLICT(owner) DO UPDATE SET generation=generation+1",
+    );
+    for (const personalOwner of owners) bump.run(personalOwner);
   }
   authorize(owner: string, id: string, capability: PluginCapability): LifePlugin {
     const plugin = this.get(owner, id);

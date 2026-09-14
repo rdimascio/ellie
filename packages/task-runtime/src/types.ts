@@ -132,6 +132,50 @@ export interface WatchRecord {
   createdAt: number;
 }
 
+export type PersonalExportItem =
+  | { type: "task"; task: TaskRecord }
+  | {
+      type: "watch";
+      watch: WatchRecord & {
+        input: unknown;
+        capabilities: string[];
+        budget: TaskBudget;
+        deadlineAt?: number;
+        expiresAt?: number;
+        retry?: RetryPolicy;
+      };
+    }
+  | {
+      type: "watchEvent";
+      event: WatchEvent & { createdAt: number };
+    }
+  | { type: "progress"; progress: ProgressRecord };
+export interface PersonalTaskExportPage {
+  format: "ellie-task-runtime-v1";
+  owner: `user:${string}`;
+  generation: number;
+  items: PersonalExportItem[];
+  nextCursor?: string;
+}
+export interface PersonalTaskSummary {
+  generation: number;
+  tasks: number;
+  watches: number;
+  watchEvents: number;
+  progress: number;
+  bytes: number;
+}
+export interface PersonalDeletion {
+  owner: `user:${string}`;
+  operationId: string;
+  state: "draining" | "ready" | "completed";
+  generation: number;
+  requestedAt: number;
+  readyAt?: number;
+  completedAt?: number;
+  unknownTaskIds: string[];
+}
+
 export interface RuntimeOptions {
   directory: string;
   now?: () => number;

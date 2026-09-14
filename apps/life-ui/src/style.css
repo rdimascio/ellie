@@ -1071,6 +1071,18 @@ main {
   display: block;
   margin: 16px 0;
 }
+.modal label.inline-check,
+.inline-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.modal label.inline-check input,
+.inline-check input {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 3px 0 0;
+}
 .modal-actions {
   display: flex;
   justify-content: space-between;
@@ -1397,5 +1409,207 @@ main {
   }
   .feedback button {
     margin-top: 8px;
+  }
+}
+.guidance {
+  margin: 24px 0;
+}
+.guidance > header,
+.personal-data > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 24px;
+}
+.guidance h2,
+.personal-data h2 {
+  font:
+    400 24px Georgia,
+    serif;
+  margin: 0 0 6px;
+}
+.guidance p,
+.personal-data > p {
+  color: var(--muted);
+  line-height: 1.5;
+  margin-top: 0;
+}
+.guide-list {
+  border-top: 1px solid var(--rule);
+}
+.guide-list > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  align-items: center;
+  gap: 14px;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  padding: 18px 4px;
+  text-align: left;
+}
+.guide-list small,
+.guide-list strong,
+.guide-state span {
+  display: block;
+}
+.guide-list small,
+.guide-list em,
+.guide-state span,
+.source-choices small {
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+}
+.guide-status {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #56846b;
+}
+.guide-status.paused {
+  background: #a79d8e;
+}
+.guide-status.source-changed {
+  background: var(--coral);
+  box-shadow: 0 0 0 4px #f6ded5;
+}
+.guide-state {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+.source-choices {
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 10px 14px;
+}
+.source-choices label {
+  margin: 10px 0;
+}
+.guide-actions {
+  align-items: center;
+}
+.guide-actions > button {
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  border-radius: 18px;
+  padding: 9px 15px;
+}
+.modal button.primary {
+  background: var(--coral);
+  color: #fff;
+  border-color: var(--coral);
+}
+.source-review-copy {
+  display: block !important;
+  margin-top: 4px;
+  line-height: 1.35;
+}
+.guide-history {
+  margin-top: 22px;
+  border-top: 1px solid var(--rule);
+  padding-top: 4px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 12px;
+}
+.guide-history select {
+  display: block;
+  width: 100%;
+  margin-top: 7px;
+  padding: 10px;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--paper);
+}
+.personal-data {
+  border-top: 1px solid var(--ink);
+  margin-top: 54px;
+  padding-top: 26px;
+}
+.personal-data > header > div > span {
+  color: var(--coral);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.personal-data button,
+.guide-history button {
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  border-radius: 18px;
+  padding: 8px 14px;
+}
+.data-review {
+  margin-top: 22px;
+  background: color-mix(in srgb, var(--paper) 72%, transparent);
+  border-block: 1px solid var(--rule);
+  padding: 20px 0;
+}
+.data-review dl {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin: 0 0 14px;
+}
+.data-review dl div {
+  border-left: 2px solid var(--coral);
+  padding-left: 10px;
+}
+.data-review dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.data-review dd {
+  font:
+    400 24px Georgia,
+    serif;
+  margin: 3px 0 0;
+}
+.data-review > small {
+  color: var(--muted);
+}
+.data-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 18px;
+}
+.danger-solid {
+  background: #9c362e !important;
+  color: white;
+  padding: 10px 15px;
+  border-radius: 7px;
+}
+.reset-status {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 5px 18px;
+  align-items: center;
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--coral);
+}
+.reset-status span {
+  color: var(--muted);
+}
+.reset-status button {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+@media (max-width: 760px) {
+  .data-review dl {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .guidance > header,
+  .personal-data > header {
+    display: block;
+  }
+  .personal-data > header button {
+    margin: 8px 0 14px;
   }
 }

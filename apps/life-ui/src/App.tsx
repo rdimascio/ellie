@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, establishSessionFromFragment, parsePluginBridgeRequest } from "./api";
-import type { Bootstrap, LifeRecord, PluginSummary } from "./types";
+import type { Bootstrap, LifeRecord, PluginSummary, TeachingGuide, TeachingSource } from "./types";
 import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
 
 type View = "chat" | "today" | "world" | "space" | "activity" | "settings";
@@ -255,6 +255,7 @@ export function App() {
             name={data.profile.name}
             messages={messages}
             records={data.agendaRecords ?? data.records}
+            timeZone={data.profile.timeZone}
             scope={scope}
             busy={busy === "chat"}
             send={send}
@@ -414,6 +415,7 @@ function Chat({
   name,
   messages,
   records,
+  timeZone,
   scope,
   busy,
   send,
@@ -421,6 +423,7 @@ function Chat({
   name: string;
   messages: Message[];
   records: LifeRecord[];
+  timeZone: string;
   scope: string;
   busy: boolean;
   send: (s: string) => void;
@@ -432,13 +435,13 @@ function Chat({
   const upcoming = records
     .map((record) => ({
       record,
-      when: agendaDate(record, Intl.DateTimeFormat().resolvedOptions().timeZone),
+      when: agendaDate(record, timeZone),
     }))
     .filter(
       (item): item is { record: LifeRecord; when: { value: string | number; allDay: boolean } } =>
         Boolean(item.when),
     )
-    .sort((a, b) => compareAgenda(a, b, Intl.DateTimeFormat().resolvedOptions().timeZone))
+    .sort((a, b) => compareAgenda(a, b, timeZone))
     .slice(0, 2);
   return (
     <section className="conversation">
@@ -745,8 +748,12 @@ function World({
     setSearchResults(null);
     setEditing(null);
   }, [data.scope]);
-  const groups = ["all", "memory", "contact", "need", "source"];
-  const records = [...data.records, ...extras].filter((r) => tab === "all" || r.kind === tab);
+  const groups = ["all", "memory", "contact", "need", "source", "guidance"];
+  const records = [...data.records, ...extras].filter(
+    (r) =>
+      !(r.kind === "routine" && r.data.type === "teaching-guide-v1") &&
+      (tab === "all" || r.kind === tab),
+  );
   const openRecord = async (id: string) => {
     const requestedScope = data.scope;
     setLoadingRecords(true);
@@ -817,7 +824,9 @@ function World({
           {recordError}
         </p>
       )}
-      {searchResults ? (
+      {tab === "guidance" ? (
+        <Guidance data={data} refresh={refresh} notify={notify} />
+      ) : searchResults ? (
         searchResults.length ? (
           <div className="record-list search-results">
             {searchResults.map((result, index) => (
@@ -861,7 +870,7 @@ function World({
           body="You can teach Ellie in chat or add a source below."
         />
       )}
-      {!searchResults && page?.hasMore && (
+      {tab !== "guidance" && !searchResults && page?.hasMore && (
         <button
           className="load-more"
           disabled={loadingRecords}
@@ -894,13 +903,15 @@ function World({
           {loadingRecords ? "Loading…" : "Load more"}
         </button>
       )}
-      <SourceUpload
-        scope={data.scope}
-        done={async () => {
-          notify("Source added");
-          await refresh();
-        }}
-      />
+      {tab !== "guidance" && (
+        <SourceUpload
+          scope={data.scope}
+          done={async () => {
+            notify("Source added");
+            await refresh();
+          }}
+        />
+      )}
       {editing && (
         <RecordModal
           record={editing}
@@ -913,6 +924,306 @@ function World({
         />
       )}
     </Page>
+  );
+}
+function Guidance({
+  data,
+  refresh,
+  notify,
+}: {
+  data: Bootstrap;
+  refresh: () => Promise<void>;
+  notify: (message: string) => void;
+}) {
+  const [guides, setGuides] = useState<TeachingGuide[]>([]);
+  const [selected, setSelected] = useState<TeachingGuide | null>(null);
+  const [selectedSources, setSelectedSources] = useState<LifeRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const scopeRef = useRef(data.scope);
+  scopeRef.current = data.scope;
+  const load = async () => {
+    const scope = data.scope;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.teaching.list(scope);
+      if (scopeRef.current === scope) setGuides(result.guides);
+    } catch (caught) {
+      if (scopeRef.current === scope)
+        setError(caught instanceof Error ? caught.message : "Guidance could not be loaded.");
+    } finally {
+      if (scopeRef.current === scope) setLoading(false);
+    }
+  };
+  useEffect(() => {
+    setSelected(null);
+    setSelectedSources([]);
+    void load();
+  }, [data.scope]);
+  const open = async (id: string) => {
+    const scope = data.scope;
+    setLoading(true);
+    try {
+      const detail = await api.teaching.detail(id);
+      const sourceIds = [
+        ...new Set(
+          detail.versions.flatMap((version) => version.sources.map((source) => source.id)),
+        ),
+      ];
+      const sourceDetails = (
+        await Promise.allSettled(sourceIds.map((sourceId) => api.record(sourceId)))
+      ).flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
+      if (scopeRef.current === scope) {
+        setSelected(detail);
+        setSelectedSources(sourceDetails);
+      }
+    } catch (caught) {
+      if (scopeRef.current === scope)
+        setError(caught instanceof Error ? caught.message : "That guide could not be opened.");
+    } finally {
+      if (scopeRef.current === scope) setLoading(false);
+    }
+  };
+  return (
+    <section className="guidance">
+      <header>
+        <div>
+          <h2>Guidance Ellie follows</h2>
+          <p>
+            Versioned instructions you deliberately adopted. A changed source pauses trust until you
+            review it.
+          </p>
+        </div>
+      </header>
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+      {loading && !guides.length ? (
+        <p className="muted">Loading guidance…</p>
+      ) : guides.length ? (
+        <div className="guide-list">
+          {guides.map((guide) => (
+            <button key={guide.record.id} onClick={() => void open(guide.record.id)}>
+              <span className={`guide-status ${guide.status}`} aria-hidden="true" />
+              <span>
+                <strong>{guide.record.title}</strong>
+                <small>
+                  Version {guide.version} ·{" "}
+                  {guide.status === "source-changed"
+                    ? "Source changed — review needed"
+                    : guide.enabled
+                      ? "Active"
+                      : "Paused"}
+                </small>
+              </span>
+              <em>Inspect</em>
+            </button>
+          ))}
+        </div>
+      ) : (
+        <Empty
+          title="No adopted guidance"
+          body="Ask Ellie to follow a source or instruction and it will appear here for review."
+        />
+      )}
+      {selected && (
+        <GuidanceModal
+          guide={selected}
+          currentSources={[
+            ...selectedSources,
+            ...data.records.filter(
+              (record) =>
+                record.kind === "source" &&
+                !selectedSources.some((source) => source.id === record.id),
+            ),
+          ]}
+          close={() => setSelected(null)}
+          changed={async (message) => {
+            setSelected(null);
+            notify(message);
+            await Promise.all([load(), refresh()]);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function GuidanceModal({
+  guide,
+  currentSources,
+  close,
+  changed,
+}: {
+  guide: TeachingGuide;
+  currentSources: LifeRecord[];
+  close: () => void;
+  changed: (message: string) => Promise<void>;
+}) {
+  const [instructions, setInstructions] = useState(guide.record.body ?? "");
+  const [sources, setSources] = useState<Set<string>>(
+    new Set(
+      guide.status === "source-changed"
+        ? []
+        : (guide.versions.find((version) => version.version === guide.version)?.sources ?? []).map(
+            (source) => source.id,
+          ),
+    ),
+  );
+  const [targetVersion, setTargetVersion] = useState(guide.version);
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const mutate = async (label: string, operation: () => Promise<unknown>, notice: string) => {
+    setBusy(label);
+    setError("");
+    try {
+      await operation();
+      await changed(notice);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Guidance could not be updated.");
+    } finally {
+      setBusy("");
+    }
+  };
+  const chosenSources: TeachingSource[] = currentSources
+    .filter((source) => sources.has(source.id))
+    .map((source) => ({ id: source.id, revision: source.revision }));
+  return (
+    <Modal title="Review guidance" close={close}>
+      <p className="guide-state">
+        <strong>{guide.record.title}</strong>
+        <span>
+          Version {guide.version} · {guide.status}
+        </span>
+      </p>
+      {guide.status === "source-changed" && (
+        <p className="impact">
+          A linked source changed. Read the current source and select it below before adopting
+          revised instructions.
+        </p>
+      )}
+      <label>
+        Explicit instructions
+        <textarea
+          rows={7}
+          value={instructions}
+          onChange={(event) => setInstructions(event.target.value)}
+        />
+      </label>
+      <fieldset className="source-choices">
+        <legend>
+          {guide.status === "source-changed"
+            ? "Choose current source revisions to review"
+            : "Link current sources (optional)"}
+        </legend>
+        {currentSources.map((source) => (
+          <label className="inline-check" key={source.id}>
+            <input
+              type="checkbox"
+              checked={sources.has(source.id)}
+              onChange={(event) =>
+                setSources((current) => {
+                  const next = new Set(current);
+                  if (event.target.checked) next.add(source.id);
+                  else next.delete(source.id);
+                  return next;
+                })
+              }
+            />
+            <span>
+              {source.title} <small>revision {source.revision}</small>
+              {(source.body || source.bodyPreview) && (
+                <small className="source-review-copy">
+                  {String(source.body || source.bodyPreview).slice(0, 500)}
+                  {String(source.body || source.bodyPreview).length > 500 ? "…" : ""}
+                </small>
+              )}
+            </span>
+          </label>
+        ))}
+        {!currentSources.length && (
+          <p className="muted">No current sources are visible in this page.</p>
+        )}
+      </fieldset>
+      <div className="modal-actions guide-actions">
+        <button
+          disabled={!!busy}
+          onClick={() =>
+            void mutate(
+              "enabled",
+              () => api.teaching.enabled(guide.record.id, guide.record.revision, !guide.enabled),
+              guide.enabled ? "Guidance paused" : "Guidance resumed",
+            )
+          }
+        >
+          {guide.enabled ? "Pause" : "Resume"}
+        </button>
+        <button
+          className="primary"
+          disabled={
+            !!busy ||
+            !instructions.trim() ||
+            (guide.status === "source-changed" && chosenSources.length === 0)
+          }
+          onClick={() =>
+            void mutate(
+              "revise",
+              () =>
+                api.teaching.revise(
+                  guide.record.id,
+                  guide.record.revision,
+                  instructions.trim(),
+                  chosenSources,
+                ),
+              "Guidance revised",
+            )
+          }
+        >
+          {busy === "revise"
+            ? "Saving…"
+            : guide.status === "source-changed"
+              ? "Adopt reviewed revision"
+              : "Create new version"}
+        </button>
+      </div>
+      {guide.versions.length > 1 && (
+        <div className="guide-history">
+          <label>
+            Earlier version
+            <select
+              value={targetVersion}
+              onChange={(event) => setTargetVersion(Number(event.target.value))}
+            >
+              {guide.versions.map((version) => (
+                <option key={version.version} value={version.version}>
+                  Version {version.version} · {new Date(version.adoptedAt).toLocaleDateString()}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            disabled={!!busy || targetVersion === guide.version}
+            onClick={() =>
+              void mutate(
+                "rollback",
+                () => api.teaching.rollback(guide.record.id, guide.record.revision, targetVersion),
+                "Earlier guidance restored as a new version",
+              )
+            }
+          >
+            Restore selected
+          </button>
+        </div>
+      )}
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+    </Modal>
   );
 }
 function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void> }) {
@@ -1079,6 +1390,7 @@ function RecordModal({
   close: () => void;
   saved: () => Promise<void>;
 }) {
+  const isGuide = record.kind === "routine" && record.data.type === "teaching-guide-v1";
   const [title, setTitle] = useState(record.title),
     [body, setBody] = useState(record.body ?? ""),
     [busy, setBusy] = useState(false),
@@ -1097,81 +1409,103 @@ function RecordModal({
   };
   return (
     <Modal
-      title={record.kind === "source" ? "Review source" : "Edit what Ellie knows"}
+      title={
+        isGuide
+          ? "Versioned guidance"
+          : record.kind === "source"
+            ? "Review source"
+            : "Edit what Ellie knows"
+      }
       close={close}
     >
-      <label>
-        Title
-        <input value={title} onChange={(e) => setTitle(e.target.value)} />
-      </label>
-      <label>
-        Details
-        <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} />
-      </label>
-      {record.kind === "source" && (
-        <p className="impact">
-          Deleting this source removes its text from search. Memories that cite it remain visible
-          but their source is marked unavailable.
-        </p>
-      )}
-      {(["need", "goal", "reminder", "routine"] as string[]).includes(record.kind) &&
-        record.data.completed !== true && (
-          <button
-            className="record-action"
-            disabled={busy}
-            onClick={() =>
-              void mutate(() =>
-                api.patchRecord(record.id, {
-                  expectedRevision: record.revision,
-                  data: { ...record.data, completed: true, completedAt: Date.now() },
-                }),
-              )
-            }
-          >
-            Mark complete
-          </button>
-        )}
-      {(["reminder", "timer", "event"] as string[]).includes(record.kind) &&
-        record.data.cancelled !== true &&
-        record.data.completed !== true && (
-          <button
-            className="record-action"
-            disabled={busy}
-            onClick={() =>
-              void mutate(() =>
-                api.patchRecord(record.id, {
-                  expectedRevision: record.revision,
-                  data: { ...record.data, cancelled: true, cancelledAt: Date.now() },
-                }),
-              )
-            }
-          >
-            Cancel {record.kind}
-          </button>
-        )}
-      <div className="modal-actions">
-        <button
-          className="danger"
-          onClick={() => void mutate(() => api.deleteRecord(record.id, record.revision))}
-        >
-          {record.kind === "source" ? "Delete source" : "Forget this"}
-        </button>
-        <button
-          className="primary"
-          disabled={busy}
-          onClick={() =>
-            void mutate(() =>
-              api.patchRecord(record.id, { title, body, expectedRevision: record.revision }),
-            )
-          }
-        >
-          Save changes
-        </button>
-      </div>
-      {mutationError && (
-        <p className="settings-error" role="alert">
-          {mutationError}
-        </p>
+      {isGuide ? (
+        <>
+          <p className="impact">
+            Guidance changes create a reviewable version. Open Guidance in Your world to revise,
+            pause, or restore it safely.
+          </p>
+          <div className="modal-actions">
+            <button className="primary" onClick={close}>
+              Close
+            </button>
+          </div>
+        </>
+      ) : (
+        <>
+          <label>
+            Title
+            <input value={title} onChange={(e) => setTitle(e.target.value)} />
+          </label>
+          <label>
+            Details
+            <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} />
+          </label>
+          {record.kind === "source" && (
+            <p className="impact">
+              Deleting this source removes its text from search. Memories that cite it remain
+              visible but their source is marked unavailable.
+            </p>
+          )}
+          {(["need", "goal", "reminder", "routine"] as string[]).includes(record.kind) &&
+            record.data.completed !== true && (
+              <button
+                className="record-action"
+                disabled={busy}
+                onClick={() =>
+                  void mutate(() =>
+                    api.patchRecord(record.id, {
+                      expectedRevision: record.revision,
+                      data: { ...record.data, completed: true, completedAt: Date.now() },
+                    }),
+                  )
+                }
+              >
+                Mark complete
+              </button>
+            )}
+          {(["reminder", "timer", "event"] as string[]).includes(record.kind) &&
+            record.data.cancelled !== true &&
+            record.data.completed !== true && (
+              <button
+                className="record-action"
+                disabled={busy}
+                onClick={() =>
+                  void mutate(() =>
+                    api.patchRecord(record.id, {
+                      expectedRevision: record.revision,
+                      data: { ...record.data, cancelled: true, cancelledAt: Date.now() },
+                    }),
+                  )
+                }
+              >
+                Cancel {record.kind}
+              </button>
+            )}
+          <div className="modal-actions">
+            <button
+              className="danger"
+              onClick={() => void mutate(() => api.deleteRecord(record.id, record.revision))}
+            >
+              {record.kind === "source" ? "Delete source" : "Forget this"}
+            </button>
+            <button
+              className="primary"
+              disabled={busy}
+              onClick={() =>
+                void mutate(() =>
+                  api.patchRecord(record.id, { title, body, expectedRevision: record.revision }),
+                )
+              }
+            >
+              Save changes
+            </button>
+          </div>
+          {mutationError && (
+            <p className="settings-error" role="alert">
+              {mutationError}
+            </p>
+          )}
+        </>
       )}
     </Modal>
   );
@@ -1434,7 +1768,7 @@ function PluginManager({
         </div>
       </section>
       <div className="remove-plugin">
-        <label>
+        <label className="inline-check">
           <input
             type="checkbox"
             checked={confirmRemove}
@@ -1980,7 +2314,306 @@ function Settings({
       >
         {busy ? "Saving…" : "Save settings"}
       </button>
+      <PersonalDataControls profileId={data.profile.id} />
     </Page>
+  );
+}
+function PersonalDataControls({ profileId }: { profileId: string }) {
+  const [review, setReview] = useState<Awaited<ReturnType<typeof api.personalData.review>> | null>(
+    null,
+  );
+  const [reset, setReset] = useState<Awaited<ReturnType<typeof api.personalData.reset>> | null>(
+    null,
+  );
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [acknowledgement, setAcknowledgement] = useState("");
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const profileRef = useRef(profileId);
+  const exportController = useRef<AbortController | null>(null);
+  const pollRunning = useRef(false);
+  profileRef.current = profileId;
+  useEffect(
+    () => () => {
+      exportController.current?.abort();
+    },
+    [profileId],
+  );
+  useEffect(() => {
+    let cancelled = false;
+    void api.personalData
+      .currentReset()
+      .then(({ reset: pending }) => {
+        if (!cancelled && pending && profileRef.current === profileId) setReset(pending);
+      })
+      .catch((caught) => {
+        if (!cancelled)
+          setError(
+            caught instanceof Error ? caught.message : "Reset recovery could not be checked.",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId]);
+  const inspect = async () => {
+    const requestedProfile = profileId;
+    setBusy("review");
+    setError("");
+    try {
+      const value = await api.personalData.review();
+      if (profileRef.current === requestedProfile) {
+        setReview(value);
+        setReset(null);
+        setConfirmReset(false);
+        setAcknowledgement("");
+      }
+    } catch (caught) {
+      if (profileRef.current === requestedProfile)
+        setError(
+          caught instanceof Error ? caught.message : "Your data summary could not be loaded.",
+        );
+    } finally {
+      if (profileRef.current === requestedProfile) setBusy("");
+    }
+  };
+  useEffect(() => {
+    if (!reset || reset.state === "completed") return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") return;
+      if (pollRunning.current) return;
+      pollRunning.current = true;
+      void api.personalData
+        .resetStatus(reset.operationId)
+        .then((value) => {
+          if (!cancelled && profileRef.current === profileId) setReset(value);
+        })
+        .catch((caught) => {
+          if (!cancelled)
+            setError(
+              caught instanceof Error ? caught.message : "Reset status could not be checked.",
+            );
+        })
+        .finally(() => {
+          pollRunning.current = false;
+        });
+    }, 1_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [reset?.operationId, reset?.state, profileId]);
+  const download = async () => {
+    if (!review) return;
+    setBusy("export");
+    setError("");
+    const controller = new AbortController();
+    exportController.current?.abort();
+    exportController.current = controller;
+    try {
+      const archive: Record<string, { format: string; generation: number; items: unknown[] }> = {};
+      let pages = 0;
+      let bytes = 0;
+      let itemCount = 0;
+      for (const store of ["life", "tasks", "plugins"] as const) {
+        const items: unknown[] = [];
+        let cursor: string | undefined;
+        let format = "";
+        let generation = 0;
+        do {
+          if (++pages > 3_000)
+            throw new Error("This archive exceeds the current browser download limit.");
+          const page = await api.personalData.exportPage(
+            review.reviewToken,
+            store,
+            cursor,
+            controller.signal,
+          );
+          bytes += new TextEncoder().encode(JSON.stringify(page.items)).byteLength;
+          itemCount += page.items.length;
+          if (itemCount > 10_000 || bytes > 25 * 1024 * 1024)
+            throw new Error(
+              "This archive exceeds the current browser download limit of 10,000 items or 25 MB.",
+            );
+          format = page.format;
+          generation = page.generation;
+          items.push(...page.items);
+          cursor = page.nextCursor;
+        } while (cursor);
+        archive[store] = { format, generation, items };
+      }
+      if (profileRef.current !== profileId) return;
+      const blob = new Blob(
+        [
+          JSON.stringify(
+            {
+              format: "ellie-personal-data-v1",
+              exportedAt: new Date().toISOString(),
+              data: archive,
+            },
+            null,
+            2,
+          ),
+        ],
+        { type: "application/json" },
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `ellie-personal-data-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (caught) {
+      if (!controller.signal.aborted)
+        setError(caught instanceof Error ? caught.message : "Your archive could not be exported.");
+    } finally {
+      if (exportController.current === controller) exportController.current = null;
+      if (profileRef.current === profileId) setBusy("");
+    }
+  };
+  const beginReset = async () => {
+    if (!review || acknowledgement !== "RESET MY PRIVATE DATA") return;
+    setBusy("reset");
+    setError("");
+    try {
+      const status = await api.personalData.reset(review.reviewToken);
+      if (profileRef.current === profileId) {
+        setConfirmReset(false);
+        setReset(status);
+      }
+    } catch (caught) {
+      if (profileRef.current === profileId)
+        setError(caught instanceof Error ? caught.message : "The reset could not be started.");
+    } finally {
+      if (profileRef.current === profileId) setBusy("");
+    }
+  };
+  return (
+    <section className="personal-data">
+      <header>
+        <div>
+          <span>Your data</span>
+          <h2>Export or reset your private Ellie data</h2>
+        </div>
+        <button disabled={!!busy || !!reset} onClick={() => void inspect()}>
+          {busy === "review" ? "Inspecting…" : review ? "Refresh summary" : "Inspect my data"}
+        </button>
+      </header>
+      <p>
+        These controls cover your private records, settings, work, guidance, apps, and app storage.
+        Shared group records, apps, tasks, and memberships stay in place. Your own storage inside a
+        shared app is removed by reset.
+      </p>
+      {review && (
+        <div className="data-review">
+          <dl>
+            <div>
+              <dt>Private records</dt>
+              <dd>{review.counts.privateRecords}</dd>
+            </div>
+            <div>
+              <dt>Sources</dt>
+              <dd>{review.counts.sources}</dd>
+            </div>
+            <div>
+              <dt>Guides</dt>
+              <dd>{review.counts.guidance}</dd>
+            </div>
+            <div>
+              <dt>Tasks & watches</dt>
+              <dd>{review.counts.tasks + review.counts.watches}</dd>
+            </div>
+            <div>
+              <dt>Personal apps</dt>
+              <dd>{review.counts.plugins}</dd>
+            </div>
+            <div>
+              <dt>App storage keys</dt>
+              <dd>{review.counts.pluginStorageKeys + review.counts.sharedPluginStorageKeys}</dd>
+            </div>
+          </dl>
+          <small>
+            Fresh review valid until {new Date(review.expiresAt).toLocaleTimeString()} · about{" "}
+            {Math.max(1, Math.ceil(review.bytes / 1024))} KB
+          </small>
+          <div className="data-actions">
+            <button disabled={!!busy} onClick={() => void download()}>
+              {busy === "export" ? "Preparing archive…" : "Download my archive"}
+            </button>
+            <button className="danger" disabled={!!busy} onClick={() => setConfirmReset(true)}>
+              Review reset
+            </button>
+          </div>
+        </div>
+      )}
+      {confirmReset && (
+        <Modal title="Reset your private Ellie data" close={() => setConfirmReset(false)}>
+          <p className="impact">
+            This permanently removes the private data counted in this fresh review. Shared group
+            content and memberships remain. Type the phrase below to acknowledge the impact.
+          </p>
+          <label>
+            Type <strong>RESET MY PRIVATE DATA</strong>
+            <input
+              autoComplete="off"
+              value={acknowledgement}
+              onChange={(event) => setAcknowledgement(event.target.value)}
+            />
+          </label>
+          <div className="modal-actions">
+            <button onClick={() => setConfirmReset(false)}>Keep my data</button>
+            <button
+              className="danger danger-solid"
+              disabled={busy === "reset" || acknowledgement !== "RESET MY PRIVATE DATA"}
+              onClick={() => void beginReset()}
+            >
+              {busy === "reset" ? "Starting…" : "Reset private data"}
+            </button>
+          </div>
+          {error && (
+            <p className="settings-error" role="alert">
+              {error}
+            </p>
+          )}
+        </Modal>
+      )}
+      {reset && (
+        <div className={`reset-status ${reset.state}`} role="status">
+          <strong>
+            {reset.state === "completed" ? "Private data reset complete" : "Reset in progress"}
+          </strong>
+          <span>
+            {reset.state === "draining"
+              ? "Finishing active private work safely…"
+              : reset.state === "completed"
+                ? "Ellie is ready to start fresh. Shared spaces were preserved."
+                : "Removing the reviewed private data…"}
+          </span>
+          {reset.state !== "completed" && (
+            <button
+              onClick={async () => {
+                try {
+                  setReset(await api.personalData.retryReset(reset.operationId));
+                } catch (caught) {
+                  setError(caught instanceof Error ? caught.message : "Retry failed.");
+                }
+              }}
+            >
+              Retry now
+            </button>
+          )}
+          {reset.state === "completed" && (
+            <button onClick={() => location.reload()}>Reload Ellie</button>
+          )}
+        </div>
+      )}
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+    </section>
   );
 }
 function Setting({

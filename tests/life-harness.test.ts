@@ -505,6 +505,32 @@ test("context invalidation discards an in-flight model reply without retaining i
   }
 });
 
+test("actor context invalidation clears personal and shared conversation caches", async () => {
+  const f = await fixture();
+  const histories: number[] = [];
+  const model: LifeModel = {
+    async plan(request) {
+      histories.push(request.history.length);
+      return { reply: "ok", actions: [] };
+    },
+  };
+  const groupScope = { type: "group", id: "reset-group" } as const;
+  try {
+    f.store.createGroup(actor, { id: "reset-group", name: "Reset group" });
+    const harness = f.make(model);
+    await harness.chat({ actor, scope, conversationId: "personal", message: "hello" });
+    await harness.chat({ actor, scope: groupScope, conversationId: "shared", message: "hello" });
+    await harness.chat({ actor, scope, conversationId: "personal", message: "again" });
+    await harness.chat({ actor, scope: groupScope, conversationId: "shared", message: "again" });
+    harness.invalidateActorContext(actor);
+    await harness.chat({ actor, scope, conversationId: "personal", message: "reset" });
+    await harness.chat({ actor, scope: groupScope, conversationId: "shared", message: "reset" });
+    assert.deepEqual(histories, [0, 0, 2, 2, 0, 0]);
+  } finally {
+    await f.close();
+  }
+});
+
 test("the complete relative birthday request preserves interests and budget", async () => {
   const f = await fixture();
   try {

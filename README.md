@@ -13,7 +13,7 @@ bun run life
 
 Open the one-use local link printed by the launcher. Try “Remember that I prefer morning appointments,” “Set a timer for 2 minutes,” or “Build an arcade shooter with a high score widget.” General model-backed conversation and custom application generation require an explicitly configured local model. See the [Life runbook](docs/life-runbook.md) for complete workflows, data location, model setup and browser verification. The existing Mac coordinator and paired devices continue to use the commands below.
 
-Ellie is at its first developer milestone: text commands → deterministic routing → authenticated HTTPS → native macOS app and window control. Normal operation needs **no model download, cloud account, API key, or paid service**. Voice, automatic conversational routing, retrieval, and browser automation are planned. An optional independent inference-worker probe is available for already installed local models; see [worker setup](docs/inference-workers.md).
+The original desktop command path uses text commands → deterministic routing → authenticated HTTPS → native macOS app and window control. These desktop commands and the supported Life commands need **no model download, cloud account, API key, or paid service**. Broader Life conversation and generated custom apps use the optional local model described above. The existing coordinator also has an independent inference-worker probe for installed models; see [worker setup](docs/inference-workers.md).
 
 ## Try the first milestone
 
@@ -86,6 +86,10 @@ After foreground setup, [install per-user background services](docs/services.md)
 | `apps/server`                                                                  | Routing, node sessions, command lifecycle, pairing and credential revocation                |
 | `apps/node`                                                                    | Outbound connection, local permission checks, native execution and optional local inference |
 | `apps/cli`                                                                     | Generated onboarding, diagnostics, text command client                                      |
+| `apps/life`, `apps/life-ui`                                                    | Authenticated local Life service and conversational web client                              |
+| `packages/life-core`, `packages/life-harness`, `packages/task-runtime`         | Scoped records, conversation workflows and durable background work                          |
+| `packages/life-ingest`, `packages/life-import`, `packages/life-teaching`       | Content extraction, reviewed imports and versioned guidance                                 |
+| `packages/life-context`, `packages/life-learning`, `packages/life-plugins`     | Preparation, explicit feedback and isolated application extensions                          |
 | `packages/protocol`                                                            | Versioned wire types and runtime validation                                                 |
 | `packages/compute`                                                             | Independent-worker admission and scheduling policy                                          |
 | `packages/router`                                                              | Pure deterministic grammar, with no LLM on the fast path                                    |

@@ -8,7 +8,11 @@ import { LifeStore } from "../packages/life-core/src/index.ts";
 import { ProactivityEngine } from "../packages/life-context/src/index.ts";
 import { PluginStore, groupStorageKey } from "../packages/life-plugins/src/index.ts";
 import type { LifePlugin } from "../packages/life-plugins/src/index.ts";
-import type { OwnerScope, TaskRecord, TaskRuntime } from "../packages/task-runtime/src/index.ts";
+import {
+  TaskRuntime,
+  type OwnerScope,
+  type TaskRecord,
+} from "../packages/task-runtime/src/index.ts";
 import { createLifeServer, type LifeHarnessLike } from "../apps/life/src/server.ts";
 import { createLifeApplication } from "../apps/life/src/main.ts";
 
@@ -759,14 +763,38 @@ test("application factory assembles isolated stores and reports readiness", asyn
   await writeFile(join(assets, "index.html"), "<!doctype html><title>Ready</title>", {
     mode: 0o600,
   });
+  const state = join(root, "state");
+  await mkdir(state, { mode: 0o700 });
+  const seed = new LifeStore(join(state, "life.sqlite"));
+  seed.createRecord(
+    { userId: "local" },
+    {
+      kind: "event",
+      title: "Flight",
+      scope: { type: "user", id: "local" },
+      data: { startAt: Date.now() + 60 * 60_000 },
+    },
+  );
+  seed.close();
   const application = await createLifeApplication({
-    stateDir: join(root, "state"),
+    stateDir: state,
     assetsDir: assets,
     port: 0,
   });
   try {
     const ready = await application.listen();
     assert.match(ready.launchUrl, /^http:\/\/127\.0\.0\.1:\d+\/#token=/);
+    const cookie = await authenticate(
+      ready.url,
+      decodeURIComponent(ready.launchUrl.split("#token=")[1]!),
+    );
+    const bootstrap = (await (
+      await fetch(`${ready.url}/api/life/bootstrap`, { headers: { cookie } })
+    ).json()) as { notifications: Array<{ title: string }> };
+    assert.equal(
+      bootstrap.notifications.some((item) => item.title === "Flight"),
+      true,
+    );
     await Promise.all([application.close(), application.close(), application.close()]);
     await application.close();
   } finally {
@@ -1291,5 +1319,412 @@ test("malformed, cross-origin, oversized and hostile paths are rejected", async 
     await running.server.close();
   } finally {
     await f.close();
+  }
+});
+
+test("teaching routes require revisions and expose retained history", async () => {
+  const f = await fixture();
+  try {
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const created = await fetch(`${running.url}/api/life/teaching`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        title: "Writing",
+        instructions: "Use short sentences.",
+        enabled: true,
+      }),
+    });
+    assert.equal(created.status, 201);
+    const guide = (await created.json()) as {
+      record: { id: string; revision: number };
+      version: number;
+    };
+    const revised = await fetch(`${running.url}/api/life/teaching/${guide.record.id}/revise`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({
+        expectedRevision: guide.record.revision,
+        instructions: "Use clear short sentences.",
+      }),
+    });
+    assert.equal(revised.status, 200);
+    const list = (await (
+      await fetch(`${running.url}/api/life/teaching?scope=user:local`, { headers: { cookie } })
+    ).json()) as { guides: Array<{ version: number; versions: unknown[] }> };
+    assert.equal(list.guides[0]?.version, 2);
+    assert.equal(list.guides[0]?.versions.length, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test("reviewed personal export and reset preserve shared data and memberships", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-personal-reset-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "ok", { mode: 0o600 });
+  const life = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite")),
+    tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  const actor = { userId: "local" },
+    group = life.createGroup(actor, { id: "home", name: "Home" });
+  life.createRecord(actor, {
+    kind: "source",
+    title: "Private",
+    body: "export this",
+    scope: { type: "user", id: "local" },
+    data: {},
+  });
+  life.createRecord(actor, {
+    kind: "event",
+    title: "Shared",
+    scope: { type: "group", id: group.id },
+    data: { startAt: Date.now() },
+  });
+  plugins.install("user:local", {
+    name: "Mine",
+    description: "Private app",
+    kind: "custom",
+    capabilities: [],
+    html: "<!doctype html>",
+  });
+  const server = createLifeServer({
+    stateDir: root,
+    assetsDir: assets,
+    store: life,
+    plugins,
+    tasks,
+    harness: {
+      chat: async () => ({ reply: "", conversationId: "c" }),
+      invalidateActorContext() {},
+    },
+    port: 0,
+    token: "r".repeat(43),
+  });
+  try {
+    const running = await server.listen(),
+      cookie = await authenticate(running.url, "r".repeat(43));
+    const review = (await (
+      await fetch(`${running.url}/api/life/personal-data/review`, { headers: { cookie } })
+    ).json()) as { reviewToken: string; counts: { privateRecords: number; plugins: number } };
+    assert.equal(review.counts.privateRecords, 1);
+    assert.equal(review.counts.plugins, 1);
+    const exported = (await (
+      await fetch(
+        `${running.url}/api/life/personal-data/export?store=life&limit=1&reviewToken=${encodeURIComponent(review.reviewToken)}`,
+        { headers: { cookie } },
+      )
+    ).json()) as { items: unknown[] };
+    assert.equal(exported.items.length, 1);
+    const reset = await fetch(`${running.url}/api/life/personal-data/reset`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ reviewToken: review.reviewToken }),
+    });
+    assert.equal(reset.status, 200);
+    assert.equal(life.personalSummary(actor).records, 0);
+    assert.equal(life.listGroups(actor)[0]?.id, "home");
+    assert.equal(
+      life.listRecords(actor, { scope: { type: "group", id: "home" } })[0]?.title,
+      "Shared",
+    );
+    assert.equal(plugins.personalSummary("local").plugins, 0);
+    const operationId = ((await reset.json()) as { operationId: string }).operationId;
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/personal-data/reset/${operationId}/retry`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: "{}",
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/records`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({
+            kind: "memory",
+            title: "Fresh start",
+            scope: "user:local",
+            data: {},
+          }),
+        })
+      ).status,
+      201,
+    );
+  } finally {
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an interrupted reviewed reset remains frozen and resumes after restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-reset-restart-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "ok", { mode: 0o600 });
+  const life = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite"));
+  life.createRecord(
+    { userId: "local" },
+    { kind: "memory", title: "Private", scope: { type: "user", id: "local" }, data: {} },
+  );
+  const originalDelete = plugins.deletePersonal.bind(plugins);
+  let failOnce = true;
+  (
+    plugins as unknown as { deletePersonal(userId: string, expected?: number): unknown }
+  ).deletePersonal = (userId, expected) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error("synthetic interruption");
+    }
+    return originalDelete(userId, expected);
+  };
+  let tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  const makeServer = (token: string) =>
+    createLifeServer({
+      stateDir: root,
+      assetsDir: assets,
+      store: life,
+      plugins,
+      tasks,
+      harness: {
+        chat: async () => ({ reply: "", conversationId: "c" }),
+        invalidateActorContext() {},
+      },
+      port: 0,
+      token,
+    });
+  let server = makeServer("s".repeat(43));
+  try {
+    let running = await server.listen(),
+      cookie = await authenticate(running.url, "s".repeat(43));
+    const review = (await (
+      await fetch(`${running.url}/api/life/personal-data/review`, { headers: { cookie } })
+    ).json()) as { reviewToken: string };
+    const failed = await fetch(`${running.url}/api/life/personal-data/reset`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ reviewToken: review.reviewToken }),
+    });
+    assert.equal(failed.status, 500);
+    const operationId = life.getPersonalReset({ userId: "local" })!.operationId;
+    assert.equal(life.getPersonalReset({ userId: "local" })!.state, "tasks-deleted");
+    await server.close();
+    await tasks.close();
+    tasks = new TaskRuntime({ directory: join(root, "tasks") });
+    server = makeServer("u".repeat(43));
+    running = await server.listen();
+    cookie = await authenticate(running.url, "u".repeat(43));
+    const blocked = await fetch(`${running.url}/api/life/records`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ kind: "memory", title: "Too late", scope: "user:local", data: {} }),
+    });
+    assert.equal(blocked.status, 423);
+    const retried = await fetch(
+      `${running.url}/api/life/personal-data/reset/${operationId}/retry`,
+      { method: "POST", headers: jsonHeaders(running.url, cookie), body: "{}" },
+    );
+    assert.equal(retried.status, 200);
+    assert.equal(life.getPersonalReset({ userId: "local" })?.state, "completed");
+    assert.equal(life.personalSummary({ userId: "local" }).records, 0);
+  } finally {
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a persisted life reset journal freezes runtime admission before scheduler restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-reset-crash-window-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "ok", { mode: 0o600 });
+  const actor = { userId: "local" },
+    life = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite"));
+  let tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  tasks.registerHandler({
+    name: "synthetic",
+    run: async (_context, input) => input,
+    checkOutcome: () => true,
+  });
+  tasks.enqueue({ owner: "user:local", handler: "synthetic", input: { private: true } });
+  const taskGeneration = tasks.personalSummary("user:local").generation,
+    pluginGeneration = plugins.personalSummary("local").generation,
+    lifeGeneration = life.personalSummary(actor).generation;
+  life.beginPersonalReset(actor, {
+    operationId: "crash-window",
+    reviewTokenHash: "b".repeat(64),
+    lifeGeneration,
+    taskGeneration,
+    pluginGeneration,
+  });
+  await tasks.close();
+  tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  const server = createLifeServer({
+    stateDir: root,
+    assetsDir: assets,
+    store: life,
+    plugins,
+    tasks,
+    harness: {
+      chat: async () => ({ reply: "", conversationId: "c" }),
+      invalidateActorContext() {},
+    },
+    port: 0,
+    token: "v".repeat(43),
+  });
+  try {
+    assert.equal(tasks.getPersonalDeletion("user:local")?.operationId, "crash-window");
+    assert.throws(
+      () => tasks.enqueue({ owner: "user:local", handler: "synthetic", input: {} }),
+      /frozen/,
+    );
+    const running = await server.listen(),
+      cookie = await authenticate(running.url, "v".repeat(43));
+    const current = (await (
+      await fetch(`${running.url}/api/life/personal-data/reset`, { headers: { cookie } })
+    ).json()) as { reset: { operationId: string } | null };
+    assert.equal(current.reset?.operationId, "crash-window");
+    const retry = await fetch(`${running.url}/api/life/personal-data/reset/crash-window/retry`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: "{}",
+    });
+    assert.equal(retry.status, 200);
+  } finally {
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent reset starts and completed retries cannot release a newer preflight freeze", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-reset-concurrent-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "ok", { mode: 0o600 });
+  const life = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite")),
+    tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  let release!: () => void, chatStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+      chatStarted = resolve;
+    }),
+    blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+  const server = createLifeServer({
+    stateDir: root,
+    assetsDir: assets,
+    store: life,
+    plugins,
+    tasks,
+    harness: {
+      async chat() {
+        chatStarted();
+        await blocked;
+        return { reply: "done", conversationId: "c" };
+      },
+      invalidateActorContext() {},
+    },
+    port: 0,
+    token: "w".repeat(43),
+  });
+  try {
+    const running = await server.listen(),
+      cookie = await authenticate(running.url, "w".repeat(43));
+    const getReview = async () =>
+      (await (
+        await fetch(`${running.url}/api/life/personal-data/review`, { headers: { cookie } })
+      ).json()) as { reviewToken: string };
+    const firstReview = await getReview(),
+      firstResponse = await fetch(`${running.url}/api/life/personal-data/reset`, {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({ reviewToken: firstReview.reviewToken }),
+      }),
+      firstOperation = ((await firstResponse.json()) as { operationId: string }).operationId;
+    life.createRecord(
+      { userId: "local" },
+      { kind: "memory", title: "New private data", scope: { type: "user", id: "local" }, data: {} },
+    );
+    const secondReview = await getReview();
+    const chat = fetch(`${running.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ scope: "user:local", message: "wait" }),
+    });
+    await started;
+    const secondReset = fetch(`${running.url}/api/life/personal-data/reset`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ reviewToken: secondReview.reviewToken }),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/personal-data/reset/${firstOperation}/retry`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: "{}",
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/personal-data/reset`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({ reviewToken: secondReview.reviewToken }),
+        })
+      ).status,
+      409,
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/records`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({
+            kind: "memory",
+            title: "Must stay blocked",
+            scope: "user:local",
+            data: {},
+          }),
+        })
+      ).status,
+      423,
+    );
+    release();
+    await chat;
+    assert.equal((await secondReset).status, 200);
+  } finally {
+    release();
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
   }
 });

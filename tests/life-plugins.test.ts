@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Script } from "node:vm";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import {
   builtInManifest,
@@ -163,6 +164,125 @@ test("revision history is bounded without losing current code or stored data", (
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("personal plugin export and purge preserve other users and shared apps with exact identity boundaries", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ellie-plugin-personal-"));
+  const store = new PluginStore(join(dir, "plugins.sqlite"));
+  try {
+    const one = store.install("user:alice", builtInManifest("arcade")!);
+    store.update("user:alice", one.id, 1, { ...builtInManifest("arcade")!, name: "Alice app" });
+    store.storageSet("user:alice", one.id, "highScore", 10);
+    const other = store.install("user:bob", builtInManifest("arcade")!);
+    store.storageSet("user:bob", other.id, "highScore", 99);
+    const shared = store.install("group:home", builtInManifest("arcade")!);
+    store.storageSet("group:home", shared.id, groupStorageKey("alice", "highScore"), 30);
+    store.storageSet("group:home", shared.id, groupStorageKey("alice", "bob:note"), "Own note");
+    store.storageSet("group:home", shared.id, groupStorageKey("alice:bob", "highScore"), 90);
+    store.storageSet("group:home", shared.id, "shared-setting", "Shared secret");
+    const before = store.personalSummary("alice");
+    assert.deepEqual(
+      [before.plugins, before.versions, before.storageKeys, before.sharedStorageKeys],
+      [1, 2, 1, 2],
+    );
+    const first = store.exportPersonal("alice", {
+      expectedGeneration: before.generation,
+      limit: 2,
+    });
+    assert.ok(first.nextCursor);
+    assert.throws(() => store.exportPersonal("bob", { cursor: first.nextCursor }));
+    store.storageSet("user:bob", other.id, "highScore", 100);
+    assert.equal(store.personalSummary("alice").generation, before.generation);
+    const items = [...first.items];
+    let cursor: string | undefined = first.nextCursor;
+    while (cursor) {
+      const page = store.exportPersonal("alice", { cursor, limit: 2 });
+      items.push(...page.items);
+      cursor = page.nextCursor;
+    }
+    assert.equal(items.length, 6);
+    assert.equal(JSON.stringify(items).includes("Shared secret"), false);
+    assert.equal(JSON.stringify(items).includes(other.id), false);
+    assert.equal(items.filter((item) => item.type === "shared-plugin-storage").length, 2);
+    store.storageSet("user:alice", one.id, "highScore", 11);
+    assert.throws(() => store.exportPersonal("alice", { cursor: first.nextCursor }));
+    assert.throws(() => store.deletePersonal("alice", before.generation));
+    assert.equal(store.personalSummary("alice").plugins, 1);
+    const empty = store.deletePersonal("alice", store.personalSummary("alice").generation);
+    assert.deepEqual(
+      [empty.plugins, empty.versions, empty.storageKeys, empty.sharedStorageKeys, empty.bytes],
+      [0, 0, 0, 0, 0],
+    );
+    assert.deepEqual(store.exportPersonal("alice").items, []);
+    assert.deepEqual(store.deletePersonal("alice"), empty);
+    assert.equal(store.storageGet("user:bob", other.id, "highScore"), 100);
+    assert.equal(
+      store.storageGet("group:home", shared.id, groupStorageKey("alice:bob", "highScore")),
+      90,
+    );
+    assert.equal(store.storageGet("group:home", shared.id, "shared-setting"), "Shared secret");
+    const collisionGeneration = store.personalSummary("alice:bob").generation;
+    store.remove("group:home", shared.id);
+    assert.equal(store.personalSummary("alice:bob").generation, collisionGeneration + 1);
+    assert.equal(store.personalSummary("bob").plugins, 1);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plugin export pages bound retained programs by bytes and reject stale revisions", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ellie-plugin-export-bound-"));
+  const store = new PluginStore(join(dir, "plugins.sqlite"));
+  try {
+    const manifest = {
+      name: "Large app",
+      description: "Export fixture",
+      kind: "custom" as const,
+      capabilities: ["storage" as const],
+      html: `<div>${"x".repeat(155000)}</div>`,
+    };
+    let plugin = store.install("user:alice", manifest);
+    for (let i = 0; i < 30; i++)
+      plugin = store.update("user:alice", plugin.id, plugin.version, manifest);
+    const page = store.exportPersonal("alice", { limit: 100 });
+    assert.ok(page.nextCursor);
+    assert.equal(Buffer.byteLength(JSON.stringify(page)) < 4_000_000, true);
+    const next = store.exportPersonal("alice", { cursor: page.nextCursor, limit: 100 });
+    assert.equal(page.items.length + next.items.length, 32);
+    assert.equal(next.nextCursor, undefined);
+    assert.throws(() => store.exportPersonal("alice", { limit: 101 }));
+    assert.throws(() => store.exportPersonal("alice", { expectedGeneration: -1 }));
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("plugin schema migrates existing private stores and preserves generation across restart", () => {
+  const dir = mkdtempSync(join(tmpdir(), "ellie-plugin-migration-")),
+    path = join(dir, "plugins.sqlite");
+  const old = new DatabaseSync(path);
+  old.exec(`CREATE TABLE plugins(id TEXT PRIMARY KEY,owner TEXT NOT NULL,manifest TEXT NOT NULL,version INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);
+    CREATE TABLE plugin_versions(plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,version INTEGER NOT NULL,manifest TEXT NOT NULL,PRIMARY KEY(plugin_id,version));
+    CREATE TABLE plugin_storage(plugin_id TEXT NOT NULL REFERENCES plugins(id) ON DELETE CASCADE,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(plugin_id,key)); PRAGMA user_version=1;`);
+  const manifest = JSON.stringify(builtInManifest("arcade"));
+  old.prepare("INSERT INTO plugins VALUES('kept','user:alice',?,1,0,0)").run(manifest);
+  old.prepare("INSERT INTO plugin_versions VALUES('kept',1,?)").run(manifest);
+  old.close();
+  chmodSync(path, 0o600);
+  let store = new PluginStore(path);
+  try {
+    assert.equal(store.personalSummary("alice").generation, 0);
+    store.storageSet("user:alice", "kept", "highScore", 5);
+    store.close();
+    store = new PluginStore(path);
+    assert.equal(store.personalSummary("alice").generation, 1);
+    assert.equal(store.storageGet("user:alice", "kept", "highScore"), 5);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
