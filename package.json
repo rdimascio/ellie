@@ -16,6 +16,8 @@
     "test": "node --test tests/*.test.ts",
     "check": "bun run lint && bun run format:check && bun run contracts:check && bun run typecheck && bun run test && bun run demo:build",
     "build:macos": "node scripts/build-macos.mjs",
+    "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:test": "xcrun swift test --package-path apps/desktop --scratch-path apps/desktop/.build",
     "contracts:generate": "node scripts/generate-contracts.ts",
     "contracts:check": "node scripts/generate-contracts.ts --check",
     "smoke:macos": "node scripts/smoke-macos.mjs",

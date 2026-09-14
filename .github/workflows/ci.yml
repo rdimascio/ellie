@@ -40,6 +40,10 @@ jobs:
         run: |
           xcrun swiftc -swift-version 5 -parse-as-library packages/macos/native/Geometry.swift tests/GeometryTests.swift -o "$RUNNER_TEMP/ellie-geometry-tests"
           "$RUNNER_TEMP/ellie-geometry-tests"
+      - name: Test native dashboard models and persistence
+        run: bun run desktop:test
+      - name: Build and verify native dashboard app
+        run: bun run desktop:build
   command-center:
     runs-on: ubuntu-latest
     steps:

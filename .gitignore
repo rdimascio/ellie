@@ -24,3 +24,7 @@ pairing.json
 
 playwright-report/
 test-results/
+
+# Native desktop build products
+apps/desktop/.build/
+dist/desktop/
