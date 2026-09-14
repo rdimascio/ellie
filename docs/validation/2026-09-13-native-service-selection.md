@@ -48,8 +48,9 @@ combined candidate `4d9861eb0962653f88bd9221fcc7efa33519a86a` and PR63. Root ver
 integrated files remain byte-identical to PR63. The combined Node gate passed 270 tests with
 one skip, and the clean captured-source payload contains 421 files and 29 components. Its ZIP
 SHA-256 is `d10780b960e7c4d99e53b9c6a9867fb204669489c8cc55553c34b268266406a7`; root independently
-verified source/checksum/manifest and read-only shipping inspection. Fresh combined CI is a
-separate gate; the earlier `4d9861eb` head passed all seven checks.
+verified source/checksum/manifest and read-only shipping inspection. All ten checks for the
+combined `1934afbb` head now pass: three TypeScript jobs, three native jobs, three command-center
+jobs and the security check. The earlier `4d9861eb` head passed all seven checks.
 
 The unloaded-state guarantee applies to selected managed LaunchAgent labels, not arbitrary
 foreground processes or external uncoordinated launchctl commands. Actual packaged start/stop,
