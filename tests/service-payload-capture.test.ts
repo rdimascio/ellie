@@ -516,10 +516,10 @@ test(
       assert.equal((await stat(candidate)).mode & 0o7777, 0o555);
 
       const stage = `.capture-${randomUUID()}`;
+      await chmod(candidate, 0o700);
       await import("node:fs/promises").then(({ rename }) =>
         rename(candidate, join(namespace, stage)),
       );
-      await chmod(join(namespace, stage), 0o700);
       const preRename = spawnSync(
         installer,
         [
