@@ -630,6 +630,115 @@ func selectionApplicationDigest(
   try validateSignature(path: try pathFromFD(root), identifier: identifier)
   return digest.finalize().map { String(format: "%02x", $0) }.joined()
 }
+func selectionValidatePartialApplication(source: SelectionRelease, parent: Int32, name: String)
+  throws
+{
+  let destination = try openDirectory(at: parent, name)
+  defer { closeFD(destination) }
+  var rootInfo = stat()
+  guard fstat(destination, &rootInfo) == 0, rootInfo.st_uid == getuid(),
+    [mode_t(0o700), mode_t(0o555)].contains(rootInfo.st_mode & 0o7777)
+  else { throw InstallerFailure.rejected }
+  let sourceRoot = try openAbsoluteDirectory(source.applicationPath)
+  defer { closeFD(sourceRoot) }
+  let expected = Dictionary(uniqueKeysWithValues: source.applicationFiles.map { ($0.path, $0) })
+  var allowedDirectories = Set<String>()
+  for file in source.applicationFiles {
+    var parts = file.path.split(separator: "/").map(String.init)
+    parts.removeLast()
+    while !parts.isEmpty {
+      allowedDirectories.insert(parts.joined(separator: "/"))
+      parts.removeLast()
+    }
+  }
+  var count = 0
+  var total: UInt64 = 0
+  func inspect(_ directory: Int32, prefix: String = "", depth: Int = 0) throws {
+    guard depth <= maximumPayloadDepth, let stream = fdopendir(dup(directory)) else {
+      throw InstallerFailure.rejected
+    }
+    defer { closedir(stream) }
+    while true {
+      errno = 0
+      guard let item = readdir(stream) else {
+        guard errno == 0 else { throw InstallerFailure.rejected }
+        break
+      }
+      let entryName = withUnsafePointer(to: &item.pointee.d_name) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) { String(cString: $0) }
+      }
+      if entryName == "." || entryName == ".." { continue }
+      count += 1
+      guard count <= maximumPayloadEntries else { throw InstallerFailure.rejected }
+      _ = try checkedComponent(entryName)
+      let path = prefix.isEmpty ? entryName : "\(prefix)/\(entryName)"
+      var info = stat()
+      guard fstatat(directory, entryName, &info, AT_SYMLINK_NOFOLLOW) == 0,
+        info.st_uid == getuid()
+      else { throw InstallerFailure.rejected }
+      if (info.st_mode & S_IFMT) == S_IFDIR {
+        guard allowedDirectories.contains(path),
+          [mode_t(0o700), mode_t(0o555)].contains(info.st_mode & 0o7777)
+        else { throw InstallerFailure.rejected }
+        let child = try openDirectory(at: directory, entryName)
+        defer { closeFD(child) }
+        try inspect(child, prefix: path, depth: depth + 1)
+      } else if (info.st_mode & S_IFMT) == S_IFREG {
+        guard let file = expected[path] else { throw InstallerFailure.rejected }
+        let finalMode: mode_t = file.mode == 0o755 ? 0o555 : 0o444
+        let actualMode = info.st_mode & 0o7777
+        guard info.st_nlink == 1, info.st_size >= 0,
+          actualMode & finalMode == actualMode, actualMode & 0o400 != 0, actualMode & 0o222 == 0,
+          UInt64(info.st_size) <= file.size
+        else { throw InstallerFailure.rejected }
+        total += UInt64(info.st_size)
+        guard total <= maximumPayloadBytes else { throw InstallerFailure.rejected }
+        let actual = try fileDescriptor(at: destination, path: path)
+        defer { closeFD(actual) }
+        var opened = stat()
+        guard fstat(actual, &opened) == 0, opened.st_dev == info.st_dev,
+          opened.st_ino == info.st_ino, opened.st_uid == info.st_uid,
+          opened.st_nlink == info.st_nlink, opened.st_size == info.st_size,
+          (opened.st_mode & S_IFMT) == S_IFREG,
+          (opened.st_mode & 0o7777) == (info.st_mode & 0o7777)
+        else { throw InstallerFailure.rejected }
+        let sourceFile = try fileDescriptor(at: sourceRoot, path: path)
+        defer { closeFD(sourceFile) }
+        var remaining = Int(info.st_size)
+        var left = [UInt8](repeating: 0, count: 64 * 1024)
+        var right = [UInt8](repeating: 0, count: 64 * 1024)
+        while remaining > 0 {
+          let amount = min(remaining, left.count)
+          let lhs = left.withUnsafeMutableBytes { Darwin.read(actual, $0.baseAddress!, amount) }
+          let rhs = right.withUnsafeMutableBytes {
+            Darwin.read(sourceFile, $0.baseAddress!, amount)
+          }
+          guard lhs == amount, rhs == amount, left[0..<amount] == right[0..<amount] else {
+            throw InstallerFailure.rejected
+          }
+          remaining -= amount
+        }
+        var trailing: UInt8 = 0
+        guard withUnsafeMutablePointer(to: &trailing, { Darwin.read(actual, $0, 1) }) == 0 else {
+          throw InstallerFailure.rejected
+        }
+      } else {
+        throw InstallerFailure.rejected
+      }
+    }
+  }
+  try inspect(destination)
+}
+func selectionUnsealPartialApplication(source: SelectionRelease, parent: Int32, name: String)
+  throws
+{
+  try selectionValidatePartialApplication(source: source, parent: parent, name: name)
+  let root = try openDirectory(at: parent, name)
+  defer { closeFD(root) }
+  guard fchmod(root, 0o700) == 0, fsync(root) == 0, fsync(parent) == 0 else {
+    throw InstallerFailure.rejected
+  }
+}
 func selectionCopyApplication(
   source: SelectionRelease, parent: Int32, name: String, identifier: String
 ) throws -> String {
@@ -1001,6 +1110,9 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "adopt-migration" || arguments.first == "recover-migration-switch" {
+      do { try runMigrationSwitchCommand(arguments) } catch { failSelectionCommand(error) }
+    }
     if arguments.first == "prepare-migration" || arguments.first == "recover-migration" {
       do { try runMigrationCommand(arguments) } catch { failMigrationCommand(error) }
     }

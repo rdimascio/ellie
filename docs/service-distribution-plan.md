@@ -183,6 +183,27 @@ can read the current state schema. Matching bundle identifiers alone does not es
 TCC continuity. This foundation does not select a packaged release, switch services, start or stop
 launchd jobs, or implement rollback.
 
+The stopped-only `adopt-migration` switch consumes one verified snapshot containing exactly every
+installed legacy role and one already staged packaged release. Partial or mixed-role adoption is
+rejected. It requires both fixed labels to remain unloaded, writes a
+private journal before staging or moving any application, and treats only an absent packaged receipt
+as the legacy pre-commit state. The exact new receipt is written after both packaged applications and
+plists are in place. Recovery restores snapshot-verified legacy backups before that commit or
+completes the exact packaged selection after it; any other receipt or competing artifact preserves
+the journal and requires review. The immutable legacy snapshot and verified transaction backups
+remain available after selection as explicit rollback evidence; this slice does not erase them.
+Before commit, complete or interrupted packaged copies are moved by exclusive rename to deterministic
+transaction evidence paths before legacy files are restored. An interrupted file is accepted only
+when every byte is an exact prefix of its immutable staged-release source and its path, type, mode,
+owner, link count, depth, entry count, and total size remain within the release manifest bounds.
+Unknown or altered content blocks recovery and is preserved. A completed canonical record embeds the
+original journal and records whether recovery committed the packaged selection or restored legacy;
+partial plist and receipt writes remain inert and are retained as transaction evidence.
+The switch does not start a role, change permissions, freeze the external checkout or Node runtime,
+or establish state-schema, Keychain, or TCC compatibility. Those checks remain required before an
+explicit later start. As with preparation, final ancestor checks reduce a bounded replacement race
+but are not a filesystem compare-and-swap against an arbitrary same-user mutation.
+
 ## Acceptance gates
 
 Implement this plan as small independent changes:
@@ -200,11 +221,12 @@ Implement this plan as small independent changes:
    filesystem and launchctl adapters. Test unsafe-path preservation, exact manifest verification,
    loaded-role refusal, failure at every publication step, restoration of the prior selection, and
    byte-for-byte preservation of synthetic `~/.ellie` and unrelated application data.
-4. **Isolated lifecycle acceptance.** Under a fresh local test user or owned temporary home, install
-   from the archive, start synthetic coordinator and node configurations, run status and doctor,
+4. **Isolated lifecycle acceptance.** Under a fresh macOS user or VM, install from the archive, start
+   synthetic coordinator and node configurations, run status and doctor,
    stop, upgrade, restart, and rollback. Exercise the existing real-process recovery test separately
    to show a coordinator interruption produces an unknown result and no replay. Do not use a live
-   identity, service, Accessibility grant, or household endpoint for automated acceptance.
+   identity, service, Accessibility grant, or household endpoint for automated acceptance. Adapter
+   tests may use an owned temporary home, but it does not isolate the fixed launchd labels.
 5. **Distribution signing.** With release credentials available, enable hardened runtime as reviewed,
    sign the nested helper, Node runtime, launchers, and dashboard in inside-out order, notarize the
    final archives, staple applicable artifacts, and run Gatekeeper assessment on a separate Mac.

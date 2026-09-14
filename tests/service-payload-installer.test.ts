@@ -13,6 +13,7 @@ import {
   rename,
   readdir,
   rm,
+  rmdir,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -42,6 +43,19 @@ const launcherSource = new URL(
   import.meta.url,
 ).pathname;
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+function canonicalJSON(value: unknown): string {
+  const sorted = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(sorted);
+    if (item && typeof item === "object")
+      return Object.fromEntries(
+        Object.entries(item as Record<string, unknown>)
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([key, child]) => [key, sorted(child)]),
+      );
+    return item;
+  };
+  return `${JSON.stringify(sorted(value))}\n`;
+}
 const run = (file: string, args: string[]) =>
   spawnSync(file, args, { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
 
@@ -1411,6 +1425,285 @@ test(
       assert.notEqual(unsealedRetry.status, 0);
       assert.match(unsealedRetry.stderr, /existing services were preserved/);
       await chmod(snapshot, 0o555);
+      const switchArguments = [
+        "adopt-migration",
+        snapshotID,
+        id,
+        "--roles",
+        "coordinator,node",
+        "--test-home-root",
+        home,
+      ];
+      await mkdir(join(services, "receipts"), { mode: 0o700 });
+      await writeFile(join(services, "receipts/installed.json"), "", { mode: 0o600 });
+      const competingReceipt = run(installer, switchArguments);
+      assert.notEqual(competingReceipt.status, 0);
+      assert.match(competingReceipt.stderr, /recover-migration-switch/);
+      await rm(join(services, "receipts/installed.json"));
+      for (const fault of [
+        "after-journal",
+        "after-staging",
+        "after-app-backup-coordinator",
+        "after-app-move-coordinator",
+        "after-app-seal-coordinator",
+        "after-role-coordinator",
+        "after-app-backup-node",
+        "after-app-move-node",
+        "after-app-seal-node",
+        "after-role-node",
+      ]) {
+        const interruptedSwitch = run(installer, [
+          ...switchArguments,
+          "--test-switch-fault",
+          fault,
+        ]);
+        assert.notEqual(interruptedSwitch.status, 0);
+        const blockedSelection = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator,node",
+          "--test-home-root",
+          home,
+        ]);
+        assert.match(blockedSelection.stderr, /recover-migration-switch/);
+        const blockedPreparation = run(installer, [
+          "prepare-migration",
+          "--roles",
+          "coordinator,node",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          launchctl,
+        ]);
+        assert.notEqual(blockedPreparation.status, 0);
+        assert.match(blockedPreparation.stderr, /recover-migration-switch/);
+        const blockedLifecycle = run(installer, [
+          "status",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          launchctl,
+        ]);
+        assert.notEqual(blockedLifecycle.status, 0);
+        assert.match(blockedLifecycle.stderr, /recover-migration-switch/);
+        if (fault === "after-journal") {
+          const journalPath = join(services, "migration-switch-journal.json");
+          const originalJournal = await readFile(journalPath);
+          const parsedJournal = JSON.parse(originalJournal.toString()) as Record<string, unknown>;
+          const parsedReceipt = JSON.parse(
+            Buffer.from(parsedJournal.newReceipt as string, "base64").toString(),
+          ) as Record<string, { releaseID: string } | null>;
+          for (const malformedReceipt of [
+            { ...parsedReceipt, node: null },
+            {
+              ...parsedReceipt,
+              node: { ...parsedReceipt.node!, releaseID: `${id}-other` },
+            },
+          ]) {
+            const malformedJournal = {
+              ...parsedJournal,
+              newReceipt: Buffer.from(canonicalJSON(malformedReceipt)).toString("base64"),
+            };
+            await writeFile(journalPath, canonicalJSON(malformedJournal), { mode: 0o600 });
+            const malformed = run(installer, [
+              "recover-migration-switch",
+              "--test-home-root",
+              home,
+            ]);
+            assert.notEqual(malformed.status, 0);
+            assert.match(malformed.stderr, /recover-migration-switch/);
+          }
+          await writeFile(journalPath, originalJournal, { mode: 0o600 });
+          await writeFile(join(services, "receipts/installed.json"), "{}", { mode: 0o600 });
+          const competingRecovery = run(installer, [
+            "recover-migration-switch",
+            "--test-home-root",
+            home,
+          ]);
+          assert.notEqual(competingRecovery.status, 0);
+          assert.match(competingRecovery.stderr, /recover-migration-switch/);
+          assert.equal(
+            await lstat(join(services, "migration-switch-journal.json")).then((value) =>
+              value.isFile(),
+            ),
+            true,
+          );
+          await rm(join(services, "receipts/installed.json"));
+          await writeFile(join(services, "selection-journal.json"), "{}", { mode: 0o600 });
+          const selectionPendingRecovery = run(installer, [
+            "recover-migration-switch",
+            "--test-home-root",
+            home,
+          ]);
+          assert.notEqual(selectionPendingRecovery.status, 0);
+          assert.match(selectionPendingRecovery.stderr, /recover-migration-switch/);
+          await rm(join(services, "selection-journal.json"));
+          await writeFile(join(migrations, "migration-preparation.json"), "{}", { mode: 0o600 });
+          const preparationPendingRecovery = run(installer, [
+            "recover-migration-switch",
+            "--test-home-root",
+            home,
+          ]);
+          assert.notEqual(preparationPendingRecovery.status, 0);
+          assert.match(preparationPendingRecovery.stderr, /recover-migration-switch/);
+          await rm(join(migrations, "migration-preparation.json"));
+          const partialStage = join(
+            home,
+            `Applications/.ellie-migration-stage-${parsedJournal.transactionID as string}-coordinator.app`,
+          );
+          await mkdir(join(partialStage, "Contents"), { recursive: true, mode: 0o700 });
+          const sourceInfo = await readFile(
+            join(release, "payload/launchers/Ellie Coordinator.app/Contents/Info.plist"),
+          );
+          await writeFile(join(partialStage, "Contents/Info.plist"), Buffer.from("altered!"), {
+            mode: 0o444,
+          });
+          await chmod(join(partialStage, "Contents/Info.plist"), 0o440);
+          assert.notEqual(
+            run(installer, ["recover-migration-switch", "--test-home-root", home]).status,
+            0,
+          );
+          await chmod(join(partialStage, "Contents/Info.plist"), 0o600);
+          await writeFile(join(partialStage, "Contents/Info.plist"), sourceInfo.subarray(0, 8));
+          await chmod(join(partialStage, "Contents/Info.plist"), 0o440);
+          await mkdir(join(partialStage, "Contents/MacOS"), { mode: 0o700 });
+          const sourceBuild = await readFile(
+            join(release, "payload/launchers/Ellie Coordinator.app/Contents/MacOS/EllieService"),
+          );
+          await writeFile(
+            join(partialStage, "Contents/MacOS/EllieService"),
+            sourceBuild.subarray(0, 8),
+            { mode: 0o500 },
+          );
+          await writeFile(join(partialStage, "unexpected"), "x", { mode: 0o444 });
+          assert.notEqual(
+            run(installer, ["recover-migration-switch", "--test-home-root", home]).status,
+            0,
+          );
+          await rm(join(partialStage, "unexpected"));
+          await chmod(partialStage, 0o555);
+          const interruptedUnseal = run(installer, [
+            "recover-migration-switch",
+            "--test-home-root",
+            home,
+            "--test-switch-fault",
+            "recovery-after-unseal-stage-coordinator",
+          ]);
+          assert.notEqual(interruptedUnseal.status, 0);
+          assert.equal((await lstat(partialStage)).mode & 0o7777, 0o700);
+        }
+        if (fault === "after-role-node") {
+          for (const recoveryFault of [
+            "recovery-after-unseal-target-coordinator",
+            "recovery-after-evidence-app-coordinator",
+            "recovery-after-restore-app-coordinator",
+            "recovery-after-evidence-plist-coordinator",
+            "recovery-after-restore-plist-coordinator",
+            "recovery-after-stage-app-coordinator",
+            "recovery-after-stage-plist-coordinator",
+            "recovery-after-unseal-target-node",
+            "recovery-after-evidence-app-node",
+            "recovery-after-restore-app-node",
+            "recovery-after-evidence-plist-node",
+            "recovery-after-restore-plist-node",
+            "recovery-after-stage-app-node",
+            "recovery-after-stage-plist-node",
+            "recovery-before-completed",
+            "recovery-after-completed",
+          ]) {
+            const interruptedRecovery = run(installer, [
+              "recover-migration-switch",
+              "--test-home-root",
+              home,
+              "--test-switch-fault",
+              recoveryFault,
+            ]);
+            assert.notEqual(interruptedRecovery.status, 0);
+            if (recoveryFault === "recovery-after-restore-app-coordinator") {
+              const activeJournal = JSON.parse(
+                await readFile(join(services, "migration-switch-journal.json"), "utf8"),
+              );
+              const abandoned = join(
+                home,
+                `Applications/.ellie-migration-evidence-${activeJournal.transactionID as string}-abandoned-target.app-coordinator`,
+              );
+              await chmod(abandoned, 0o700);
+              await writeFile(join(abandoned, "unexpected"), "x", { mode: 0o444 });
+              const tamperedEvidence = run(installer, [
+                "recover-migration-switch",
+                "--test-home-root",
+                home,
+              ]);
+              assert.notEqual(tamperedEvidence.status, 0);
+              assert.match(tamperedEvidence.stderr, /recover-migration-switch/);
+              await rm(join(abandoned, "unexpected"));
+            }
+            if (recoveryFault === "recovery-before-completed") {
+              const activeJournal = JSON.parse(
+                await readFile(join(services, "migration-switch-journal.json"), "utf8"),
+              );
+              const completedBytes = Buffer.from(
+                canonicalJSON({ journal: activeJournal, outcome: "restored-legacy", version: 1 }),
+              );
+              await writeFile(
+                join(
+                  services,
+                  `.migration-switch-evidence-${activeJournal.transactionID as string}-partial-completed`,
+                ),
+                completedBytes.subarray(0, 8),
+                { mode: 0o600 },
+              );
+              await writeFile(
+                join(
+                  services,
+                  `.ellie-write-${activeJournal.transactionID as string}-completed-switch`,
+                ),
+                completedBytes.subarray(0, 16),
+                { mode: 0o600 },
+              );
+            }
+          }
+        }
+        const recoveredSwitch = run(installer, [
+          "recover-migration-switch",
+          "--test-home-root",
+          home,
+        ]);
+        assert.equal(recoveredSwitch.status, 0, recoveredSwitch.stderr);
+        assert.equal(await readFile(appManifest).then((value) => value.equals(appBefore)), true);
+        assert.equal(await readFile(plist).then((value) => value.equals(plistBefore)), true);
+        assert.equal(
+          await lstat(join(services, "receipts/installed.json"))
+            .then(() => true)
+            .catch(() => false),
+          false,
+        );
+      }
+      const replacedServices = run(installer, [
+        ...switchArguments,
+        "--test-switch-replace-services",
+      ]);
+      assert.notEqual(replacedServices.status, 0);
+      assert.match(replacedServices.stderr, /recover-migration-switch/);
+      await rmdir(services);
+      await rename(`${services}.test-detached`, services);
+      assert.equal(
+        run(installer, ["recover-migration-switch", "--test-home-root", home]).status,
+        0,
+      );
+      const loadedAfterPreflight = run(installer, [
+        ...switchArguments,
+        "--test-switch-load-after-preflight",
+      ]);
+      assert.notEqual(loadedAfterPreflight.status, 0);
+      assert.match(loadedAfterPreflight.stderr, /recover-migration-switch/);
+      assert.equal(
+        run(installer, ["recover-migration-switch", "--test-home-root", home]).status,
+        0,
+      );
+      await rm(join(services, "receipts"), { recursive: true });
       assert.equal(await readFile(appManifest).then((value) => value.equals(appBefore)), true);
       assert.equal(await readFile(plist).then((value) => value.equals(plistBefore)), true);
       assert.equal(
@@ -1554,6 +1847,113 @@ test(
       assert.match(stale.stderr, /no longer matches its recorded checkout build/);
       assert.deepEqual(await readFile(appManifest), appBefore);
       assert.deepEqual(await readFile(plist), plistBefore);
+
+      await cp(
+        join(repositoryPath, "packages/macos/native/EllieService.swift"),
+        join(checkout, "packages/macos/native/EllieService.swift"),
+      );
+      const committedSwitch = run(installer, [
+        ...switchArguments,
+        "--test-switch-fault",
+        "after-receipt",
+      ]);
+      assert.notEqual(committedSwitch.status, 0);
+      const committedRecovery = run(installer, [
+        "recover-migration-switch",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(committedRecovery.status, 0, committedRecovery.stderr);
+      assert.equal(
+        run(installer, ["recover-migration-switch", "--test-home-root", home]).status,
+        0,
+      );
+      const installedReceipt = JSON.parse(
+        await readFile(join(services, "receipts/installed.json"), "utf8"),
+      );
+      assert.equal(installedReceipt.coordinator.releaseID, id);
+      assert.equal(installedReceipt.node.releaseID, id);
+      assert.equal(
+        (await lstat(join(home, "Applications/Ellie Coordinator.app"))).mode & 0o7777,
+        0o555,
+      );
+      assert.equal((await lstat(join(home, "Applications/Ellie Node.app"))).mode & 0o7777, 0o555);
+      assert.equal(
+        await lstat(join(services, "migration-switch-journal.json"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      const completedEvidence = (await readdir(services)).filter(
+        (name) => name.startsWith(".migration-switch-evidence-") && name.endsWith(".json"),
+      );
+      const completedRecords = await Promise.all(
+        completedEvidence.map(async (name) =>
+          JSON.parse(await readFile(join(services, name), "utf8")),
+        ),
+      );
+      const completedRecord = completedRecords.find((value) => value.outcome === "committed");
+      assert.ok(completedRecord);
+      assert.equal(completedRecord.outcome, "committed");
+      assert.equal(completedRecord.journal.releaseID, id);
+      for (const role of ["coordinator", "node"]) {
+        assert.equal(
+          (await readdir(join(home, "Applications"))).some(
+            (name) => name.includes(`migration-backup`) && name.includes(role),
+          ),
+          true,
+        );
+      }
+      const applicationNames = await readdir(join(home, "Applications"));
+      const agentNames = await readdir(join(home, "Library/LaunchAgents"));
+      const coordinatorBackupApp = applicationNames.find(
+        (name) => name.includes("migration-backup") && name.includes("coordinator"),
+      );
+      const coordinatorBackupPlist = agentNames.find(
+        (name) => name.includes("migration-backup") && name.includes("coordinator"),
+      );
+      assert.ok(coordinatorBackupApp);
+      assert.ok(coordinatorBackupPlist);
+      await removeOwned(join(home, "Applications/Ellie Coordinator.app"));
+      await removeOwned(join(home, "Applications/Ellie Node.app"));
+      await rm(join(home, "Library/LaunchAgents/org.ellie.assistant.coordinator.plist"));
+      await rm(join(home, "Library/LaunchAgents/org.ellie.assistant.node.plist"));
+      await rename(
+        join(home, "Applications", coordinatorBackupApp),
+        join(home, "Applications/Ellie Coordinator.app"),
+      );
+      await rename(
+        join(home, "Library/LaunchAgents", coordinatorBackupPlist),
+        join(home, "Library/LaunchAgents/org.ellie.assistant.coordinator.plist"),
+      );
+      await rm(join(services, "receipts"), { recursive: true });
+      const singlePrepared = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.equal(singlePrepared.status, 0, singlePrepared.stderr);
+      const singleSnapshot = singlePrepared.stdout.trim();
+      assert.match(singleSnapshot, /^legacy-v1-[a-f0-9]{64}$/);
+      const singleAdoption = run(installer, [
+        "adopt-migration",
+        singleSnapshot,
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(singleAdoption.status, 0, singleAdoption.stderr);
+      const singleReceipt = JSON.parse(
+        await readFile(join(services, "receipts/installed.json"), "utf8"),
+      );
+      assert.equal(singleReceipt.coordinator.releaseID, id);
+      assert.equal(singleReceipt.node, null);
     });
   },
 );

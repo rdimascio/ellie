@@ -3,6 +3,8 @@ import Darwin
 import Foundation
 import Security
 
+struct MigrationSwitchPendingFailure: Error {}
+
 private enum MigrationFailure: Error { case rejected, stale, loaded, recoveryRequired, unavailable }
 private enum MigrationRole: String, Codable, CaseIterable {
   case coordinator, node
@@ -42,6 +44,18 @@ private struct MigrationManifest: Codable {
   let bindings: [MigrationBinding]
   let files: [MigrationEntry]
 }
+struct MigrationLegacyRoleEvidence {
+  let role: String
+  let identifier: String
+  let directoryModes: [String: Int]
+  let files: [String: (mode: Int, data: Data, sha256: String)]
+}
+struct MigrationLegacyEvidence {
+  let snapshotID: String
+  let manifestSHA256: String
+  let roles: [String]
+  let roleEvidence: [String: MigrationLegacyRoleEvidence]
+}
 private struct MigrationIntent: Codable {
   let version: Int
   let transactionID: String
@@ -60,11 +74,28 @@ private let migrationRecovery =
   "Legacy migration preparation requires explicit recovery; retained evidence was preserved."
 private let migrationUnavailable =
   "Ellie could not verify that both legacy service labels are unloaded."
+let migrationSwitchRecovery =
+  "Legacy service migration switching requires explicit recover-migration-switch."
+func migrationSwitchPending(_ services: Int32) throws -> Bool {
+  var value = stat()
+  if fstatat(services, "migration-switch-journal.json", &value, AT_SYMLINK_NOFOLLOW) == 0 {
+    guard (value.st_mode & S_IFMT) == S_IFREG, value.st_uid == getuid(), value.st_nlink == 1,
+      (value.st_mode & 0o7777) == 0o600
+    else { throw MigrationSwitchPendingFailure() }
+    return true
+  }
+  guard errno == ENOENT else { throw MigrationSwitchPendingFailure() }
+  return false
+}
 private let migrationMaxFile: UInt64 = 128 * 1024 * 1024
 private let migrationMaxTotal: UInt64 = 512 * 1024 * 1024
 private let migrationMaxEntries = 64
 private func migrationFail(_ error: Error) -> Never {
   let message: String
+  if error is MigrationSwitchPendingFailure {
+    FileHandle.standardError.write(Data((migrationSwitchRecovery + "\n").utf8))
+    exit(1)
+  }
   switch error as? MigrationFailure {
   case .stale: message = migrationStale
   case .loaded: message = migrationLoaded
@@ -732,6 +763,178 @@ private func verifySnapshotTree(
   try walk(root, "")
   if !partial { guard found == Set(expected.keys) else { throw MigrationFailure.recoveryRequired } }
 }
+
+private func migrationSnapshotFile(_ root: Int32, _ components: [String]) throws -> Data {
+  guard let name = components.last else { throw MigrationFailure.recoveryRequired }
+  var current = dup(root)
+  guard current >= 0 else { throw MigrationFailure.recoveryRequired }
+  defer { close(current) }
+  for component in components.dropLast() {
+    let next = try selectionOpenChildDirectory(parent: current, name: component)
+    close(current)
+    current = next
+  }
+  return try migrationRead(current, name, mode: 0o444, max: migrationMaxFile).0
+}
+
+private func loadMigrationLegacyEvidence(
+  services: Int32, snapshotID: String, requiredRoles: [String]
+) throws -> MigrationLegacyEvidence {
+  guard snapshotID.hasPrefix("legacy-v1-"), migrationHex(String(snapshotID.dropFirst(10))) else {
+    throw MigrationSwitchPendingFailure()
+  }
+  let migrations = try selectionOpenOwnedDirectory(parent: services, name: "migrations")
+  defer { close(migrations) }
+  guard let info = try migrationInfo(migrations, snapshotID), (info.st_mode & S_IFMT) == S_IFDIR,
+    (info.st_mode & 0o7777) == 0o555
+  else { throw MigrationSwitchPendingFailure() }
+  let root = try selectionOpenChildDirectory(parent: migrations, name: snapshotID)
+  defer { close(root) }
+  let manifestData = try migrationRead(root, "manifest.json", mode: 0o444, max: 1024 * 1024).0
+  guard let object = try JSONSerialization.jsonObject(with: manifestData) as? [String: Any],
+    let roles = object["roles"] as? [String], roles == requiredRoles,
+    roles == roles.sorted(), Set(roles).count == roles.count
+  else { throw MigrationSwitchPendingFailure() }
+  let manifestHash = migrationHash(manifestData)
+  guard snapshotID == "legacy-v1-" + manifestHash else { throw MigrationSwitchPendingFailure() }
+  let intent = MigrationIntent(
+    version: 1, transactionID: UUID().uuidString.lowercased(), snapshotID: snapshotID,
+    stageName: ".unused", roles: roles, manifestSHA256: manifestHash)
+  let manifest = try decodedMigrationManifest(manifestData, intent: intent)
+  try verifySnapshotTree(root: root, intent: intent, partial: false, final: true)
+  var result: [String: MigrationLegacyRoleEvidence] = [:]
+  for binding in manifest.bindings {
+    guard let role = MigrationRole(rawValue: binding.role) else {
+      throw MigrationSwitchPendingFailure()
+    }
+    var files: [String: (mode: Int, data: Data, sha256: String)] = [:]
+    let prefix = "roles/\(binding.role)/"
+    for entry in manifest.files where entry.path.hasPrefix(prefix) {
+      let relative = String(entry.path.dropFirst(prefix.count))
+      let data = try migrationSnapshotFile(root, entry.path.split(separator: "/").map(String.init))
+      files[relative] = (entry.mode, data, entry.sha256)
+    }
+    result[binding.role] = MigrationLegacyRoleEvidence(
+      role: binding.role, identifier: role.identifier, directoryModes: binding.directoryModes,
+      files: files)
+  }
+  guard result.count == roles.count else { throw MigrationSwitchPendingFailure() }
+  return MigrationLegacyEvidence(
+    snapshotID: snapshotID, manifestSHA256: manifestHash, roles: roles, roleEvidence: result)
+}
+
+func migrationLegacyEvidence(
+  services: Int32, snapshotID: String, requiredRoles: [String]
+) throws -> MigrationLegacyEvidence {
+  do {
+    return try loadMigrationLegacyEvidence(
+      services: services, snapshotID: snapshotID, requiredRoles: requiredRoles)
+  } catch {
+    throw MigrationSwitchPendingFailure()
+  }
+}
+
+private func validateMigrationLegacyRole(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, agents: Int32,
+  applicationName: String, plistName: String
+) throws {
+  try validateMigrationLegacyApplication(
+    evidence, applications: applications, applicationName: applicationName)
+  try validateMigrationLegacyPlist(evidence, agents: agents, plistName: plistName)
+}
+
+private func validateMigrationLegacyApplication(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+) throws {
+  let app = try selectionOpenOwnedDirectory(parent: applications, name: applicationName)
+  defer { close(app) }
+  let contents = try selectionOpenOwnedDirectory(parent: app, name: "Contents")
+  defer { close(contents) }
+  let macos = try selectionOpenOwnedDirectory(parent: contents, name: "MacOS")
+  defer { close(macos) }
+  let resources = try selectionOpenOwnedDirectory(parent: contents, name: "Resources")
+  defer { close(resources) }
+  let signatures = try selectionOpenOwnedDirectory(parent: contents, name: "_CodeSignature")
+  defer { close(signatures) }
+  let directories: [(Int32, String)] = [
+    (app, "application"), (contents, "application/Contents"),
+    (macos, "application/Contents/MacOS"), (resources, "application/Contents/Resources"),
+    (signatures, "application/Contents/_CodeSignature"),
+  ]
+  for (fd, path) in directories {
+    var info = stat()
+    guard fstat(fd, &info) == 0, Int(info.st_mode & 0o7777) == evidence.directoryModes[path]
+    else { throw MigrationSwitchPendingFailure() }
+  }
+  guard try migrationNames(app) == ["Contents"],
+    try migrationNames(contents) == ["Info.plist", "MacOS", "Resources", "_CodeSignature"],
+    try migrationNames(macos) == ["EllieService"],
+    try migrationNames(resources) == ["Ellie.icns", "ellie-build.json", "runtime.json"],
+    try migrationNames(signatures) == ["CodeResources"]
+  else { throw MigrationSwitchPendingFailure() }
+  let sources: [(Int32, String, String)] = [
+    (contents, "Info.plist", "application/Contents/Info.plist"),
+    (macos, "EllieService", "application/Contents/MacOS/EllieService"),
+    (resources, "Ellie.icns", "application/Contents/Resources/Ellie.icns"),
+    (resources, "ellie-build.json", "application/Contents/Resources/ellie-build.json"),
+    (resources, "runtime.json", "application/Contents/Resources/runtime.json"),
+    (signatures, "CodeResources", "application/Contents/_CodeSignature/CodeResources"),
+  ]
+  for (parent, name, path) in sources {
+    guard let expected = evidence.files[path] else { throw MigrationSwitchPendingFailure() }
+    let actual = try migrationRead(parent, name, mode: mode_t(expected.mode), max: migrationMaxFile)
+      .0
+    guard actual == expected.data, migrationHash(actual) == expected.sha256 else {
+      throw MigrationSwitchPendingFailure()
+    }
+  }
+  try selectionValidateSignature(
+    path: try selectionPathFromFD(app), identifier: evidence.identifier)
+}
+
+private func validateMigrationLegacyPlist(
+  _ evidence: MigrationLegacyRoleEvidence, agents: Int32, plistName: String
+) throws {
+  guard let expected = evidence.files["launch-agent.plist"] else {
+    throw MigrationSwitchPendingFailure()
+  }
+  let actual = try migrationRead(
+    agents, plistName, mode: mode_t(expected.mode), max: migrationMaxFile
+  ).0
+  guard actual == expected.data, migrationHash(actual) == expected.sha256 else {
+    throw MigrationSwitchPendingFailure()
+  }
+}
+
+func migrationValidateLegacyApplication(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+) throws {
+  do {
+    try validateMigrationLegacyApplication(
+      evidence, applications: applications, applicationName: applicationName)
+  } catch { throw MigrationSwitchPendingFailure() }
+}
+
+func migrationValidateLegacyPlist(
+  _ evidence: MigrationLegacyRoleEvidence, agents: Int32, plistName: String
+) throws {
+  do {
+    try validateMigrationLegacyPlist(evidence, agents: agents, plistName: plistName)
+  } catch { throw MigrationSwitchPendingFailure() }
+}
+
+func migrationValidateLegacyRole(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, agents: Int32,
+  applicationName: String, plistName: String
+) throws {
+  do {
+    try validateMigrationLegacyRole(
+      evidence, applications: applications, agents: agents, applicationName: applicationName,
+      plistName: plistName)
+  } catch {
+    throw MigrationSwitchPendingFailure()
+  }
+}
 private func sealSnapshotDirectories(_ directory: Int32) throws {
   for name in try migrationNames(directory) {
     guard let info = try migrationInfo(directory, name) else {
@@ -847,6 +1050,7 @@ func runMigrationCommand(_ input: [String]) throws -> Never {
     flock(lock, LOCK_UN)
     close(lock)
   }
+  if try migrationSwitchPending(services) { throw MigrationSwitchPendingFailure() }
   if command == "recover-migration" {
     try bothUnloaded(launchctl)
     guard try migrationInfo(services, "migrations") != nil else { exit(0) }
