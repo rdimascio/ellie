@@ -20,6 +20,7 @@ import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
 import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
+import { SpeechStartDiagnostics } from "./speech-start-diagnostics.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const environment = {
@@ -46,6 +47,10 @@ const diagnosticStartedAt = performance.now();
 let diagnosticStage = "fixture-setup",
   diagnosticStageStartedAt = diagnosticStartedAt;
 const cleanupOutcomes = [];
+const speechDiagnostics = new SpeechStartDiagnostics();
+let readSpeechMarkers = () => [],
+  readSpeechExitMarkers = () => [];
+let speechMarkerEvidenceAvailable = false;
 const platform = { xcode: "unknown", sdk: "unknown", runtime: "unknown", device: "unknown" };
 const endpointRequests = {
   session: 0,
@@ -88,12 +93,21 @@ function diagnosticSummary() {
     ["session", "inventory", "command", "logout", "unexpected"]
       .map((key) => `${key}:${Math.min(value[key], 99)}`)
       .join(",");
+  let speech = "unavailable";
+  try {
+    speech = speechMarkerEvidenceAvailable
+      ? speechDiagnostics.summary(readSpeechMarkers(), readSpeechExitMarkers())
+      : speechDiagnostics.summary();
+  } catch {
+    // Keep the original failure and avoid exposing owned marker paths or contents.
+  }
   return [
     `stage=${diagnosticStage}`,
     `stageMs=${bounded(Math.round(performance.now() - diagnosticStageStartedAt))}`,
     `totalMs=${bounded(Math.round(performance.now() - diagnosticStartedAt))}`,
     `requests=${counts(endpointRequests)}`,
     `responses=${counts(endpointResponses)}`,
+    `speech=${speech}`,
     `xcode=${platform.xcode}`,
     `sdk=${platform.sdk}`,
     `runtime=${platform.runtime}`,
@@ -392,7 +406,7 @@ if (audio[44] >= 3) {
   await nativeAuth.revoke(speechClients[3].id);
   const disconnectBearer = `Bearer ${"de".repeat(32)}`;
   const cancelBearer = `Bearer ${"cd".repeat(32)}`;
-  const readSpeechMarkers = () => {
+  readSpeechMarkers = () => {
     try {
       return readFileSync(invocationLog, "utf8").trim().split("\n").filter(Boolean);
     } catch (error) {
@@ -400,7 +414,7 @@ if (audio[44] >= 3) {
       throw error;
     }
   };
-  const readSpeechExitMarkers = () => {
+  readSpeechExitMarkers = () => {
     try {
       return readFileSync(processExitLog, "utf8").trim().split("\n").filter(Boolean);
     } catch (error) {
@@ -408,15 +422,14 @@ if (audio[44] >= 3) {
       throw error;
     }
   };
-  const settledTurns = new Set();
-  const activeTurns = new Map();
+  speechMarkerEvidenceAvailable = true;
   const fixtureTranscribe = nativeSpeech.transcribe.bind(nativeSpeech);
   nativeSpeech.transcribe = async (bearer, turnId, audio, disconnected) => {
-    activeTurns.set(turnId, bearer);
+    speechDiagnostics.delivered(turnId, bearer);
     try {
       return await fixtureTranscribe(bearer, turnId, audio, disconnected);
     } finally {
-      settledTurns.add(turnId);
+      speechDiagnostics.settled(turnId);
     }
   };
   const hosted = createBrowserServer({
@@ -467,16 +480,16 @@ if (audio[44] >= 3) {
         }
         const deadline = Date.now() + 5_000;
         while (Date.now() < deadline) {
-          const turns = [...activeTurns].filter(([, owner]) => owner === bearer).map(([id]) => id);
           const processMarkers = readSpeechMarkers();
           const exitMarkers = readSpeechExitMarkers();
-          const ready =
-            phase === "started"
-              ? turns.some((id) => !settledTurns.has(id)) && processMarkers.includes(marker)
-              : turns.length === 1 &&
-                turns.every((id) => settledTurns.has(id)) &&
-                exitMarkers.includes(marker);
-          if (ready) {
+          const observation = speechDiagnostics.observe(
+            bearer,
+            phase,
+            marker,
+            processMarkers,
+            exitMarkers,
+          );
+          if (observation.ready) {
             response.writeHead(200, {
               "content-type": "application/json",
               "cache-control": "no-store",
@@ -486,6 +499,14 @@ if (audio[44] >= 3) {
           }
           await new Promise((resolveWait) => setTimeout(resolveWait, 20));
         }
+        const observation = speechDiagnostics.observe(
+          bearer,
+          phase,
+          marker,
+          readSpeechMarkers(),
+          readSpeechExitMarkers(),
+        );
+        speechDiagnostics.timeout(observation);
         response.writeHead(503, {
           "content-type": "application/json",
           "cache-control": "no-store",
@@ -496,6 +517,7 @@ if (audio[44] >= 3) {
     }
     if (request.method === "POST" && request.url === "/native/v1/speech/transcriptions") {
       speechUploadRequests += 1;
+      speechDiagnostics.noteUpload(request.headers.authorization ?? "");
     }
     if (request.headers["x-ellie-turn-id"] === "77777777-7777-4777-8777-777777777777") {
       response.end = function () {
@@ -679,7 +701,9 @@ if (audio[44] >= 3) {
     cleanupOutcomes.push("child-cleanup-uncertain");
   }
   if (cleanupCertain) {
+    if (speechMarkerEvidenceAvailable) diagnosticSummary();
     rmSync(owned, { recursive: true, force: true });
+    speechMarkerEvidenceAvailable = false;
     cleanupOutcomes.push("owned-removed");
     if (succeeded) rmSync(resultBundle, { recursive: true, force: true });
   } else {
