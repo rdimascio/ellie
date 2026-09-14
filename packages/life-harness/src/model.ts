@@ -1,4 +1,5 @@
 import type { LifeIntent } from "./operations.ts";
+import type { ModelWorldContext } from "../../life-context/src/model-world.ts";
 import { planMessages } from "./model-context.ts";
 
 export interface LifeModelRequest {
@@ -12,6 +13,7 @@ export interface LifeModelRequest {
   history: Array<{ role: "user" | "assistant"; content: string }>;
   preferences?: Record<string, unknown>;
   memories?: Array<{ id: string; text: string; explicit: boolean }>;
+  world?: ModelWorldContext;
   adoptedGuidance?: Array<{
     id: string;
     title: string;

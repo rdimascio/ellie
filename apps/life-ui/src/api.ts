@@ -11,9 +11,11 @@ import type {
   PersonalDataReview,
   PersonalResetStatus,
   ConversationSummary,
+  ConversationPreferenceState,
   ConversationTurn,
   ModelStatus,
   PendingIntent,
+  Group,
 } from "./types";
 export class ApiError extends Error {
   constructor(
@@ -30,6 +32,7 @@ export type ChatResponse = {
   status: "completed" | "pending" | "interrupted";
   actions?: { label: string; status: string }[];
   pendingIntent: PendingIntent | null;
+  conversationPreferences: ConversationPreferenceState;
 };
 export type PluginBridgeRequest = {
   id: string;
@@ -91,6 +94,16 @@ export async function establishSessionFromFragment() {
   return true;
 }
 export const api = {
+  groups: {
+    list: () => request<{ groups: Group[] }>("/api/life/groups"),
+    create: (name: string) =>
+      request<Group>("/api/life/groups", { method: "POST", body: JSON.stringify({ name }) }),
+    rename: (id: string, name: string, expectedRevision: number) =>
+      request<Group>(`/api/life/groups/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name, expectedRevision }),
+      }),
+  },
   bootstrap: (scope?: string) =>
     request<Bootstrap>(`/api/life/bootstrap${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),
   chat: (
@@ -129,6 +142,7 @@ export const api = {
       if (cursor) query.set("cursor", cursor);
       return request<{
         conversation: ConversationSummary;
+        conversationPreferences: ConversationPreferenceState;
         turns: ConversationTurn[];
         page: { hasMore: boolean; nextCursor?: string };
       }>(`/api/life/conversations/${encodeURIComponent(id)}?${query}`, {
@@ -312,10 +326,11 @@ export const api = {
     }),
   learning: {
     record: (value: {
-      scope: string;
+      conversationId: string;
+      turnId: string;
       message: string;
       rating: -1 | 1;
-      example: { prompt: string; response: string; preferredResponse?: string };
+      example: { preferredResponse?: string };
       trainingEligible: false;
     }) =>
       request<LifeRecord>("/api/life/learning", {

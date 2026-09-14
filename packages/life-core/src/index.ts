@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-export const LIFE_SCHEMA_VERSION = 4;
+export const LIFE_SCHEMA_VERSION = 5;
 export const LIFE_RECORD_KINDS = [
   "memory",
   "contact",
@@ -101,6 +101,11 @@ export type PersonalLifeExportItem =
   | { type: "setting"; key: string; value: unknown; updatedAt: number }
   | { type: "conversation"; conversation: ConversationSummary }
   | { type: "conversation-turn"; conversationId: string; turn: ConversationTurn }
+  | {
+      type: "conversation-preferences";
+      conversationId: string;
+      state: ConversationPreferenceState;
+    }
   | { type: "pending-intent"; pendingIntent: PendingLifeIntent }
   | { type: "reminder-reschedule"; reschedule: ReminderRescheduleState };
 export interface PersonalLifeSummary {
@@ -112,6 +117,7 @@ export interface PersonalLifeSummary {
   settings: number;
   conversations: number;
   conversationTurns: number;
+  conversationPreferences: number;
   pendingIntents: number;
   reminderReschedules: number;
   bytes: number;
@@ -156,6 +162,7 @@ export interface ConversationResult {
   recordReceipts?: Array<{ id: string; kind: "reminder" | "event"; revision: number }>;
   taskIds: string[];
   evidence: ConversationEvidence[];
+  createdGroup?: { id: string; name: string };
 }
 export interface ConversationTurn {
   id: string;
@@ -176,6 +183,24 @@ export interface ConversationPage<T> {
 }
 export interface ConversationIndex extends ConversationPage<ConversationSummary> {
   chatEpoch: number;
+}
+export type ConversationTone = "calm" | "warm" | "playful" | "direct";
+export type ConversationVerbosity = "brief" | "balanced" | "detailed";
+export interface ConversationPreferences {
+  tone?: ConversationTone;
+  verbosity?: ConversationVerbosity;
+}
+export interface ConversationPreferenceState {
+  preferences: ConversationPreferences;
+  revision: number;
+}
+export interface LifeGroup {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
 }
 export type PendingTemporalSpec =
   | { type: "instant"; at: number }
@@ -469,6 +494,7 @@ export class LifeStore {
       else if (version === 1) this.migrateV2();
       else if (version === 2) this.migrateV3();
       else if (version === 3) this.migrateV4();
+      else if (version === 4) this.migrateV5();
       this.db
         .prepare(
           "UPDATE conversation_turns SET status='interrupted',updated_at=? WHERE status='pending'",
@@ -567,6 +593,20 @@ export class LifeStore {
     UPDATE pending_life_intents SET state='interrupted',revision=revision+1,updated_at=${this.clock()} WHERE state='executing';
     PRAGMA user_version=4;`),
     );
+    this.migrateV5();
+  }
+  private migrateV5(): void {
+    this.transaction(() =>
+      this.db.exec(`
+    ALTER TABLE groups ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+    ALTER TABLE groups ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+    UPDATE groups SET updated_at=created_at WHERE updated_at=0;
+    CREATE TABLE conversation_preferences(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,user_id TEXT NOT NULL,preferences_json TEXT NOT NULL,revision INTEGER NOT NULL,origin_turn_id TEXT NOT NULL UNIQUE,origin_request_id TEXT NOT NULL,updated_at INTEGER NOT NULL) STRICT;
+    CREATE TRIGGER conversation_preferences_generation_insert AFTER INSERT ON conversation_preferences BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversation_preferences_generation_update AFTER UPDATE ON conversation_preferences BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversation_preferences_generation_delete AFTER DELETE ON conversation_preferences BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    PRAGMA user_version=5;`),
+    );
   }
   private actor(actor: LifeActor): string {
     return identifier(actor?.userId, "actor.userId");
@@ -608,19 +648,48 @@ export class LifeStore {
       throw new LifeAccessError("Group owner access required");
     return id;
   }
-  createGroup(
-    actor: LifeActor,
-    input: { id?: string; name: string },
-  ): { id: string; name: string } {
+  createGroup(actor: LifeActor, input: { id?: string; name: string }): LifeGroup {
     const userId = this.actor(actor),
       id = input.id ? identifier(input.id, "group.id") : this.makeId(),
-      name = text(input.name, "group.name", 500),
+      name = text(input.name, "group.name", 100),
       now = this.clock();
+    if (
+      Number(
+        this.db
+          .prepare(
+            "SELECT count(*) count FROM groups g JOIN group_members m ON m.group_id=g.id WHERE m.user_id=? AND m.role='owner'",
+          )
+          .get(userId)?.count,
+      ) >= 32
+    )
+      throw new LifeConflictError("A user may own at most 32 groups.");
     this.transaction(() => {
-      this.db.prepare("INSERT INTO groups VALUES(?,?,?)").run(id, name, now);
+      this.db
+        .prepare("INSERT INTO groups(id,name,created_at,revision,updated_at) VALUES(?,?,?,1,?)")
+        .run(id, name, now, now);
       this.db.prepare("INSERT INTO group_members VALUES(?,?,'owner')").run(id, userId);
     });
-    return { id, name };
+    return { id, name, role: "owner", revision: 1, createdAt: now, updatedAt: now };
+  }
+  renameGroup(
+    actor: LifeActor,
+    groupId: string,
+    expectedRevision: number,
+    nameInput: string,
+  ): LifeGroup {
+    const id = this.owner(actor, groupId),
+      name = text(nameInput, "group.name", 100),
+      revision = expectedRevision;
+    if (!Number.isSafeInteger(revision) || revision < 1)
+      throw new TypeError("expectedRevision is invalid");
+    const now = this.clock(),
+      result = this.db
+        .prepare(
+          "UPDATE groups SET name=?,revision=revision+1,updated_at=? WHERE id=? AND revision=?",
+        )
+        .run(name, now, id, revision);
+    if (!result.changes) throw new LifeConflictError("Group changed; reload it and try again.");
+    return this.listGroups(actor).find((group) => group.id === id)!;
   }
   setGroupMember(
     actor: LifeActor,
@@ -655,13 +724,13 @@ export class LifeStore {
       }
     });
   }
-  listGroups(actor: LifeActor): Array<{ id: string; name: string; role: "owner" | "member" }> {
+  listGroups(actor: LifeActor): LifeGroup[] {
     const user = this.actor(actor);
     return this.db
       .prepare(
-        "SELECT g.id,g.name,m.role FROM groups g JOIN group_members m ON m.group_id=g.id WHERE m.user_id=? ORDER BY g.name",
+        "SELECT g.id,g.name,m.role,g.revision,g.created_at createdAt,g.updated_at updatedAt FROM groups g JOIN group_members m ON m.group_id=g.id WHERE m.user_id=? ORDER BY g.name",
       )
-      .all(user) as Array<{ id: string; name: string; role: "owner" | "member" }>;
+      .all(user) as unknown as LifeGroup[];
   }
   private record(row: Record<string, unknown>): LifeRecord {
     return {
@@ -1560,6 +1629,7 @@ export class LifeStore {
       target?: string;
       message: string;
       explicitPreference?: { key: string; value: unknown };
+      preferenceLevel?: "user" | "group";
     },
   ): LifeRecord {
     return this.transaction(() => {
@@ -1574,15 +1644,17 @@ export class LifeStore {
         },
       });
       if (input.explicitPreference) {
-        if (input.scope.type === "user")
+        const level = input.preferenceLevel ?? input.scope.type;
+        if (level === "user")
           this.setUserSetting(actor, input.explicitPreference.key, input.explicitPreference.value);
-        else
+        else if (input.scope.type === "group")
           this.setGroupSetting(
             actor,
             input.scope.id,
             input.explicitPreference.key,
             input.explicitPreference.value,
           );
+        else throw new TypeError("Group preference requires a group scope");
       }
       return record;
     });
@@ -2698,6 +2770,13 @@ export class LifeStore {
       turnId: string;
       requestId: string;
       result: ConversationResult;
+      preferenceUpdate?: {
+        expectedRevision: number;
+        set?: ConversationPreferences;
+        clear?: Array<"tone" | "verbosity">;
+        chatEpoch: number;
+        contextFingerprint: string;
+      };
     },
   ): { conversation: ConversationSummary; turn: ConversationTurn; result: ConversationResult } {
     const conversation = this.accessibleConversation(actor, input.conversationId),
@@ -2739,6 +2818,14 @@ export class LifeStore {
             })),
           }
         : {}),
+      ...(input.result.createdGroup
+        ? {
+            createdGroup: {
+              id: identifier(input.result.createdGroup.id, "createdGroup.id"),
+              name: text(input.result.createdGroup.name, "createdGroup.name", 100),
+            },
+          }
+        : {}),
     };
     if (
       result.evidence.some((e) => !Number.isSafeInteger(e.sourceRevision) || e.sourceRevision < 1)
@@ -2775,6 +2862,17 @@ export class LifeStore {
         };
       if (row.status !== "pending")
         throw new LifeConflictError("Interrupted turns cannot be replayed automatically.");
+      if (input.preferenceUpdate)
+        this.updateConversationPreferences(actor, {
+          conversationId: conversation.id,
+          expectedRevision: input.preferenceUpdate.expectedRevision,
+          ...(input.preferenceUpdate.set ? { set: input.preferenceUpdate.set } : {}),
+          ...(input.preferenceUpdate.clear ? { clear: input.preferenceUpdate.clear } : {}),
+          chatEpoch: input.preferenceUpdate.chatEpoch,
+          contextFingerprint: input.preferenceUpdate.contextFingerprint,
+          originTurnId: turnId,
+          originRequestId: requestId,
+        });
       const at = this.clock(),
         fingerprint = this.contextFingerprintFor(actor, conversation.scope);
       this.db
@@ -2866,6 +2964,117 @@ export class LifeStore {
     }
     return result;
   }
+  private conversationPreferenceInput(value: unknown): ConversationPreferences {
+    const input = object(value ?? {}, "conversation preferences"),
+      result: ConversationPreferences = {};
+    if (Object.keys(input).some((key) => key !== "tone" && key !== "verbosity"))
+      throw new TypeError("Conversation preference key is invalid");
+    if (input.tone !== undefined) {
+      if (
+        typeof input.tone !== "string" ||
+        !["calm", "warm", "playful", "direct"].includes(input.tone)
+      )
+        throw new TypeError("Conversation tone is invalid");
+      result.tone = input.tone as ConversationTone;
+    }
+    if (input.verbosity !== undefined) {
+      if (
+        typeof input.verbosity !== "string" ||
+        !["brief", "balanced", "detailed"].includes(input.verbosity)
+      )
+        throw new TypeError("Conversation verbosity is invalid");
+      result.verbosity = input.verbosity as ConversationVerbosity;
+    }
+    return result;
+  }
+  getConversationPreferences(
+    actor: LifeActor,
+    conversationId: string,
+  ): ConversationPreferenceState {
+    const conversation = this.accessibleConversation(actor, conversationId),
+      row = this.db
+        .prepare(
+          "SELECT preferences_json,revision FROM conversation_preferences WHERE conversation_id=? AND user_id=?",
+        )
+        .get(conversation.id, this.actor(actor)) as Record<string, unknown> | undefined;
+    return row
+      ? {
+          preferences: this.conversationPreferenceInput(JSON.parse(String(row.preferences_json))),
+          revision: Number(row.revision),
+        }
+      : { preferences: {}, revision: 0 };
+  }
+  updateConversationPreferences(
+    actor: LifeActor,
+    input: {
+      conversationId: string;
+      expectedRevision: number;
+      set?: ConversationPreferences;
+      clear?: Array<"tone" | "verbosity">;
+      chatEpoch: number;
+      contextFingerprint: string;
+      originTurnId: string;
+      originRequestId: string;
+    },
+  ): ConversationPreferenceState {
+    const user = this.actor(actor),
+      conversation = this.accessibleConversation(actor, input.conversationId),
+      originTurnId = identifier(input.originTurnId, "originTurnId"),
+      originRequestId = identifier(input.originRequestId, "originRequestId"),
+      existingOrigin = this.db
+        .prepare(
+          "SELECT conversation_id FROM conversation_preferences WHERE origin_turn_id=? AND user_id=?",
+        )
+        .get(originTurnId, user) as { conversation_id?: string } | undefined;
+    if (existingOrigin) {
+      if (existingOrigin.conversation_id !== conversation.id)
+        throw new LifeConflictError("Conversation preference origin is already bound.");
+      return this.getConversationPreferences(actor, conversation.id);
+    }
+    if (input.chatEpoch !== this.chatEpoch(actor))
+      throw new LifeConflictError("Conversation epoch changed.");
+    if (input.contextFingerprint !== this.contextFingerprintFor(actor, conversation.scope))
+      throw new LifeConflictError("Conversation context changed.");
+    const turn = this.db
+      .prepare(
+        "SELECT 1 found FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=? AND request_id=? AND status='pending'",
+      )
+      .get(originTurnId, conversation.id, user, originRequestId);
+    if (!turn) throw new LifeAccessError("Conversation preference origin is unavailable.");
+    const current = this.getConversationPreferences(actor, conversation.id);
+    if (
+      !Number.isSafeInteger(input.expectedRevision) ||
+      input.expectedRevision < 0 ||
+      input.expectedRevision !== current.revision
+    )
+      throw new LifeConflictError("Conversation preferences changed.");
+    const set = this.conversationPreferenceInput(input.set),
+      clear = input.clear ?? [];
+    if (
+      !Array.isArray(clear) ||
+      clear.length > 2 ||
+      clear.some((key) => key !== "tone" && key !== "verbosity")
+    )
+      throw new TypeError("Conversation preference clear list is invalid");
+    const preferences = { ...current.preferences, ...set };
+    for (const key of clear) delete preferences[key];
+    const revision = current.revision + 1,
+      now = this.clock();
+    this.db
+      .prepare(
+        "INSERT INTO conversation_preferences VALUES(?,?,?,?,?,?,?) ON CONFLICT(conversation_id) DO UPDATE SET preferences_json=excluded.preferences_json,revision=excluded.revision,origin_turn_id=excluded.origin_turn_id,origin_request_id=excluded.origin_request_id,updated_at=excluded.updated_at",
+      )
+      .run(
+        conversation.id,
+        user,
+        JSON.stringify(preferences),
+        revision,
+        originTurnId,
+        originRequestId,
+        now,
+      );
+    return { preferences, revision };
+  }
   getConversation(
     actor: LifeActor,
     id: string,
@@ -2908,6 +3117,24 @@ export class LifeStore {
       ).toString("base64url");
     }
     return { conversation, turns };
+  }
+  getConversationTurn(
+    actor: LifeActor,
+    conversationId: string,
+    turnIdInput: string,
+  ): ConversationTurn {
+    const conversation = this.accessibleConversation(actor, conversationId),
+      turnId = identifier(turnIdInput, "turnId"),
+      row = this.db
+        .prepare("SELECT * FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=?")
+        .get(turnId, conversation.id, this.actor(actor)) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Conversation turn unavailable.");
+    return this.turn(
+      actor,
+      row,
+      conversation,
+      this.contextFingerprintFor(actor, conversation.scope),
+    );
   }
   getConversationRequest(
     actor: LifeActor,
@@ -3059,14 +3286,26 @@ export class LifeStore {
           (SELECT count(*) FROM settings WHERE level='user' AND scope_id=?) settings,
           (SELECT count(*) FROM conversations WHERE user_id=?) conversations,
           (SELECT count(*) FROM conversation_turns WHERE user_id=?) conversation_turns,
+          (SELECT count(*) FROM conversation_preferences WHERE user_id=?) conversation_preferences,
           (SELECT count(*) FROM pending_life_intents WHERE user_id=?) pending_intents,
           (SELECT count(*) FROM reminder_reschedules WHERE user_id=?) reminder_reschedules,
-          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(intent_json AS BLOB))+length(CAST(missing_json AS BLOB))+length(CAST(question AS BLOB))+length(CAST(coalesce(target_json,'') AS BLOB))+length(CAST(coalesce(outcome_json,'') AS BLOB))),0) FROM pending_life_intents WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(operation_id AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(replaces_task_id AS BLOB))+length(CAST(coalesce(replacement_task_id,'') AS BLOB))),0) FROM reminder_reschedules WHERE user_id=?) bytes
+          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(preferences_json AS BLOB))),0) FROM conversation_preferences WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(intent_json AS BLOB))+length(CAST(missing_json AS BLOB))+length(CAST(question AS BLOB))+length(CAST(coalesce(target_json,'') AS BLOB))+length(CAST(coalesce(outcome_json,'') AS BLOB))),0) FROM pending_life_intents WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(operation_id AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(replaces_task_id AS BLOB))+length(CAST(coalesce(replacement_task_id,'') AS BLOB))),0) FROM reminder_reschedules WHERE user_id=?) bytes
           FROM records WHERE scope_type='user' AND scope_id=?`)
-        .get(user, user, user, user, user, user, user, user, user, user, user) as Record<
-        string,
-        unknown
-      >;
+        .get(
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+          user,
+        ) as Record<string, unknown>;
     return {
       generation: Number(row.generation ?? 0),
       records: Number(row.records),
@@ -3076,6 +3315,7 @@ export class LifeStore {
       settings: Number(row.settings),
       conversations: Number(row.conversations),
       conversationTurns: Number(row.conversation_turns),
+      conversationPreferences: Number(row.conversation_preferences),
       pendingIntents: Number(row.pending_intents),
       reminderReschedules: Number(row.reminder_reschedules),
       bytes: Number(row.bytes),
@@ -3108,6 +3348,7 @@ export class LifeStore {
             "setting",
             "conversation",
             "conversation-turn",
+            "conversation-preferences",
             "pending-intent",
             "reminder-reschedule",
           ].includes(cursor.type) ||
@@ -3124,11 +3365,14 @@ export class LifeStore {
         UNION ALL SELECT 'setting' type,key,updated_at FROM settings WHERE level='user' AND scope_id=?
         UNION ALL SELECT 'conversation' type,id key,updated_at FROM conversations WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=scope_id AND m.user_id=?))
         UNION ALL SELECT 'conversation-turn' type,t.id key,t.updated_at FROM conversation_turns t JOIN conversations c ON c.id=t.conversation_id WHERE t.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
+        UNION ALL SELECT 'conversation-preferences' type,p.conversation_id key,p.updated_at FROM conversation_preferences p JOIN conversations c ON c.id=p.conversation_id WHERE p.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
         UNION ALL SELECT 'pending-intent' type,p.id key,p.updated_at FROM pending_life_intents p JOIN conversations c ON c.id=p.conversation_id WHERE p.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
         UNION ALL SELECT 'reminder-reschedule' type,operation_id key,updated_at FROM reminder_reschedules r WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=r.scope_id AND m.user_id=?))
       ) WHERE (? IS NULL OR updated_at<? OR (updated_at=? AND (type<? OR (type=? AND key<?))))
       ORDER BY updated_at DESC,type DESC,key DESC LIMIT ?`)
       .all(
+        user,
+        user,
         user,
         user,
         user,
@@ -3152,6 +3396,7 @@ export class LifeStore {
         | "setting"
         | "conversation"
         | "conversation-turn"
+        | "conversation-preferences"
         | "pending-intent"
         | "reminder-reschedule";
       key: string;
@@ -3168,6 +3413,9 @@ export class LifeStore {
         "SELECT c.*,(SELECT count(*) FROM conversation_turns t WHERE t.conversation_id=c.id) turn_count,EXISTS(SELECT 1 FROM conversation_turns t WHERE t.conversation_id=c.id AND t.status='pending') pending FROM conversations c WHERE c.id=? AND c.user_id=?",
       ),
       turnStatement = this.db.prepare("SELECT * FROM conversation_turns WHERE id=? AND user_id=?"),
+      preferenceStatement = this.db.prepare(
+        "SELECT * FROM conversation_preferences WHERE conversation_id=? AND user_id=?",
+      ),
       pendingStatement = this.db.prepare(
         "SELECT * FROM pending_life_intents WHERE id=? AND user_id=?",
       ),
@@ -3211,6 +3459,20 @@ export class LifeStore {
           type: "conversation-turn",
           conversationId: conversation.id,
           turn: this.turn(actor, found, conversation, fingerprint),
+        };
+      } else if (row.type === "conversation-preferences") {
+        const found = preferenceStatement.get(row.key, user) as Record<string, unknown> | undefined;
+        if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        this.accessibleConversation(actor, row.key);
+        item = {
+          type: "conversation-preferences",
+          conversationId: row.key,
+          state: {
+            preferences: this.conversationPreferenceInput(
+              JSON.parse(String(found.preferences_json)),
+            ),
+            revision: Number(found.revision),
+          },
         };
       } else if (row.type === "pending-intent") {
         const found = pendingStatement.get(row.key, user) as Record<string, unknown> | undefined;

@@ -137,6 +137,60 @@ aside nav button.active {
   background: transparent;
   font-weight: 600;
 }
+.scope .manage-spaces {
+  margin-top: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+}
+.group-create {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: end;
+  gap: 12px;
+}
+.group-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 20px;
+}
+.group-list article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.group-list article > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.group-list article > div:first-child {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 2px;
+}
+.group-list span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.group-list button,
+.conversation-style button {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: transparent;
+  padding: 7px 12px;
+}
+.group-list button.primary {
+  border-color: var(--coral);
+  background: var(--coral);
+  color: white;
+}
 .settings-link {
   width: 100%;
 }
@@ -189,6 +243,35 @@ main {
   gap: 9px;
   padding-bottom: 13px;
   border-bottom: 1px solid var(--rule);
+}
+.conversation-style {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.conversation-style label {
+  display: grid;
+  gap: 2px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.conversation-style select {
+  min-width: 110px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+}
+.conversation-style small {
+  max-width: 150px;
+}
+.conversation-style button {
+  margin-left: auto;
+  color: var(--coral-dark);
+  font-size: 12px;
 }
 .conversation-bar > div:first-child {
   min-width: 0;

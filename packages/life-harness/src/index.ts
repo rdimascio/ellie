@@ -1,12 +1,16 @@
 import { randomUUID } from "node:crypto";
 import type {
+  ConversationPreferences,
+  ConversationPreferenceState,
   LifeActor,
+  LifeGroup,
   LifeRecord,
   LifeScope,
   LifeRecordKind,
 } from "../../life-core/src/index.ts";
 import { inferTone, LifeAccessError, LifeStore } from "../../life-core/src/index.ts";
 import { ProactivityEngine } from "../../life-context/src/index.ts";
+import { selectModelWorld } from "../../life-context/src/model-world.ts";
 import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src/index.ts";
 import { builtInManifest, PluginError } from "../../life-plugins/src/index.ts";
 import { LifeTeaching } from "../../life-teaching/src/index.ts";
@@ -57,6 +61,8 @@ export interface ChatRequest {
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   isContextCurrent?: () => boolean;
   signal?: AbortSignal;
+  /** Trusted persisted state for this actor-private conversation. */
+  conversationPreferences?: ConversationPreferenceState;
   /** Trusted service data. Never populate this from a client request body. */
   pendingIntent?: PendingLifeIntent;
   /** Trusted receipt from the immediately preceding completed operation. */
@@ -80,6 +86,12 @@ export interface ChatResponse {
   evidence: Array<{ sourceId: string; title: string; reference?: string }>;
   continuation?: ContinuationDirective;
   operationOutcome?: OperationOutcome["status"];
+  conversationPreferenceUpdate?: {
+    set?: ConversationPreferences;
+    clear?: Array<"tone" | "verbosity">;
+    expectedRevision: number;
+  };
+  createdGroup?: Pick<LifeGroup, "id" | "name">;
 }
 export interface LifeHarness {
   chat(request: ChatRequest): Promise<ChatResponse>;
@@ -156,13 +168,14 @@ function modelContext(
   actor: LifeActor,
   scope: LifeScope,
   message: string,
+  conversationPreferences: ConversationPreferences = {},
 ) {
   const terms = new Set(message.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
   const memories = store
     .listRecords(actor, { scope, kinds: ["memory"], limit: 100 })
     .filter((record) => record.provenance.every((item) => item.invalidatedAt === undefined))
     .map((record) => {
-      const text = (record.body ?? record.title).slice(0, 2_000);
+      const text = record.body ?? record.title;
       const score = (text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []).reduce(
         (total, term) => total + Number(terms.has(term)),
         0,
@@ -178,12 +191,91 @@ function modelContext(
     .slice(0, 20)
     .map(({ score: _score, ...memory }) => memory);
   return {
-    preferences: store.resolveSettings(actor, scope.type === "group" ? { groupId: scope.id } : {})
-      .values,
+    preferences: {
+      ...store.resolveSettings(actor, scope.type === "group" ? { groupId: scope.id } : {}).values,
+      ...conversationPreferences,
+    },
     memories,
     adoptedGuidance: teaching.resolve(actor, scope),
+    world: selectModelWorld(store, actor, scope, message),
     tone: inferTone(message),
   };
+}
+
+const tones = ["calm", "warm", "playful", "direct"] as const;
+const verbosityLevels = ["brief", "balanced", "detailed"] as const;
+function checkedConversationPreferences(
+  state: ConversationPreferenceState | undefined,
+): ConversationPreferenceState {
+  if (state === undefined) return { preferences: {}, revision: 0 };
+  if (
+    !state ||
+    typeof state !== "object" ||
+    !Number.isSafeInteger(state.revision) ||
+    state.revision < 0 ||
+    !state.preferences ||
+    typeof state.preferences !== "object" ||
+    Array.isArray(state.preferences) ||
+    Object.keys(state.preferences).some((key) => key !== "tone" && key !== "verbosity") ||
+    (state.preferences.tone !== undefined && !tones.includes(state.preferences.tone)) ||
+    (state.preferences.verbosity !== undefined &&
+      !verbosityLevels.includes(state.preferences.verbosity))
+  )
+    throw new TypeError("Conversation preferences are invalid.");
+  return structuredClone(state);
+}
+
+function styleValue(value: string): ConversationPreferences | undefined {
+  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
+  if (tones.includes(normalized as (typeof tones)[number]))
+    return { tone: normalized as (typeof tones)[number] };
+  if (normalized === "concise" || normalized === "less chatty") return { verbosity: "brief" };
+  if (verbosityLevels.includes(normalized as (typeof verbosityLevels)[number]))
+    return { verbosity: normalized as (typeof verbosityLevels)[number] };
+}
+
+function styleRequest(
+  message: string,
+): { value: ConversationPreferences; persistence: "conversation" | "user" | "group" } | undefined {
+  let input = message
+      .trim()
+      .replace(/[.!?]+$/, "")
+      .trim(),
+    group = false,
+    lasting = false;
+  if (/^in this conversation,?\s+/i.test(input))
+    input = input.replace(/^in this conversation,?\s+/i, "");
+  if (/^for this group,?\s+/i.test(input)) {
+    group = true;
+    input = input.replace(/^for this group,?\s+/i, "");
+  }
+  if (/^from now on,?\s+/i.test(input)) {
+    lasting = true;
+    input = input.replace(/^from now on,?\s+/i, "");
+  }
+  if (/^(?:please\s+)?always\s+/i.test(input)) {
+    lasting = true;
+    input = input.replace(/^(?:please\s+)?always\s+/i, "");
+  }
+  const remembered =
+    /^(?:please\s+)?remember my preference (?:for|to be)\s+(calm|warm|playful|direct|brief|concise|less chatty|balanced|detailed)(?:\s+(?:replies|tone))?$/i.exec(
+      input,
+    );
+  if (remembered) {
+    lasting = true;
+    input = `be ${remembered[1]}`;
+  }
+  if (/\s+from now on$/i.test(input)) {
+    lasting = true;
+    input = input.replace(/\s+from now on$/i, "");
+  }
+  const match =
+    /^(?:please\s+)?(?:be|keep (?:(?:my|your) )?replies?)\s+(calm|warm|playful|direct|brief|concise|less chatty|balanced|detailed)$/i.exec(
+      input,
+    );
+  const value = match ? styleValue(match[1]!) : undefined;
+  if (!value) return;
+  return { value, persistence: lasting ? (group ? "group" : "user") : "conversation" };
 }
 
 function parseDelay(message: string): { delay: number; text: string } | undefined {
@@ -711,6 +803,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   async function chat(request: ChatRequest): Promise<ChatResponse> {
     const message = request.message.trim();
     if (!message || message.length > 20_000) throw new TypeError("Chat message is invalid.");
+    const preferenceState = checkedConversationPreferences(request.conversationPreferences);
     options.store.listRecords(request.actor, {
       scope: request.scope,
       limit: 1,
@@ -734,6 +827,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       tasks: TaskRecord[] = [],
       actions: ChatAction[] = [],
       evidence: ChatResponse["evidence"] = [];
+    let conversationPreferenceUpdate: ChatResponse["conversationPreferenceUpdate"],
+      createdGroup: ChatResponse["createdGroup"];
     const all = (kinds?: LifeRecordKind[]) =>
       options.store.listRecords(request.actor, {
         scope: request.scope,
@@ -756,6 +851,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         taskIds: tasks.map((task) => task.id),
         evidence,
         ...(continuation ? { continuation } : {}),
+        ...(conversationPreferenceUpdate ? { conversationPreferenceUpdate } : {}),
+        ...(createdGroup ? { createdGroup } : {}),
       };
     };
     const lower = message.toLowerCase();
@@ -767,6 +864,164 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       typeof settings.values.timeZone === "string"
         ? settings.values.timeZone
         : Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const createGroup =
+      /^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:please\s+)?(?:create|make)\s+(?:a\s+)?group\s+(?:called|named)\s+(.+?)[.!?]?$/i.exec(
+        message,
+      );
+    if (createGroup) {
+      const name = clean(createGroup[1]!);
+      if (!name || name.length > 100)
+        return finish("Please use a group name up to 100 characters.");
+      const matches = options.store
+        .listGroups(request.actor)
+        .filter((group) => clean(group.name).toLowerCase() === name.toLowerCase());
+      if (matches.length > 1)
+        return finish(
+          `More than one visible group is named “${name}”. Rename one in settings before using this command.`,
+        );
+      if (matches.length === 1) {
+        const group = matches[0]!;
+        createdGroup = { id: group.id, name: group.name };
+        actions.push({ label: `Use group: ${group.name}`, status: "skipped" });
+        return finish(`You already have a group named “${group.name}”.`);
+      }
+      const group = options.store.createGroup(request.actor, { name });
+      createdGroup = { id: group.id, name: group.name };
+      actions.push({ label: `Create group: ${group.name}`, status: "completed" });
+      return finish(`Created “${group.name}”. Open it to add shared records.`);
+    }
+    const renameGroup =
+      /^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:please\s+)?rename\s+(?:the\s+)?group\s+(.+?)\s+to\s+(.+?)[.!?]?$/i.exec(
+        message,
+      );
+    if (renameGroup) {
+      const oldName = clean(renameGroup[1]!),
+        newName = clean(renameGroup[2]!),
+        matches = options.store
+          .listGroups(request.actor)
+          .filter((group) => clean(group.name).toLowerCase() === oldName.toLowerCase());
+      if (!newName || newName.length > 100)
+        return finish("Please use a group name up to 100 characters.");
+      if (matches.length !== 1)
+        return finish(
+          matches.length
+            ? "That name matches more than one group. Please rename one in settings first."
+            : `I couldn’t find a group named “${oldName}”.`,
+        );
+      if (
+        options.store
+          .listGroups(request.actor)
+          .some(
+            (group) =>
+              group.id !== matches[0]!.id &&
+              clean(group.name).toLowerCase() === newName.toLowerCase(),
+          )
+      )
+        return finish(`You already have another group named “${newName}”.`);
+      const group = options.store.renameGroup(
+        request.actor,
+        matches[0]!.id,
+        matches[0]!.revision,
+        newName,
+      );
+      createdGroup = { id: group.id, name: group.name };
+      actions.push({ label: `Rename group: ${group.name}`, status: "completed" });
+      return finish(`Renamed “${oldName}” to “${group.name}”.`);
+    }
+    const requestedStyle = styleRequest(message);
+    if (requestedStyle) {
+      const [key, value] = Object.entries(requestedStyle.value)[0]! as [
+        "tone" | "verbosity",
+        string,
+      ];
+      if (requestedStyle.persistence === "conversation") {
+        conversationPreferenceUpdate = {
+          set: requestedStyle.value,
+          expectedRevision: preferenceState.revision,
+        };
+        actions.push({ label: `Use ${key}: ${value} in this conversation`, status: "completed" });
+        return finish(`Okay. I’ll keep this conversation ${value}.`);
+      }
+      if (requestedStyle.persistence === "group" && request.scope.type !== "group")
+        return finish("Open a group conversation before setting a preference for that group.");
+      const settingScope: LifeScope =
+        requestedStyle.persistence === "group"
+          ? request.scope
+          : { type: "user", id: request.actor.userId };
+      const record = options.store.recordFeedback(request.actor, {
+        scope: settingScope,
+        message,
+        explicitPreference: { key, value },
+      });
+      records.push(record);
+      if (requestedStyle.persistence === "group") invalidateContext(request.actor, settingScope);
+      else invalidateActorContext(request.actor);
+      actions.push({
+        label: `Set ${requestedStyle.persistence} ${key}: ${value}`,
+        status: "completed",
+      });
+      return finish(
+        `Saved ${value} as your ${requestedStyle.persistence === "group" ? "group" : "personal"} ${key} preference.`,
+      );
+    }
+    if (/^(?:what are|show)(?: me)? my response preferences[?!.]?$/i.test(message)) {
+      const effective = options.store.resolveSettings(
+        request.actor,
+        request.scope.type === "group" ? { groupId: request.scope.id } : {},
+      );
+      const describe = (key: "tone" | "verbosity", fallback: string) => {
+        const temporary = preferenceState.preferences[key];
+        if (temporary) return `${key}: ${temporary} (this conversation)`;
+        const value = effective.values[key] ?? fallback,
+          origin = effective.origins[key] ?? "default";
+        return `${key}: ${String(value)} (${origin})`;
+      };
+      return finish(`${describe("tone", "calm")}; ${describe("verbosity", "balanced")}.`);
+    }
+    const useSavedPreferences = /^use saved preferences again in this conversation[.!?]?$/i.test(
+      message,
+    );
+    const clearConversation =
+      /^(?:clear|reset) (?:the )?(?:conversation|chat) (tone|verbosity|preferences?)[.!]?$/i.exec(
+        message,
+      );
+    if (useSavedPreferences || clearConversation) {
+      const selected = clearConversation?.[1]?.toLowerCase() ?? "preferences";
+      conversationPreferenceUpdate = {
+        clear: selected.startsWith("preference")
+          ? ["tone", "verbosity"]
+          : [selected as "tone" | "verbosity"],
+        expectedRevision: preferenceState.revision,
+      };
+      actions.push({ label: "Clear conversation preference", status: "completed" });
+      return finish("Cleared that conversation-only preference. Saved preferences still apply.");
+    }
+    const resetPreference =
+      /^reset (?:(?:this|the) group(?:'s)? |my )(tone|verbosity) preference[.!]?$/i.exec(message);
+    if (resetPreference) {
+      const key = resetPreference[1]!.toLowerCase() as "tone" | "verbosity",
+        groupReset = /group/i.test(message);
+      if (groupReset) {
+        if (request.scope.type !== "group")
+          return finish("Open a group conversation before resetting its preference.");
+        options.store.deleteGroupSetting(request.actor, request.scope.id, key);
+      } else options.store.deleteUserSetting(request.actor, key);
+      if (groupReset) invalidateContext(request.actor, request.scope);
+      else invalidateActorContext(request.actor);
+      const inherited = options.store.resolveSettings(
+        request.actor,
+        request.scope.type === "group" ? { groupId: request.scope.id } : {},
+      );
+      actions.push({
+        label: `Reset ${groupReset ? "group" : "personal"} ${key}`,
+        status: "completed",
+      });
+      return finish(
+        inherited.values[key] === undefined
+          ? `Reset the ${key} preference; the default now applies.`
+          : `Reset the ${key} preference; ${String(inherited.values[key])} now applies from ${inherited.origins[key]}.`,
+      );
+    }
     if (request.pendingIntent) {
       try {
         const directive = pendingDirective(
@@ -864,7 +1119,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         throw error;
       }
     }
-    const missingReminder = options.model ? undefined : parseMissingReminder(message);
+    const missingReminder = parseMissingReminder(message);
     if (missingReminder) {
       continuation = {
         action: request.pendingIntent?.state === "awaiting-fields" ? "replace" : "create",
@@ -1231,7 +1486,10 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
     }
 
-    const reminderStart = /^(?:please\s+)?(remind me|set (?:a )?timer)\s+/i.exec(message);
+    const reminderStart =
+      /^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:please\s+)?(remind me|set (?:a )?timer)\s+/i.exec(
+        message,
+      );
     if (reminderStart) {
       let parsed: ReturnType<typeof parseDelay> | ReturnType<typeof localAnchored>;
       try {
@@ -1472,31 +1730,11 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
     }
 
-    const pref = /^(?:please\s+)?(?:always\s+)?be\s+(concise|brief|warm)(?:\s+from now on)?$/i.exec(
-      message,
-    );
-    if (pref) {
-      const value = pref[1]!.toLowerCase();
-      const key = value === "warm" ? "tone" : "verbosity";
-      const record = options.store.recordFeedback(request.actor, {
-        scope: request.scope,
-        message,
-        explicitPreference: {
-          key,
-          value: value === "warm" ? "warm" : "brief",
-        },
-      });
-      records.push(record);
-      invalidateContext(request.actor, request.scope);
-      actions.push({ label: `Set ${key}`, status: "completed" });
-      return finish(`Got it. I’ll keep my replies ${value}.`);
-    }
-
     const feedback = /^feedback:\s*(.+)$/i.exec(message);
     if (feedback) {
       records.push(
         options.store.recordFeedback(request.actor, {
-          scope: request.scope,
+          scope: { type: "user", id: request.actor.userId },
           message: clean(feedback[1]!),
         }),
       );
@@ -1641,7 +1879,14 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
           history: suppliedHistory ?? sessions.get(conversationKey)?.slice(0, -1) ?? [],
           now: now(),
           timeZone,
-          ...modelContext(options.store, teaching, request.actor, request.scope, message),
+          ...modelContext(
+            options.store,
+            teaching,
+            request.actor,
+            request.scope,
+            message,
+            preferenceState.preferences,
+          ),
         }),
       );
       options.store.listRecords(request.actor, { scope: request.scope, limit: 1 });

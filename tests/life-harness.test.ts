@@ -275,7 +275,7 @@ test("model-translated reminder executes through the validated life operation", 
     const polite = await f.make(model).chat({
       actor,
       scope,
-      message: "Could you remind me to call Maya?",
+      message: "Could you remind me to call Maya at 10:37?",
     });
     assert.equal(polite.taskIds.length, 1);
     assert.match(polite.reply, /I'll remind you/);
@@ -589,7 +589,7 @@ test("invalid modeled local time returns an actionable no-change result", async 
     const response = await f.make(model).chat({
       actor,
       scope,
-      message: "Could you remind me to call Maya?",
+      message: "Could you remind me to call Maya at 10:37?",
     });
     assert.match(response.reply, /clock time is invalid.*No changes were saved/i);
     assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"], limit: 20 }).length, 0);
@@ -1028,6 +1028,32 @@ test("model context includes scoped settings and valid memories only", async () 
   }
 });
 
+test("model context preserves a whole selected memory including its final qualifier", async () => {
+  const f = await fixture();
+  let captured: Parameters<LifeModel["plan"]>[0] | undefined;
+  const model: LifeModel = {
+    async plan(request) {
+      captured = request;
+      return { reply: "understood", actions: [] };
+    },
+  };
+  try {
+    const body = `${"Rosemary notes. ".repeat(150)}Use rosemary only when Alice asks explicitly.`;
+    const memory = f.store.createRecord(actor, {
+      kind: "memory",
+      title: "Rosemary qualification",
+      body,
+      scope,
+      data: { explicit: true },
+    });
+    await f.make(model).chat({ actor, scope, message: "What are the rosemary rules?" });
+    assert.deepEqual(captured?.memories, [{ id: memory.id, text: body, explicit: true }]);
+    assert.match(captured?.memories?.[0]?.text ?? "", /only when Alice asks explicitly\.$/);
+  } finally {
+    await f.close();
+  }
+});
+
 test("explicit conversational preferences use canonical model and UI keys", async () => {
   const f = await fixture();
   try {
@@ -1039,11 +1065,239 @@ test("explicit conversational preferences use canonical model and UI keys", asyn
       },
     };
     const harness = f.make(model);
-    await harness.chat({ actor, scope, message: "Please be brief" });
-    assert.equal(f.store.resolveSettings(actor).values.verbosity, "brief");
-    await harness.chat({ actor, scope, message: "How should I plan my week?" });
+    const temporary = await harness.chat({ actor, scope, message: "Please be brief" });
+    assert.deepEqual(temporary.conversationPreferenceUpdate, {
+      set: { verbosity: "brief" },
+      expectedRevision: 0,
+    });
+    assert.equal(f.store.resolveSettings(actor).values.verbosity, undefined);
+    await harness.chat({
+      actor,
+      scope,
+      message: "How should I plan my week?",
+      conversationPreferences: { preferences: { verbosity: "brief" }, revision: 1 },
+    });
     assert.equal(preferences?.verbosity, "brief");
     assert.equal(preferences?.["response.length"], undefined);
+    await harness.chat({ actor, scope, message: "From now on, be detailed" });
+    assert.equal(f.store.resolveSettings(actor).values.verbosity, "detailed");
+  } finally {
+    await f.close();
+  }
+});
+
+test("lasting personal and group preferences have explicit scope and visible origins", async () => {
+  const f = await fixture();
+  try {
+    f.store.setDefaultSetting("tone", "calm");
+    const group = f.store.createGroup(actor, { name: "Family" }),
+      groupScope = { type: "group", id: group.id } as const,
+      harness = f.make();
+    await harness.chat({ actor, scope: groupScope, message: "Always be playful" });
+    assert.equal(f.store.resolveSettings(actor).values.tone, "playful");
+    assert.equal(f.store.resolveSettings(actor, { groupId: group.id }).origins.tone, "user");
+    await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "For this group, from now on, be warm",
+    });
+    assert.equal(f.store.resolveSettings(actor, { groupId: group.id }).values.tone, "playful");
+    assert.equal(f.store.resolveSettings(actor, { groupId: group.id }).origins.tone, "user");
+    await harness.chat({ actor, scope, message: "Reset my tone preference" });
+    const query = await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "What are my response preferences?",
+    });
+    assert.match(query.reply, /tone: warm \(group\)/i);
+    await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "Reset this group tone preference",
+    });
+    assert.equal(f.store.resolveSettings(actor, { groupId: group.id }).values.tone, "calm");
+    assert.equal(f.store.resolveSettings(actor, { groupId: group.id }).origins.tone, "default");
+  } finally {
+    await f.close();
+  }
+});
+
+test("a member cannot turn a conversational style request into a lasting group preference", async () => {
+  const f = await fixture();
+  try {
+    const group = f.store.createGroup(actor, { name: "Shared" });
+    f.store.setGroupMember(actor, group.id, { userId: "bob", role: "member" });
+    const groupScope = { type: "group", id: group.id } as const;
+    await assert.rejects(
+      f.make().chat({
+        actor: { userId: "bob" },
+        scope: groupScope,
+        message: "For this group, always be direct",
+      }),
+      /owner/i,
+    );
+    assert.equal(f.store.resolveSettings(actor, { groupId: group.id }).values.tone, undefined);
+    assert.equal(f.store.listRecords(actor, { scope: groupScope, kinds: ["feedback"] }).length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("conversation preference clearing and feedback-only chat never alter saved settings", async () => {
+  const f = await fixture();
+  try {
+    const harness = f.make();
+    const cleared = await harness.chat({
+      actor,
+      scope,
+      message: "Clear the conversation preferences",
+      conversationPreferences: {
+        preferences: { tone: "direct", verbosity: "brief" },
+        revision: 4,
+      },
+    });
+    assert.deepEqual(cleared.conversationPreferenceUpdate, {
+      clear: ["tone", "verbosity"],
+      expectedRevision: 4,
+    });
+    await harness.chat({ actor, scope, message: "Feedback: that answer was too long" });
+    assert.deepEqual(f.store.resolveSettings(actor).values, {});
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["feedback"] }).length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("feedback entered in a group conversation remains private to the actor", async () => {
+  const f = await fixture();
+  try {
+    const group = f.store.createGroup(actor, { name: "Shared" }),
+      groupScope = { type: "group", id: group.id } as const;
+    await f.make().chat({
+      actor,
+      scope: groupScope,
+      message: "Feedback: that group answer exposed too much",
+    });
+    assert.equal(f.store.listRecords(actor, { scope: groupScope, kinds: ["feedback"] }).length, 0);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["feedback"] }).length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("visible conversation style commands support every setting value and saved fallback", async () => {
+  const f = await fixture();
+  try {
+    const harness = f.make(),
+      values = [
+        ["calm", "tone"],
+        ["warm", "tone"],
+        ["playful", "tone"],
+        ["direct", "tone"],
+        ["brief", "verbosity"],
+        ["balanced", "verbosity"],
+        ["detailed", "verbosity"],
+      ] as const;
+    for (const [index, [value, key]] of values.entries()) {
+      const response = await harness.chat({
+        actor,
+        scope,
+        message: `In this conversation, be ${value}${[".", "!", "?"][index % 3]}`,
+        conversationPreferences: { preferences: {}, revision: index },
+      });
+      assert.deepEqual(response.conversationPreferenceUpdate, {
+        set: { [key]: value },
+        expectedRevision: index,
+      });
+    }
+    const fallback = await harness.chat({
+      actor,
+      scope,
+      message: "Use saved preferences again in this conversation.",
+      conversationPreferences: {
+        preferences: { tone: "playful", verbosity: "brief" },
+        revision: 9,
+      },
+    });
+    assert.deepEqual(fallback.conversationPreferenceUpdate, {
+      clear: ["tone", "verbosity"],
+      expectedRevision: 9,
+    });
+    assert.deepEqual(f.store.resolveSettings(actor).values, {});
+  } finally {
+    await f.close();
+  }
+});
+
+test("a lasting personal preference invalidates an older in-flight modeled reply", async () => {
+  const f = await fixture();
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => (entered = resolve)),
+    blocked = new Promise<void>((resolve) => (release = resolve));
+  const model: LifeModel = {
+    async plan() {
+      entered();
+      await blocked;
+      return { reply: "stale", actions: [] };
+    },
+  };
+  try {
+    const harness = f.make(model),
+      pending = harness.chat({ actor, scope, message: "Help me plan dinner" });
+    await started;
+    await harness.chat({ actor, scope, message: "From now on, keep my replies direct" });
+    release();
+    assert.match((await pending).reply, /saved context changed/i);
+    assert.equal(f.store.resolveSettings(actor).values.tone, "direct");
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
+test("group chat commands create idempotently and rename by exact visible name", async () => {
+  const f = await fixture();
+  try {
+    const harness = f.make(),
+      created = await harness.chat({ actor, scope, message: "Create a group called Family" });
+    assert.equal(created.createdGroup?.name, "Family");
+    assert.match(created.reply, /Open it to add shared records/i);
+    const repeated = await harness.chat({ actor, scope, message: "Create a group called Family" });
+    assert.equal(repeated.createdGroup?.id, created.createdGroup?.id);
+    assert.equal(f.store.listGroups(actor).length, 1);
+    const renamed = await harness.chat({
+      actor,
+      scope,
+      message: "Rename the group Family to Home",
+    });
+    assert.deepEqual(renamed.createdGroup, { id: created.createdGroup!.id, name: "Home" });
+    assert.equal(f.store.listGroups(actor)[0]?.revision, 2);
+    const quoted = await harness.chat({
+      actor,
+      scope,
+      message: "For example, create a group called Work",
+    });
+    assert.equal(quoted.createdGroup, undefined);
+    assert.equal(f.store.listGroups(actor).length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("group creation refuses an ambiguous duplicate visible name", async () => {
+  const f = await fixture();
+  try {
+    f.store.createGroup(actor, { id: "family-one", name: "Family" });
+    f.store.createGroup(actor, { id: "family-two", name: "Family." });
+    const result = await f.make().chat({
+      actor,
+      scope,
+      message: "Create a group called Family",
+    });
+    assert.match(result.reply, /more than one visible group/i);
+    assert.equal(result.createdGroup, undefined);
+    assert.equal(f.store.listGroups(actor).length, 2);
   } finally {
     await f.close();
   }
@@ -1982,6 +2236,95 @@ test("a missing reminder time becomes a trusted continuation and survives a fres
       true,
     );
     assert.equal(executed.taskIds.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("polite missing-time reminders draft deterministically without model calls or writes", async () => {
+  const f = await fixture();
+  let modelCalls = 0;
+  const model: LifeModel = {
+    async plan() {
+      modelCalls += 1;
+      throw new Error("The deterministic reminder draft should run first.");
+    },
+  };
+  try {
+    const harness = f.make(model);
+    for (const message of [
+      "Could you remind me to phone Maya?",
+      "Can you please remind me to phone Maya.",
+      "Would you remind me to phone Maya!",
+      "Please remind me to phone Maya?",
+    ]) {
+      const response = await harness.chat({ actor, scope, message });
+      assert.deepEqual(response.continuation, {
+        action: "create",
+        intent: { kind: "schedule-reminder", title: "phone Maya" },
+        missing: ["when"],
+        question: "When should I remind you?",
+      });
+      assert.equal(response.records.length, 0);
+      assert.equal(response.taskIds.length, 0);
+    }
+    assert.equal(modelCalls, 0);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"] }).length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("temporal-looking reminder phrases proceed to model interpretation", async () => {
+  const f = await fixture();
+  const seen: string[] = [];
+  const model: LifeModel = {
+    async plan(request) {
+      seen.push(request.message);
+      return { reply: "I need to interpret that time.", actions: [] };
+    },
+  };
+  try {
+    const harness = f.make(model),
+      messages = [
+        "Could you remind me to call Maya in an hour?",
+        "Could you remind me to call Maya at noon?",
+        "Could you remind me to call Maya on Tuesday?",
+        "Could you remind me to call Maya this evening?",
+        "Could you remind me to call Maya on September 15?",
+      ];
+    for (const message of messages) {
+      const response = await harness.chat({ actor, scope, message });
+      assert.equal(response.continuation, undefined);
+      assert.equal(response.records.length, 0);
+      assert.equal(response.taskIds.length, 0);
+    }
+    assert.deepEqual(seen, messages);
+  } finally {
+    await f.close();
+  }
+});
+
+test("quoted, advisory, and negated reminder wording cannot create a deterministic draft", async () => {
+  const f = await fixture();
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "No local action.", actions: [] };
+    },
+  };
+  try {
+    const harness = f.make(model);
+    for (const message of [
+      'For example, say "Could you remind me to phone Maya?"',
+      "How could you remind me to phone Maya?",
+      "Don't remind me to phone Maya.",
+    ]) {
+      const response = await harness.chat({ actor, scope, message });
+      assert.equal(response.continuation, undefined);
+      assert.equal(response.records.length, 0);
+      assert.equal(response.taskIds.length, 0);
+    }
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"] }).length, 0);
   } finally {
     await f.close();
   }

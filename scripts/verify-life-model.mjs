@@ -13,7 +13,11 @@ if (args.length !== 2) {
   );
   process.exit(2);
 }
-const model = new LocalOpenAIModel(args[0], args[1]);
+let inferenceRequests = 0;
+const model = new LocalOpenAIModel(args[0], args[1], async (...request) => {
+  inferenceRequests++;
+  return fetch(...request);
+});
 
 const root = await mkdtemp("/tmp/ellie-real-model-fixture-"),
   actor = { userId: "synthetic-model-acceptance" },
@@ -38,20 +42,28 @@ const store = new LifeStore(join(root, "life.sqlite"), { now: () => now }),
   });
 store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
 
-async function run(name, message, verify) {
-  const started = Date.now();
+async function run(name, message, verify, options = {}) {
+  const started = Date.now(),
+    priorInferenceRequests = inferenceRequests;
   try {
-    const result = await harness.chat({ actor, scope, message, conversationId: name });
+    const result = await harness.chat({ actor, scope, message, conversationId: name, ...options });
     verify(result);
     results.push({
       name,
       elapsedMs: Date.now() - started,
+      inferenceRequests: inferenceRequests - priorInferenceRequests,
       status: "passed",
       reply: result.reply,
       actions: result.actions,
     });
   } catch (error) {
-    results.push({ name, elapsedMs: Date.now() - started, status: "failed", error: String(error) });
+    results.push({
+      name,
+      elapsedMs: Date.now() - started,
+      inferenceRequests: inferenceRequests - priorInferenceRequests,
+      status: "failed",
+      error: String(error),
+    });
   }
   console.log(JSON.stringify(results.at(-1)));
 }
@@ -94,6 +106,47 @@ try {
     assert.deepEqual(result.continuation.missing, ["when"]);
     assert.match(result.reply, /when/i);
   });
+  const maya = store.createRecord(actor, {
+    kind: "contact",
+    scope,
+    title: "Maya",
+    body: "She loves growing vegetables on her balcony and already has gardening gloves.",
+    data: { interests: ["gardening", "hiking"] },
+  });
+  store.createRecord(actor, {
+    kind: "need",
+    scope,
+    title: "Maya birthday gift",
+    data: { budget: 40, currency: "USD", completed: false },
+    relationships: [{ type: "for-person", targetId: maya.id }],
+  });
+  const beforeAdvice = store
+    .listRecords(actor, { scope })
+    .map((record) => [record.id, record.revision]);
+  await run(
+    "personalized-advice",
+    "What kind of gift would suit Maya, using what you remember about her?",
+    (result) => {
+      assert.match(result.reply, /garden|vegetable|balcony/i);
+      assert.equal(result.records.length, 0);
+      assert.equal(result.taskIds.length, 0);
+      assert.deepEqual(
+        store.listRecords(actor, { scope }).map((record) => [record.id, record.revision]),
+        beforeAdvice,
+      );
+    },
+  );
+  const group = store.createGroup(actor, { name: "Synthetic empty space" });
+  await run(
+    "group-context-privacy",
+    "What personal interests have I saved for Maya in this space?",
+    (result) => {
+      assert.doesNotMatch(result.reply, /gardening|hiking|vegetables|balcony/);
+      assert.equal(result.records.length, 0);
+      assert.equal(result.taskIds.length, 0);
+    },
+    { scope: { type: "group", id: group.id } },
+  );
 } finally {
   await tasks.close();
   plugins.close();

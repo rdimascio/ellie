@@ -474,6 +474,68 @@ try {
     "deleted conversation is absent from scoped history",
   );
   await page.getByRole("button", { name: "Close conversation history" }).click();
+  await page.getByRole("button", { name: "Manage shared spaces" }).click();
+  await page.getByLabel("New space name").fill("Garden club");
+  await page.getByRole("button", { name: "Create space" }).click();
+  const gardenSpace = page.locator(".group-list article").filter({ hasText: "Garden club" });
+  await gardenSpace.waitFor();
+  await gardenSpace.getByRole("button", { name: "Open" }).click();
+  const createdGroup = await page.evaluate(async () => {
+    const body = (await (await fetch("/api/life/groups")).json()) as {
+      groups: Array<{ id: string; name: string; revision: number }>;
+    };
+    return body.groups.find((group) => group.name === "Garden club");
+  });
+  assert.ok(createdGroup);
+  assert.equal(await page.getByLabel("Sharing with").inputValue(), `group:${createdGroup.id}`);
+  await page.getByLabel("Message Ellie").fill("remember that garden club tea is at five");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
+  await page.getByRole("button", { name: "Send message" }).waitFor();
+  assert.equal(
+    store
+      .listRecords(
+        { userId: "e2e-user" },
+        { scope: { type: "group", id: createdGroup.id }, kinds: ["memory"] },
+      )
+      .some((record) => /garden club tea/i.test(record.title)),
+    true,
+  );
+  assert.equal(
+    store
+      .listRecords(
+        { userId: "e2e-user" },
+        { scope: { type: "group", id: createdGroup.id }, kinds: ["memory"] },
+      )
+      .some((record) => /morning appointments/i.test(record.title)),
+    false,
+    "personal records do not enter a newly selected shared space",
+  );
+  await page.getByRole("button", { name: "Manage shared spaces" }).click();
+  const managedGarden = page.locator(".group-list article").filter({ hasText: "Garden club" });
+  await managedGarden.getByRole("button", { name: "Rename" }).click();
+  const renameGarden = page.getByLabel("Rename Garden club");
+  await renameGarden.fill("Garden circle");
+  await renameGarden.press("Enter");
+  await page.getByRole("dialog").getByText("Garden circle", { exact: true }).waitFor();
+  await page.evaluate(async (group) => {
+    const response = await fetch(`/api/life/groups/${group.id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "Garden external", expectedRevision: group.revision + 1 }),
+    });
+    if (!response.ok) throw new Error(`fixture rename failed: ${response.status}`);
+  }, createdGroup);
+  const staleGarden = page.locator(".group-list article").filter({ hasText: "Garden circle" });
+  await staleGarden.getByRole("button", { name: "Rename" }).click();
+  const staleRename = page.getByLabel("Rename Garden circle");
+  await staleRename.fill("Garden stale");
+  await staleRename.press("Enter");
+  await page.getByText("That space was renamed elsewhere. Its current name is shown.").waitFor();
+  await page.getByRole("dialog").getByText("Garden external", { exact: true }).waitFor();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-shared-spaces.png"), fullPage: false });
+  await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
   await page.getByLabel("Message Ellie").fill("remember that family tea is at four");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -486,6 +548,45 @@ try {
     .getByText("remember that family tea is at four", { exact: true })
     .waitFor();
   await page.getByText("Private · using shared group context").waitFor();
+  await page.getByLabel("Length").selectOption("brief");
+  await page.getByText(/keep this conversation brief/i).waitFor();
+  await page.reload();
+  assert.equal(await page.getByLabel("Length").inputValue(), "brief");
+  await page.getByText("This conversation", { exact: true }).waitFor();
+  const privateFeedbackBefore = store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["feedback"] },
+    ).length,
+    groupFeedbackBefore = store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "group", id: sharedGroup.id }, kinds: ["feedback"] },
+    ).length;
+  await page
+    .locator(".messages article.ellie")
+    .last()
+    .getByRole("button", { name: "Helpful" })
+    .click();
+  await page.getByText("Private feedback saved for evaluation.").waitFor();
+  assert.equal(
+    store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["feedback"] },
+    ).length,
+    privateFeedbackBefore + 1,
+  );
+  assert.equal(
+    store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "group", id: sharedGroup.id }, kinds: ["feedback"] },
+    ).length,
+    groupFeedbackBefore,
+    "rating a group-context response remains actor-private",
+  );
+  if (artifactDir)
+    await page.screenshot({
+      path: join(artifactDir, "life-conversation-style.png"),
+      fullPage: false,
+    });
   const scopedHistories = await page.evaluate(async (groupScope) => {
     const [personal, group] = await Promise.all([
       fetch("/api/life/conversations?scope=user:e2e-user"),
@@ -505,6 +606,16 @@ try {
     true,
   );
   await page.getByRole("button", { name: "New", exact: true }).click();
+  assert.equal(await page.getByLabel("Length").inputValue(), "");
+  await page.getByLabel("Message Ellie").fill("from now on, be playful");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/personal tone preference/i).waitFor();
+  await page.getByLabel("Tone").selectOption("warm");
+  await page.getByText(/keep this conversation warm/i).waitFor();
+  await page.getByRole("button", { name: "Use saved preferences" }).click();
+  await page.getByText(/Saved preferences still apply/i).waitFor();
+  assert.equal(await page.getByLabel("Tone").inputValue(), "");
+  await page.getByText(/Saved user: playful/i).waitFor();
   await page.getByLabel("Sharing with").selectOption("user:e2e-user");
   await page.getByRole("button", { name: /Your world/ }).click();
   await page
@@ -926,8 +1037,10 @@ try {
   );
   assert.equal(await generatedFrame.getByRole("button", { name: "Reset" }).isDisabled(), true);
   await loadError.click();
+  await generatedFrame.getByRole("button", { name: "Add a glass" }).click();
+  await generatedCount().getByText("1", { exact: true }).waitFor();
+  await generatedFrame.getByRole("button", { name: "Reset" }).click();
   await generatedCount().getByText("0", { exact: true }).waitFor();
-  assert.equal(await generatedFrame.getByRole("button", { name: "Add a glass" }).isEnabled(), true);
   if (artifactDir)
     await page.screenshot({
       path: join(artifactDir, "life-generated-water-counter.png"),

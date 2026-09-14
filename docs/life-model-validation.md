@@ -23,6 +23,19 @@ Replace the endpoint and exact model ID with the runner’s configuration. The a
 
 Earlier attempts exposed three real compatibility problems: numeric time alone led to an incorrect year, the model flattened a nested action, and one output appended text after the JSON object. The context now supplies formatted current local time and exact nested examples; one bounded JSON/schema repair runs before any host action. Fourteen focused adapter tests cover this contract, input limits, cancellation, admission and shared repair deadlines. Passing these four examples is a useful acceptance sample, not a general benchmark or guarantee of model correctness.
 
+The eighth slice reran the same pinned runner with partial scoped world records and added two advice/privacy cases. The first run caught an invalid top-level `clarify` action even after repair and an unsupported assertion that all suggested gifts would fit a stored budget. The host now handles ordinary polite missing-time reminders deterministically before inference, and the model contract includes an exact draft envelope plus explicit budget/price distinctions. The final six-case script passed:
+
+| Case                          | Result                                                              | Inference requests | Time  |
+| ----------------------------- | ------------------------------------------------------------------- | ------------------ | ----- |
+| Reminder                      | Correct reminder/task for September 15 at 10 am Los Angeles         | 1                  | 8.1 s |
+| Event                         | Correct start and thirty-minute duration                            | 1                  | 4.7 s |
+| Shopping need                 | Correct item, budget and currency                                   | 1                  | 3.1 s |
+| Missing-time reminder         | Host-created typed draft; no reminder/task write                    | 0                  | 1 ms  |
+| Gift advice for Maya          | Used gardening/hiking interests and existing-gloves note; no writes | 1                  | 6.0 s |
+| Same person in an empty group | Did not expose the personal interests or create records             | 1                  | 3.2 s |
+
+The final gift response suggested relevant categories without claiming verified prices or an actual purchase. Its phrasing about checking affordability could still be clearer, and its list was longer than ideal. These are recorded observations, not a general quality score. The script asserts the selected facts, lack of side effects and absence of private fixture facts from the group answer; a human reviewed the full text. It now reports inference counts so host parsing cannot be mistaken for a successful model call. The captured synthetic final output is `/tmp/ellie-life-model-acceptance/world-final-cases.log`.
+
 An early generated water-counter app used `localStorage`, which is unavailable in the opaque plugin sandbox. After the SDK was introduced, a fresh generation and two plain-language revisions produced the unchanged fixture in `apps/life-ui/tests/fixtures/sdk-water-counter-v3.json`, using the trusted `window.ellie.storage` SDK. The real browser acceptance adds two glasses, verifies host storage, restores the value after closing and after a full page reload, persists Reset, retains the old count after an injected write failure, and keeps controls disabled until retry after an injected read failure. The generated app still parses stored values permissively and makes its retry message clickable rather than using a semantic button; this acceptance records tested behavior rather than a general quality guarantee.
 
 ## Pinned inputs

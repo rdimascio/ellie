@@ -1,4 +1,12 @@
 export type Scope = { type: "user" | "group"; id: string };
+export interface Group {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
 export type LifeKind =
   | "memory"
   | "contact"
@@ -96,7 +104,7 @@ export interface NotificationSummary {
 }
 export interface Bootstrap {
   profile: { id: string; name: string; timeZone: string };
-  groups: { id: string; name: string }[];
+  groups: Group[];
   scope: string;
   records: LifeRecord[];
   recordsPage?: { hasMore: boolean; nextCursor?: string };
@@ -169,6 +177,13 @@ export interface ConversationSummary {
   pending: boolean;
   createdAt: string | number;
   updatedAt: string | number;
+}
+export interface ConversationPreferenceState {
+  preferences: {
+    tone?: "calm" | "warm" | "playful" | "direct";
+    verbosity?: "brief" | "balanced" | "detailed";
+  };
+  revision: number;
 }
 export interface ConversationTurn {
   id: string;

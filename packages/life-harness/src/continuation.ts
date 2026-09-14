@@ -53,12 +53,11 @@ export function parseMissingReminder(message: string): PendingIntentPayload | un
     .trim()
     .replace(/[.!]+$/, "")
     .trim();
-  if (
-    !title ||
-    title.length > 2_000 ||
-    /\b(?:today|tomorrow|next\s+\w+|at\s+\d|in\s+\d|when\s+i(?:'m| am))\b/i.test(title)
-  )
-    return undefined;
+  const hasTemporalPhrase =
+    /\b(?:today|tomorrow|tonight|next\s+\w+|this\s+(?:morning|afternoon|evening|weekend)|at\s+(?:\d{1,2}|noon|midnight|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)|in\s+(?:(?:an?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d+)\s+(?:minutes?|hours?|days?|weeks?)|the\s+(?:morning|afternoon|evening))|on\s+(?:sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|\d{4}-\d{2}-\d{2}|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2})|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}|when\s+i(?:'m| am))\b/i.test(
+      title,
+    );
+  if (!title || title.length > 2_000 || hasTemporalPhrase) return undefined;
   return { kind: "schedule-reminder", title };
 }
 

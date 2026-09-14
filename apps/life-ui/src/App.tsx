@@ -3,7 +3,9 @@ import { api, ApiError, establishSessionFromFragment, parsePluginBridgeRequest }
 import type {
   Bootstrap,
   ConversationSummary,
+  ConversationPreferenceState,
   ConversationTurn,
+  Group,
   LifeRecord,
   ModelStatus,
   PendingIntent,
@@ -22,6 +24,7 @@ type Message = {
   actions?: { label: string; status: string }[];
   status?: "pending" | "interrupted" | "completed";
   outdated?: boolean;
+  turnId?: string;
 };
 const newRequestId = () =>
   typeof crypto.randomUUID === "function"
@@ -86,6 +89,10 @@ export function App() {
     [messages, setMessages] = useState<Message[]>([]),
     [conversation, setConversation] = useState<string>(),
     [conversationMeta, setConversationMeta] = useState<ConversationSummary>(),
+    [conversationPreferences, setConversationPreferences] = useState<ConversationPreferenceState>({
+      preferences: {},
+      revision: 0,
+    }),
     [pendingIntent, setPendingIntent] = useState<PendingIntent | null>(null),
     [pendingIntentState, setPendingIntentState] = useState<"idle" | "loading" | "error">("idle"),
     [uncertainRequest, setUncertainRequest] = useState<{
@@ -97,7 +104,8 @@ export function App() {
       hasMore: boolean;
       nextCursor?: string;
     }>({ hasMore: false }),
-    [expanded, setExpanded] = useState<PluginSummary | null>(null);
+    [expanded, setExpanded] = useState<PluginSummary | null>(null),
+    [groupsOpen, setGroupsOpen] = useState(false);
   const [notice, setNotice] = useState("");
   const scopeGeneration = useRef(0);
   const desiredScope = useRef("");
@@ -159,6 +167,7 @@ export function App() {
       setMessages([]);
       setConversation(undefined);
       setConversationMeta(undefined);
+      setConversationPreferences({ preferences: {}, revision: 0 });
       setPendingIntent(null);
       setPendingIntentState("idle");
       setUncertainRequest(undefined);
@@ -200,6 +209,25 @@ export function App() {
         : [],
     [data],
   );
+  const switchScope = (nextScope: string) => {
+    scopeGeneration.current += 1;
+    chatEpoch.current += 1;
+    chatRequest.current?.abort();
+    pendingIntentRequest.current?.abort();
+    pluginBuildRequest.current?.abort();
+    chatInFlight.current = "";
+    desiredScope.current = nextScope;
+    setMessages([]);
+    setConversation(undefined);
+    setConversationMeta(undefined);
+    setConversationPreferences({ preferences: {}, revision: 0 });
+    setPendingIntent(null);
+    setPendingIntentState("idle");
+    setBusy("");
+    setChatUrl(undefined, uncertainRequest?.id);
+    setLoading(true);
+    void load(nextScope);
+  };
   const mapTurns = (turns: ConversationTurn[]): Message[] =>
     [...turns].reverse().flatMap((turn) => [
       {
@@ -218,6 +246,7 @@ export function App() {
               status: turn.status,
               outdated: turn.outdated && turn.evidence.length > 0,
               actions: turn.actions,
+              turnId: turn.id,
             },
           ]
         : []),
@@ -242,6 +271,7 @@ export function App() {
       }
       setConversation(id);
       setConversationMeta(detail.conversation);
+      setConversationPreferences(detail.conversationPreferences);
       setMessages(mapTurns(detail.turns));
       setOlderTurns(detail.page);
       const pending =
@@ -324,6 +354,7 @@ export function App() {
       );
       if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
       setConversation(r.conversationId);
+      setConversationPreferences(r.conversationPreferences);
       setMessages((current) => {
         const next = current.map((item) =>
           item.id === `${requestId}-user` ? { ...item, status: r.status } : item,
@@ -338,6 +369,7 @@ export function App() {
                 prompt: message.trim(),
                 actions: r.actions,
                 status: r.status,
+                turnId: r.turnId,
               },
             ]
           : next;
@@ -421,6 +453,7 @@ export function App() {
     setMessages([]);
     setConversation(undefined);
     setConversationMeta(undefined);
+    setConversationPreferences({ preferences: {}, revision: 0 });
     setPendingIntent(null);
     setPendingIntentState("idle");
     setBusy("");
@@ -505,34 +538,16 @@ export function App() {
         </nav>
         <div className="scope">
           <label htmlFor="scope">Sharing with</label>
-          <select
-            id="scope"
-            value={scope}
-            onChange={(e) => {
-              scopeGeneration.current += 1;
-              chatEpoch.current += 1;
-              chatRequest.current?.abort();
-              pendingIntentRequest.current?.abort();
-              pluginBuildRequest.current?.abort();
-              chatInFlight.current = "";
-              desiredScope.current = e.target.value;
-              setMessages([]);
-              setConversation(undefined);
-              setConversationMeta(undefined);
-              setPendingIntent(null);
-              setPendingIntentState("idle");
-              setBusy("");
-              setChatUrl(undefined, uncertainRequest?.id);
-              setLoading(true);
-              void load(e.target.value);
-            }}
-          >
+          <select id="scope" value={scope} onChange={(e) => switchScope(e.target.value)}>
             {scopeOptions.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
               </option>
             ))}
           </select>
+          <button type="button" className="manage-spaces" onClick={() => setGroupsOpen(true)}>
+            Manage shared spaces
+          </button>
         </div>
         <button className="settings-link" onClick={() => setView("settings")}>
           {icons.settings} Settings
@@ -568,6 +583,8 @@ export function App() {
             busy={busy === "chat"}
             send={send}
             active={conversationMeta}
+            preferences={conversationPreferences}
+            savedSettings={data.settings}
             openConversation={openConversation}
             newConversation={newConversation}
             uncertainRequest={uncertainRequest}
@@ -701,6 +718,17 @@ export function App() {
           }}
         />
       )}
+      {groupsOpen && (
+        <GroupManager
+          initial={data.groups}
+          close={() => setGroupsOpen(false)}
+          open={(group) => {
+            setGroupsOpen(false);
+            switchScope(`group:${group.id}`);
+          }}
+          changed={() => load(desiredScope.current, true)}
+        />
+      )}
     </div>
   );
 }
@@ -781,6 +809,76 @@ function Composer({
     </form>
   );
 }
+function ConversationStyle({
+  state,
+  savedSettings,
+  busy,
+  send,
+}: {
+  state: ConversationPreferenceState;
+  savedSettings: Record<string, unknown>;
+  busy: boolean;
+  send: (message: string) => void;
+}) {
+  const values =
+      savedSettings.values && typeof savedSettings.values === "object"
+        ? (savedSettings.values as Record<string, unknown>)
+        : savedSettings,
+    origins =
+      savedSettings.origins && typeof savedSettings.origins === "object"
+        ? (savedSettings.origins as Record<string, string>)
+        : {},
+    savedTone = typeof values.tone === "string" ? values.tone : "calm",
+    savedVerbosity = typeof values.verbosity === "string" ? values.verbosity : "balanced";
+  const label = (key: "tone" | "verbosity", saved: string) =>
+    state.preferences[key] ? "This conversation" : `Saved ${origins[key] ?? "default"}: ${saved}`;
+  return (
+    <div className="conversation-style" aria-label="Conversation style">
+      <label>
+        Tone
+        <select
+          value={state.preferences.tone ?? ""}
+          disabled={busy}
+          onChange={(event) => {
+            if (event.target.value) send(`In this conversation, be ${event.target.value}`);
+          }}
+        >
+          <option value="">{savedTone}</option>
+          {(["calm", "warm", "playful", "direct"] as const).map((value) => (
+            <option key={value}>{value}</option>
+          ))}
+        </select>
+        <small>{label("tone", savedTone)}</small>
+      </label>
+      <label>
+        Length
+        <select
+          value={state.preferences.verbosity ?? ""}
+          disabled={busy}
+          onChange={(event) => {
+            if (event.target.value) send(`In this conversation, be ${event.target.value}`);
+          }}
+        >
+          <option value="">{savedVerbosity}</option>
+          {(["brief", "balanced", "detailed"] as const).map((value) => (
+            <option key={value}>{value}</option>
+          ))}
+        </select>
+        <small>{label("verbosity", savedVerbosity)}</small>
+      </label>
+      {(state.preferences.tone || state.preferences.verbosity) && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => send("Use saved preferences again in this conversation")}
+        >
+          Use saved preferences
+        </button>
+      )}
+    </div>
+  );
+}
+
 function Chat({
   name,
   messages,
@@ -790,6 +888,8 @@ function Chat({
   busy,
   send,
   active,
+  preferences,
+  savedSettings,
   openConversation,
   newConversation,
   uncertainRequest,
@@ -809,6 +909,8 @@ function Chat({
   busy: boolean;
   send: (s: string) => void;
   active?: ConversationSummary;
+  preferences: ConversationPreferenceState;
+  savedSettings: Record<string, unknown>;
   openConversation: (id: string) => Promise<void>;
   newConversation: () => void;
   uncertainRequest?: {
@@ -859,6 +961,12 @@ function Chat({
           New
         </button>
       </div>
+      <ConversationStyle
+        state={preferences}
+        savedSettings={savedSettings}
+        busy={busy}
+        send={send}
+      />
       {uncertainRequest && (
         <div className="request-recovery" role="status">
           <div>
@@ -939,7 +1047,7 @@ function Chat({
                 </small>
               ))}
               {m.role === "ellie" && m.prompt && (
-                <ResponseFeedback scope={scope} prompt={m.prompt} response={m.text} />
+                <ResponseFeedback conversationId={active?.id} turnId={m.turnId} />
               )}
             </div>
           </article>
@@ -1269,39 +1377,55 @@ function ConversationHistory({
   );
 }
 function ResponseFeedback({
-  scope,
-  prompt,
-  response,
+  conversationId,
+  turnId,
 }: {
-  scope: string;
-  prompt: string;
-  response: string;
+  conversationId?: string;
+  turnId?: string;
 }) {
-  const [mode, setMode] = useState<"idle" | "correct" | "sent">("idle"),
-    [correction, setCorrection] = useState("");
+  const [mode, setMode] = useState<"idle" | "correct" | "sending" | "sent">("idle"),
+    [correction, setCorrection] = useState(""),
+    [error, setError] = useState("");
   const record = async (rating: -1 | 1) => {
-    await api.learning.record({
-      scope,
-      message:
-        rating === 1
-          ? "This response was helpful."
-          : correction.trim() || "This response needs work.",
-      rating,
-      example: {
-        prompt,
-        response,
-        ...(correction.trim() ? { preferredResponse: correction.trim() } : {}),
-      },
-      trainingEligible: false,
-    });
-    setMode("sent");
+    if (!conversationId || !turnId || mode === "sending") return;
+    setMode("sending");
+    setError("");
+    try {
+      await api.learning.record({
+        conversationId,
+        turnId,
+        message:
+          rating === 1
+            ? "This response was helpful."
+            : correction.trim() || "This response needs work.",
+        rating,
+        example: correction.trim() ? { preferredResponse: correction.trim() } : {},
+        trainingEligible: false,
+      });
+      setMode("sent");
+    } catch (cause) {
+      setMode(rating === -1 ? "correct" : "idle");
+      setError(cause instanceof Error ? cause.message : "Feedback could not be saved.");
+    }
   };
-  if (mode === "sent") return <span className="feedback-sent">Feedback saved for evaluation.</span>;
+  if (mode === "sent")
+    return <span className="feedback-sent">Private feedback saved for evaluation.</span>;
   return (
     <div className="response-feedback">
-      <button onClick={() => void record(1)}>Helpful</button>
-      <button onClick={() => setMode("correct")}>Needs work</button>
-      {mode === "correct" && (
+      <span>Private to you</span>
+      <button
+        disabled={!conversationId || !turnId || mode === "sending"}
+        onClick={() => void record(1)}
+      >
+        Helpful
+      </button>
+      <button
+        disabled={!conversationId || !turnId || mode === "sending"}
+        onClick={() => setMode("correct")}
+      >
+        Needs work
+      </button>
+      {(mode === "correct" || mode === "sending") && (
         <div>
           <textarea
             aria-label="How should Ellie respond instead?"
@@ -1309,9 +1433,12 @@ function ResponseFeedback({
             onChange={(event) => setCorrection(event.target.value)}
             placeholder="Optional: what would have been better?"
           />
-          <button onClick={() => void record(-1)}>Save feedback</button>
+          <button disabled={mode === "sending"} onClick={() => void record(-1)}>
+            {mode === "sending" ? "Saving…" : "Save private feedback"}
+          </button>
         </div>
       )}
+      {error && <span role="alert">{error}</span>}
     </div>
   );
 }
@@ -3694,6 +3821,125 @@ function Empty({ title, body }: { title: string; body: string }) {
     </div>
   );
 }
+function GroupManager({
+  initial,
+  close,
+  open,
+  changed,
+}: {
+  initial: Group[];
+  close: () => void;
+  open: (group: Group) => void;
+  changed: () => Promise<void>;
+}) {
+  const [groups, setGroups] = useState(initial),
+    [name, setName] = useState(""),
+    [editing, setEditing] = useState(""),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  const create = async () => {
+    setBusy(true);
+    setError("");
+    try {
+      const group = await api.groups.create(name.trim());
+      setGroups((current) => [...current, group]);
+      setName("");
+      await changed();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The shared space could not be created.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Modal title="Shared spaces" close={close}>
+      <p className="impact">
+        Shared spaces keep selected records and apps together on this device. Your conversations
+        remain private.
+      </p>
+      <form
+        className="group-create"
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (name.trim()) void create();
+        }}
+      >
+        <label>
+          New space name
+          <input value={name} onChange={(event) => setName(event.target.value)} />
+        </label>
+        <button className="primary" disabled={busy || !name.trim()}>
+          Create space
+        </button>
+      </form>
+      <div className="group-list">
+        {groups.map((group) => (
+          <article key={group.id}>
+            {editing === group.id ? (
+              <input
+                aria-label={`Rename ${group.name}`}
+                defaultValue={group.name}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  const next = event.currentTarget.value.trim();
+                  if (!next) return;
+                  setBusy(true);
+                  void api.groups
+                    .rename(group.id, next, group.revision)
+                    .then(async (updated) => {
+                      setGroups((current) =>
+                        current.map((item) => (item.id === updated.id ? updated : item)),
+                      );
+                      setEditing("");
+                      await changed();
+                    })
+                    .catch(async (cause) => {
+                      if (cause instanceof ApiError && cause.status === 409) {
+                        try {
+                          const current = await api.groups.list();
+                          setGroups(current.groups);
+                          await changed();
+                          setEditing("");
+                          setError("That space was renamed elsewhere. Its current name is shown.");
+                        } catch (refreshError) {
+                          setError(
+                            refreshError instanceof Error
+                              ? refreshError.message
+                              : "The current space name could not be loaded.",
+                          );
+                        }
+                      } else setError(cause instanceof Error ? cause.message : "Rename failed.");
+                    })
+                    .finally(() => setBusy(false));
+                }}
+              />
+            ) : (
+              <div>
+                <strong>{group.name}</strong>
+                <span>{group.role === "owner" ? "You own this space" : "Member"}</span>
+              </div>
+            )}
+            <div>
+              {group.role === "owner" && editing !== group.id && (
+                <button onClick={() => setEditing(group.id)}>Rename</button>
+              )}
+              <button className="primary" onClick={() => open(group)}>
+                Open
+              </button>
+            </div>
+          </article>
+        ))}
+      </div>
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+    </Modal>
+  );
+}
+
 function Modal({
   title,
   close,

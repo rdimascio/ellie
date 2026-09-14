@@ -38,6 +38,10 @@ The directory must be outside the source checkout, owned by the current OS user,
 - “Complete buy a garden gift.”
 - “Set a timer for 2 minutes.”
 - “Every Monday at 9 am remind me to plan the week.”
+- “Could you remind me to phone Maya?” (Ellie asks when and keeps the draft.)
+- “Create a group called Family.” (Open the returned space to add shared records.)
+- “In this conversation, be brief.”
+- “Use saved preferences again in this conversation.”
 - “Build an arcade shooter with a high score widget.”
 - “Build an MLB standings and today's games widget.”
 - “Teach Ellie: Offer two options when helping me plan dinner.”
@@ -59,11 +63,15 @@ In Settings, use **Inspect my data** to review the private records, sources, gui
 
 Chat history belongs to its author, including conversations using a group context. History supports reopening and deleting conversations; transcripts are stored in the private service database, not browser local storage. Archives include your conversations in currently accessible spaces. Reset deletes all of your conversations, including those whose group access was later revoked. Historical messages can retain quoted or remembered text after a life record is changed; delete the conversation or reset personal data to remove those transcripts. Changed source or settings context is excluded from future model history.
 
+Use **Manage shared spaces** to create, open or rename a locally owned space. Personal records remain personal when switching spaces. Space names and owner changes use revisions so an older window cannot overwrite a newer rename. Invitation, account linking and synchronization are not enabled by these controls.
+
+Tone and Length at the top of chat send visible conversation commands. Temporary preferences survive reopening that conversation; a new conversation inherits saved preferences again. Explicit lasting instructions change personal preferences unless the user expressly requests a group setting and has authority to change it. Helpful/Needs work ratings keep the rated exchange in personal feedback even when the conversation uses a shared space.
+
 **Review reset** shows the scope before you explicitly reset your private data. Reset pauses new mutations, settles active requests and private background work, and journals progress across the three stores. It preserves shared group content and memberships, and removes your own storage in shared apps. If work cannot stop immediately, the status remains pending and can be retried. A restarted service restores the pending pause. Previously downloaded files, device backups and external systems are outside this local reset.
 
 ## Optional local model
 
-An explicitly configured, already running OpenAI-compatible local model can answer broader questions using scoped memories, preferences and source evidence, and generate or revise self-contained custom applications:
+An explicitly configured, already running OpenAI-compatible local model can answer broader questions using scoped memories, preferences, source evidence and a partial selection of people, needs, places and commitments, and generate or revise self-contained custom applications:
 
 ```sh
 bun run life:start --model-url http://127.0.0.1:8080/v1 --model YOUR_INSTALLED_MODEL_ID

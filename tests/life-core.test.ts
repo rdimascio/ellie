@@ -27,7 +27,14 @@ test("records survive restart, enforce private/group scopes, revisions and delet
   try {
     let store = f.open();
     const group = store.createGroup(alice, { id: "home", name: "Home" });
-    assert.deepEqual(group, { id: "home", name: "Home" });
+    assert.deepEqual(group, {
+      id: "home",
+      name: "Home",
+      role: "owner",
+      revision: 1,
+      createdAt: 100,
+      updatedAt: 100,
+    });
     store.setGroupMember(alice, "home", { userId: "bob", role: "member" });
     const privateRecord = store.createRecord(alice, {
       kind: "memory",
@@ -1035,6 +1042,103 @@ test("pending intents bind direct turns, fill only missing fields, persist and n
     assert.equal(store.personalSummary(alice).pendingIntents, 0);
     store.close();
   } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("groups are revisioned and conversation preferences remain actor-private", async () => {
+  const f = await fixture();
+  let store = f.open(10_000);
+  try {
+    const group = store.createGroup(alice, { id: "family", name: "Family" });
+    assert.equal(group.revision, 1);
+    store.setGroupMember(alice, group.id, { userId: "bob", role: "member" });
+    assert.throws(() => store.renameGroup(bob, group.id, 1, "Other"), LifeAccessError);
+    store.recordFeedback(bob, {
+      scope: { type: "group", id: group.id },
+      message: "Please be brief",
+      explicitPreference: { key: "verbosity", value: "brief" },
+      preferenceLevel: "user",
+    });
+    assert.equal(store.resolveSettings(bob).values.verbosity, "brief");
+    assert.equal(store.resolveSettings(alice, { groupId: group.id }).values.verbosity, undefined);
+    const renamed = store.renameGroup(alice, group.id, 1, "Our family");
+    assert.equal(renamed.revision, 2);
+    assert.throws(() => store.renameGroup(alice, group.id, 1, "Stale"), LifeConflictError);
+    for (let index = 1; index < 32; index++)
+      store.createGroup(alice, { id: `group-${index}`, name: `Group ${index}` });
+    assert.throws(
+      () => store.createGroup(alice, { id: "group-33", name: "Too many" }),
+      /at most 32/,
+    );
+
+    const begun = store.beginConversationTurn(alice, {
+      scope: { type: "group", id: group.id },
+      requestId: "style-1",
+      chatEpoch: 1,
+      message: "In this conversation, be brief",
+    });
+    assert.throws(
+      () =>
+        store.updateConversationPreferences(alice, {
+          conversationId: begun.conversation.id,
+          expectedRevision: 0,
+          set: { tone: ["warm"] } as never,
+          chatEpoch: 1,
+          contextFingerprint: begun.contextFingerprint,
+          originTurnId: begun.turn.id,
+          originRequestId: "style-1",
+        }),
+      /tone is invalid/,
+    );
+    const completed = store.completeConversationTurn(alice, {
+      conversationId: begun.conversation.id,
+      turnId: begun.turn.id,
+      requestId: "style-1",
+      result: { reply: "Okay.", actions: [], recordIds: [], taskIds: [], evidence: [] },
+      preferenceUpdate: {
+        expectedRevision: 0,
+        set: { verbosity: "brief" },
+        chatEpoch: 1,
+        contextFingerprint: begun.contextFingerprint,
+      },
+    });
+    assert.deepEqual(store.getConversationPreferences(alice, begun.conversation.id), {
+      preferences: { verbosity: "brief" },
+      revision: 1,
+    });
+    assert.throws(
+      () => store.getConversationPreferences(bob, begun.conversation.id),
+      LifeAccessError,
+    );
+    assert.equal(
+      store.completeConversationTurn(alice, {
+        conversationId: begun.conversation.id,
+        turnId: begun.turn.id,
+        requestId: "style-1",
+        result: completed.result,
+      }).turn.id,
+      begun.turn.id,
+      "a duplicate receipt must not apply the preference twice",
+    );
+    store.close();
+    store = f.open(11_000);
+    assert.equal(store.listGroups(alice).find((item) => item.id === group.id)?.name, "Our family");
+    assert.equal(
+      store.getConversationPreferences(alice, begun.conversation.id).preferences.verbosity,
+      "brief",
+    );
+    assert.ok(
+      store
+        .exportPersonalPage(alice, { limit: 100 })
+        .items.some((item) => item.type === "conversation-preferences"),
+    );
+    store.deleteConversation(alice, begun.conversation.id, completed.conversation.revision);
+    assert.throws(() => store.getConversationPreferences(alice, begun.conversation.id));
+  } finally {
+    try {
+      store.close();
+    } catch {}
     await rm(f.dir, { recursive: true, force: true });
   }
 });

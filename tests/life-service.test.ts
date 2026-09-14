@@ -36,6 +36,132 @@ test("plugin child bootstrap installs a frozen storage SDK before custom HTML", 
   assert.doesNotMatch(document, /\[upstream\.port2\]/);
 });
 
+test("group management is generated, revisioned and owner-only", async () => {
+  const f = await fixture();
+  try {
+    let running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const suppliedId = await fetch(`${running.url}/api/life/groups`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ id: "chosen", name: "Family" }),
+    });
+    assert.equal(suppliedId.status, 400);
+    const createdResponse = await fetch(`${running.url}/api/life/groups`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ name: "Family" }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = (await createdResponse.json()) as {
+      id: string;
+      name: string;
+      role: string;
+      revision: number;
+    };
+    assert.equal(created.role, "owner");
+    assert.equal(created.revision, 1);
+    const renamed = await fetch(`${running.url}/api/life/groups/${created.id}`, {
+      method: "PATCH",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ name: "Our family", expectedRevision: 1 }),
+    });
+    assert.equal(renamed.status, 200);
+    assert.equal(((await renamed.json()) as { revision: number }).revision, 2);
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/groups/${created.id}`, {
+          method: "PATCH",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({ name: "Stale", expectedRevision: 1 }),
+        })
+      ).status,
+      409,
+    );
+    f.life.setGroupMember({ userId: "local" }, created.id, { userId: "bob", role: "member" });
+    await running.server.close();
+    running = await f.start("b".repeat(43), "bob");
+    cookie = await authenticate(running.url, "b".repeat(43));
+    const groups = (await (
+      await fetch(`${running.url}/api/life/groups`, { headers: { cookie } })
+    ).json()) as { groups: Array<{ name: string; role: string }> };
+    assert.deepEqual(
+      groups.groups.map(({ name, role }) => ({ name, role })),
+      [{ name: "Our family", role: "member" }],
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/groups/${created.id}`, {
+          method: "PATCH",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({ name: "No", expectedRevision: 2 }),
+        })
+      ).status,
+      403,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("chat applies private conversation preferences once and restores them", async () => {
+  const f = await fixture();
+  try {
+    f.harness.chat = async (input) => ({
+      reply: "I’ll keep this conversation brief.",
+      conversationId: input.conversationId!,
+      actions: [],
+      conversationPreferenceUpdate: {
+        set: { verbosity: "brief" },
+        expectedRevision: input.conversationPreferences!.revision,
+      },
+    });
+    let running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const payload = {
+      scope: "user:local",
+      message: "In this conversation, be brief",
+      requestId: "preference-once",
+      chatEpoch: 1,
+    };
+    const response = await fetch(`${running.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify(payload),
+    });
+    assert.equal(response.status, 200);
+    const saved = (await response.json()) as {
+      conversationId: string;
+      conversationPreferences: { preferences: { verbosity: string }; revision: number };
+    };
+    assert.deepEqual(saved.conversationPreferences, {
+      preferences: { verbosity: "brief" },
+      revision: 1,
+    });
+    const duplicate = await fetch(`${running.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify(payload),
+    });
+    assert.equal(
+      ((await duplicate.json()) as { conversationPreferences: { revision: number } })
+        .conversationPreferences.revision,
+      1,
+    );
+    await running.server.close();
+    running = await f.start("b".repeat(43));
+    cookie = await authenticate(running.url, "b".repeat(43));
+    const detail = (await (
+      await fetch(`${running.url}/api/life/conversations/${saved.conversationId}`, {
+        headers: { cookie },
+      })
+    ).json()) as { conversationPreferences: { preferences: { verbosity: string } } };
+    assert.equal(detail.conversationPreferences.preferences.verbosity, "brief");
+  } finally {
+    await f.close();
+  }
+});
+
 test("plugin builds expose actionable deadlines and abort during service shutdown", async () => {
   const f = await fixture();
   try {
@@ -607,13 +733,14 @@ test("group and plugin lookup cannot bypass authorized owners", async () => {
     const groupResponse = await fetch(`${running.url}/api/life/groups`, {
       method: "POST",
       headers: jsonHeaders(running.url, cookie),
-      body: JSON.stringify({ id: "home", name: "Home" }),
+      body: JSON.stringify({ name: "Home" }),
     });
     assert.equal(groupResponse.status, 201);
+    const groupId = ((await groupResponse.json()) as { id: string }).id;
     const build = await fetch(`${running.url}/api/life/plugins/build`, {
       method: "POST",
       headers: jsonHeaders(running.url, cookie),
-      body: JSON.stringify({ request: "build an arcade", scope: "group:home" }),
+      body: JSON.stringify({ request: "build an arcade", scope: `group:${groupId}` }),
     });
     assert.equal(build.status, 201);
     const plugin = (await build.json()) as { id: string };
@@ -634,15 +761,17 @@ test("group and plugin lookup cannot bypass authorized owners", async () => {
     });
     assert.equal(set.status, 200);
     assert.equal(
-      f.plugins.storageGet("group:home", plugin.id, groupStorageKey("local", "highScore")),
+      f.plugins.storageGet(`group:${groupId}`, plugin.id, groupStorageKey("local", "highScore")),
       42,
     );
-    f.life.setGroupMember({ userId: "local" }, "home", { userId: "bob", role: "member" });
+    f.life.setGroupMember({ userId: "local" }, groupId, { userId: "bob", role: "member" });
     await running.server.close();
     running = await f.start("b".repeat(43), "bob");
     cookie = await authenticate(running.url, "b".repeat(43));
     const bobBootstrap = (await (
-      await fetch(`${running.url}/api/life/bootstrap?scope=group:home`, { headers: { cookie } })
+      await fetch(`${running.url}/api/life/bootstrap?scope=group:${groupId}`, {
+        headers: { cookie },
+      })
     ).json()) as { plugins: Array<{ id: string; data: { highScore: number } }> };
     assert.equal(bobBootstrap.plugins.find((item) => item.id === plugin.id)?.data.highScore, 0);
     assert.equal(
@@ -658,17 +787,19 @@ test("group and plugin lookup cannot bypass authorized owners", async () => {
     await running.server.close();
     running = await f.start("c".repeat(43));
     cookie = await authenticate(running.url, "c".repeat(43));
-    f.life.setGroupSetting({ userId: "local" }, "home", "timeZone", "America/New_York");
+    f.life.setGroupSetting({ userId: "local" }, groupId, "timeZone", "America/New_York");
     f.life.setUserSetting({ userId: "local" }, "timeZone", "America/Los_Angeles");
     const localBootstrap = (await (
-      await fetch(`${running.url}/api/life/bootstrap?scope=group:home`, { headers: { cookie } })
+      await fetch(`${running.url}/api/life/bootstrap?scope=group:${groupId}`, {
+        headers: { cookie },
+      })
     ).json()) as {
       profile: { timeZone: string };
       plugins: Array<{ id: string; data: { highScore: number } }>;
     };
     assert.equal(localBootstrap.plugins.find((item) => item.id === plugin.id)?.data.highScore, 42);
     assert.equal(localBootstrap.profile.timeZone, "America/Los_Angeles");
-    f.plugins.update("group:home", plugin.id, 1, {
+    f.plugins.update(`group:${groupId}`, plugin.id, 1, {
       name: "Star arcade",
       description: "Version two",
       kind: "arcade",
@@ -1229,6 +1360,107 @@ test("learning feedback remains scoped and exports only explicitly selected pers
     assert.equal(payload.format, "ellie-feedback-v1");
     assert.equal(payload.count, 1);
     assert.match(payload.jsonl, /"preferredOutput":"At seven\."/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("conversation response feedback is bound to an owned turn and stored privately", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" },
+      group = f.life.createGroup(actor, { id: "feedback-room", name: "Feedback room" }),
+      begun = f.life.beginConversationTurn(actor, {
+        scope: { type: "group", id: group.id },
+        requestId: "rated-turn",
+        chatEpoch: 1,
+        message: "What should I bring?",
+      });
+    f.life.completeConversationTurn(actor, {
+      conversationId: begun.conversation.id,
+      turnId: begun.turn.id,
+      requestId: "rated-turn",
+      result: {
+        reply: "Bring water.",
+        actions: [],
+        recordIds: [],
+        taskIds: [],
+        evidence: [],
+      },
+    });
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43)),
+      response = await fetch(`${running.url}/api/life/learning`, {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({
+          scope: `group:${group.id}`,
+          conversationId: begun.conversation.id,
+          turnId: begun.turn.id,
+          message: "Helpful",
+          rating: 1,
+          example: { prompt: "malicious replacement", response: "leak this" },
+          trainingEligible: false,
+        }),
+      });
+    assert.equal(response.status, 201);
+    const feedback = (await response.json()) as {
+      scope: { type: string; id: string };
+      data: { example: { prompt: string; response: string } };
+    };
+    assert.deepEqual(feedback.scope, { type: "user", id: "local" });
+    assert.deepEqual(feedback.data.example, {
+      prompt: "What should I bring?",
+      response: "Bring water.",
+    });
+    const personalPreference = await fetch(`${running.url}/api/life/feedback`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({
+        scope: `group:${group.id}`,
+        text: "Keep my answers brief",
+        explicitPreference: { key: "verbosity", value: "brief" },
+      }),
+    });
+    assert.equal(personalPreference.status, 201);
+    assert.deepEqual(
+      ((await personalPreference.json()) as { scope: { type: string; id: string } }).scope,
+      { type: "user", id: "local" },
+    );
+    assert.equal(f.life.resolveSettings(actor).values.verbosity, "brief");
+    assert.equal(f.life.resolveSettings(actor, { groupId: group.id }).origins.verbosity, "user");
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/learning`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({
+            conversationId: begun.conversation.id,
+            turnId: "missing-turn",
+            message: "No",
+            rating: -1,
+          }),
+        })
+      ).status,
+      403,
+    );
+    f.life.setGroupMember(actor, group.id, { userId: "other-owner", role: "owner" });
+    f.life.setGroupMember(actor, group.id, { userId: "local", remove: true });
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/learning`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({
+            conversationId: begun.conversation.id,
+            turnId: begun.turn.id,
+            message: "Again",
+            rating: 1,
+          }),
+        })
+      ).status,
+      403,
+    );
   } finally {
     await f.close();
   }
