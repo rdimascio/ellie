@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { access, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { constants } from "node:fs";
-import { arch, platform, tmpdir } from "node:os";
+import { arch, platform, tmpdir, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -107,11 +107,15 @@ export function localRunnerOrigin(value) {
   return url.origin;
 }
 
-function run(file, args, { capture = false } = {}) {
+function run(file, args, { capture = false, input } = {}) {
   return new Promise((resolveRun, reject) => {
     const child = spawn(file, args, {
       cwd: root,
-      stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+      stdio: [
+        input === undefined ? "ignore" : "pipe",
+        capture ? "pipe" : "inherit",
+        capture ? "pipe" : "inherit",
+      ],
     });
     let stdout = "";
     let stderr = "";
@@ -133,6 +137,7 @@ function run(file, args, { capture = false } = {}) {
           ),
         );
     });
+    if (input !== undefined) child.stdin.end(input);
   });
 }
 
@@ -369,9 +374,29 @@ async function main() {
           helper,
         ]),
       );
+      await check(
+        "native telemetry",
+        async () => {
+          const response = await run(helper, [], {
+            capture: true,
+            input: JSON.stringify({ command: "telemetry" }),
+          });
+          const status = JSON.parse(response.stdout);
+          if (
+            !Number.isSafeInteger(status.availableMemoryBytes) ||
+            status.availableMemoryBytes < 0 ||
+            status.availableMemoryBytes > totalmem()
+          ) {
+            throw new Error("Native admission memory is missing or invalid.");
+          }
+        },
+        "The temporary helper did not return a bounded admission-memory reading.",
+      );
     } else {
       checks.push(result("temporary helper signing", "not-run", "Swift helper build failed."));
       console.log("SKIP temporary helper signing: Swift helper build failed.");
+      checks.push(result("native telemetry", "not-run", "Swift helper build failed."));
+      console.log("SKIP native telemetry: Swift helper build failed.");
     }
     const geometry = join(temporaryDirectory, "geometry-tests");
     const geometryBuilt = await check("geometry test build", () =>
@@ -397,6 +422,7 @@ async function main() {
       "Node test suite",
       "Swift helper build",
       "temporary helper signing",
+      "native telemetry",
       "geometry test build",
       "geometry tests",
     ]) {

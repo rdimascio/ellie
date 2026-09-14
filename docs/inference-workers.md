@@ -2,6 +2,8 @@
 
 Desktop commands still work without a model. This is an optional, non-streaming local inference probe, with a 30-second job deadline. Start with a small model that already runs comfortably on one Mac.
 
+See the [dated single-Mac inference validation record](validation/2026-09-12-inference.md) for measured direct-worker and coordinator-scheduling results and their limits.
+
 ## Configure each worker Mac
 
 1. Install and run a local OpenAI-compatible model server on loopback, serving a model you have already installed. It must expose `GET /v1/models` and `POST /v1/chat/completions`. Keep it running. Ellie does not install or launch the runner. Use the exact model ID returned by `/v1/models`.
@@ -29,7 +31,7 @@ bun run build:macos
 bun run ellie node start
 ```
 
-The updated helper supplies power-mode and thermal readings without Accessibility permission. Execution-only setups keep their prior behavior. Compute Macs need to stay awake with their local runner and Ellie agent running; they do not need Accessibility unless desktop window control is also enabled.
+The updated helper supplies power-mode, thermal, and conservative macOS admission-memory readings without Accessibility permission. The reading includes free pages and an estimate from inactive pages that macOS may reclaim under pressure; it is not guaranteed immediately allocatable headroom. It falls back to free pages alone if native collection fails. Execution-only setups keep their prior behavior. Compute Macs need to stay awake with their local runner and Ellie agent running; they do not need Accessibility unless desktop window control is also enabled.
 
 ## Send a request from the server Mac
 

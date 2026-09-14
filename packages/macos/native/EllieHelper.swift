@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin.Mach
 import Security
 
 struct HelperError: Error { let message: String }
@@ -21,6 +22,28 @@ func waitUntil(_ seconds: TimeInterval, _ test: () -> Bool) -> Bool {
         RunLoop.current.run(until: Date().addingTimeInterval(0.04))
     }
     return true
+}
+func availableMemoryBytes() -> UInt64? {
+    var statistics = vm_statistics64()
+    var count = mach_msg_type_number_t(MemoryLayout<vm_statistics64_data_t>.size / MemoryLayout<integer_t>.size)
+    let host = mach_host_self()
+    defer { mach_port_deallocate(mach_task_self_, host) }
+    let status = withUnsafeMutablePointer(to: &statistics) { pointer in
+        pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+            host_statistics64(host, HOST_VM_INFO64, $0, &count)
+        }
+    }
+    guard status == KERN_SUCCESS else { return nil }
+    var pageSize: vm_size_t = 0
+    guard host_page_size(host, &pageSize) == KERN_SUCCESS else { return nil }
+
+    // Apple's VM headers say speculative pages are already included in free_count.
+    // Inactive pages estimate memory reclaimable under pressure. Omit other cache
+    // categories so this admission estimate stays conservative and does not double count.
+    let (pages, pagesOverflow) = UInt64(statistics.free_count).addingReportingOverflow(UInt64(statistics.inactive_count))
+    guard !pagesOverflow else { return nil }
+    let (bytes, bytesOverflow) = pages.multipliedReportingOverflow(by: UInt64(pageSize))
+    return bytesOverflow ? nil : bytes
 }
 func attribute(_ element: AXUIElement, _ key: String) -> CFTypeRef? {
     var value: CFTypeRef?
@@ -149,6 +172,7 @@ enum EllieHelper {
                     }
                     var status: [String: Any] = ["thermal": thermal]
                     if #available(macOS 12.0, *) { status["lowPowerMode"] = ProcessInfo.processInfo.isLowPowerModeEnabled }
+                    if let memory = availableMemoryBytes() { status["availableMemoryBytes"] = memory }
                     emit(status); return
                 }
                 if command == "doctor" { emit(["accessibility": AXIsProcessTrusted(), "ok": true]); return }
