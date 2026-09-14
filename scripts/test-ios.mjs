@@ -18,9 +18,11 @@ const resultBundle = resolve(root, "test-results/native-ios.xcresult");
 const diagnosticFile = resolve(root, "test-results/native-ios-runner-diagnostic.txt");
 let simulatorID,
   activeChild,
+  activeStop,
   requestedSignal,
   cleaning = false,
-  succeeded = false;
+  succeeded = false,
+  cleanupCertain = true;
 const runnerStarted = performance.now();
 let stage = "runner-setup",
   stageStarted = runnerStarted,
@@ -38,6 +40,7 @@ const platform = {
 function diagnosticValue(value) {
   return typeof value === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(value) ? value : "invalid";
 }
+const unreapedChildren = new Set();
 
 function enterStage(value) {
   stage = value;
@@ -75,12 +78,26 @@ function executionError(message, outcome) {
   return Object.assign(new Error(message), { outcome });
 }
 
-function terminate(child, signal) {
-  if (!Number.isInteger(child.pid) || child.pid <= 0) return;
+function signalDirectChild(child, signal) {
+  if (
+    !child ||
+    !Number.isInteger(child.pid) ||
+    child.pid <= 1 ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  )
+    return false;
+  return child.kill(signal);
+}
+
+function groupAbsent(processGroup) {
+  if (!Number.isInteger(processGroup) || processGroup <= 1) return true;
   try {
-    process.kill(-child.pid, signal);
-  } catch {
-    child.kill(signal);
+    process.kill(-processGroup, 0);
+    return false;
+  } catch (error) {
+    if (error?.code === "ESRCH") return true;
+    throw executionError("Owned subprocess cleanup could not be verified.", "cleanup-uncertain");
   }
 }
 
@@ -100,19 +117,39 @@ function execute(
   return new Promise((resolvePromise, reject) => {
     let stdout = "",
       failure,
-      killTimer;
+      killTimer,
+      reapTimer,
+      settled = false;
     const child = spawn(file, args, {
       cwd: root,
       env: environment,
       detached: true,
       stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
     });
+    unreapedChildren.add(child);
     activeChild = child;
     const stop = (error) => {
       failure ??= error;
-      terminate(child, "SIGTERM");
-      killTimer ??= setTimeout(() => terminate(child, "SIGKILL"), 5_000);
+      signalDirectChild(child, "SIGTERM");
+      killTimer ??= setTimeout(() => signalDirectChild(child, "SIGKILL"), 5_000);
+      reapTimer ??= setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(killTimer);
+        activeStop = undefined;
+        cleanupCertain = false;
+        child.stdout?.destroy();
+        child.unref();
+        reject(
+          executionError(
+            `${label} direct child was not reaped after termination.`,
+            "cleanup-uncertain",
+          ),
+        );
+      }, 7_000);
     };
+    activeStop = () => stop(executionError("iOS test interrupted.", "interrupted"));
     if (capture)
       child.stdout.setEncoding("utf8").on("data", (chunk) => {
         if (stdout.length + chunk.length > 1_048_576) {
@@ -127,11 +164,27 @@ function execute(
     });
     child.once("close", (code, signal) => {
       clearTimeout(timer);
-      // The direct child closing does not prove that every member of its detached
-      // process group exited. Repeat the owned-group kill before dropping its PID.
-      if (failure) terminate(child, "SIGKILL");
       clearTimeout(killTimer);
-      if (activeChild === child) activeChild = undefined;
+      clearTimeout(reapTimer);
+      unreapedChildren.delete(child);
+      if (activeChild === child) {
+        activeChild = undefined;
+        activeStop = undefined;
+      }
+      if (settled) return;
+      settled = true;
+      try {
+        if (!groupAbsent(child.pid)) {
+          cleanupCertain = false;
+          failure ??= executionError(
+            `${label} left process-group members whose ownership is uncertain.`,
+            "cleanup-uncertain",
+          );
+        }
+      } catch (error) {
+        cleanupCertain = false;
+        failure ??= error;
+      }
       if (failure) reject(failure);
       else if (code === 0 || ignoreFailure) resolvePromise(stdout);
       else
@@ -148,6 +201,11 @@ function execute(
 async function cleanup() {
   if (cleaning) return;
   cleaning = true;
+  if (unreapedChildren.size) {
+    for (const child of unreapedChildren) signalDirectChild(child, "SIGKILL");
+    cleanupCertain = false;
+    cleanupOutcomes.push("child-cleanup-uncertain");
+  }
   if (simulatorID) {
     try {
       await execute("xcrun", ["simctl", "shutdown", simulatorID], {
@@ -157,6 +215,7 @@ async function cleanup() {
       });
       cleanupOutcomes.push("shutdown-complete");
     } catch {
+      cleanupCertain = false;
       cleanupOutcomes.push("shutdown-failed");
       console.warn("The temporary iOS simulator did not shut down cleanly.");
     }
@@ -168,31 +227,41 @@ async function cleanup() {
       });
       cleanupOutcomes.push("delete-complete");
     } catch {
+      cleanupCertain = false;
       cleanupOutcomes.push("delete-failed");
       console.warn(
         "The temporary iOS simulator could not be deleted; remove the uniquely named Ellie iOS Tests simulator manually.",
       );
     }
   }
-  rmSync(derivedData, { recursive: true, force: true });
+  if (unreapedChildren.size) cleanupCertain = false;
+  if (cleanupCertain) {
+    rmSync(derivedData, { recursive: true, force: true });
+    cleanupOutcomes.push("derived-removed");
+  } else {
+    cleanupOutcomes.push("derived-retained");
+    console.warn("Owned iOS test evidence was retained because subprocess cleanup is uncertain.");
+  }
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.once(signal, () => {
     requestedSignal = signal;
-    if (activeChild) {
-      const child = activeChild;
-      terminate(child, "SIGTERM");
-      setTimeout(() => {
-        if (activeChild === child) terminate(child, "SIGKILL");
-      }, 5_000);
-    }
+    activeStop?.();
   });
 }
 
 try {
   enterStage("simulator-discovery");
-  rmSync(resultBundle, { recursive: true, force: true });
+  try {
+    lstatSync(resultBundle);
+    throw executionError(
+      "A previous iOS test result is retained; move or remove it before another run.",
+      "retained-result",
+    );
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   rmSync(diagnosticFile, { force: true });
   mkdirSync(dirname(resultBundle), { recursive: true });
   const xcodeVersion = await execute("xcodebuild", ["-version"], {
@@ -283,7 +352,7 @@ try {
   console.error(error instanceof Error ? error.message : "iOS test failed.");
 } finally {
   await cleanup();
-  if (succeeded) {
+  if (succeeded && cleanupCertain) {
     rmSync(resultBundle, { recursive: true, force: true });
     diagnostic("passed", "removed-after-success");
   } else {
@@ -294,7 +363,11 @@ try {
     } catch (error) {
       if (error?.code !== "ENOENT") result = "unreadable";
     }
-    diagnostic(failureOutcome, result, failureStageMilliseconds);
+    diagnostic(
+      cleanupCertain ? failureOutcome : "cleanup-uncertain",
+      result,
+      failureStageMilliseconds,
+    );
     process.exitCode = 1;
   }
 }
