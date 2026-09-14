@@ -22,7 +22,7 @@ final class LifeWebSessionTests: XCTestCase {
     XCTAssertEqual(cookie.domain, "ellie.test")
     XCTAssertTrue(cookie.isSecure)
     XCTAssertTrue(cookie.isHTTPOnly)
-    XCTAssertEqual(cookie.sameSitePolicy, .strict)
+    XCTAssertEqual(cookie.sameSitePolicy?.rawValue, "strict")
     let renewal = session.renewalDate(now: now)
     XCTAssertTrue(renewal.renew)
     XCTAssertEqual(renewal.date, now.addingTimeInterval(9 * 60))
@@ -111,6 +111,30 @@ final class LifeWebSessionTests: XCTestCase {
     XCTAssertFalse(LifeWebNavigationPolicy.allows(
       try XCTUnwrap(URL(string: "https://ellie.test:7443/life/")),
       mainFrame: false, origin: origin))
+  }
+
+  func testServerTrustRequiresTheEnrolledHttpsHostAndEffectivePort() throws {
+    func space(host: String = "ellie.test", port: Int, scheme: String = "https") -> URLProtectionSpace {
+      URLProtectionSpace(
+        host: host, port: port, protocol: scheme, realm: nil,
+        authenticationMethod: NSURLAuthenticationMethodServerTrust)
+    }
+    let custom = try XCTUnwrap(URL(string: "https://ellie.test:7443"))
+    let implicit = try XCTUnwrap(URL(string: "https://ellie.test"))
+    let explicit = try XCTUnwrap(URL(string: "https://ellie.test:443"))
+    let insecure = try XCTUnwrap(URL(string: "http://ellie.test:443"))
+    XCTAssertTrue(LifeWebTrustPolicy.matchesEndpoint(space(port: 7443), origin: custom))
+    XCTAssertTrue(LifeWebTrustPolicy.matchesEndpoint(space(port: 443), origin: implicit))
+    XCTAssertTrue(LifeWebTrustPolicy.matchesEndpoint(space(port: 443), origin: explicit))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(space(port: 443), origin: custom))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(space(port: 7444), origin: custom))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(space(port: 7443), origin: implicit))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(space(port: 0), origin: implicit))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(
+      space(host: "other.test", port: 7443), origin: custom))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(
+      space(port: 7443, scheme: "http"), origin: custom))
+    XCTAssertFalse(LifeWebTrustPolicy.matchesEndpoint(space(port: 443), origin: insecure))
   }
 
   @MainActor
