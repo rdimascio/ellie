@@ -51,3 +51,12 @@ The final reviewed source passed the complete repository gate on the physical Ma
 passed, one skipped, with lint, formatting, contracts, type checks and the web build passing. The
 retained log is `ellie-service-authorization-root-final-check.log`. These tests use synthetic owned
 fixtures, including the native signature checks; they do not exercise the installed household stack.
+
+A preceding unchanged-source CI run exceeded the lifecycle fixture's 20-second aggregate test
+deadline before the app tests ran. That budget includes Swift compilation, signing and deliberately
+slow operation probes. The follow-up gives that one aggregate test 30 seconds while preserving
+every product deadline and assertion; its focused Mini run passed in 9.312 seconds. The failing CI
+record does not identify an individual slow operation or prove a product lifecycle failure.
+The complete final gate also passed 306 tests with one skip after this correction, plus lint,
+formatting, contracts, type checks and the web build. Its retained log is
+`ellie-service-authorization-lifecycle-final-check.log`.

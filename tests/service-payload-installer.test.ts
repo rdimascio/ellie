@@ -1202,7 +1202,8 @@ test(
 
 test(
   "native lifecycle validates selection and sends only fixed bounded launchctl operations",
-  { ...options, timeout: 20_000 },
+  // This aggregate includes native fixture compilation/signing and intentionally slow lifecycle probes.
+  { ...options, timeout: 30_000 },
   async (t) => {
     await withFixture(t, async ({ root, release, installer, id }) => {
       const fresh = join(root, "fresh-lifecycle-home");
