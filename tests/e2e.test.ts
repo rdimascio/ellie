@@ -114,13 +114,27 @@ test("node credentials cannot control another Mac, issue invites, or spoof its r
     await f.close();
   }
 });
-test("timeouts do not replay commands, failed actions do not advance pronoun context", async () => {
+test("timeouts do not replay commands, failed actions do not advance pronoun context", async (t) => {
   const f = await fixture(150);
   try {
     const node = await f.pair("node");
     await node.call("POST", "/v1/register", { capabilities: [...CAPABILITIES] });
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
+    const storageWait = new Int32Array(new SharedArrayBuffer(4));
+    const delayDurableWrite = () => Atomics.wait(storageWait, 0, 0, 175);
+    const create = f.jobStore.create.bind(f.jobStore);
+    const markDelivered = f.jobStore.markDelivered.bind(f.jobStore);
+    t.mock.method(f.jobStore, "create", (input: Parameters<typeof create>[0]) => {
+      delayDurableWrite();
+      create(input);
+    });
+    t.mock.method(f.jobStore, "markDelivered", (id: string, now?: number) => {
+      delayDurableWrite();
+      markDelivered(id, now);
+    });
     const pending = node.call("POST", "/v1/commands", { nodeId: "node", text: "open Arc" });
     const task = job(record(await node.call("GET", "/v1/poll")).job);
+    t.mock.timers.tick(151);
     assert.equal(record(await pending).ok, false);
     await assert.rejects(
       node.call("POST", "/v1/result", { id: task.id, result: { ok: true, message: "Late." } }),
