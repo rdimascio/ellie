@@ -1,0 +1,11 @@
+{
+  "name": "@ellie/life-import",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@ellie/life-core": "*",
+    "@ellie/life-time": "*"
+  }
+}

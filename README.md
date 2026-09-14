@@ -2,7 +2,18 @@
 
 A local-first personal assistant for macOS. Warm, playful, thoughtful, and built to act quickly across your Macs.
 
-Ellie is at its first developer milestone: text commands → deterministic routing → authenticated HTTPS → native macOS app and window control. Normal operation needs **no model download, cloud account, API key, or paid service**. Voice, automatic conversational routing, retrieval, and browser automation are planned. An optional independent inference-worker probe is available for already installed local models; see [worker setup](docs/inference-workers.md).
+The additive **Ellie Life** development client brings chat, persistent personal memory, source teaching, reminders, background tasks, and sandboxed extensions together. Its private data lives in a separate opt-in store. See [the life harness plan](docs/life-harness-plan.md) and [the current implementation checkpoint](docs/overnight-build.md) for scope and validation.
+
+With Node.js 24 selected, start it from this checkout:
+
+```sh
+bun install --frozen-lockfile --ignore-scripts
+bun run life
+```
+
+Open the one-use local link printed by the launcher. Try “Remember that I prefer morning appointments,” “Set a timer for 2 minutes,” or “Build an arcade shooter with a high score widget.” General model-backed conversation and custom application generation require an explicitly configured local model. See the [Life runbook](docs/life-runbook.md) for complete workflows, data location, model setup and browser verification. The existing Mac coordinator and paired devices continue to use the commands below.
+
+The original desktop command path uses text commands → deterministic routing → authenticated HTTPS → native macOS app and window control. These desktop commands and the supported Life commands need **no model download, cloud account, API key, or paid service**. Broader Life conversation and generated custom apps use the optional local model described above. The existing coordinator also has an independent inference-worker probe for installed models; see [worker setup](docs/inference-workers.md).
 
 ## Try the first milestone
 
@@ -75,6 +86,10 @@ After foreground setup, [install per-user background services](docs/services.md)
 | `apps/server`                                                                  | Routing, node sessions, command lifecycle, pairing and credential revocation                |
 | `apps/node`                                                                    | Outbound connection, local permission checks, native execution and optional local inference |
 | `apps/cli`                                                                     | Generated onboarding, diagnostics, text command client                                      |
+| `apps/life`, `apps/life-ui`                                                    | Authenticated local Life service and conversational web client                              |
+| `packages/life-core`, `packages/life-harness`, `packages/task-runtime`         | Scoped records, conversation workflows and durable background work                          |
+| `packages/life-ingest`, `packages/life-import`, `packages/life-teaching`       | Content extraction, reviewed imports and versioned guidance                                 |
+| `packages/life-context`, `packages/life-learning`, `packages/life-plugins`     | Preparation, explicit feedback and isolated application extensions                          |
 | `packages/protocol`                                                            | Versioned wire types and runtime validation                                                 |
 | `packages/compute`                                                             | Independent-worker admission and scheduling policy                                          |
 | `packages/router`                                                              | Pure deterministic grammar, with no LLM on the fast path                                    |
@@ -85,7 +100,7 @@ After foreground setup, [install per-user background services](docs/services.md)
 
 ## Privacy and development
 
-Public examples belong in `examples/`. Generated installation state belongs exclusively in `~/.ellie/`, outside the checkout. Secrets are stored in macOS Keychain; server-side credential verifiers are hashes. Browser sessions remain browser-owned. Command text, actions, prompts, responses, and conversation context are not persisted. The local job database contains IDs, targets, lifecycle timestamps and enum outcomes only. Startup and lifecycle writes prune terminal rows older than 30 days and cap terminal history at 10,000 rows. There is no external analytics. Explicitly enabled compute workers report resource telemetry only to their paired coordinator; it is kept in process memory.
+Public examples belong in `examples/`. Existing coordinator installation state belongs in `~/.ellie/`, outside the checkout. The opt-in Ellie Life launcher uses a separate `~/.ellie-life/` store for explicitly saved records, imported source content, tasks and plugin data; see [life service operation](docs/life-service.md). Secrets for the existing coordinator are stored in macOS Keychain; server-side credential verifiers are hashes. Browser sessions remain browser-owned. Existing desktop command text, actions, inference prompts, responses, and transient pronoun context are not persisted. The original job database contains IDs, targets, lifecycle timestamps and enum outcomes only. Startup and lifecycle writes prune terminal rows older than 30 days and cap terminal history at 10,000 rows. There is no external analytics. Explicitly enabled compute workers report resource telemetry only to their paired coordinator; it is kept in process memory.
 
 Run `bun run check` for Oxlint, Oxfmt verification, generated-contract drift checks, strict TypeScript checking, and Node tests, including actual HTTPS server/node integration with a simulated native executor, independent-worker scheduling, and a synthetic loopback model server. Run `bun run format` to apply Oxfmt. macOS CI additionally compiles the helper and tests monitor geometry. A physical Mac with Accessibility permission is required to verify real window actions; CI cannot grant that permission or substitute for the manual checklist.
 

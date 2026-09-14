@@ -1,4 +1,8 @@
 {
   "$schema": "./node_modules/oxfmt/configuration_schema.json",
-  "ignorePatterns": ["bun.lock", "contracts/*.json"]
+  "ignorePatterns": [
+    "bun.lock",
+    "contracts/*.json",
+    "apps/life-ui/tests/fixtures/sdk-water-counter-v3.json"
+  ]
 }
