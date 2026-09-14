@@ -541,6 +541,10 @@ func selectionOpenDirectory(_ path: String, privateMode: Bool) throws -> Int32 {
   }
   return fd
 }
+func selectionValidateSignature(path: String, identifier: String) throws {
+  try validateSignature(path: path, identifier: identifier)
+}
+func selectionPathFromFD(_ fd: Int32) throws -> String { try pathFromFD(fd) }
 func selectionRemoveTree(parent: Int32, name: String) throws {
   try removeTree(parent: parent, name: name)
 }
@@ -997,6 +1001,9 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "prepare-migration" || arguments.first == "recover-migration" {
+      do { try runMigrationCommand(arguments) } catch { failMigrationCommand(error) }
+    }
     if arguments.first == "status" || arguments.first == "start" || arguments.first == "stop" {
       do {
         try runLifecycleCommand(arguments)

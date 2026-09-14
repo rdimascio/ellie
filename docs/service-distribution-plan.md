@@ -159,6 +159,30 @@ data outside the `Services` subdirectory, service logs, or any Keychain item. Un
 managed LaunchAgents, role apps, receipts, and unreferenced verified release payloads after stopping
 the roles; private identities and state remain available to a reinstalled compatible version.
 
+### Legacy service preparation
+
+The native installer can explicitly prepare a stopped `ellie-service-v1` developer installation for
+a later migration. It verifies both fixed LaunchAgent labels are unloaded, validates the exact
+generated app and plist bytes against their recorded checkout build, and writes an immutable,
+content-addressed snapshot under the private `Services/migrations` directory. The snapshot contains
+only the app and plist bytes. It records bounded fingerprints for the external checkout entrypoint
+and Node executable, but it does not copy or freeze either external dependency.
+
+Preparation leaves the original apps, plists, launchd state, identities, and Keychain items
+unchanged. An interrupted preparation retains a private intent and requires the explicit
+`recover-migration` command; a later prepare never performs hidden recovery. Recovery verifies the
+owned partial or completed snapshot before removing only transaction-owned evidence. A changed
+checkout is reported as a stale build and is preserved rather than rebuilt or resigned.
+The installer reopens and compares the fixed directory chain immediately before reporting a
+publication or recovery complete. This detects bounded testable replacement races, but it is not a
+filesystem compare-and-swap and cannot exclude an arbitrary same-user change after the final check.
+
+This snapshot is migration input, not a promise of executable rollback. A future switching change
+must separately verify that the recorded external runtime remains available and that the old code
+can read the current state schema. Matching bundle identifiers alone does not establish Keychain or
+TCC continuity. This foundation does not select a packaged release, switch services, start or stop
+launchd jobs, or implement rollback.
+
 ## Acceptance gates
 
 Implement this plan as small independent changes:
