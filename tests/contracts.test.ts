@@ -137,6 +137,10 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
     "/v1/pair",
     "/v1/invite",
     "/v1/revoke",
+    "/v1/browser",
+    "/v1/browser/invitations",
+    "/v1/browser/clients",
+    "/v1/browser/revoke",
     "/v1/nodes",
     "/v1/register",
     "/v1/heartbeat",
@@ -169,6 +173,14 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
   assert.equal(
     openapi.paths["/v1/commands"]?.post?.responses["404"]?.$ref,
     "#/components/responses/NotFound",
+  );
+  assert.equal(
+    openapi.paths["/v1/browser/invitations"]?.post?.responses["503"]?.$ref,
+    "#/components/responses/ServiceUnavailable",
+  );
+  assert.equal(
+    openapi.paths["/v1/browser/revoke"]?.post?.responses["403"]?.$ref,
+    "#/components/responses/Forbidden",
   );
 
   const document = openapi as unknown as Record<string, unknown>;

@@ -1,5 +1,5 @@
 import { access, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
@@ -19,10 +19,20 @@ import { MacOSExecutor } from "@ellie/macos";
 import { Auth, newToken } from "../../server/src/auth.ts";
 import { createEllieServer } from "../../server/src/index.ts";
 import { JobStore } from "../../server/src/jobs.ts";
+import { loadBrowserAssets } from "../../server/src/browser-assets.ts";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
 
 import { generateCertificate } from "./certificate.ts";
+import { generateBrowserTlsIdentity } from "./certificate.ts";
+import {
+  browserStatus,
+  exportBrowserCa,
+  initializeBrowser,
+  systemLocalHostname,
+} from "./browser-setup.ts";
+import { createBrowserRuntime } from "./browser-runtime.ts";
+import { parseBrowserCommand, runBrowserCommand } from "./browser-commands.ts";
 import { Services, serviceRole } from "./services.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
@@ -37,6 +47,13 @@ import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
+const browserEnvironment = {
+  stateDir,
+  secrets,
+  localHostname: systemLocalHostname,
+  generate: (hostname: string) => generateBrowserTlsIdentity(hostname),
+  now: Date.now,
+};
 let serviceLog: ServiceLog | undefined;
 let commandOutcomeMayBeUnknown = false;
 async function exists(name: string): Promise<boolean> {
@@ -97,6 +114,38 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
   };
 }
 async function main(): Promise<void> {
+  if (args[0] === "browser") {
+    const environment = browserEnvironment;
+    if (args[1] === "init" && args.length === 2) {
+      const config = await initializeBrowser(environment);
+      console.log(
+        `Browser identity ready for https://${config.hostname}:${config.port}. No listener was started and no trust setting was changed.`,
+      );
+      return;
+    }
+    if (args[1] === "status" && args.length === 2) {
+      const status = await browserStatus(environment);
+      console.log(JSON.stringify(status, null, 2));
+      if (!status.ready) process.exitCode = 1;
+      return;
+    }
+    if (args[1] === "export-ca") {
+      const force = args[3] === "--force";
+      if (!args[2] || args.length !== (force ? 4 : 3))
+        throw new Error("Use: bun run ellie browser export-ca PATH [--force]");
+      const output = resolve(args[2]);
+      await exportBrowserCa(environment, output, force);
+      console.log(
+        `Public browser CA exported to ${output}. Transfer only this public certificate through an existing trusted local channel; installation does not enable trust automatically.`,
+      );
+      return;
+    }
+    const command = parseBrowserCommand(args.slice(1));
+    await withController(async (client) => {
+      for (const line of await runBrowserCommand(client, command)) console.log(line);
+    });
+    return;
+  }
   if (args[0] === "service") {
     const action = args[1];
     if (action === "test") {
@@ -182,6 +231,12 @@ async function main(): Promise<void> {
     const config = serverConfig(await privateConfig("server.json"));
     const cert = await readFile(join(stateDir, "server-cert.pem"), "utf8");
     const jobStore = new JobStore(join(stateDir, "jobs.sqlite"));
+    // The coordinator lifetime lock also owns the single browser authorization writer.
+    const browser = createBrowserRuntime({
+      setup: browserEnvironment,
+      bindHost: config.host,
+      loadAssets: loadBrowserAssets,
+    });
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
       const created = createEllieServer({
@@ -190,6 +245,7 @@ async function main(): Promise<void> {
         auth: await Auth.open(),
         preferences: config.preferences,
         jobStore,
+        browser,
       });
       app = created;
       await new Promise<void>((resolve, reject) => {
@@ -197,6 +253,7 @@ async function main(): Promise<void> {
         created.server.listen(config.port, config.host, () => resolve());
       });
     } catch (error) {
+      await browser.shutdown();
       if (app) app.shutdown();
       else jobStore.close();
       throw error;
@@ -204,14 +261,34 @@ async function main(): Promise<void> {
     if (!app) throw new Error("Coordinator failed to initialize.");
     console.log(`Ellie server ready on port ${config.port}. No model or cloud API is required.`);
     serviceLog?.write("ready");
+    let stopping = false;
+    const stop = async () => {
+      if (stopping) return;
+      stopping = true;
+      try {
+        serviceLog?.write("stopping");
+      } finally {
+        // Stop accepting browser mutations and drain persistence before releasing the lock.
+        try {
+          await browser.shutdown();
+        } finally {
+          app!.shutdown();
+        }
+      }
+    };
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.once(signal, () => {
-        try {
-          serviceLog?.write("stopping");
-        } finally {
-          app.shutdown();
-        }
+        void stop().catch(() => {
+          process.exitCode = 1;
+        });
       });
+    // Agent readiness and signal handlers precede optional browser Keychain access.
+    await browser.start();
+    if (!stopping) {
+      const status = browser.current().status;
+      if (status === "ready") serviceLog?.write("browser_ready");
+      else if (status === "unavailable") serviceLog?.write("browser_unavailable");
+    }
     return;
   }
   if (args[0] === "server" && args[1] === "pair") {
@@ -389,7 +466,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {

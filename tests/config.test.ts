@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, stat, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ensureState, save, load, defaults, serverConfig, nodeConfig } from "@ellie/config";
+import {
+  browserConfig,
+  ensureState,
+  save,
+  load,
+  defaults,
+  serverConfig,
+  nodeConfig,
+  Keychain,
+} from "@ellie/config";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 
 test("private state has restricted permissions and credentials are stored only as hashes", async () => {
@@ -29,6 +38,14 @@ test("private state has restricted permissions and credentials are stored only a
     await rm(dir, { recursive: true, force: true });
   }
 });
+test("Keychain presence checks reject unknown helper responses", async () => {
+  class InvalidPresenceKeychain extends Keychain {
+    override async call(): Promise<string> {
+      return "unexpected";
+    }
+  }
+  await assert.rejects(new InvalidPresenceKeychain().has("browser-ca-key"), /invalid presence/);
+});
 test("private state cannot be written into the checkout or traversed through a file name", async () => {
   await assert.rejects(ensureState(join(process.cwd(), ".ellie")), /outside/);
   await assert.rejects(save("../secret", {}), /identifier/);
@@ -42,6 +59,15 @@ test("config validates transport and version before use", () => {
   );
   assert.throws(() =>
     nodeConfig({ version: 2, id: "test", serverUrl: "https://localhost", preferences: defaults }),
+  );
+  assert.throws(() =>
+    browserConfig({
+      version: 1,
+      hostname: "Other.local",
+      port: 8444,
+      createdAt: new Date().toISOString(),
+      caFingerprint: "AA",
+    }),
   );
 });
 test("pairing is single-use even under concurrency, and invitation replacement invalidates the old code", async () => {

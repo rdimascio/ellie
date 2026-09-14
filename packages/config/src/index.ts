@@ -18,6 +18,34 @@ export interface ServerConfig {
   port: number;
   preferences: Preferences;
 }
+export interface BrowserConfig {
+  version: 1;
+  hostname: string;
+  port: 8444;
+  createdAt: string;
+  caFingerprint: string;
+}
+export function browserConfig(value: unknown): BrowserConfig {
+  const v = record(value);
+  const hostname = string(v.hostname, 69);
+  if (
+    v.version !== 1 ||
+    v.port !== 8444 ||
+    !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(hostname) ||
+    typeof v.createdAt !== "string" ||
+    !Number.isFinite(Date.parse(v.createdAt)) ||
+    typeof v.caFingerprint !== "string" ||
+    !/^([A-F0-9]{2}:){31}[A-F0-9]{2}$/.test(v.caFingerprint)
+  )
+    throw new Error("Invalid browser configuration.");
+  return {
+    version: 1,
+    hostname,
+    port: 8444,
+    createdAt: v.createdAt,
+    caFingerprint: v.caFingerprint,
+  };
+}
 export interface InferenceWorkerConfig {
   endpoint: string;
   models: InstalledModel[];
@@ -132,7 +160,12 @@ export interface SecretStore {
   get(account: string): Promise<string>;
   set(account: string, value: string): Promise<void>;
 }
-export class Keychain implements SecretStore {
+export interface MutableSecretStore extends SecretStore {
+  has(account: string): Promise<boolean>;
+  add(account: string, value: string): Promise<void>;
+  delete(account: string): Promise<void>;
+}
+export class Keychain implements MutableSecretStore {
   async call(request: Record<string, string>): Promise<string> {
     if (process.platform !== "darwin")
       throw new Error("Keychain requires macOS. Tests use an explicit in-memory store.");
@@ -178,5 +211,17 @@ export class Keychain implements SecretStore {
   }
   async set(account: string, value: string): Promise<void> {
     await this.call({ command: "keychain.set", account, value });
+  }
+  async has(account: string): Promise<boolean> {
+    const value = await this.call({ command: "keychain.has", account });
+    if (value !== "true" && value !== "false")
+      throw new Error("Keychain returned an invalid presence response.");
+    return value === "true";
+  }
+  async add(account: string, value: string): Promise<void> {
+    await this.call({ command: "keychain.add", account, value });
+  }
+  async delete(account: string): Promise<void> {
+    await this.call({ command: "keychain.delete", account });
   }
 }

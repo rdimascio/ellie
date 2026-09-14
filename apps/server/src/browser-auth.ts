@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, open, rename, rm } from "node:fs/promises";
+import { link, lstat, open, rename, rm } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { join } from "node:path";
 import { TextDecoder } from "node:util";
@@ -307,6 +307,52 @@ export async function writeBrowserAuthState(
   }
 }
 
+async function initializeBrowserAuthState(dir: string): Promise<void> {
+  let temp: string | undefined;
+  try {
+    const directory = await lstat(dir);
+    assertPrivateStat(directory, "directory");
+    const path = join(dir, BROWSER_AUTH_FILE);
+    const encoded = Buffer.from(`${JSON.stringify(BrowserAuth.empty(), null, 2)}\n`);
+    temp = join(dir, `.${BROWSER_AUTH_FILE}.${randomBytes(8).toString("hex")}.tmp`);
+    const handle = await open(
+      temp,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      await handle.chmod(0o600);
+      await handle.writeFile(encoded);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    try {
+      await link(temp, path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    await rm(temp);
+    temp = undefined;
+    const published = await lstat(path);
+    assertPrivateStat(published, "file");
+    const directoryHandle = await open(dir, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const actualDirectory = await directoryHandle.stat();
+      assertPrivateStat(actualDirectory, "directory");
+      if (actualDirectory.dev !== directory.dev || actualDirectory.ino !== directory.ino)
+        throw new Error("private directory changed while initializing");
+      await directoryHandle.sync();
+    } finally {
+      await directoryHandle.close();
+    }
+  } catch {
+    throw browserStateError("opened");
+  } finally {
+    if (temp) await rm(temp, { force: true }).catch(() => {});
+  }
+}
+
 function publicClient(value: StoredBrowserCredential): BrowserClient {
   return {
     id: value.id,
@@ -351,6 +397,7 @@ export class BrowserAuth {
   private readonly token: () => string;
   private readonly id: () => string;
   private poisoned = false;
+  private closed = false;
   private lock: Promise<void> = Promise.resolve();
 
   constructor(
@@ -375,9 +422,20 @@ export class BrowserAuth {
     );
   }
 
+  static async openOrInitialize(dir = stateDir): Promise<BrowserAuth> {
+    await initializeBrowserAuthState(dir);
+    return BrowserAuth.open(dir);
+  }
+
   private assertUsable(): void {
+    if (this.closed) throw new Error("Browser authorization is closed.");
     if (this.poisoned)
       throw new Error("Browser authorization state must be reopened after a failed save.");
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    await this.lock;
   }
 
   private async mutate<T>(fn: () => Promise<T>): Promise<T> {
@@ -559,7 +617,7 @@ export function browserSessionToken(header?: string | string[]): string | undefi
   return matches[0];
 }
 
-function exactBrowserOrigin(value: string): URL {
+export function browserOrigin(value: string): URL {
   const url = new URL(value);
   if (
     url.protocol !== "https:" ||
@@ -579,7 +637,7 @@ export function browserRequestMatchesOrigin(
   expectedOrigin: string,
   request: { method: string; host?: string; origin?: string },
 ): boolean {
-  const expected = exactBrowserOrigin(expectedOrigin);
+  const expected = browserOrigin(expectedOrigin);
   if (request.host !== expected.host) return false;
   if (request.origin !== undefined && request.origin !== expected.origin) return false;
   const method = request.method.toUpperCase();

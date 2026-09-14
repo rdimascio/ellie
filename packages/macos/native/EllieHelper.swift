@@ -143,6 +143,19 @@ func keychain(_ request: [String: Any], command: String) throws {
         }
         guard status == errSecSuccess else { throw fail("Unable to save to macOS Keychain.") }
         emit(["value": ""])
+    } else if command == "keychain.add" {
+        let value = Data(try text(request, "value").utf8)
+        var item = query; item[kSecValueData as String] = value
+        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw fail("Unable to add macOS Keychain item.") }
+        emit(["value": ""])
+    } else if command == "keychain.has" {
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw fail("Unable to inspect macOS Keychain.") }
+        emit(["value": status == errSecSuccess ? "true" : "false"])
+    } else if command == "keychain.delete" {
+        let status = SecItemDelete(query as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw fail("Unable to remove macOS Keychain item.") }
+        emit(["value": ""])
     } else {
         var lookup = query
         lookup[kSecReturnData as String] = true
@@ -160,7 +173,7 @@ enum EllieHelper {
             let data = FileHandle.standardInput.readDataToEndOfFile()
             guard data.count <= 32768, let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw fail("Invalid helper request.") }
             if let command = request["command"] as? String {
-                if command == "keychain.get" || command == "keychain.set" { try keychain(request, command: command); return }
+                if command == "keychain.get" || command == "keychain.set" || command == "keychain.add" || command == "keychain.has" || command == "keychain.delete" { try keychain(request, command: command); return }
                 if command == "telemetry" {
                     let thermal: String
                     switch ProcessInfo.processInfo.thermalState {
