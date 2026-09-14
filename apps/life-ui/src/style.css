@@ -2571,6 +2571,108 @@ main {
   margin-top: 54px;
   padding-top: 26px;
 }
+.connections {
+  border-top: 1px solid var(--ink);
+  margin-top: 54px;
+  padding-top: 26px;
+}
+.connections > header span {
+  color: var(--coral);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.connections h2 {
+  margin: 3px 0 6px;
+  font: 400 24px var(--font-family);
+}
+.connections > p,
+.connections small {
+  color: var(--muted);
+  line-height: 1.5;
+}
+.connection-list,
+.provider-list {
+  border-top: 1px solid var(--rule);
+  margin-top: 20px;
+}
+.connection-default {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-top: 18px;
+}
+.connection-default input {
+  margin-top: 4px;
+  accent-color: var(--coral);
+}
+.connection-default span,
+.connection-default small {
+  display: block;
+}
+.connection-list article,
+.provider-list article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 18px;
+  border-bottom: 1px solid var(--rule);
+  padding: 16px 2px;
+}
+.connection-list strong,
+.connection-list small,
+.connection-list span,
+.provider-list strong,
+.provider-list small {
+  display: block;
+}
+.connection-list span {
+  margin-top: 4px;
+  color: #9c362e;
+  font-size: 12px;
+}
+.connection-list label {
+  display: grid;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.connection-list select {
+  border: 1px solid var(--rule);
+  border-radius: 7px;
+  background: var(--paper);
+  padding: 7px 9px;
+}
+.connection-actions {
+  display: flex;
+  gap: 7px;
+}
+.connection-actions button,
+.provider-list button {
+  border: 1px solid var(--rule);
+  border-radius: 18px;
+  background: var(--paper);
+  padding: 8px 13px;
+}
+.connection-empty {
+  border-block: 1px solid var(--rule);
+  padding: 16px 2px;
+}
+@media (max-width: 760px) {
+  .connection-list article,
+  .provider-list article {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .connection-list label {
+    grid-column: 1;
+  }
+  .connection-actions {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    flex-direction: column;
+  }
+}
 .personal-data > header > div > span {
   color: var(--coral);
   font-size: 11px;

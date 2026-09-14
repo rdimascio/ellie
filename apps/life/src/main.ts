@@ -3,6 +3,22 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { LocalModelReadiness, validateLocalModelConfiguration } from "./model-status.ts";
+import { loadGoogleClient } from "./google-client.ts";
+import { openAuthorizationUrl } from "./authorization-browser.ts";
+import {
+  ConnectorBroker,
+  ConnectorStore,
+  GoogleCalendarProvider,
+  GmailProvider,
+  PlaidProvider,
+  HostCredentialVault,
+  GoogleLoopbackOAuth,
+} from "../../../packages/life-connectors/src/index.ts";
+import {
+  ConnectorPluginRegistry,
+  type ConnectorPluginManifest,
+} from "../../../packages/life-plugins/src/connectors.ts";
+import type { LifeProviderAdapter } from "../../../packages/life-connectors/src/provider-types.ts";
 
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
@@ -13,6 +29,10 @@ export interface LifeApplicationOptions {
   modelUrl?: string;
   model?: string;
   assetsDir?: string;
+  googleOAuth?: { clientId: string; clientSecret?: string };
+  /** Trusted server adapters, never browser widget code or user-supplied module paths. */
+  connectorPlugins?: Array<{ manifest: ConnectorPluginManifest; adapter: LifeProviderAdapter }>;
+  openAuthorizationUrl?: (url: string) => Promise<boolean>;
 }
 
 async function prepareStateDirectory(input: string): Promise<string> {
@@ -93,7 +113,10 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
   ]);
   let store: InstanceType<typeof core.LifeStore> | undefined,
     tasks: InstanceType<typeof taskPackage.TaskRuntime> | undefined,
-    plugins: InstanceType<typeof pluginPackage.PluginStore> | undefined;
+    plugins: InstanceType<typeof pluginPackage.PluginStore> | undefined,
+    connectorStore: ConnectorStore | undefined,
+    vault: HostCredentialVault | undefined,
+    connectors: ConnectorBroker | undefined;
   try {
     store = new core.LifeStore(join(stateDir, "life.sqlite"));
     const trustedActor = { userId: options.userId ?? "local" };
@@ -104,11 +127,80 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
           owner === `user:${trustedActor.userId}` ||
           (owner.startsWith("group:") &&
             store!.listGroups(trustedActor).some((group) => owner === `group:${group.id}`));
-        return authorized ? ["life.records.read", "life.records.write"] : [];
+        return authorized
+          ? [
+              "life.records.read",
+              "life.records.write",
+              ...(owner === `user:${trustedActor.userId}`
+                ? ["life.connections.read", "life.connections.write"]
+                : []),
+            ]
+          : [];
       },
     });
     plugins = new pluginPackage.PluginStore(join(stateDir, "plugins.sqlite"));
+    connectorStore = new ConnectorStore(join(stateDir, "connectors.sqlite"));
+    vault = new HostCredentialVault(join(stateDir, "credentials"));
+    const connectorRegistry = new ConnectorPluginRegistry();
+    connectorRegistry.register(
+      {
+        id: "google-calendar",
+        label: "Google Calendar",
+        kind: "connector",
+        version: 1,
+        observationKinds: ["event"],
+        auth: "google-oauth",
+        scopes: ["https://www.googleapis.com/auth/calendar.readonly"],
+        origins: ["https://www.googleapis.com"],
+      },
+      new GoogleCalendarProvider(),
+    );
+    connectorRegistry.register(
+      {
+        id: "gmail",
+        label: "Gmail",
+        kind: "connector",
+        version: 1,
+        observationKinds: ["message"],
+        auth: "google-oauth",
+        scopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+        origins: ["https://gmail.googleapis.com"],
+      },
+      new GmailProvider(),
+    );
+    connectorRegistry.register(
+      {
+        id: "plaid",
+        label: "Financial accounts",
+        kind: "connector",
+        version: 1,
+        observationKinds: ["transaction"],
+        auth: "host-provisioned",
+        scopes: ["transactions"],
+        origins: ["https://production.plaid.com"],
+      },
+      new PlaidProvider(),
+    );
+    for (const plugin of options.connectorPlugins ?? [])
+      connectorRegistry.register(plugin.manifest, plugin.adapter);
+    connectors = new ConnectorBroker({
+      store: connectorStore,
+      life: store,
+      vault,
+      tasks,
+      providers: connectorRegistry.adapters(),
+      ...(options.googleOAuth
+        ? { oauth: new GoogleLoopbackOAuth({ vault, ...options.googleOAuth }) }
+        : {}),
+    });
   } catch (error) {
+    await connectors?.close().catch(() => {});
+    try {
+      vault?.close();
+    } catch {}
+    try {
+      connectorStore?.close();
+    } catch {}
     if (tasks) await tasks.close().catch(() => {});
     try {
       plugins?.close();
@@ -161,6 +253,8 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
       mlb,
       context,
       preparationMonitor,
+      connectors,
+      openAuthorizationUrl: options.openAuthorizationUrl ?? openAuthorizationUrl,
       modelStatus: () => readiness.status(),
       port: options.port,
       userId: options.userId,
@@ -169,13 +263,16 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
     let closed = false,
       closeInFlight: Promise<void> | undefined,
       pluginsClosed = false,
-      storeClosed = false;
+      storeClosed = false,
+      vaultClosed = false,
+      connectorStoreClosed = false;
     return {
       server,
       async listen() {
         try {
           const ready = await server.listen();
           taskRuntime.start();
+          if (server.canEvaluateBackground()) await connectors!.resume(trustedActor.userId);
           return ready;
         } catch (error) {
           await this.close();
@@ -187,8 +284,17 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
         if (closeInFlight) return closeInFlight;
         closeInFlight = (async () => {
           readiness.close();
+          await connectors!.close();
           await server.close();
           await taskRuntime.close();
+          if (!vaultClosed) {
+            vault!.close();
+            vaultClosed = true;
+          }
+          if (!connectorStoreClosed) {
+            connectorStore!.close();
+            connectorStoreClosed = true;
+          }
           if (!pluginsClosed) {
             pluginStore.close();
             pluginsClosed = true;
@@ -208,7 +314,14 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
     };
   } catch (error) {
     readiness.close();
+    await connectors!.close().catch(() => {});
     await taskRuntime.close().catch(() => {});
+    try {
+      vault!.close();
+    } catch {}
+    try {
+      connectorStore!.close();
+    } catch {}
     try {
       pluginStore.close();
     } catch {}
@@ -224,13 +337,26 @@ function parseArguments(args: string[]): LifeApplicationOptions {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index],
       value = args[index + 1];
-    if (!key || !value || !["--state-dir", "--port", "--model-url", "--model"].includes(key))
+    if (
+      !key ||
+      !value ||
+      ![
+        "--state-dir",
+        "--port",
+        "--model-url",
+        "--model",
+        "--google-client-id",
+        "--google-oauth-client",
+      ].includes(key)
+    )
       throw new Error(
-        "Use: node apps/life/src/main.ts [--state-dir DIR] [--port N] [--model-url URL --model NAME]",
+        "Use: node apps/life/src/main.ts [--state-dir DIR] [--port N] [--model-url URL --model NAME] [--google-client-id ID | --google-oauth-client PRIVATE_JSON_PATH]",
       );
     values.set(key, value);
   }
   const port = Number(values.get("--port") ?? 7440);
+  if (values.has("--google-client-id") && values.has("--google-oauth-client"))
+    throw new Error("Use one Google client configuration option.");
   if (!Number.isInteger(port) || port < 0 || port > 65_535)
     throw new Error("--port must be 0 through 65535.");
   return {
@@ -238,6 +364,12 @@ function parseArguments(args: string[]): LifeApplicationOptions {
     port,
     ...(values.has("--model-url") ? { modelUrl: values.get("--model-url")! } : {}),
     ...(values.has("--model") ? { model: values.get("--model")! } : {}),
+    ...(values.has("--google-client-id")
+      ? { googleOAuth: { clientId: values.get("--google-client-id")! } }
+      : {}),
+    ...(values.has("--google-oauth-client")
+      ? { googleOAuth: loadGoogleClient(values.get("--google-oauth-client")!) }
+      : {}),
   };
 }
 

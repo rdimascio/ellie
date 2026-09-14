@@ -716,3 +716,8 @@ export class MLBAdapter {
     }
   }
 }
+export {
+  ConnectorPluginRegistry,
+  validateConnectorPluginManifest,
+  type ConnectorPluginManifest,
+} from "./connectors.ts";

@@ -2,7 +2,7 @@
 
 Product planning draft · September 13, 2026
 
-Ellie is a personal assistant that remembers your world, helps you anticipate what comes next, acts within your preferences, and builds new capabilities when you need them. Conversation is how you teach, use, and change her. The result can be a remembered preference, a completed errand, a recurring routine, a widget, or an entire small application.
+Ellie is a personal assistant that remembers your world, helps you anticipate what comes next, acts within your preferences, and builds new capabilities when you need them. Connected accounts and permitted context let her learn and prepare proactively; conversation lets you teach, correct, inspect and direct her. The result can be a remembered preference, a completed errand, a recurring routine, a widget, or an entire small application.
 
 The product promise is: **tell Ellie what matters, and she helps carry it forward.**
 
@@ -22,13 +22,17 @@ A floating, glowing orb at the bottom center is the primary control surface. It 
 
 Every important operation should also work through conversation: “Why did you suggest that?”, “Only on weekends,” “Share this with the household,” “Stop watching that,” and “Undo the change.” Conversation is sufficient for ordinary use; the user should not need to organize content or configure a memory pipeline.
 
+**Further user correction, September 14:** ordinary care should arise from analyzing connected accounts rather than depend on command examples. A supported morning scheduling preference, timely family follow-up, appointment preparation plan, completed checklist step or weekday routine should emerge from suitable evidence and the user's standing choices. Ellie should begin bounded persona and horizon analysis when accounts connect, then maintain daily, monthly, quarterly and annual plans. Inferences must remain distinct from explicit preferences, and completion needs actual evidence. Account reading alone does not authorize purchases, messages or device control. See the [connected-life contract](life-connected-plan.md) for the broker, evidence, standing-permission, research and revocation design.
+
+Account plugins are trusted host connectors with typed capabilities; generated widgets are views over those capabilities and never receive credentials. The first account slice is personal and does not automatically share private account data with household members. Additional trusted devices can supply parallel workers or independently eligible stronger models; their VRAM is not automatically pooled.
+
 **Automatic conversation memory**
 
 Every accepted user prompt creates an internal Markdown memory journal entry, including deterministic commands and interrupted model requests. The host derives entries from the authoritative stored conversation; it never treats assistant-generated claims as user facts. Existing retained conversations are processed automatically when this capability starts.
 
 Ellie summarizes the retained statements, preferences, corrections and recent intentions into a bounded, cached Markdown context. The host injects this context into the system messages of later conversations in the same user and space. Capture, summarization, cache invalidation and file generation are internal implementation details. Users do not upload or maintain Markdown files to make Ellie remember.
 
-The current implementation uses whole, extractive observations with explicit omission information. It carries ordinary facts and feedback without a “remember” command, preserves qualifications, separates historical requests from completed work, and excludes conversation-only style from lasting summaries. Richer semantic consolidation can improve this without changing the user experience. Current instructions and explicit settings outrank historical observations; memory cannot grant tools or replay old actions.
+The current implementation uses whole, extractive observations with exact deduplication, bounded relevance selection and explicit omission information. It carries ordinary facts and feedback without a “remember” command, preserves qualifications, separates historical requests from completed work, and excludes conversation-only style from lasting summaries. Connected-account inferences add a separate evidence-linked layer; they do not overwrite explicit settings or become completed work merely because they are plausible. Current instructions and explicit settings outrank historical observations; memory cannot grant tools or replay old actions.
 
 Corrections update later context. Forgetting suppresses matching automatic notes; deleting a conversation removes its derived notes and invalidates caches. Personal reset also removes generated Markdown. Shared-space conversations remain actor-private and are not copied into personal or other members' contexts. Original transcripts have their own visible deletion control.
 
@@ -186,11 +190,11 @@ Persist action identity and enough permitted checkpoint state to resume planning
 
 Adapt Every's read/stage/commit model into clear personal controls:
 
-| Mode                           | Examples                                                                                 | Default behavior                                                                                                            |
-| ------------------------------ | ---------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| Read and suggest               | Retrieve granted information, compare choices, prepare a checklist.                      | Proceed within existing source and device grants.                                                                           |
-| Act within standing permission | Set a requested timer, update a private list, run an approved routine, refresh a widget. | Execute and report the result; provide undo where the operation supports it.                                                |
-| Prepare and confirm            | Purchase a gift, send a message, share private content, make a consequential booking.    | Obtain the needed explicit authorization, which can be a sufficiently specific current request or a bounded standing grant. |
+| Mode                           | Examples                                                                                                                            | Default behavior                                                                                                                    |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Read and suggest               | Retrieve granted information, compare choices, prepare a checklist.                                                                 | Proceed within existing source and device grants.                                                                                   |
+| Act within standing permission | Prepare for a confirmed appointment, create an evidence-backed private reminder or list, run an approved routine, refresh a widget. | Execute eligible work without requiring another command; report the actual result and provide undo where the operation supports it. |
+| Prepare and confirm            | Purchase a gift, send a message, share private content, make a consequential booking.                                               | Obtain the needed explicit authorization, which can be a sufficiently specific current request or a bounded standing grant.         |
 
 Standing grants are concrete: resource, action, scope, limits, duration, and revocation. An example is “Maintain my private packing checklist for this trip.” Broad trust or a model's confidence is not a substitute for the required grant. Additional authorization is needed when an action goes beyond what the user actually authorized.
 
@@ -239,7 +243,7 @@ The borrowed value is reliable execution around a replaceable model. Ellie addit
 
 **Build order and acceptance**
 
-Prioritize a complete life workflow early. Keep the current hardware and service reliability gates; move conversational use, scoped memory, and an initial routine alongside the first useful authenticated client. A dashboard of fixtures remains a design aid, but the new product milestone should prove that a conversation carries an intention through to completion.
+Prioritize a complete life workflow early. Keep the current hardware and service reliability gates while extending conversational use, scoped memory and routines into connected anticipatory assistance. A dashboard of fixtures remains a design aid. The next account milestone must prove that authorized evidence ingestion creates a useful private preparation under a standing choice, explains its sources, survives restart without duplication and stops after revocation; a user command is not required to restate the inferred need.
 
 | Stage                          | Product slice                                                                                                                                                              | Exit evidence                                                                                                                                                                                               |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -268,4 +272,4 @@ Track verified task completion, missed or late commitments, duplicate actions, a
 
 Start with synthetic scenario checks for memory correction and deletion, private/group separation, recurrence and daylight-saving changes, expired grants, stale location, prompt injection through content, background recovery, uncertain action results, plugin isolation, and rollback. Compare learning candidates against held-out cases and the previous version. Keep product telemetry local by default and distinguish it from any separately consented shared training data.
 
-For the initial scope, assume one person first, a household as the first group, a Mac coordinator, and optional phone/TV clients. Treat native mobile context, broader external connectors, marketplace distribution, and model-weight training as later increments. The architecture should leave room for them while the first release proves that Ellie remembers, follows through, and can be corrected entirely through conversation.
+For the initial scope, assume one person first, a household as the first group, a Mac coordinator, and optional phone/TV clients. The connected-life slice introduces a generic trusted broker and first read adapters; native mobile context, additional provider onboarding, marketplace distribution, distributed research transport and model-weight training remain separate increments. Ellie should remember, prepare and follow through from authorized evidence while remaining correctable entirely through conversation.
