@@ -3,5 +3,10 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./src/index.ts"
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@ellie/life-anticipation": "workspace:*",
+    "@ellie/life-core": "workspace:*",
+    "@ellie/task-runtime": "workspace:*"
+  }
 }

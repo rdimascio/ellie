@@ -125,6 +125,11 @@
     "packages/life-connectors": {
       "name": "@ellie/life-connectors",
       "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-anticipation": "workspace:*",
+        "@ellie/life-core": "workspace:*",
+        "@ellie/task-runtime": "workspace:*",
+      },
     },
     "packages/life-context": {
       "name": "@ellie/life-context",

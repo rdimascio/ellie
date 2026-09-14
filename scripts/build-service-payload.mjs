@@ -509,6 +509,33 @@ export async function prepareDependencies({ bun, cwd, cache, environmentRoot }) 
   );
 }
 
+export async function verifyStagedLifeRuntime(payload, environmentRoot) {
+  await mkdir(join(environmentRoot, "home"), { recursive: true, mode: 0o700 });
+  await mkdir(join(environmentRoot, "tmp"), { recursive: true, mode: 0o700 });
+  const node = join(payload, "bin/node");
+  const output = command(
+    node,
+    [
+      "--input-type=module",
+      "--eval",
+      'import { createLifeApplication, createEmbeddedLifeApplication } from "./apps/life/src/embedded.ts"; if (typeof createLifeApplication !== "function" || typeof createEmbeddedLifeApplication !== "function") throw new Error("Life runtime exports are missing."); console.log("Life runtime imports verified.");',
+    ],
+    {
+      cwd: join(payload, "lib/ellie"),
+      env: {
+        PATH: `${dirname(node)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+        HOME: join(environmentRoot, "home"),
+        TMPDIR: join(environmentRoot, "tmp"),
+        NO_COLOR: "1",
+      },
+      stdio: "pipe",
+      timeout: 15_000,
+    },
+  );
+  if (output !== "Life runtime imports verified.\n")
+    throw new Error("Staged Life runtime did not verify its imports.");
+}
+
 async function workspaceMap(root) {
   const result = new Map();
   for (const area of ["apps", "packages"]) {
@@ -947,6 +974,7 @@ export async function buildServicePayload(options) {
     const components = await stageApplication(buildSource, payload, {
       created,
     });
+    await verifyStagedLifeRuntime(payload, join(scratch, "runtime-check"));
     await mkdir(join(payload, "helpers"), { mode: 0o755 });
     command(
       "/usr/bin/xcrun",
