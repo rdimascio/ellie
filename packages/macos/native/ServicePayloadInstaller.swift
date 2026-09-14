@@ -3,18 +3,18 @@ import Darwin
 import Foundation
 import Security
 
-private enum InstallerFailure: Error { case rejected, cleanupIncomplete, publicationUncertain }
+enum InstallerFailure: Error { case rejected, cleanupIncomplete, publicationUncertain }
 private let fixedError =
   "Ellie service payload inspection or staging failed; existing installations were preserved."
 private let cleanupError =
   "Ellie service staging failed and its private temporary release could not be fully removed."
 private let uncertainError =
   "Ellie may have staged an unselected service release; no installed release was selected or started."
-private let maximumManifestBytes = 4 * 1024 * 1024
-private let maximumSourceBytes = 16 * 1024
+let maximumManifestBytes = 4 * 1024 * 1024
+let maximumSourceBytes = 16 * 1024
 #if ELLIE_INSTALLER_TESTING
-  private let maximumPayloadFiles = 100
-  private let maximumPayloadEntries = 128
+  let maximumPayloadFiles = 100
+  let maximumPayloadEntries = 128
   private var diagnosticStage = "argument-validation"
   private var diagnosticCategory = "validation"
 
@@ -40,17 +40,17 @@ private let maximumSourceBytes = 16 * 1024
     return .rejected
   }
 #else
-  private let maximumPayloadFiles = 2_048
-  private let maximumPayloadEntries = 4_096
+  let maximumPayloadFiles = 2_048
+  let maximumPayloadEntries = 4_096
   private func diagnosticCheckpoint(_ stage: String, category: String = "validation") {}
 
   private func diagnosticSyscallFailure(_ stage: String) -> InstallerFailure { .rejected }
 #endif
-private let maximumPayloadDepth = 16
-private let maximumFileBytes: UInt64 = 128 * 1024 * 1024
-private let maximumPayloadBytes: UInt64 = 512 * 1024 * 1024
+let maximumPayloadDepth = 16
+let maximumFileBytes: UInt64 = 128 * 1024 * 1024
+let maximumPayloadBytes: UInt64 = 512 * 1024 * 1024
 
-private struct Entry: Decodable, Equatable {
+struct Entry: Decodable, Equatable {
   let path: String
   let mode: Int
   let size: UInt64
@@ -141,19 +141,19 @@ private func fail(_ error: Error? = nil) -> Never {
   #endif
   exit(1)
 }
-private func closeFD(_ fd: Int32) { if fd >= 0 { _ = Darwin.close(fd) } }
-private func checkedComponent(_ value: String) throws -> String {
+func closeFD(_ fd: Int32) { if fd >= 0 { _ = Darwin.close(fd) } }
+func checkedComponent(_ value: String) throws -> String {
   guard !value.isEmpty, value != ".", value != "..", value.utf8.count <= 255,
     !value.contains("/"), !value.utf8.contains(0)
   else { throw InstallerFailure.rejected }
   return value
 }
-private func components(_ path: String) throws -> [String] {
+func components(_ path: String) throws -> [String] {
   guard path.utf8.count <= 4096 else { throw InstallerFailure.rejected }
   let values = path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
   return try values.map(checkedComponent)
 }
-private func openDirectory(at parent: Int32, _ name: String) throws -> Int32 {
+func openDirectory(at parent: Int32, _ name: String) throws -> Int32 {
   let fd = openat(
     parent, try checkedComponent(name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
   guard fd >= 0 else { throw InstallerFailure.rejected }
@@ -164,7 +164,7 @@ private func openDirectory(at parent: Int32, _ name: String) throws -> Int32 {
   }
   return fd
 }
-private func openAbsoluteDirectory(_ path: String) throws -> Int32 {
+func openAbsoluteDirectory(_ path: String) throws -> Int32 {
   guard path.hasPrefix("/") else { throw InstallerFailure.rejected }
   var current = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)
   guard current >= 0 else { throw InstallerFailure.rejected }
@@ -180,14 +180,14 @@ private func openAbsoluteDirectory(_ path: String) throws -> Int32 {
     throw error
   }
 }
-private func statSafeDirectory(_ fd: Int32, privateMode: Bool) throws {
+func statSafeDirectory(_ fd: Int32, privateMode: Bool) throws {
   var info = stat()
   guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
     info.st_uid == getuid(), !privateMode || (info.st_mode & 0o077) == 0,
     (info.st_mode & 0o022) == 0
   else { throw InstallerFailure.rejected }
 }
-private func readFile(at parent: Int32, _ name: String, mode: mode_t, maximum: Int) throws -> Data {
+func readFile(at parent: Int32, _ name: String, mode: mode_t, maximum: Int) throws -> Data {
   let fd = openat(
     parent, try checkedComponent(name), O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
   guard fd >= 0 else { throw InstallerFailure.rejected }
@@ -207,7 +207,7 @@ private func readFile(at parent: Int32, _ name: String, mode: mode_t, maximum: I
   }
   return result
 }
-private func fileDescriptor(at root: Int32, path: String) throws -> Int32 {
+func fileDescriptor(at root: Int32, path: String) throws -> Int32 {
   let parts = try components(path)
   guard !parts.isEmpty else { throw InstallerFailure.rejected }
   var directory = dup(root)
@@ -227,7 +227,7 @@ private func fileDescriptor(at root: Int32, path: String) throws -> Int32 {
     throw error
   }
 }
-private func validatePath(_ path: String) throws {
+func validatePath(_ path: String) throws {
   let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
   guard !path.isEmpty, path.utf8.count <= 500, !path.hasPrefix("/"), !path.contains("\\"),
     parts.allSatisfy({ part in
@@ -239,14 +239,14 @@ private func validatePath(_ path: String) throws {
     })
   else { throw InstallerFailure.rejected }
 }
-private func exactMatch(_ value: String, _ pattern: String, maximum: Int) -> Bool {
+func exactMatch(_ value: String, _ pattern: String, maximum: Int) -> Bool {
   guard !value.isEmpty, value.utf8.count <= maximum,
     let expression = try? NSRegularExpression(pattern: pattern)
   else { return false }
   let range = NSRange(value.startIndex..<value.endIndex, in: value)
   return expression.firstMatch(in: value, range: range)?.range == range
 }
-private func exactKeys(_ value: Any?, _ expected: Set<String>) -> Bool {
+func exactKeys(_ value: Any?, _ expected: Set<String>) -> Bool {
   guard let object = value as? [String: Any] else { return false }
   return Set(object.keys) == expected
 }
@@ -272,7 +272,7 @@ private func validateManifestShape(_ data: Data) throws {
     files.allSatisfy({ exactKeys($0, ["path", "mode", "size", "sha256"]) })
   else { throw InstallerFailure.rejected }
 }
-private func hashAndValidate(root: Int32, entry: Entry, installed: Bool) throws {
+func hashAndValidate(root: Int32, entry: Entry, installed: Bool) throws {
   try validatePath(entry.path)
   guard entry.mode == 0o644 || entry.mode == 0o755, entry.size <= maximumFileBytes,
     exactMatch(entry.sha256, "[a-f0-9]{64}", maximum: 64)
@@ -299,7 +299,7 @@ private func hashAndValidate(root: Int32, entry: Entry, installed: Bool) throws 
   let value = digest.finalize().map { String(format: "%02x", $0) }.joined()
   guard total == entry.size, value == entry.sha256 else { throw InstallerFailure.rejected }
 }
-private func listedFiles(
+func listedFiles(
   _ root: Int32, prefix: String = "", installed: Bool, depth: Int = 0,
   allowedDirectories: Set<String>, count: inout Int
 ) throws -> [String] {
@@ -344,7 +344,7 @@ private func listedFiles(
   }
   return result.sorted()
 }
-private func expectedArchitecture() -> String {
+func expectedArchitecture() -> String {
   #if arch(arm64)
     return "arm64"
   #elseif arch(x86_64)
@@ -367,7 +367,7 @@ private func validateSignature(path: String, identifier: String) throws {
     values[kSecCodeInfoIdentifier as String] as? String == identifier
   else { throw InstallerFailure.rejected }
 }
-private func pathFromFD(_ fd: Int32) throws -> String {
+func pathFromFD(_ fd: Int32) throws -> String {
   var value = [CChar](repeating: 0, count: Int(MAXPATHLEN))
   guard fcntl(fd, F_GETPATH, &value) == 0 else { throw InstallerFailure.rejected }
   return String(cString: value)
@@ -788,7 +788,7 @@ func selectionUnsealApplication(
   return try selectionApplicationDigest(
     parent: parent, name: name, files: files, identifier: identifier, rootMode: 0o700)
 }
-private func directoryNames(_ fd: Int32, maximum: Int = maximumPayloadEntries) throws -> [String] {
+func directoryNames(_ fd: Int32, maximum: Int = maximumPayloadEntries) throws -> [String] {
   guard let stream = fdopendir(dup(fd)) else { throw InstallerFailure.rejected }
   defer { closedir(stream) }
   var names: [String] = []
@@ -808,7 +808,7 @@ private func directoryNames(_ fd: Int32, maximum: Int = maximumPayloadEntries) t
   }
   return names.sorted()
 }
-private func ensureDirectory(parent: Int32, name: String, mode: mode_t) throws -> Int32 {
+func ensureDirectory(parent: Int32, name: String, mode: mode_t) throws -> Int32 {
   if mkdirat(parent, try checkedComponent(name), mode) != 0 && errno != EEXIST {
     throw InstallerFailure.rejected
   }
@@ -820,7 +820,7 @@ private func ensureDirectory(parent: Int32, name: String, mode: mode_t) throws -
   }
   return result
 }
-private func removeTree(parent: Int32, name: String) throws {
+func removeTree(parent: Int32, name: String) throws {
   var info = stat()
   guard fstatat(parent, try checkedComponent(name), &info, AT_SYMLINK_NOFOLLOW) == 0 else {
     if errno == ENOENT { return }
@@ -841,7 +841,7 @@ private func removeTree(parent: Int32, name: String) throws {
     }
   }
 }
-private func productionServicesRoot() throws -> String {
+func productionServicesRoot() throws -> String {
   let home = try openAbsoluteDirectory(FileManager.default.homeDirectoryForCurrentUser.path)
   defer { closeFD(home) }
   try statSafeDirectory(home, privateMode: false)
@@ -906,13 +906,14 @@ private func copyFile(
   let hash = digest.finalize().map { String(format: "%02x", $0) }.joined()
   guard total == expected.size, hash == expected.sha256 else { throw InstallerFailure.rejected }
 }
-private func writeCapturedFile(
-  destination: Int32, name: String, data: Data, counter: inout Int, failAfter: Int?
+func writeCapturedFile(
+  destination: Int32, name: String, data: Data, mode: mode_t = 0o444,
+  counter: inout Int, failAfter: Int?
 ) throws {
   if let failAfter, counter == failAfter { throw InstallerFailure.rejected }
   counter += 1
   let output = openat(
-    destination, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o444)
+    destination, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
   guard output >= 0 else { throw InstallerFailure.rejected }
   defer { closeFD(output) }
   var offset = 0
@@ -923,11 +924,11 @@ private func writeCapturedFile(
     guard count > 0 else { throw InstallerFailure.rejected }
     offset += count
   }
-  guard fchmod(output, 0o444) == 0, fsync(output) == 0 else {
+  guard fchmod(output, mode) == 0, fsync(output) == 0 else {
     throw InstallerFailure.rejected
   }
 }
-private func copyPayload(
+func copyPayload(
   source: Int32, destination: Int32, entries: [Entry], counter: inout Int, failAfter: Int?,
   sourceInstalled: Bool = false
 ) throws {
@@ -955,7 +956,7 @@ private func copyPayload(
       counter: &counter, failAfter: failAfter, sourceInstalled: sourceInstalled)
   }
 }
-private func makeImmutable(_ fd: Int32) throws {
+func makeImmutable(_ fd: Int32) throws {
   for name in try directoryNames(fd) {
     var info = stat()
     guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
@@ -1110,6 +1111,18 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "inspect-authenticated-payload" {
+      do { try runAuthenticatedPayloadInspection(arguments) } catch {
+        failAuthenticatedPayloadInspection(error)
+      }
+    }
+    if arguments.first == "capture-authenticated-payload"
+      || arguments.first == "recover-authenticated-capture"
+    {
+      do { try runAuthenticatedCaptureCommand(arguments) } catch {
+        failAuthenticatedCapture(error)
+      }
+    }
     if arguments.first == "inspect-authorization" {
       do { try runAuthorizationInspection(arguments) } catch { failAuthorizationInspection(error) }
     }
@@ -1119,6 +1132,13 @@ private struct ServicePayloadInstaller {
       }
       if arguments.first == "test-authorization-resources" {
         do { try runAuthorizationResourcesTest(arguments) } catch { failAuthorizationInspection(error) }
+      }
+    #endif
+    #if ELLIE_AUTHENTICATED_PAYLOAD_TESTING
+      if arguments.first == "test-authenticated-macho" {
+        do { try runAuthenticatedMachOParserTest(arguments) } catch {
+          failAuthenticatedPayloadInspection(error)
+        }
       }
     #endif
     if arguments.first == "restore-legacy" || arguments.first == "recover-legacy-restore" {

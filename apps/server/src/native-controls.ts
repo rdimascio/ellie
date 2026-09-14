@@ -148,12 +148,6 @@ export class NativeControls {
           NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs,
         ),
       );
-      const fresh = current();
-      if (!fresh) return true;
-      if (!allowed(fresh, command.nodeId)) {
-        reply(403, { error: "App opening is not allowed on this device." });
-        return true;
-      }
       const target = nodes.find((node) => node.id === command.nodeId);
       if (!target) {
         reply(404, { error: "The granted device is not configured." });
@@ -164,15 +158,21 @@ export class NativeControls {
         return true;
       }
       if (controller.signal.aborted || response.destroyed || this.stopped) return true;
+      const nodeId = command.nodeId;
+      const admitted = await bounded(
+        () => auth.withAuthenticated(bearer, (fresh) => allowed(fresh, nodeId)),
+        controller,
+        NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs,
+      );
+      if (admitted !== true) {
+        reply(401, { error: "Native session required." });
+        return true;
+      }
+      if (controller.signal.aborted || response.destroyed || this.stopped) return true;
       response.setTimeout(40_000);
       dispatched = true;
-      const nodeId = command.nodeId;
       const operation = Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
-        // Recheck at dispatch, after all asynchronous discovery and parsing.
-        const authorized = auth.authenticateBearer(bearer);
-        if (!authorized || !allowed(authorized, nodeId))
-          throw new Error("Native authority changed.");
         return remote.openApp(nodeId, command.action.app, { signal: controller.signal });
       });
       operation.then(

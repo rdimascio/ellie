@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
+  copyFile,
   link,
   lstat,
   mkdir,
@@ -30,6 +31,14 @@ const authorizationSource = new URL(
   "../packages/macos/native/ServicePayloadAuthorization.swift",
   import.meta.url,
 ).pathname;
+const authenticatedPayloadSource = new URL(
+  "../packages/macos/native/ServicePayloadAuthenticatedInspection.swift",
+  import.meta.url,
+).pathname;
+const captureSource = new URL(
+  "../packages/macos/native/ServicePayloadCapture.swift",
+  import.meta.url,
+).pathname;
 const selectionSource = new URL(
   "../packages/macos/native/ServicePayloadSelection.swift",
   import.meta.url,
@@ -48,6 +57,37 @@ const launcherSource = new URL(
 ).pathname;
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const boundedCommand = { timeout: 15_000, stdio: "pipe" as const };
+const sharedSetupTimeout = 120_000;
+const sharedTemplateNames = [
+  "build-key.json",
+  "coordinator-launcher",
+  "installer",
+  "node-launcher",
+  "tiny",
+] as const;
+type TemplateArtifact = {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+  uid: number;
+  mode: number;
+  size: number;
+  sha256: string;
+};
+type SharedTemplate = {
+  root: string;
+  rootDev: bigint;
+  rootIno: bigint;
+  rootUID: number;
+  artifacts: Readonly<Record<string, Readonly<TemplateArtifact>>>;
+};
+type OwnedDirectoryIdentity = {
+  dev: bigint;
+  ino: bigint;
+  uid: number;
+};
+let sharedTemplate: SharedTemplate | undefined;
+let sharedSetupCertain = false;
 function authorizationRequirement(teamID: string) {
   return `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${teamID}" and identifier "org.ellie.service.authorization"`;
 }
@@ -76,6 +116,85 @@ function canonicalJSON(value: unknown): string {
   };
   return `${JSON.stringify(sorted(value))}\n`;
 }
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+async function templateArtifact(root: string, name: string): Promise<TemplateArtifact> {
+  const path = join(root, name);
+  const info = await lstat(path, { bigint: true });
+  assert.equal(info.isFile(), true);
+  assert.equal(info.nlink, 1n);
+  assert.equal(Number(info.uid), process.getuid?.());
+  return Object.freeze({
+    path: name,
+    dev: info.dev,
+    ino: info.ino,
+    uid: Number(info.uid),
+    mode: Number(info.mode & 0o7777n),
+    size: Number(info.size),
+    sha256: digest(await readFile(path)),
+  });
+}
+async function captureOwnedDirectory(path: string): Promise<OwnedDirectoryIdentity> {
+  const info = await lstat(path, { bigint: true });
+  assert.equal(info.isDirectory(), true);
+  assert.equal(Number(info.uid), process.getuid?.());
+  assert.equal(Number(info.mode & 0o7777n), 0o700);
+  return Object.freeze({ dev: info.dev, ino: info.ino, uid: Number(info.uid) });
+}
+async function verifyOwnedDirectory(
+  path: string,
+  expected: OwnedDirectoryIdentity,
+  mode: number,
+  names: readonly string[],
+) {
+  const info = await lstat(path, { bigint: true });
+  assert.equal(info.isDirectory(), true);
+  assert.equal(info.dev, expected.dev);
+  assert.equal(info.ino, expected.ino);
+  assert.equal(Number(info.uid), expected.uid);
+  assert.equal(Number(info.uid), process.getuid?.());
+  assert.equal(Number(info.mode & 0o7777n), mode);
+  assert.deepEqual((await readdir(path)).sort(), [...names].sort());
+}
+async function verifySharedTemplate(): Promise<SharedTemplate> {
+  assert.ok(sharedTemplate);
+  const expected = sharedTemplate;
+  const root = await lstat(expected.root, { bigint: true });
+  assert.equal(root.isDirectory(), true);
+  assert.equal(root.dev, expected.rootDev);
+  assert.equal(root.ino, expected.rootIno);
+  assert.equal(Number(root.uid), expected.rootUID);
+  assert.equal(Number(root.mode & 0o7777n), 0o500);
+  assert.deepEqual((await readdir(expected.root)).sort(), [...sharedTemplateNames]);
+  for (const name of sharedTemplateNames) {
+    const actual = await templateArtifact(expected.root, name);
+    const recorded = expected.artifacts[name];
+    assert.ok(recorded);
+    assert.deepEqual(actual, recorded);
+  }
+  return expected;
+}
+async function copyTemplateArtifact(name: string, destination: string) {
+  const template = await verifySharedTemplate();
+  const expected = template.artifacts[name];
+  assert.ok(expected);
+  await copyFile(join(template.root, name), destination);
+  await chmod(destination, 0o755);
+  const copied = await lstat(destination, { bigint: true });
+  assert.equal(copied.isFile(), true);
+  assert.equal(copied.nlink, 1n);
+  assert.equal(Number(copied.uid), expected.uid);
+  assert.equal(Number(copied.mode & 0o7777n), 0o755);
+  assert.equal(Number(copied.size), expected.size);
+  assert.notEqual(copied.dev === expected.dev && copied.ino === expected.ino, true);
+  assert.equal(digest(await readFile(destination)), expected.sha256);
+  await verifySharedTemplate();
+}
 const run = (file: string, args: string[]) =>
   spawnSync(file, args, { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
 function assertAuthorizationRejected(result: ReturnType<typeof run>) {
@@ -85,6 +204,15 @@ function assertAuthorizationRejected(result: ReturnType<typeof run>) {
   assert.match(
     result.stderr,
     /^Ellie could not authenticate this service manifest envelope; no payload was installed or changed\.\n/,
+  );
+}
+function assertAuthenticatedPayloadRejected(result: ReturnType<typeof run>) {
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.equal(
+    result.stderr,
+    "Ellie could not authenticate and inspect this service payload; no payload was installed or changed.\n",
   );
 }
 const runWithUmask = (mask: "027" | "077", file: string, args: string[]) =>
@@ -122,7 +250,224 @@ async function removeOwned(root: string) {
   await makeWritable(root);
   await rm(root, { recursive: true });
 }
-async function fixture(root: string, installer: string, tiny: string) {
+test.before(
+  async () => {
+    if (!mac) return;
+    const templateRoot = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-template-")));
+    const templateIdentity = await captureOwnedDirectory(templateRoot);
+    const buildRoot = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-build-")));
+    const buildIdentity = await captureOwnedDirectory(buildRoot);
+    try {
+      const compilerVersion = execFileSync("/usr/bin/xcrun", ["swiftc", "--version"], {
+        ...boundedCommand,
+        encoding: "utf8",
+      }).trim();
+      const tinySource = join(buildRoot, "tiny.swift");
+      const tinySourceBytes = Buffer.from("@main struct Tiny { static func main() {} }\n");
+      await writeFile(tinySource, tinySourceBytes, { mode: 0o600 });
+      const tinySourceRecord = await templateArtifact(buildRoot, "tiny.swift");
+      const sources = [
+        authorizationSource,
+        authenticatedPayloadSource,
+        captureSource,
+        selectionSource,
+        lifecycleSource,
+        migrationSource,
+        source,
+        launcherSource,
+      ];
+      const sourceRecords = await Promise.all(
+        sources.map(async (path) => ({
+          path,
+          name: path.split("/").at(-1),
+          sha256: digest(await readFile(path)),
+        })),
+      );
+      const installerArguments = [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-parse-as-library",
+        "-D",
+        "ELLIE_INSTALLER_TESTING",
+        "-D",
+        "ELLIE_AUTHORIZATION_TESTING",
+        "-D",
+        "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
+        authorizationSource,
+        authenticatedPayloadSource,
+        captureSource,
+        selectionSource,
+        lifecycleSource,
+        migrationSource,
+        source,
+        "-o",
+        join(templateRoot, "installer"),
+      ];
+      execFileSync("/usr/bin/xcrun", installerArguments, boundedCommand);
+      execFileSync(
+        "/usr/bin/codesign",
+        [
+          "--force",
+          "--sign",
+          "-",
+          "--identifier",
+          "org.ellie.installer",
+          join(templateRoot, "installer"),
+        ],
+        boundedCommand,
+      );
+      const tinyArguments = [
+        "swiftc",
+        "-parse-as-library",
+        tinySource,
+        "-o",
+        join(templateRoot, "tiny"),
+      ];
+      execFileSync("/usr/bin/xcrun", tinyArguments, boundedCommand);
+      const launcherArguments: Record<"coordinator-launcher" | "node-launcher", string[]> = {
+        "coordinator-launcher": [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          "-D",
+          "ELLIE_COORDINATOR",
+          launcherSource,
+          "-o",
+          join(templateRoot, "coordinator-launcher"),
+        ],
+        "node-launcher": [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          "-D",
+          "ELLIE_NODE",
+          launcherSource,
+          "-o",
+          join(templateRoot, "node-launcher"),
+        ],
+      };
+      for (const arguments_ of Object.values(launcherArguments))
+        execFileSync("/usr/bin/xcrun", arguments_, boundedCommand);
+      for (const name of ["installer", "tiny", "coordinator-launcher", "node-launcher"])
+        await chmod(join(templateRoot, name), 0o500);
+      for (const record of sourceRecords)
+        assert.equal(digest(await readFile(record.path)), record.sha256);
+      assert.deepEqual(await templateArtifact(buildRoot, "tiny.swift"), tinySourceRecord);
+      const buildKey = deepFreeze({
+        version: 1,
+        architecture: process.arch,
+        compilerVersion,
+        sources: [
+          ...sourceRecords.map(({ name, sha256 }) => ({ name, sha256 })),
+          { name: "tiny.swift", sha256: digest(tinySourceBytes) },
+        ],
+        commands: {
+          installer: [
+            "swiftc",
+            "-swift-version",
+            "5",
+            "-parse-as-library",
+            "-D",
+            "ELLIE_INSTALLER_TESTING",
+            "-D",
+            "ELLIE_AUTHORIZATION_TESTING",
+            "-D",
+            "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
+            ...sources.slice(0, 6).map((path) => path.split("/").at(-1)),
+            "-o",
+            "installer",
+          ],
+          installerSignature: [
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--identifier",
+            "org.ellie.installer",
+            "installer",
+          ],
+          tiny: ["swiftc", "-parse-as-library", "tiny.swift", "-o", "tiny"],
+          launchers: {
+            coordinator: [
+              "swiftc",
+              "-swift-version",
+              "5",
+              "-parse-as-library",
+              "-D",
+              "ELLIE_COORDINATOR",
+              "PackagedServiceLauncher.swift",
+              "-o",
+              "coordinator-launcher",
+            ],
+            node: [
+              "swiftc",
+              "-swift-version",
+              "5",
+              "-parse-as-library",
+              "-D",
+              "ELLIE_NODE",
+              "PackagedServiceLauncher.swift",
+              "-o",
+              "node-launcher",
+            ],
+          },
+        },
+        outputs: await Promise.all(
+          ["installer", "tiny", "coordinator-launcher", "node-launcher"].map(async (name) => ({
+            name,
+            sha256: digest(await readFile(join(templateRoot, name))),
+          })),
+        ),
+      });
+      const buildKeyBytes = Buffer.from(canonicalJSON(buildKey));
+      await writeFile(join(templateRoot, "build-key.json"), buildKeyBytes, {
+        mode: 0o400,
+      });
+      await verifyOwnedDirectory(templateRoot, templateIdentity, 0o700, sharedTemplateNames);
+      const artifacts: Record<string, Readonly<TemplateArtifact>> = {};
+      for (const name of sharedTemplateNames)
+        artifacts[name] = await templateArtifact(templateRoot, name);
+      for (const name of sharedTemplateNames)
+        assert.equal(artifacts[name]?.mode, name === "build-key.json" ? 0o400 : 0o500);
+      assert.equal(artifacts["build-key.json"]?.sha256, digest(buildKeyBytes));
+      for (const output of buildKey.outputs)
+        assert.equal(artifacts[output.name]?.sha256, output.sha256);
+      await chmod(templateRoot, 0o500);
+      sharedTemplate = Object.freeze({
+        root: templateRoot,
+        rootDev: templateIdentity.dev,
+        rootIno: templateIdentity.ino,
+        rootUID: templateIdentity.uid,
+        artifacts: Object.freeze(artifacts),
+      });
+      await verifySharedTemplate();
+      await verifyOwnedDirectory(buildRoot, buildIdentity, 0o700, ["tiny.swift"]);
+      assert.deepEqual(await templateArtifact(buildRoot, "tiny.swift"), tinySourceRecord);
+      await removeOwned(buildRoot);
+      sharedSetupCertain = true;
+    } catch (error) {
+      console.error(`Native fixture setup retained owned roots: ${templateRoot} ${buildRoot}`);
+      throw error;
+    }
+  },
+  { timeout: sharedSetupTimeout },
+);
+
+test.after(async () => {
+  if (sharedSetupCertain && sharedTemplate) {
+    await verifySharedTemplate();
+    await removeOwned(sharedTemplate.root);
+  }
+});
+async function fixture(
+  root: string,
+  installer: string,
+  tiny: string,
+  launcherTemplates?: { coordinator: string; node: string },
+) {
   const release = join(root, "source");
   const payload = join(release, "payload");
   await mkdir(join(payload, "bin"), { recursive: true, mode: 0o755 });
@@ -155,21 +500,30 @@ async function fixture(root: string, installer: string, tiny: string) {
   ] as const) {
     const app = join(payload, "launchers", `${name}.app`);
     await mkdir(join(app, "Contents/MacOS"), { recursive: true, mode: 0o755 });
-    execFileSync(
-      "/usr/bin/xcrun",
-      [
-        "swiftc",
-        "-swift-version",
-        "5",
-        "-parse-as-library",
-        "-D",
-        define,
-        launcherSource,
-        "-o",
-        join(app, "Contents/MacOS/EllieService"),
-      ],
-      boundedCommand,
-    );
+    const executable = join(app, "Contents/MacOS/EllieService");
+    if (launcherTemplates) {
+      await copyFile(
+        define === "ELLIE_COORDINATOR" ? launcherTemplates.coordinator : launcherTemplates.node,
+        executable,
+      );
+      await chmod(executable, 0o755);
+    } else {
+      execFileSync(
+        "/usr/bin/xcrun",
+        [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          "-D",
+          define,
+          launcherSource,
+          "-o",
+          executable,
+        ],
+        boundedCommand,
+      );
+    }
     await writeFile(
       join(app, "Contents/Info.plist"),
       `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleExecutable</key><string>EllieService</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>`,
@@ -246,6 +600,107 @@ async function refreshManifestFiles(release: string) {
   await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 }
 
+const productionNativeCode = [
+  {
+    path: "bin/node",
+    kind: "executable",
+    identifier: "org.ellie.runtime.node",
+    machOPaths: ["bin/node"],
+    entitlements: {
+      "com.apple.security.cs.allow-jit": true,
+      "com.apple.security.cs.allow-unsigned-executable-memory": true,
+    },
+  },
+  {
+    path: "bin/ellie-service-installer",
+    kind: "executable",
+    identifier: "org.ellie.installer",
+    machOPaths: ["bin/ellie-service-installer"],
+    entitlements: {},
+  },
+  {
+    path: "helpers/ellie-macos",
+    kind: "executable",
+    identifier: "org.ellie.helper",
+    machOPaths: ["helpers/ellie-macos"],
+    entitlements: {},
+  },
+  {
+    path: "launchers/Ellie Coordinator.app",
+    kind: "bundle",
+    identifier: "org.ellie.assistant.coordinator.app",
+    machOPaths: ["launchers/Ellie Coordinator.app/Contents/MacOS/EllieService"],
+    entitlements: {},
+  },
+  {
+    path: "launchers/Ellie Node.app",
+    kind: "bundle",
+    identifier: "org.ellie.assistant.node.app",
+    machOPaths: ["launchers/Ellie Node.app/Contents/MacOS/EllieService"],
+    entitlements: {},
+  },
+];
+
+async function productionFixture(root: string, release: string) {
+  const payload = join(release, "payload");
+  const entitlements = join(root, "node-entitlements.plist");
+  await writeFile(
+    entitlements,
+    '<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/><key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/></dict></plist>',
+    { mode: 0o600 },
+  );
+  execFileSync(
+    "/usr/bin/codesign",
+    [
+      "--force",
+      "--sign",
+      "-",
+      "--identifier",
+      "org.ellie.runtime.node",
+      "--options",
+      "runtime",
+      "--entitlements",
+      entitlements,
+      join(payload, "bin/node"),
+    ],
+    boundedCommand,
+  );
+  for (const [path, identifier] of [
+    ["bin/ellie-service-installer", "org.ellie.installer"],
+    ["helpers/ellie-macos", "org.ellie.helper"],
+    ["launchers/Ellie Coordinator.app", "org.ellie.assistant.coordinator.app"],
+    ["launchers/Ellie Node.app", "org.ellie.assistant.node.app"],
+  ] as const) {
+    execFileSync(
+      "/usr/bin/codesign",
+      [
+        "--force",
+        "--sign",
+        "-",
+        "--options",
+        "runtime",
+        "--identifier",
+        identifier,
+        join(payload, path),
+      ],
+      boundedCommand,
+    );
+  }
+  const manifestPath = join(release, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.version = 2;
+  manifest.helper.signature = "developer-id";
+  for (const launcher of manifest.launchers) launcher.signature = "developer-id";
+  manifest.nativeCode = productionNativeCode;
+  await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
+  await refreshManifestFiles(release);
+  await writeFile(
+    join(release, "SOURCE.txt"),
+    `Ellie service payload\nSource revision: ${manifest.sourceRevision}\nNode.js: ${manifest.runtime.version}\nNode archive SHA-256: ${manifest.runtime.sha256}\nMinimum macOS: ${manifest.minimumOS}\nPolicy: authenticated-payload-v1\n`,
+    { mode: 0o644 },
+  );
+}
+
 async function authorizationBundle(
   root: string,
   release: string,
@@ -317,41 +772,14 @@ async function withFixture(
     if (completed) await removeOwned(root);
   });
   const installer = join(root, "installer");
-  const tinySource = join(root, "tiny.swift");
   const tiny = join(root, "tiny");
-  await writeFile(tinySource, "@main struct Tiny { static func main() {} }\n");
-  execFileSync(
-    "/usr/bin/xcrun",
-    [
-      "swiftc",
-      "-swift-version",
-      "5",
-      "-parse-as-library",
-      "-D",
-      "ELLIE_INSTALLER_TESTING",
-      "-D",
-      "ELLIE_AUTHORIZATION_TESTING",
-      authorizationSource,
-      selectionSource,
-      lifecycleSource,
-      migrationSource,
-      source,
-      "-o",
-      installer,
-    ],
-    boundedCommand,
-  );
-  execFileSync(
-    "/usr/bin/codesign",
-    ["--force", "--sign", "-", "--identifier", "org.ellie.installer", installer],
-    boundedCommand,
-  );
-  execFileSync(
-    "/usr/bin/xcrun",
-    ["swiftc", "-parse-as-library", tinySource, "-o", tiny],
-    boundedCommand,
-  );
-  const { release, id } = await fixture(root, installer, tiny);
+  const coordinator = join(root, "coordinator-launcher");
+  const node = join(root, "node-launcher");
+  await copyTemplateArtifact("installer", installer);
+  await copyTemplateArtifact("tiny", tiny);
+  await copyTemplateArtifact("coordinator-launcher", coordinator);
+  await copyTemplateArtifact("node-launcher", node);
+  const { release, id } = await fixture(root, installer, tiny, { coordinator, node });
   const services = join(root, "Services");
   await mkdir(services, { mode: 0o700 });
   await action({ root, release, installer, services, id });
@@ -359,6 +787,36 @@ async function withFixture(
 }
 
 const options = { skip: !mac };
+test(
+  "compiled installer templates copy into isolated mutable fixture roots",
+  options,
+  async (t) => {
+    const first = await realpath(await mkdtemp(join(tmpdir(), "ellie-template-copy-a-")));
+    const second = await realpath(await mkdtemp(join(tmpdir(), "ellie-template-copy-b-")));
+    let completed = false;
+    t.after(async () => {
+      if (completed) {
+        await removeOwned(first);
+        await removeOwned(second);
+      }
+    });
+    const firstInstaller = join(first, "installer");
+    const secondInstaller = join(second, "installer");
+    await copyTemplateArtifact("installer", firstInstaller);
+    await copyTemplateArtifact("installer", secondInstaller);
+    const template = await verifySharedTemplate();
+    const expected = template.artifacts.installer;
+    assert.ok(expected);
+    const firstInfo = await lstat(firstInstaller, { bigint: true });
+    const secondInfo = await lstat(secondInstaller, { bigint: true });
+    assert.notEqual(firstInfo.dev === secondInfo.dev && firstInfo.ino === secondInfo.ino, true);
+    await writeFile(firstInstaller, "owned mutation", { mode: 0o755 });
+    assert.notEqual(digest(await readFile(firstInstaller)), expected.sha256);
+    assert.equal(digest(await readFile(secondInstaller)), expected.sha256);
+    await verifySharedTemplate();
+    completed = true;
+  },
+);
 test("installer stage diagnostics are compiled into test builds only", options, async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-diagnostic-")));
   t.after(() => removeOwned(root));
@@ -372,6 +830,8 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-D",
     "ELLIE_INSTALLER_TESTING",
     authorizationSource,
+    authenticatedPayloadSource,
+    captureSource,
     selectionSource,
     lifecycleSource,
     migrationSource,
@@ -385,6 +845,8 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "5",
     "-parse-as-library",
     authorizationSource,
+    authenticatedPayloadSource,
+    captureSource,
     selectionSource,
     lifecycleSource,
     migrationSource,
@@ -464,6 +926,8 @@ test(
           "5",
           "-parse-as-library",
           authorizationSource,
+          authenticatedPayloadSource,
+          captureSource,
           selectionSource,
           lifecycleSource,
           migrationSource,
@@ -545,6 +1009,293 @@ test(
       const sealedManifest = join(app, "Contents/Resources/manifest.json");
       await writeFile(sealedManifest, Buffer.concat([originalManifest, Buffer.from(" ")]));
       assertAuthorizationRejected(run(installer, args));
+    });
+  },
+);
+
+test(
+  "authenticated payload inspection binds manifest v2 to the complete native inventory",
+  options,
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      await productionFixture(root, release);
+      const app = await authorizationBundle(root, release, installer);
+      const args = [
+        "inspect-authenticated-payload",
+        release,
+        app,
+        "--publisher-team-id",
+        "ABCDEFGHIJ",
+        "--test-allow-sealed-adhoc",
+      ];
+      const accepted = run(installer, args);
+      assert.equal(accepted.error, undefined);
+      assert.equal(accepted.signal, null);
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.match(
+        accepted.stdout,
+        new RegExp(
+          `^Authenticated payload ${id}, envelope policy [a-f0-9]{64}, payload policy [a-f0-9]{64}, manifest [a-f0-9]{64}; installation was not authorized and nothing was changed\\.\\n$`,
+        ),
+      );
+      assert.notEqual(run(installer, ["inspect", release]).status, 0);
+      const reboundRelease = join(root, "rebound-release");
+      await cp(release, reboundRelease, { recursive: true });
+      assertAuthenticatedPayloadRejected(
+        run(installer, [...args, "--test-rebind-path", reboundRelease]),
+      );
+
+      const thin = await readFile(join(release, "payload/bin/node"));
+      const fatOffset = 4096;
+      const fat = Buffer.alloc(fatOffset + thin.length);
+      fat.writeUInt32BE(0xcafebabe, 0);
+      fat.writeUInt32BE(1, 4);
+      fat.writeUInt32BE(thin.readUInt32LE(4), 8);
+      fat.writeUInt32BE(thin.readUInt32LE(8), 12);
+      fat.writeUInt32BE(fatOffset, 16);
+      fat.writeUInt32BE(thin.length, 20);
+      fat.writeUInt32BE(12, 24);
+      thin.copy(fat, fatOffset);
+      const fatPath = join(root, "synthetic-fat");
+      await writeFile(fatPath, fat, { mode: 0o600 });
+      const parsedFat = run(installer, [
+        "test-authenticated-macho",
+        root,
+        "synthetic-fat",
+        process.arch === "arm64" ? "arm64" : "x64",
+      ]);
+      assert.equal(parsedFat.status, 0, parsedFat.stderr);
+      assert.equal(parsedFat.stdout, "native\n");
+      assertAuthenticatedPayloadRejected(
+        run(installer, [
+          "test-authenticated-macho",
+          root,
+          "synthetic-fat",
+          process.arch === "arm64" ? "x64" : "arm64",
+        ]),
+      );
+      await writeFile(join(root, "short-data"), Buffer.from([0xcf, 0xfa, 0xed, 0xfe]), {
+        mode: 0o600,
+      });
+      assertAuthenticatedPayloadRejected(
+        run(installer, [
+          "test-authenticated-macho",
+          root,
+          "short-data",
+          process.arch === "arm64" ? "arm64" : "x64",
+        ]),
+      );
+
+      const rejectedCandidate = async (
+        name: string,
+        mutate: (candidate: string) => Promise<void>,
+      ) => {
+        const candidateRoot = join(root, name);
+        await mkdir(candidateRoot, { mode: 0o700 });
+        const candidate = join(candidateRoot, "release");
+        await cp(release, candidate, { recursive: true });
+        await mutate(candidate);
+        const candidateAuthorization = await authorizationBundle(
+          candidateRoot,
+          candidate,
+          installer,
+        );
+        assertAuthenticatedPayloadRejected(
+          run(installer, [
+            "inspect-authenticated-payload",
+            candidate,
+            candidateAuthorization,
+            "--publisher-team-id",
+            "ABCDEFGHIJ",
+            "--test-allow-sealed-adhoc",
+          ]),
+        );
+      };
+
+      await rejectedCandidate("undeclared-file", async (candidate) => {
+        await writeFile(join(candidate, "payload/undeclared.txt"), "bounded", { mode: 0o644 });
+      });
+      await rejectedCandidate("undeclared-native", async (candidate) => {
+        await cp(join(candidate, "payload/bin/node"), join(candidate, "payload/undeclared-native"));
+        await chmod(join(candidate, "payload/undeclared-native"), 0o755);
+        await refreshManifestFiles(candidate);
+      });
+      await rejectedCandidate("wrong-native-identifier", async (candidate) => {
+        const helper = join(candidate, "payload/helpers/ellie-macos");
+        execFileSync(
+          "/usr/bin/codesign",
+          [
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "runtime",
+            "--identifier",
+            "org.ellie.other",
+            helper,
+          ],
+          boundedCommand,
+        );
+        await refreshManifestFiles(candidate);
+      });
+      await rejectedCandidate("unexpected-native-entitlement", async (candidate) => {
+        const helper = join(candidate, "payload/helpers/ellie-macos");
+        const entitlements = join(root, "unexpected-helper-entitlements.plist");
+        await writeFile(
+          entitlements,
+          '<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>',
+          { mode: 0o600 },
+        );
+        execFileSync(
+          "/usr/bin/codesign",
+          [
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "runtime",
+            "--identifier",
+            "org.ellie.helper",
+            "--entitlements",
+            entitlements,
+            helper,
+          ],
+          boundedCommand,
+        );
+        await refreshManifestFiles(candidate);
+      });
+      await rejectedCandidate("integer-signed-entitlement", async (candidate) => {
+        const node = join(candidate, "payload/bin/node");
+        const entitlements = join(root, "integer-node-entitlements.plist");
+        await writeFile(
+          entitlements,
+          '<?xml version="1.0"?><plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><integer>1</integer><key>com.apple.security.cs.allow-unsigned-executable-memory</key><integer>1</integer></dict></plist>',
+          { mode: 0o600 },
+        );
+        execFileSync(
+          "/usr/bin/codesign",
+          [
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "runtime",
+            "--identifier",
+            "org.ellie.runtime.node",
+            "--entitlements",
+            entitlements,
+            node,
+          ],
+          boundedCommand,
+        );
+        await refreshManifestFiles(candidate);
+      });
+      await rejectedCandidate("altered-nested-launcher", async (candidate) => {
+        const executable = join(
+          candidate,
+          "payload/launchers/Ellie Node.app/Contents/MacOS/EllieService",
+        );
+        await writeFile(executable, Buffer.concat([await readFile(executable), Buffer.from([0])]));
+        await refreshManifestFiles(candidate);
+      });
+      await rejectedCandidate("malformed-mach", async (candidate) => {
+        const node = join(candidate, "payload/bin/node");
+        await writeFile(node, Buffer.from([0xcf, 0xfa, 0xed, 0xfe]));
+        await refreshManifestFiles(candidate);
+      });
+      await rejectedCandidate("wrong-mode", async (candidate) => {
+        await chmod(join(candidate, "payload/bin/node"), 0o744);
+      });
+      await rejectedCandidate("duplicate-json-key", async (candidate) => {
+        const path = join(candidate, "manifest.json");
+        const value = await readFile(path, "utf8");
+        await writeFile(
+          path,
+          value.replace('{\n  "version": 2,', '{\n  "version": 2,\n  "version": 2,'),
+        );
+      });
+      await rejectedCandidate("boolean-manifest-version", async (candidate) => {
+        const path = join(candidate, "manifest.json");
+        const value = await readFile(path, "utf8");
+        await writeFile(path, value.replace('{\n  "version": 2,', '{\n  "version": true,'));
+      });
+      await rejectedCandidate("unknown-native-key", async (candidate) => {
+        const path = join(candidate, "manifest.json");
+        const value = JSON.parse(await readFile(path, "utf8"));
+        value.nativeCode[0].unknown = false;
+        await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o644 });
+      });
+      for (const [name, entitlements] of [
+        ["array-entitlements", ["com.apple.security.cs.allow-jit"]],
+        [
+          "false-entitlement",
+          {
+            "com.apple.security.cs.allow-jit": false,
+            "com.apple.security.cs.allow-unsigned-executable-memory": true,
+          },
+        ],
+        [
+          "nonboolean-entitlement",
+          {
+            "com.apple.security.cs.allow-jit": 1,
+            "com.apple.security.cs.allow-unsigned-executable-memory": true,
+          },
+        ],
+        [
+          "unknown-entitlement",
+          {
+            "com.apple.security.cs.allow-jit": true,
+            "com.apple.security.cs.allow-unsigned-executable-memory": true,
+            "com.apple.security.cs.disable-library-validation": true,
+          },
+        ],
+      ] as const) {
+        await rejectedCandidate(name, async (candidate) => {
+          const path = join(candidate, "manifest.json");
+          const value = JSON.parse(await readFile(path, "utf8"));
+          value.nativeCode[0].entitlements = entitlements;
+          await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o644 });
+        });
+      }
+
+      const v1Root = join(root, "v1");
+      await mkdir(v1Root, { mode: 0o700 });
+      const v1 = await fixture(v1Root, installer, join(release, "payload/bin/node"));
+      const v1App = await authorizationBundle(v1Root, v1.release, installer);
+      assertAuthenticatedPayloadRejected(
+        run(installer, [
+          "inspect-authenticated-payload",
+          v1.release,
+          v1App,
+          "--publisher-team-id",
+          "ABCDEFGHIJ",
+          "--test-allow-sealed-adhoc",
+        ]),
+      );
+
+      const changedNode = join(release, "payload/bin/node");
+      const originalNode = await readFile(changedNode);
+      await writeFile(changedNode, Buffer.concat([originalNode, Buffer.from([0])]));
+      assertAuthenticatedPayloadRejected(run(installer, args));
+      await writeFile(changedNode, originalNode);
+
+      const manifestPath = join(release, "manifest.json");
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+      manifest.nativeCode[0].identifier = "org.ellie.runtime.other";
+      await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
+      const changedAppRoot = join(root, "changed-authorization");
+      await mkdir(changedAppRoot, { mode: 0o700 });
+      const changedApp = await authorizationBundle(changedAppRoot, release, installer);
+      assertAuthenticatedPayloadRejected(
+        run(installer, [
+          "inspect-authenticated-payload",
+          release,
+          changedApp,
+          "--publisher-team-id",
+          "ABCDEFGHIJ",
+          "--test-allow-sealed-adhoc",
+        ]),
+      );
     });
   },
 );
