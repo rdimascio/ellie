@@ -45,3 +45,18 @@ The Node suite took 42.509 seconds; setup/isolation took 5.699 seconds and migra
 took 7.470 seconds. The retained log is `ellie-native-fixture-template-root-final-check.log`,
 SHA-256 `102b7909359721722deeb9e70858f1be2b900953c798ff1dcb7f6bbd02d38331`.
 No MacBook run, installed-service exercise or hosted-CI acceptance is implied by this local result.
+
+The author separately repeated that final source with 308 tests passed and one skipped in 43.220
+seconds. Both original `e117f880` CI runs then passed: native jobs `104025486507` and `104025500959`
+used the identical tracked tree `06df5a1baa78f95fe4bdeaf32a71d30fb6379a3b` and passed 308 Node tests
+with one skip, 158 Swift tests, two standard UI tests and the app-hosted HTTPS suite. Their actual
+checkouts were `e117f880cd2d6e2f1d2ef497ca9b42ca84597ca5` and merge
+`bb00f4f80bedb18c7a38b35c50a34ad6f1e40636` respectively.
+
+Independent review then required artifact inventory hashes to equal the canonical in-memory build
+key and output hashes before acceptance, closing the write-to-read evidence gap. The changed test
+source SHA-256 `f7223228a585a57e44709b4636e3352352b9719484e88860d69f4795833d8218` passed the
+complete local gate with 308 tests passed and one skipped in 43.137 seconds. Log
+`ellie-native-fixture-template-bound-key-final-check.log`, SHA-256
+`7138a57d05bfeb5fcf9c1f4aa0ac78c99a75bf0b2f40612940d2fce0a347af97`.
+Updated-source CI is separate from the preceding passes.
