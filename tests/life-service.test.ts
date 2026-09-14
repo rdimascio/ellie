@@ -749,7 +749,26 @@ test("successful record mutations invalidate scoped conversation context", async
       ).status,
       204,
     );
-    assert.deepEqual(invalidated, ["user:local", "user:local"]);
+    for (const source of [
+      { filename: "note.txt", mimeType: "text/plain", content: "hello" },
+      {
+        filename: "scan.pdf",
+        mimeType: "application/pdf",
+        encoding: "base64",
+        content: Buffer.from("pdf").toString("base64"),
+      },
+    ])
+      assert.equal(
+        (
+          await fetch(`${running.url}/api/life/sources`, {
+            method: "POST",
+            headers: jsonHeaders(running.url, cookie),
+            body: JSON.stringify({ scope: "user:local", ...source }),
+          })
+        ).status,
+        201,
+      );
+    assert.deepEqual(invalidated, ["user:local", "user:local", "user:local", "user:local"]);
   } finally {
     await f.close();
   }
@@ -836,6 +855,52 @@ test("explicit context signals create scoped notifications without retaining raw
     );
     assert.equal(
       JSON.stringify(f.life.exportPersonal({ userId: "local" })).includes("latitude"),
+      false,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("bootstrap hides a preparation notice after its event moves outside the preparation window", async () => {
+  const f = await fixture();
+  try {
+    const event = f.life.createRecord(
+        { userId: "local" },
+        {
+          kind: "event",
+          title: "Appointment",
+          scope: { type: "user", id: "local" },
+          data: { startAt: 1_800_000_000_000 + 60 * 60_000 },
+        },
+      ),
+      running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const signal = await fetch(`${running.url}/api/life/signals`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        signal: { type: "check", at: 1_800_000_000_000 },
+      }),
+    });
+    assert.equal(signal.status, 200);
+    const before = (await (
+      await fetch(`${running.url}/api/life/bootstrap?scope=user:local`, { headers: { cookie } })
+    ).json()) as { notifications: Array<{ title: string }> };
+    assert.equal(
+      before.notifications.some((item) => item.title === "Appointment"),
+      true,
+    );
+    const current = f.life.getRecord({ userId: "local" }, event.id)!;
+    f.life.updateRecord({ userId: "local" }, event.id, current.revision, {
+      data: { ...current.data, startAt: 1_800_000_000_000 + 7 * 24 * 60 * 60_000 },
+    });
+    const after = (await (
+      await fetch(`${running.url}/api/life/bootstrap?scope=user:local`, { headers: { cookie } })
+    ).json()) as { notifications: Array<{ title: string }> };
+    assert.equal(
+      after.notifications.some((item) => item.title === "Appointment"),
       false,
     );
   } finally {
@@ -1317,6 +1382,425 @@ test("malformed, cross-origin, oversized and hostile paths are rejected", async 
       415,
     );
     await running.server.close();
+  } finally {
+    await f.close();
+  }
+});
+
+test("raw binary upload accepts documents above the JSON limit without base64 expansion", async () => {
+  const f = await fixture();
+  try {
+    let received = 0;
+    const running = await f.start("b".repeat(43), "local", {
+        extractor: async ({ bytes, filename, mimeType }) => {
+          received = bytes.length;
+          assert.equal(filename, "large.pdf");
+          assert.equal(mimeType, "application/pdf");
+          return { text: "Extracted large document", metadata: { pages: 12 } };
+        },
+      }),
+      cookie = await authenticate(running.url, "b".repeat(43)),
+      bytes = Buffer.alloc(3_000_000, 7),
+      query = new URLSearchParams({
+        scope: "user:local",
+        filename: "large.pdf",
+        mimeType: "application/pdf",
+        title: "Large PDF",
+      });
+    const response = await fetch(`${running.url}/api/life/sources/binary?${query}`, {
+      method: "POST",
+      headers: {
+        origin: running.url,
+        cookie,
+        "content-type": "application/octet-stream",
+        "content-length": String(bytes.length),
+      },
+      body: bytes,
+    });
+    assert.equal(response.status, 201);
+    assert.equal(received, bytes.length);
+    const record = (await response.json()) as {
+      title: string;
+      data: { metadata: { pages: number } };
+    };
+    assert.equal(record.title, "Large PDF");
+    assert.equal(record.data.metadata.pages, 12);
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/sources/binary?${query}`, {
+          method: "POST",
+          headers: { origin: running.url, cookie, "content-type": "application/pdf" },
+          body: Buffer.from("pdf"),
+        })
+      ).status,
+      415,
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/sources/binary?${query}`, {
+          method: "POST",
+          headers: { origin: running.url, cookie, "content-type": "application/octet-stream" },
+        })
+      ).status,
+      411,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("reviewed reset aborts an active binary extraction before deleting stores", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-binary-reset-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "ok", { mode: 0o600 });
+  const life = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite")),
+    tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  let extractionStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    extractionStarted = resolve;
+  });
+  const server = createLifeServer({
+    stateDir: root,
+    assetsDir: assets,
+    store: life,
+    plugins,
+    tasks,
+    harness: {
+      chat: async () => ({ reply: "", conversationId: "c" }),
+      invalidateActorContext() {},
+    },
+    extractor: async ({ signal }) => {
+      extractionStarted();
+      return await new Promise((_resolve, reject) =>
+        signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }),
+      );
+    },
+    port: 0,
+    token: "x".repeat(43),
+  });
+  try {
+    const running = await server.listen(),
+      cookie = await authenticate(running.url, "x".repeat(43)),
+      review = (await (
+        await fetch(`${running.url}/api/life/personal-data/review`, { headers: { cookie } })
+      ).json()) as { reviewToken: string },
+      query = new URLSearchParams({
+        scope: "user:local",
+        filename: "scan.pdf",
+        mimeType: "application/pdf",
+      });
+    const upload = fetch(`${running.url}/api/life/sources/binary?${query}`, {
+      method: "POST",
+      headers: {
+        origin: running.url,
+        cookie,
+        "content-type": "application/octet-stream",
+        "content-length": "4",
+      },
+      body: Buffer.from("scan"),
+    });
+    await started;
+    const reset = await fetch(`${running.url}/api/life/personal-data/reset`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ reviewToken: review.reviewToken }),
+    });
+    assert.equal(reset.status, 200);
+    assert.equal((await upload).status, 408);
+    assert.equal(life.personalSummary({ userId: "local" }).sources, 0);
+  } finally {
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("binary extraction rechecks group membership before persisting", async () => {
+  const f = await fixture();
+  try {
+    f.life.createGroup({ userId: "local" }, { id: "shared", name: "Shared" });
+    f.life.setGroupMember({ userId: "local" }, "shared", { userId: "bob", role: "member" });
+    let begin!: () => void, finish!: (value: { text: string }) => void;
+    const started = new Promise<void>((resolve) => {
+        begin = resolve;
+      }),
+      extraction = new Promise<{ text: string }>((resolve) => {
+        finish = resolve;
+      });
+    const running = await f.start("y".repeat(43), "bob", {
+        extractor: async () => {
+          begin();
+          return extraction;
+        },
+      }),
+      cookie = await authenticate(running.url, "y".repeat(43)),
+      query = new URLSearchParams({
+        scope: "group:shared",
+        filename: "photo.png",
+        mimeType: "image/png",
+      });
+    const upload = fetch(`${running.url}/api/life/sources/binary?${query}`, {
+      method: "POST",
+      headers: {
+        origin: running.url,
+        cookie,
+        "content-type": "application/octet-stream",
+        "content-length": "3",
+      },
+      body: Buffer.from("png"),
+    });
+    await started;
+    f.life.setGroupMember({ userId: "local" }, "shared", { userId: "bob", remove: true });
+    finish({ text: "private OCR" });
+    assert.equal((await upload).status, 403);
+    assert.equal(
+      f.life.listRecords(
+        { userId: "local" },
+        { scope: { type: "group", id: "shared" }, kinds: ["source"] },
+      ).length,
+      0,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("binary uploads enforce the two-extraction concurrency quota", async () => {
+  const f = await fixture();
+  try {
+    let active = 0,
+      both!: () => void,
+      release!: () => void;
+    const started = new Promise<void>((resolve) => {
+        both = resolve;
+      }),
+      held = new Promise<{ text: string }>((resolve) => {
+        release = () => resolve({ text: "done" });
+      });
+    const running = await f.start("z".repeat(43), "local", {
+        extractor: async () => {
+          active++;
+          if (active === 2) both();
+          return held;
+        },
+      }),
+      cookie = await authenticate(running.url, "z".repeat(43));
+    const upload = (name: string) =>
+      fetch(
+        `${running.url}/api/life/sources/binary?${new URLSearchParams({ scope: "user:local", filename: name, mimeType: "application/pdf" })}`,
+        {
+          method: "POST",
+          headers: {
+            origin: running.url,
+            cookie,
+            "content-type": "application/octet-stream",
+            "content-length": "1",
+          },
+          body: Buffer.from("x"),
+        },
+      );
+    const first = upload("one.pdf"),
+      second = upload("two.pdf");
+    await started;
+    assert.equal((await upload("three.pdf")).status, 429);
+    release();
+    assert.deepEqual(
+      await Promise.all([first.then((r) => r.status), second.then((r) => r.status)]),
+      [201, 201],
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("a noncooperative extractor cannot persist after shutdown aborts its signal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-binary-late-resolve-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "ok", { mode: 0o600 });
+  const life = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite")),
+    tasks = new TaskRuntime({ directory: join(root, "tasks") });
+  let start!: () => void, release!: () => void;
+  const started = new Promise<void>((resolve) => {
+      start = resolve;
+    }),
+    held = new Promise<{ text: string }>((resolve) => {
+      release = () => resolve({ text: "late text" });
+    });
+  const server = createLifeServer({
+    stateDir: root,
+    assetsDir: assets,
+    store: life,
+    plugins,
+    tasks,
+    harness: {
+      chat: async () => ({ reply: "", conversationId: "c" }),
+      invalidateActorContext() {},
+    },
+    extractor: async () => {
+      start();
+      return held;
+    },
+    port: 0,
+    token: "n".repeat(43),
+  });
+  try {
+    const running = await server.listen(),
+      cookie = await authenticate(running.url, "n".repeat(43)),
+      query = new URLSearchParams({
+        scope: "user:local",
+        filename: "late.pdf",
+        mimeType: "application/pdf",
+      });
+    const upload = fetch(`${running.url}/api/life/sources/binary?${query}`, {
+      method: "POST",
+      headers: {
+        origin: running.url,
+        cookie,
+        "content-type": "application/octet-stream",
+        "content-length": "1",
+      },
+      body: Buffer.from("x"),
+    })
+      .then((response) => response.status)
+      .catch(() => 408);
+    await started;
+    let closeSettled = false;
+    const closing = server.close().then(() => {
+      closeSettled = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closeSettled, false);
+    release();
+    assert.equal(await upload, 408);
+    await closing;
+    assert.equal(life.personalSummary({ userId: "local" }).sources, 0);
+  } finally {
+    release();
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("client disconnect after upload aborts extraction and prevents persistence", async () => {
+  const f = await fixture();
+  try {
+    let start!: () => void, aborted!: () => void;
+    const started = new Promise<void>((resolve) => {
+        start = resolve;
+      }),
+      sawAbort = new Promise<void>((resolve) => {
+        aborted = resolve;
+      });
+    const running = await f.start("d".repeat(43), "local", {
+        extractor: async ({ signal }) => {
+          start();
+          return await new Promise((_resolve, reject) =>
+            signal?.addEventListener(
+              "abort",
+              () => {
+                aborted();
+                reject(new Error("disconnected"));
+              },
+              { once: true },
+            ),
+          );
+        },
+      }),
+      cookie = await authenticate(running.url, "d".repeat(43)),
+      query = new URLSearchParams({
+        scope: "user:local",
+        filename: "gone.png",
+        mimeType: "image/png",
+      });
+    const request = httpRequest({
+      hostname: "127.0.0.1",
+      port: running.port,
+      path: `/api/life/sources/binary?${query}`,
+      method: "POST",
+      headers: {
+        host: `127.0.0.1:${running.port}`,
+        origin: running.url,
+        cookie,
+        "content-type": "application/octet-stream",
+        "content-length": "3",
+      },
+    });
+    request.on("error", () => {});
+    request.end("png");
+    await started;
+    request.destroy();
+    await sawAbort;
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      f.life.listRecords(
+        { userId: "local" },
+        { scope: { type: "user", id: "local" }, kinds: ["source"] },
+      ).length,
+      0,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("legacy base64 extraction cannot write after a noncooperative shutdown abort", async () => {
+  const f = await fixture();
+  try {
+    let start!: () => void, release!: () => void;
+    const started = new Promise<void>((resolve) => {
+        start = resolve;
+      }),
+      held = new Promise<{ text: string }>((resolve) => {
+        release = () => resolve({ text: "late legacy text" });
+      });
+    const running = await f.start("q".repeat(43), "local", {
+        extractor: async () => {
+          start();
+          return held;
+        },
+      }),
+      cookie = await authenticate(running.url, "q".repeat(43));
+    const upload = fetch(`${running.url}/api/life/sources`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        filename: "legacy.pdf",
+        mimeType: "application/pdf",
+        encoding: "base64",
+        content: Buffer.from("pdf").toString("base64"),
+      }),
+    })
+      .then((response) => response.status)
+      .catch(() => 408);
+    await started;
+    let closed = false;
+    const closing = running.server.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(closed, false);
+    release();
+    assert.equal(await upload, 408);
+    await closing;
+    assert.equal(
+      f.life.listRecords(
+        { userId: "local" },
+        { scope: { type: "user", id: "local" }, kinds: ["source"] },
+      ).length,
+      0,
+    );
   } finally {
     await f.close();
   }

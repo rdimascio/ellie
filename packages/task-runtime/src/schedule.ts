@@ -1,30 +1,10 @@
 import type { TaskSchedule } from "./types.ts";
-
-const parts = (at: number, timeZone: string) => {
-  const values: Record<string, number> = {};
-  for (const part of new Intl.DateTimeFormat("en-CA", {
-    timeZone,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-    weekday: "short",
-  }).formatToParts(new Date(at))) {
-    if (part.type !== "literal" && part.type !== "weekday") values[part.type] = Number(part.value);
-    if (part.type === "weekday")
-      values.weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(part.value);
-  }
-  return values as {
-    year: number;
-    month: number;
-    day: number;
-    hour: number;
-    minute: number;
-    weekday: number;
-  };
-};
+import {
+  addCalendarDays,
+  localParts,
+  validateCalendarDate,
+  zonedCandidates,
+} from "../../life-time/src/index.ts";
 
 function wallOccurrence(
   schedule: Extract<TaskSchedule, { kind: "daily" | "weekly" }>,
@@ -41,43 +21,21 @@ function wallOccurrence(
     (!Number.isInteger(schedule.weekday) || schedule.weekday < 0 || schedule.weekday > 6)
   )
     throw new Error("Weekly weekday must be 0 through 6.");
-  const cursorLocal = parts(after, schedule.timeZone);
+  const cursorLocal = localParts(after, schedule.timeZone);
   const cursorPassedWallTime =
     cursorLocal.hour > hour || (cursorLocal.hour === hour && cursorLocal.minute >= minute);
-  const startDate = new Date(Date.UTC(cursorLocal.year, cursorLocal.month - 1, cursorLocal.day));
+  const startDate = validateCalendarDate(cursorLocal);
   for (let dayOffset = 0; dayOffset <= 8; dayOffset++) {
-    const date = new Date(startDate.getTime() + dayOffset * 86_400_000);
-    const year = date.getUTCFullYear(),
-      month = date.getUTCMonth() + 1,
-      day = date.getUTCDate();
-    const weekday = date.getUTCDay();
+    const date = addCalendarDays(startDate, dayOffset);
+    const { year, month, day } = date;
+    const weekdayDate = new Date(0);
+    weekdayDate.setUTCFullYear(year, month - 1, day);
+    weekdayDate.setUTCHours(0, 0, 0, 0);
+    const weekday = weekdayDate.getUTCDay();
     if (schedule.kind === "weekly" && weekday !== schedule.weekday) continue;
     if (dayOffset === 0 && cursorPassedWallTime) continue;
-    const wall = Date.UTC(year, month - 1, day, hour, minute);
-    const candidates = new Set<number>();
-    for (const probe of [wall - 12 * 3_600_000, wall, wall + 12 * 3_600_000]) {
-      const local = parts(probe, schedule.timeZone);
-      const represented = Date.UTC(
-        local.year,
-        local.month - 1,
-        local.day,
-        local.hour,
-        local.minute,
-      );
-      candidates.add(wall - (represented - probe));
-    }
-    for (const at of [...candidates].sort((a, b) => a - b)) {
-      const local = parts(at, schedule.timeZone);
-      if (
-        at > after &&
-        local.year === year &&
-        local.month === month &&
-        local.day === day &&
-        local.hour === hour &&
-        local.minute === minute
-      )
-        return at;
-    }
+    const at = zonedCandidates({ year, month, day, hour, minute }, schedule.timeZone)[0];
+    if (at !== undefined && at > after) return at;
   }
   throw new Error("No schedule occurrence found.");
 }
@@ -107,7 +65,7 @@ export function nextOccurrence(schedule: TaskSchedule, after: number): number | 
 
 export function occurrenceKey(schedule: TaskSchedule, at: number): string {
   if (schedule.kind === "daily" || schedule.kind === "weekly") {
-    const p = parts(at, schedule.timeZone);
+    const p = localParts(at, schedule.timeZone);
     return `${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}@${schedule.timeZone}`;
   }
   return String(at);

@@ -931,3 +931,242 @@ test("chat creates and queries an explicit future appointment in the effective t
     await f.close();
   }
 });
+
+test("upcoming and today queries find events beyond unrelated record limits", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    f.store.createRecord(actor, {
+      kind: "event",
+      title: "Buried appointment",
+      scope,
+      data: { startAt: Date.UTC(2026, 8, 14, 18) },
+    });
+    f.store.createRecord(actor, {
+      kind: "event",
+      title: "Imported all-day event",
+      scope,
+      data: { startDate: "2026-09-13", allDay: true },
+    });
+    f.store.createRecord(actor, {
+      kind: "event",
+      title: "Imported offset event",
+      scope,
+      data: { startAt: "2026-09-13T18:30:00+02:00" },
+    });
+    for (let index = 0; index < 501; index++)
+      f.store.createRecord(actor, {
+        kind: "source",
+        title: `Later source ${index}`,
+        body: "unrelated",
+        scope,
+        data: {},
+      });
+    const harness = f.make();
+    const upcoming = await harness.chat({ actor, scope, message: "What's upcoming?" });
+    assert.match(upcoming.reply, /Buried appointment/);
+    assert.match(upcoming.reply, /Imported all-day event/);
+    assert.match(upcoming.reply, /Imported offset event/);
+    const today = await harness.chat({ actor, scope, message: "What's on today?" });
+    assert.match(today.reply, /Imported all-day event/);
+    assert.match(today.reply, /Imported offset event/);
+    assert.doesNotMatch(today.reply, /Buried appointment/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("anchored reminders and appointments use the effective calendar zone", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const harness = f.make();
+    const reminder = await harness.chat({
+      actor,
+      scope,
+      message: "Remind me tomorrow at 8:15 am to call Maya",
+    });
+    assert.equal(
+      reminder.records.find((record) => record.kind === "reminder")?.data.dueAt,
+      Date.UTC(2026, 8, 14, 15, 15),
+    );
+    const appointment = await harness.chat({
+      actor,
+      scope,
+      message: "Schedule dentist appointment next Monday at 3 pm",
+    });
+    assert.equal(
+      appointment.records.find((record) => record.kind === "event")?.data.startAt,
+      Date.UTC(2026, 8, 14, 22),
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("explicit calendar input rejects invalid clocks and DST gaps without shifting time", async () => {
+  const f = await fixture(Date.UTC(2026, 9, 3, 0));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "Australia/Lord_Howe");
+    const harness = f.make();
+    const valid = await harness.chat({
+      actor,
+      scope,
+      message: "Schedule breakfast event on October 4 2026 at 2:30 am",
+    });
+    assert.equal(
+      valid.records.find((record) => record.kind === "event")?.data.startAt,
+      Date.UTC(2026, 9, 3, 15, 30),
+    );
+    assert.match(
+      (
+        await harness.chat({
+          actor,
+          scope,
+          message: "Schedule coffee event on October 4 2026 at 2:15 am",
+        })
+      ).reply,
+      /does not exist|clocks change/i,
+    );
+    assert.match(
+      (
+        await harness.chat({
+          actor,
+          scope,
+          message: "Schedule coffee event on October 5 2026 at 13 pm",
+        })
+      ).reply,
+      /clock time is invalid/i,
+    );
+    for (const clock of ["0 am", "24:00"]) {
+      assert.match(
+        (
+          await harness.chat({
+            actor,
+            scope,
+            message: `Schedule coffee event on October 5 2026 at ${clock}`,
+          })
+        ).reply,
+        /clock time is invalid/i,
+      );
+    }
+  } finally {
+    await f.close();
+  }
+});
+
+test("explicit repeated local times require an unambiguous choice", async () => {
+  const f = await fixture(Date.UTC(2026, 9, 1));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const response = await f.make().chat({
+      actor,
+      scope,
+      message: "Schedule breakfast event on November 1 2026 at 1:30 am",
+    });
+    assert.match(response.reply, /occurs twice|unambiguous/i);
+    assert.equal(
+      response.records.some((record) => record.kind === "event"),
+      false,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("a leap-day birthday advances to the next real annual date", async () => {
+  const f = await fixture(Date.UTC(2026, 2, 1));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const response = await f.make().chat({
+      actor,
+      scope,
+      message: "Maya's birthday is February 29",
+    });
+    assert.equal(
+      response.records.find((record) => record.kind === "birthday")?.data.nextDate,
+      "2028-02-29",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("birthday writes require a direct statement and reject negation or questions", async () => {
+  const f = await fixture();
+  try {
+    const harness = f.make();
+    for (const message of [
+      "Don't remember that Sam's birthday is May 3",
+      "Do you remember when Sam's birthday is May 3?",
+      "For example, say: Sam's birthday is May 3",
+    ])
+      await harness.chat({ actor, scope, message });
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["birthday"], limit: 20 }).length, 0);
+    assert.equal(
+      (
+        await harness.chat({
+          actor,
+          scope,
+          message: "Remember that Sam's birthday is May 3.",
+        })
+      ).records.some((record) => record.kind === "birthday"),
+      true,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("an absolute birthday statement preserves an explicit interest suffix", async () => {
+  const f = await fixture();
+  try {
+    const response = await f.make().chat({
+      actor,
+      scope,
+      message: "Maya's birthday is October 30 and she loves gardening",
+    });
+    const contact = response.records.find((record) => record.kind === "contact"),
+      need = response.records.find((record) => record.kind === "need");
+    assert.deepEqual(contact?.data.interests, ["gardening"]);
+    assert.deepEqual(need?.data.interests, ["gardening"]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a birthday remembered after its nominal hour remains today through local day end", async () => {
+  const f = await fixture(Date.UTC(2026, 4, 3, 20));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const response = await f.make().chat({
+      actor,
+      scope,
+      message: "Maya's birthday is May 3",
+    });
+    const birthday = response.records.find((record) => record.kind === "birthday"),
+      need = response.records.find((record) => record.kind === "need");
+    assert.equal(birthday?.data.nextDate, "2026-05-03");
+    assert.equal(need?.data.deadlineAt, Date.UTC(2026, 4, 4, 7));
+  } finally {
+    await f.close();
+  }
+});
+
+test("next weekday birthday means the following week even before today's nominal hour", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 15));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const response = await f.make().chat({
+      actor,
+      scope,
+      message: "My friend's birthday is next Sunday. They love gardening.",
+    });
+    assert.equal(
+      response.records.find((record) => record.kind === "birthday")?.data.nextDate,
+      "2026-09-20",
+    );
+  } finally {
+    await f.close();
+  }
+});

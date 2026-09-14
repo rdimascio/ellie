@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@ellie/life-core": "*"
+    "@ellie/life-core": "*",
+    "@ellie/life-time": "*"
   }
 }

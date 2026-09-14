@@ -1,5 +1,12 @@
 import type { LifeActor, LifeRecord, LifeScope } from "../../life-core/src/index.ts";
 import { LifeStore } from "../../life-core/src/index.ts";
+import {
+  addCalendarDays,
+  calendarDateKey,
+  localParts,
+  parseCalendarDate,
+  startOfLocalDay,
+} from "../../life-time/src/index.ts";
 
 export type ContextSignal =
   | { type: "shopping"; store: string; at: number }
@@ -20,6 +27,49 @@ const open = (record: LifeRecord) =>
   record.data.cancelled !== true &&
   !record.provenance.some((item) => item.invalidatedAt !== undefined);
 const normalized = (value: string) => value.trim().toLocaleLowerCase();
+
+/** Interpret a current event without treating an all-day date as a UTC timestamp. */
+export function eventPreparationWindow(
+  record: Pick<LifeRecord, "kind" | "data">,
+  now: number,
+  zone: string,
+  boundaries = new Map<string, number | undefined>(),
+): { expiresAt: number; allDay: boolean; today: boolean } | undefined {
+  if (record.kind !== "event" || record.data.completed === true || record.data.cancelled === true)
+    return undefined;
+  const raw = record.data.startAt ?? record.data.startDate ?? record.data.dueAt ?? record.data.date,
+    date = parseCalendarDate(raw);
+  if (date) {
+    const current = localParts(now, zone),
+      today = calendarDateKey(current),
+      day = calendarDateKey(date);
+    if (day < today || day > calendarDateKey(addCalendarDays(current, 2))) return undefined;
+    const boundary = (value: typeof date) => {
+      const key = `${zone}:${calendarDateKey(value)}`;
+      if (!boundaries.has(key)) boundaries.set(key, startOfLocalDay(value, zone));
+      return boundaries.get(key);
+    };
+    if (boundary(date) === undefined) return undefined;
+    for (let offset = 1; offset <= 3; offset++) {
+      const expiresAt = boundary(addCalendarDays(date, offset));
+      if (expiresAt !== undefined)
+        return expiresAt > now ? { expiresAt, allDay: true, today: day === today } : undefined;
+    }
+    return undefined;
+  }
+  let at: number | undefined;
+  if (number(raw)) at = raw;
+  else if (typeof raw === "string") {
+    const match =
+      /^(\d{4}-\d{2}-\d{2})T([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(
+        raw,
+      );
+    if (match && parseCalendarDate(match[1])) at = Date.parse(raw);
+  }
+  return number(at) && at > now && at - now <= 48 * 60 * 60_000
+    ? { expiresAt: at, allDay: false, today: false }
+    : undefined;
+}
 export function distanceMeters(
   a: { latitude: number; longitude: number },
   b: { latitude: number; longitude: number },
@@ -102,6 +152,7 @@ export class ProactivityEngine {
       expiresAt: number;
       category: string;
     }> = [];
+    const dayBoundaries = new Map<string, number | undefined>();
     for (const record of needs) {
       if (number(record.data.deadlineAt) && record.data.deadlineAt < now) continue;
       if (signal.type === "shopping" || signal.type === "location") {
@@ -160,18 +211,20 @@ export class ProactivityEngine {
         });
       }
       if (signal.type === "check" && record.kind === "event") {
-        const at = record.data.startAt ?? record.data.dueAt;
-        if (number(at) && at > now && at - now <= 48 * 60 * 60_000)
+        const window = eventPreparationWindow(record, now, zone, dayBoundaries);
+        if (window)
           matches.push({
             record,
-            reason:
-              "This event is within the next two days. Check travel, forms, and anything you want to bring.",
-            expiresAt: at,
+            reason: window.today
+              ? "This all-day event is today. Check travel, forms, and anything you want to bring."
+              : "This event is within the next two days. Check travel, forms, and anything you want to bring.",
+            expiresAt: window.expiresAt,
             category: "preparation",
           });
       }
     }
     const results: ContextSuggestion[] = [];
+    if (signal.type === "check") matches.sort((a, b) => a.expiresAt - b.expiresAt);
     // Surface at most three matches per event; the last-issued marker survives a restart.
     for (const match of matches) {
       if (results.length === 3) break;

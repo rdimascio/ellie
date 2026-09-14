@@ -84,6 +84,22 @@ test("ICS preview resolves valid DST instants and refuses nonexistent or unknown
   assert.equal(preview.items[3]?.data.startAt, undefined);
 });
 
+test("ICS preview resolves the exact minute after a half-hour DST jump", () => {
+  const preview = previewLifeImport({
+    format: "ics",
+    content: [
+      "BEGIN:VCALENDAR",
+      "BEGIN:VEVENT",
+      "UID:lord-howe",
+      "SUMMARY:After jump",
+      "DTSTART;TZID=Australia/Lord_Howe:20261004T023000",
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\n"),
+  });
+  assert.equal(preview.items[0]?.data.startAt, Date.UTC(2026, 9, 3, 15, 30));
+});
+
 test("unsupported recurrence is visible and never expanded into actions", () => {
   const preview = previewLifeImport({
     format: "ics",

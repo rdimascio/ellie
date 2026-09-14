@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@ellie/life-core": "workspace:*"
+    "@ellie/life-core": "workspace:*",
+    "@ellie/life-time": "workspace:*"
   }
 }

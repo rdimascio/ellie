@@ -164,6 +164,7 @@ const SUMMARY_DATA_KEYS = [
   "cancelled",
   "type",
   "notification",
+  "category",
   "dismissed",
   "reminderId",
   "relatedRecordId",
@@ -410,6 +411,15 @@ export class LifeStore {
   }
   private actor(actor: LifeActor): string {
     return identifier(actor?.userId, "actor.userId");
+  }
+  private personalGeneration(userId: string): number {
+    return Number(
+      (
+        this.db
+          .prepare("SELECT generation FROM personal_generations WHERE user_id=?")
+          .get(userId) as Record<string, unknown> | undefined
+      )?.generation ?? 0,
+    );
   }
   private canAccess(userId: string, scope: LifeScope): boolean {
     if (scope.type === "user") return scope.id === userId;
@@ -1579,7 +1589,7 @@ export class LifeStore {
     options: { cursor?: string; limit?: number; expectedGeneration?: number } = {},
   ): PersonalLifeExportPage {
     const user = this.actor(actor),
-      generation = this.personalSummary(actor).generation,
+      generation = this.personalGeneration(user),
       limit = options.limit ?? 50;
     if (!Number.isInteger(limit) || limit < 1 || limit > 100)
       throw new TypeError("Personal export limit must be from 1 through 100");
@@ -1652,7 +1662,7 @@ export class LifeStore {
       pageRows.push(row);
       pageBytes += itemBytes;
     }
-    if (this.personalSummary(actor).generation !== generation)
+    if (this.personalGeneration(user) !== generation)
       throw new LifeConflictError("Personal data changed; review a fresh export.");
     const result: PersonalLifeExportPage = { format: "ellie-life-v1", generation, items };
     if (rows.length > pageRows.length && pageRows.length) {

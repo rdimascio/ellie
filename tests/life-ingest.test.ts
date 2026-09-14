@@ -5,10 +5,239 @@ import { chmod, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { crc32 } from "node:zlib";
 import { extractDocument, DocumentExtractionError } from "../packages/life-ingest/src/index.ts";
 import { LifeStore } from "../packages/life-core/src/index.ts";
 
 const bytes = (value: string) => new TextEncoder().encode(value);
+
+function makeZip(
+  files: Array<{ name: string; content: string; uncompressed?: number }>,
+): Uint8Array {
+  const local: Buffer[] = [];
+  const central: Buffer[] = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = Buffer.from(file.name);
+    const content = Buffer.from(file.content);
+    const size = file.uncompressed ?? content.length;
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt32LE(content.length, 18);
+    header.writeUInt32LE(size, 22);
+    header.writeUInt16LE(name.length, 26);
+    header.writeUInt32LE(crc32(content), 14);
+    local.push(header, name, content);
+    const directory = Buffer.alloc(46);
+    directory.writeUInt32LE(0x02014b50, 0);
+    directory.writeUInt16LE(20, 4);
+    directory.writeUInt16LE(20, 6);
+    directory.writeUInt32LE(content.length, 20);
+    directory.writeUInt32LE(size, 24);
+    directory.writeUInt16LE(name.length, 28);
+    directory.writeUInt32LE(crc32(content), 16);
+    directory.writeUInt32LE(offset, 42);
+    central.push(directory, name);
+    offset += header.length + name.length + content.length;
+  }
+  const directory = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(files.length, 8);
+  end.writeUInt16LE(files.length, 10);
+  end.writeUInt32LE(directory.length, 12);
+  end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...local, directory, end]);
+}
+
+test("extracts DOCX headings, paragraphs, and table rows with references", async () => {
+  const docx = makeZip([
+    {
+      name: "word/document.xml",
+      content: `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+        <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Garden plan</w:t></w:r></w:p>
+        <w:p><w:r><w:t>Plant tomatoes &amp; basil.</w:t></w:r></w:p>
+        <w:tbl><w:tr><w:tc><w:p><w:r><w:t>Bed</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Crop</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+      </w:body></w:document>`,
+    },
+  ]);
+  const result = await extractDocument({
+    filename: "garden.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    bytes: docx,
+  });
+  assert.match(result.text, /\[Heading 1\]\n# Garden plan/);
+  assert.match(result.text, /\[Paragraph 2\]\nPlant tomatoes & basil/);
+  assert.match(result.text, /\[Table 1, row 1\]\nBed \| Crop/);
+  assert.ok(result.metadata);
+  assert.deepEqual(
+    (result.metadata.references as Array<{ reference: string }>).map((item) => item.reference),
+    ["Heading 1", "Paragraph 2", "Table 1, row 1"],
+  );
+  assert.match(String((result.metadata.limitations as string[])[0]), /not extracted or OCRed/);
+  const strictNamespace = await extractDocument({
+    filename: "strict.docx",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    bytes: makeZip([
+      {
+        name: "word/document.xml",
+        content: `<x:document xmlns:x="http://purl.oclc.org/ooxml/wordprocessingml/main"><x:body><x:p><x:r><x:t>Strict namespace text</x:t></x:r></x:p></x:body></x:document>`,
+      },
+    ]),
+  });
+  assert.match(strictNamespace.text, /Strict namespace text/);
+});
+
+test("rejects unsafe, bomb-like, truncated, and active DOCX content", async () => {
+  const mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  await assert.rejects(
+    extractDocument({ filename: "broken.docx", mimeType, bytes: bytes("PK truncated") }),
+    /missing or truncated/,
+  );
+  await assert.rejects(
+    extractDocument({
+      filename: "bomb.docx",
+      mimeType,
+      bytes: makeZip([
+        {
+          name: "word/document.xml",
+          content: "<w:document/>",
+          uncompressed: 2_000_000,
+        },
+      ]),
+    }),
+    /compression ratio/,
+  );
+  const linked = await extractDocument({
+    filename: "external.docx",
+    mimeType,
+    bytes: makeZip([
+      {
+        name: "word/document.xml",
+        content: `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Visible link text</w:t></w:r></w:p></w:body></w:document>`,
+      },
+      {
+        name: "word/_rels/document.xml.rels",
+        content: `<Relationships><Relationship TargetMode="External" Target="https://example.test/private"/></Relationships>`,
+      },
+    ]),
+  });
+  assert.match(linked.text, /Visible link text/);
+  assert.ok(linked.metadata);
+  assert.equal(linked.metadata.hasExternalRelationships, true);
+  assert.match(String((linked.metadata.limitations as string[]).at(-1)), /not fetched/);
+  await assert.rejects(
+    extractDocument({
+      filename: "entity.docx",
+      mimeType,
+      bytes: makeZip([
+        {
+          name: "word/document.xml",
+          content: `<!DOCTYPE x [<!ENTITY steal SYSTEM "file:///etc/passwd">]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>&steal;</w:t></w:r></w:p></w:document>`,
+        },
+      ]),
+    }),
+    /DTD or entity/,
+  );
+  await assert.rejects(
+    extractDocument({
+      filename: "macro.docx",
+      mimeType,
+      bytes: makeZip([
+        {
+          name: "word/document.xml",
+          content: `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`,
+        },
+        { name: "word/vbaProject.bin", content: "macro" },
+      ]),
+    }),
+    /Macro-enabled/,
+  );
+  await assert.rejects(
+    extractDocument({
+      filename: "path.docx",
+      mimeType,
+      bytes: makeZip([{ name: "../word/document.xml", content: "<w:document/>" }]),
+    }),
+    /unsafe ZIP entry path/,
+  );
+  await assert.rejects(
+    extractDocument({
+      filename: "image-only.docx",
+      mimeType,
+      bytes: makeZip([
+        {
+          name: "word/document.xml",
+          content: `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>`,
+        },
+        { name: "word/media/image1.png", content: "image bytes" },
+      ]),
+    }),
+    /images are not OCRed/,
+  );
+  const manyOpen = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${"<w:p>".repeat(50_000)}`;
+  const started = performance.now();
+  await assert.rejects(
+    extractDocument({
+      filename: "many-open.docx",
+      mimeType,
+      bytes: makeZip([{ name: "word/document.xml", content: manyOpen }]),
+    }),
+    /structure exceeds|truncated/,
+  );
+  assert.ok(performance.now() - started < 2_000, "malformed XML is rejected within a bound");
+});
+
+test("enforces Word namespaces, one root, XML entities, characters, and attribute boundaries", async () => {
+  const mimeType = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  const wrap = (xml: string) =>
+    extractDocument({
+      filename: "strict.docx",
+      mimeType,
+      bytes: makeZip([{ name: "word/document.xml", content: xml }]),
+    });
+  const namespaceFiltered = await wrap(
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:fake="urn:not-word"><w:body><w:p><w:r><w:t>Kept</w:t><fake:t>Not kept</fake:t></w:r></w:p></w:body></w:document>`,
+  );
+  assert.match(namespaceFiltered.text, /Kept/);
+  assert.doesNotMatch(namespaceFiltered.text, /Not kept/);
+  const escapedAttribute = await wrap(
+    `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" example="&lt;"><w:body><w:p><w:r><w:t>Valid attribute</w:t></w:r></w:p></w:body></w:document>`,
+  );
+  assert.match(escapedAttribute.text, /Valid attribute/);
+  for (const [xml, expected] of [
+    [
+      `<other xmlns="urn:other"/><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`,
+      /one Word document root/,
+    ],
+    [
+      `<![CDATA[outside]]><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>`,
+      /CDATA appears outside/,
+    ],
+    [
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>&AMP;</w:t></w:r></w:p></w:document>`,
+      /invalid entity/,
+    ],
+    [
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>&#0;</w:t></w:r></w:p></w:document>`,
+      /invalid character/,
+    ],
+    [
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>&#xD800;</w:t></w:r></w:p></w:document>`,
+      /invalid character/,
+    ],
+    [
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"example="bad"/>`,
+      /require whitespace/,
+    ],
+    [
+      `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" example="raw<value"/>`,
+      /attribute is malformed/,
+    ],
+  ] as const)
+    await assert.rejects(wrap(xml), expected);
+});
 
 test("extracts useful text formats without treating active HTML as content", async () => {
   const markdown = await extractDocument({

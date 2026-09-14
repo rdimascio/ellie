@@ -1227,83 +1227,239 @@ function GuidanceModal({
   );
 }
 function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void> }) {
+  type UploadItem = {
+    id: string;
+    file: File;
+    status: "queued" | "uploading" | "review" | "done" | "error" | "cancelled";
+    progress: number;
+    error?: string;
+    note?: string;
+  };
+  const [queue, setQueue] = useState<UploadItem[]>([]);
+  const [queueNotice, setQueueNotice] = useState("");
   const [busy, setBusy] = useState(false);
   const [importError, setImportError] = useState("");
   const [importing, setImporting] = useState<{
+    queueId: string;
     format: "ics" | "vcard";
     content: string;
     fileName: string;
     preview: Awaited<ReturnType<typeof api.import.preview>>;
     selected: Set<string>;
   } | null>(null);
+  const controller = useRef<AbortController | null>(null);
+  const running = useRef(false);
+  const scopeRef = useRef(scope);
+  scopeRef.current = scope;
+  const updateItem = (id: string, patch: Partial<UploadItem>) =>
+    setQueue((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
+  useEffect(() => {
+    return () => controller.current?.abort();
+  }, []);
+  useEffect(() => {
+    controller.current?.abort();
+    controller.current = null;
+    running.current = false;
+    setQueue([]);
+    setImporting(null);
+    setImportError("");
+    setQueueNotice("");
+  }, [scope]);
+  useEffect(() => {
+    if (running.current || importing) return;
+    const item = queue.find((candidate) => candidate.status === "queued");
+    if (!item) return;
+    const requestedScope = scope;
+    const abort = new AbortController();
+    controller.current = abort;
+    running.current = true;
+    updateItem(item.id, { status: "uploading", progress: 0, error: undefined });
+    void (async () => {
+      try {
+        if (item.file.size === 0) throw new Error("This file is empty.");
+        if (item.file.size > 50_000_000) throw new Error("This file exceeds the 50 MB limit.");
+        const importFormat = /\.ics$/i.test(item.file.name)
+          ? "ics"
+          : /\.(vcf|vcard)$/i.test(item.file.name)
+            ? "vcard"
+            : undefined;
+        if (importFormat) {
+          const content = await item.file.text();
+          if (abort.signal.aborted) throw new DOMException("Upload cancelled", "AbortError");
+          const preview = await api.import.preview(
+            {
+              scope: requestedScope,
+              format: importFormat,
+              content,
+              fileName: item.file.name,
+            },
+            abort.signal,
+          );
+          if (scopeRef.current !== requestedScope || abort.signal.aborted) return;
+          updateItem(item.id, { status: "review", progress: 1 });
+          setImporting({
+            queueId: item.id,
+            format: importFormat,
+            content,
+            fileName: item.file.name,
+            preview,
+            selected: new Set(preview.items.map((entry) => entry.key)),
+          });
+          return;
+        }
+        const binary =
+          item.file.type === "application/pdf" ||
+          item.file.type === "image/png" ||
+          item.file.type === "image/jpeg" ||
+          item.file.type ===
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+          /\.(pdf|png|jpe?g|docx)$/i.test(item.file.name);
+        if (binary) {
+          await api.sourceBinary(item.file, requestedScope, abort.signal, (progress) =>
+            updateItem(item.id, { progress }),
+          );
+          if (/\.docx$/i.test(item.file.name))
+            updateItem(item.id, {
+              note: "Document text added. Embedded objects are not OCRed and external resources are not fetched.",
+            });
+        } else
+          await api.source(
+            {
+              filename: item.file.name,
+              content: await item.file.text(),
+              mimeType: item.file.type || "text/plain",
+              scope: requestedScope,
+            },
+            abort.signal,
+          );
+        if (scopeRef.current !== requestedScope || abort.signal.aborted) return;
+        updateItem(item.id, { status: "done", progress: 1 });
+        await done();
+      } catch (error) {
+        if (scopeRef.current !== requestedScope) return;
+        updateItem(item.id, {
+          status:
+            error instanceof DOMException && error.name === "AbortError" ? "cancelled" : "error",
+          error:
+            error instanceof DOMException && error.name === "AbortError"
+              ? "Cancelled"
+              : error instanceof Error
+                ? error.message
+                : "The file could not be added.",
+        });
+      } finally {
+        if (controller.current === abort) controller.current = null;
+        running.current = false;
+        if (scopeRef.current === requestedScope) setQueue((current) => [...current]);
+      }
+    })();
+  }, [queue, importing, scope, done]);
   return (
     <>
       <label className="drop">
         <input
           type="file"
-          onChange={async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            setBusy(true);
-            try {
-              const importFormat = /\.ics$/i.test(file.name)
-                ? "ics"
-                : /\.(vcf|vcard)$/i.test(file.name)
-                  ? "vcard"
-                  : undefined;
-              if (importFormat) {
-                const content = await file.text(),
-                  preview = await api.import.preview({
-                    scope,
-                    format: importFormat,
-                    content,
-                    fileName: file.name,
-                  });
-                setImporting({
-                  format: importFormat,
-                  content,
-                  fileName: file.name,
-                  preview,
-                  selected: new Set(preview.items.map((item) => item.key)),
-                });
-                return;
-              }
-              const binary =
-                file.type === "application/pdf" ||
-                file.type === "image/png" ||
-                file.type === "image/jpeg";
-              let content: string;
-              if (binary) {
-                const source = new Uint8Array(await file.arrayBuffer());
-                let encoded = "";
-                for (let offset = 0; offset < source.length; offset += 0x8000)
-                  encoded += String.fromCharCode(...source.subarray(offset, offset + 0x8000));
-                content = btoa(encoded);
-              } else content = await file.text();
-              await api.source({
-                filename: file.name,
-                content,
-                mimeType: file.type || "text/plain",
-                scope,
-                ...(binary ? { encoding: "base64" as const } : {}),
-              });
-              await done();
-            } catch (error) {
-              setImportError(
-                error instanceof Error ? error.message : "The file could not be added.",
+          multiple
+          onChange={(event) => {
+            const files = [...(event.target.files ?? [])];
+            setQueue((current) => {
+              const accepted = files.slice(0, Math.max(0, 20 - current.length));
+              const ignored = files.length - accepted.length;
+              setQueueNotice(
+                ignored
+                  ? `${ignored} ${ignored === 1 ? "file was" : "files were"} not queued because the 20-file limit was reached.`
+                  : "",
               );
-            } finally {
-              setBusy(false);
-            }
+              return [
+                ...current,
+                ...accepted.map((file, index) => ({
+                  id: `${Date.now()}-${index}-${file.name}`,
+                  file,
+                  status: "queued" as const,
+                  progress: 0,
+                })),
+              ];
+            });
+            event.target.value = "";
           }}
         />
-        <strong>{busy ? "Teaching Ellie…" : "Teach Ellie from a file"}</strong>
-        <span>Choose notes, PDF, image, calendar, or contact files</span>
+        <strong>Teach Ellie from files</strong>
+        <span>Choose up to 20 notes, DOCX, PDF, images, calendars, or contacts</span>
       </label>
+      {queue.length > 0 && (
+        <section className="upload-queue" aria-label="File upload queue">
+          <header>
+            <strong>Selected files</strong>
+            <span>
+              {queue.filter((item) => item.status === "done").length} of {queue.length} added
+            </span>
+            {queue.some((item) => ["done", "error", "cancelled"].includes(item.status)) && (
+              <button
+                onClick={() =>
+                  setQueue((current) =>
+                    current.filter((item) => !["done", "error", "cancelled"].includes(item.status)),
+                  )
+                }
+              >
+                Dismiss results
+              </button>
+            )}
+          </header>
+          {queueNotice && (
+            <p className="queue-notice" role="alert">
+              {queueNotice}
+            </p>
+          )}
+          {queue.map((item) => (
+            <article key={item.id} className={`upload-${item.status}`}>
+              <div>
+                <strong>{item.file.name}</strong>
+                <small>
+                  {item.status === "uploading"
+                    ? `Uploading ${Math.round(item.progress * 100)}%`
+                    : item.status === "review"
+                      ? "Waiting for your review"
+                      : item.status === "done"
+                        ? "Added"
+                        : item.status === "error"
+                          ? "Needs attention"
+                          : item.status}
+                </small>
+                {item.error && <em>{item.error}</em>}
+                {item.note && <span className="upload-note">{item.note}</span>}
+              </div>
+              <progress max={1} value={item.progress} />
+              {(item.status === "queued" || item.status === "uploading") && (
+                <button
+                  aria-label={`Cancel ${item.file.name}`}
+                  onClick={() => {
+                    if (item.status === "uploading") controller.current?.abort();
+                    else updateItem(item.id, { status: "cancelled", error: "Cancelled" });
+                  }}
+                >
+                  Cancel
+                </button>
+              )}
+              {item.status === "error" && (
+                <button
+                  onClick={() =>
+                    updateItem(item.id, { status: "queued", progress: 0, error: undefined })
+                  }
+                >
+                  Retry
+                </button>
+              )}
+            </article>
+          ))}
+        </section>
+      )}
       {importing && (
         <Modal
           title={`Review ${importing.format === "ics" ? "calendar" : "contacts"}`}
-          close={() => setImporting(null)}
+          close={() => {
+            updateItem(importing.queueId, { status: "cancelled", error: "Review cancelled" });
+            setImporting(null);
+          }}
         >
           <p className="impact">
             Choose what to add. File content is treated as data; warnings show details Ellie could
@@ -1341,20 +1497,33 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
             ))}
           </div>
           <div className="modal-actions">
-            <button onClick={() => setImporting(null)}>Cancel</button>
+            <button
+              onClick={() => {
+                updateItem(importing.queueId, { status: "cancelled", error: "Review cancelled" });
+                setImporting(null);
+              }}
+            >
+              Cancel
+            </button>
             <button
               className="primary"
               disabled={busy || importing.selected.size === 0}
               onClick={async () => {
                 setBusy(true);
+                const abort = new AbortController();
+                controller.current = abort;
                 try {
-                  await api.import.commit({
-                    scope,
-                    format: importing.format,
-                    content: importing.content,
-                    fileName: importing.fileName,
-                    selectedKeys: [...importing.selected],
-                  });
+                  await api.import.commit(
+                    {
+                      scope,
+                      format: importing.format,
+                      content: importing.content,
+                      fileName: importing.fileName,
+                      selectedKeys: [...importing.selected],
+                    },
+                    abort.signal,
+                  );
+                  updateItem(importing.queueId, { status: "done", progress: 1 });
                   setImporting(null);
                   await done();
                 } catch (error) {
@@ -1364,6 +1533,7 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
                       : "The selected items could not be added.",
                   );
                 } finally {
+                  if (controller.current === abort) controller.current = null;
                   setBusy(false);
                 }
               }}

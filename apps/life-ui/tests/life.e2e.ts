@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { crc32 } from "node:zlib";
 import { createServer as createHttpServer } from "node:http";
 import { chromium } from "@playwright/test";
 import { LifeStore } from "../../../packages/life-core/src/index.ts";
@@ -175,14 +176,39 @@ try {
   await page.getByText("Morning appointment preference").waitFor();
 
   const chooser = page.waitForEvent("filechooser");
-  await page.getByText("Teach Ellie from a file").click();
+  await page.getByText("Teach Ellie from files").click();
   await (
     await chooser
-  ).setFiles({
-    name: "garden.txt",
-    mimeType: "text/plain",
-    buffer: Buffer.from("Garden gate code is 2468. This is untrusted source content."),
-  });
+  ).setFiles([
+    {
+      name: "garden.txt",
+      mimeType: "text/plain",
+      buffer: Buffer.from("Garden gate code is 2468. This is untrusted source content."),
+    },
+    {
+      name: "garden-handbook.docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: Buffer.from(makeDocx("Garden handbook binary route", 1_550_000)),
+    },
+    {
+      name: "broken-handbook.docx",
+      mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: Buffer.from("PK truncated"),
+    },
+  ]);
+  await page.locator(".upload-queue article.upload-done").nth(1).waitFor({ timeout: 30_000 });
+  await page.locator(".upload-queue article.upload-error").waitFor();
+  assert.equal(await page.locator(".upload-queue article.upload-done").count(), 2);
+  assert.match(
+    (await page.locator(".upload-queue article.upload-error").textContent()) ?? "",
+    /missing|truncated|corrupt|could not be extracted/i,
+  );
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-upload-queue.png"), fullPage: false });
+  await page
+    .locator(".record-list strong")
+    .getByText("garden-handbook.docx", { exact: true })
+    .waitFor();
   await page.locator(".record-list strong").getByText("garden.txt", { exact: true }).waitFor();
   await page.locator(".record-list button").filter({ hasText: "garden.txt" }).click();
   assert.equal(
@@ -200,7 +226,7 @@ try {
   await page.locator(".search-results button").filter({ hasText: "garden.txt" }).click();
   assert.match(await page.getByLabel("Details").inputValue(), /untrusted source content/);
   await page.getByRole("button", { name: "Close" }).click();
-  await page.getByRole("button", { name: "Clear" }).click();
+  await page.getByRole("button", { name: "Clear", exact: true }).click();
   await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
   await page.getByLabel("Message Ellie").fill("Summarize gate code in the background");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -334,7 +360,7 @@ try {
   assert.equal(guideAfterRollback.record.body, "Answer garden questions in three clear steps.");
   await page.getByRole("button", { name: "all", exact: true }).click();
   const pdfChooser = page.waitForEvent("filechooser");
-  await page.getByText("Teach Ellie from a file").click();
+  await page.getByText("Teach Ellie from files").click();
   await (
     await pdfChooser
   ).setFiles({
@@ -344,7 +370,7 @@ try {
   });
   await page.getByText("paper.pdf").waitFor();
   const calendarChooser = page.waitForEvent("filechooser");
-  await page.getByText("Teach Ellie from a file").click();
+  await page.getByText("Teach Ellie from files").click();
   await (
     await calendarChooser
   ).setFiles({
@@ -889,4 +915,33 @@ function makePdf(message: string): Uint8Array {
     .map((value) => String(value).padStart(10, "0") + " 00000 n \n")
     .join("")}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
   return new TextEncoder().encode(pdf);
+}
+
+function makeDocx(message: string, minimumSize = 0): Uint8Array {
+  const padding = " garden".repeat(Math.max(0, Math.ceil((minimumSize - message.length) / 7)));
+  const xml = `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>${message}</w:t></w:r></w:p><w:p><w:r><w:t>${padding}</w:t></w:r></w:p></w:body></w:document>`;
+  const name = Buffer.from("word/document.xml");
+  const content = Buffer.from(xml);
+  const local = Buffer.alloc(30);
+  local.writeUInt32LE(0x04034b50, 0);
+  local.writeUInt16LE(20, 4);
+  local.writeUInt32LE(content.length, 18);
+  local.writeUInt32LE(content.length, 22);
+  local.writeUInt16LE(name.length, 26);
+  local.writeUInt32LE(crc32(content), 14);
+  const central = Buffer.alloc(46);
+  central.writeUInt32LE(0x02014b50, 0);
+  central.writeUInt16LE(20, 4);
+  central.writeUInt16LE(20, 6);
+  central.writeUInt32LE(content.length, 20);
+  central.writeUInt32LE(content.length, 24);
+  central.writeUInt16LE(name.length, 28);
+  central.writeUInt32LE(crc32(content), 16);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(1, 8);
+  end.writeUInt16LE(1, 10);
+  end.writeUInt32LE(central.length + name.length, 12);
+  end.writeUInt32LE(local.length + name.length + content.length, 16);
+  return Buffer.concat([local, name, content, central, name, end]);
 }

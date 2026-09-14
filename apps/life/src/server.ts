@@ -14,7 +14,10 @@ import type {
   TextSourceFormat,
 } from "../../../packages/life-core/src/index.ts";
 import { LifeAccessError, LifeConflictError } from "../../../packages/life-core/src/index.ts";
-import type { ContextSignal } from "../../../packages/life-context/src/index.ts";
+import {
+  eventPreparationWindow,
+  type ContextSignal,
+} from "../../../packages/life-context/src/index.ts";
 import {
   commitLifeImport,
   previewLifeImport,
@@ -36,7 +39,9 @@ import type {
 
 const ORDINARY_LIMIT = 128 * 1024;
 const SOURCE_LIMIT = 2 * 1024 * 1024;
+const BINARY_SOURCE_LIMIT = 50_000_000;
 const DEADLINE_MS = 15_000;
+const BINARY_DEADLINE_MS = 60_000;
 const SESSION_COOKIE = "ellie_life_session";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const BASE_HEADERS = {
@@ -252,6 +257,7 @@ export class LifeHttpServer {
   private contextTail: Promise<void> = Promise.resolve();
   private readonly activeRequests = new Set<Promise<void>>();
   private readonly extractionControllers = new Set<AbortController>();
+  private binaryUploads = 0;
   private readonly mutationRequests = new Set<Promise<void>>();
   private readonly personalReviews = new Map<
     string,
@@ -329,7 +335,8 @@ export class LifeHttpServer {
       void active.finally(() => this.activeRequests.delete(active)).catch(() => {});
       void active.finally(() => this.mutationRequests.delete(active)).catch(() => {});
     });
-    this.server.requestTimeout = DEADLINE_MS;
+    // Route readers enforce tighter ordinary deadlines; raw local extraction may use the full minute.
+    this.server.requestTimeout = BINARY_DEADLINE_MS;
     this.server.headersTimeout = 10_000;
     this.server.maxConnections = 64;
     this.server.on("clientError", (_error, socket) => {
@@ -614,6 +621,8 @@ export class LifeHttpServer {
         return await this.recordMutation(request, response, url);
       if (path === "/api/life/sources" && request.method === "POST")
         return await this.source(request, response);
+      if (path === "/api/life/sources/binary" && request.method === "POST")
+        return await this.binarySource(request, response, url);
       if (path === "/api/life/import/preview" && request.method === "POST")
         return await this.importPreview(request, response);
       if (path === "/api/life/import/commit" && request.method === "POST")
@@ -1031,13 +1040,25 @@ export class LifeHttpServer {
           deliveredAt: record.data.deliveredAt,
         })),
       proactiveNotifications = notificationPage.items
-        .filter(
-          (record) =>
-            record.kind === "feedback" &&
-            record.data.notification === true &&
-            record.data.dismissed !== true &&
-            (typeof record.data.expiresAt !== "number" || record.data.expiresAt > this.now()),
-        )
+        .filter((record) => {
+          if (
+            record.kind !== "feedback" ||
+            record.data.notification !== true ||
+            record.data.dismissed === true ||
+            (typeof record.data.expiresAt === "number" && record.data.expiresAt <= this.now())
+          )
+            return false;
+          if (record.data.category !== "preparation") return true;
+          if (typeof record.data.relatedRecordId !== "string") return false;
+          const event = this.options.store.getRecord(this.actor, record.data.relatedRecordId);
+          return Boolean(
+            event &&
+            event.kind === "event" &&
+            event.scope.type === scope.type &&
+            event.scope.id === scope.id &&
+            eventPreparationWindow(event, this.now(), this.timeZoneForScope(scope)),
+          );
+        })
         .map((record) => ({
           id: record.id,
           title: record.title,
@@ -1189,8 +1210,13 @@ export class LifeHttpServer {
         throw new HttpError(400, "Invalid base64 source.");
       }
       const controller = new AbortController(),
-        deadline = setTimeout(() => controller.abort(), DEADLINE_MS);
+        deadline = setTimeout(() => controller.abort(), DEADLINE_MS),
+        disconnect = () => {
+          if (!response.writableFinished)
+            controller.abort(new Error("Source upload client disconnected."));
+        };
       this.extractionControllers.add(controller);
+      response.once("close", disconnect);
       let extraction: { text: string; metadata?: Record<string, unknown> };
       try {
         try {
@@ -1201,12 +1227,17 @@ export class LifeHttpServer {
             signal: controller.signal,
           });
         } catch {
+          if (controller.signal.aborted)
+            throw new HttpError(408, "Source extraction was cancelled.");
           throw new HttpError(422, "Source could not be extracted locally.");
         }
+        if (controller.signal.aborted) throw new HttpError(408, "Source extraction was cancelled.");
       } finally {
         clearTimeout(deadline);
+        response.off("close", disconnect);
         this.extractionControllers.delete(controller);
       }
+      this.scope(scope);
       record = this.options.store.ingestSource(this.actor, {
         title: filename,
         scope,
@@ -1224,7 +1255,98 @@ export class LifeHttpServer {
         metadata: { filename, mimeType },
       });
     }
+    this.options.harness.invalidateContext?.(this.actor, scope);
     this.send(response, 201, serializeRecord(record));
+  }
+  private async binarySource(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+  ): Promise<void> {
+    if (!this.options.extractor)
+      throw new HttpError(415, "Binary source extraction is unavailable.");
+    if (request.headers["content-type"] !== "application/octet-stream")
+      throw new HttpError(415, "Binary uploads require Content-Type application/octet-stream.");
+    const rawLength = request.headers["content-length"];
+    if (typeof rawLength !== "string" || !/^[1-9][0-9]*$/.test(rawLength))
+      throw new HttpError(411, "A valid Content-Length is required.");
+    const length = Number(rawLength);
+    if (!Number.isSafeInteger(length) || length > BINARY_SOURCE_LIMIT)
+      throw new HttpError(413, "Binary source is too large.");
+    if (this.binaryUploads >= 2) throw new HttpError(429, "Too many binary uploads are active.");
+    const scope = this.scope(url.searchParams.get("scope")),
+      filename = bounded(url.searchParams.get("filename"), "filename", 1000),
+      mimeType = bounded(url.searchParams.get("mimeType"), "mimeType", 200),
+      title = url.searchParams.has("title")
+        ? bounded(url.searchParams.get("title"), "title", 2000)
+        : filename,
+      bytes = Buffer.allocUnsafe(length),
+      controller = new AbortController();
+    let offset = 0;
+    const deadline = setTimeout(
+        () => controller.abort(new Error("Binary upload deadline exceeded.")),
+        BINARY_DEADLINE_MS,
+      ),
+      abortRequest = () => {
+        if (offset < length) request.destroy(new Error("Binary upload cancelled."));
+      },
+      disconnect = () => {
+        if (!response.writableFinished)
+          controller.abort(new Error("Binary upload client disconnected."));
+      };
+    deadline.unref();
+    controller.signal.addEventListener("abort", abortRequest, { once: true });
+    response.once("close", disconnect);
+    this.binaryUploads++;
+    this.extractionControllers.add(controller);
+    try {
+      for await (const part of request) {
+        if (controller.signal.aborted) throw new HttpError(408, "Binary upload was cancelled.");
+        const chunk = Buffer.from(part);
+        if (offset + chunk.length > length)
+          throw new HttpError(400, "Binary body exceeds Content-Length.");
+        chunk.copy(bytes, offset);
+        offset += chunk.length;
+      }
+      if (offset !== length) throw new HttpError(400, "Binary body does not match Content-Length.");
+      let extraction: { text: string; metadata?: Record<string, unknown> };
+      try {
+        extraction = await this.options.extractor({
+          filename,
+          mimeType,
+          bytes,
+          signal: controller.signal,
+        });
+      } catch (error) {
+        if (controller.signal.aborted) throw new HttpError(408, "Binary extraction was cancelled.");
+        throw new HttpError(422, "Source could not be extracted locally.");
+      }
+      if (controller.signal.aborted) throw new HttpError(408, "Binary extraction was cancelled.");
+      if (!extraction.text || extraction.text.length > 5_000_000)
+        throw new HttpError(422, "Extracted source text is empty or too large.");
+      this.scope(scope);
+      const record = this.options.store.ingestSource(this.actor, {
+        title,
+        scope,
+        format: "text",
+        content: extraction.text,
+        metadata: { filename, mimeType, ...extraction.metadata, extracted: true },
+      });
+      this.options.harness.invalidateContext?.(this.actor, scope);
+      const serialized = serializeRecord(record);
+      delete serialized.body;
+      this.send(response, 201, {
+        ...serialized,
+        bodyPreview: record.body?.slice(0, 240),
+        hasMoreBody: (record.body?.length ?? 0) > 240,
+      });
+    } finally {
+      clearTimeout(deadline);
+      controller.signal.removeEventListener("abort", abortRequest);
+      response.off("close", disconnect);
+      this.extractionControllers.delete(controller);
+      this.binaryUploads--;
+    }
   }
   private sourceFormat(mimeType: string, filename: string): TextSourceFormat {
     if (mimeType === "text/html" || /\.html?$/.test(filename)) return "html";

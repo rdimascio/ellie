@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { LifeStore } from "../packages/life-core/src/index.ts";
-import { PreparationMonitor, ProactivityEngine } from "../packages/life-context/src/index.ts";
+import {
+  eventPreparationWindow,
+  PreparationMonitor,
+  ProactivityEngine,
+} from "../packages/life-context/src/index.ts";
 
 test("shopping opportunities are relevant, scoped, quiet, persistent and stop after completion", () => {
   const directory = mkdtempSync(join(tmpdir(), "ellie-context-test-"));
@@ -341,4 +345,92 @@ test("stopping the monitor prevents subsequent interval work", async () => {
   monitor.start();
   assert.equal(checks, 2);
   monitor.stop();
+});
+
+test("all-day preparation follows local dates and expires at the next actual local day", () => {
+  const now = Date.parse("2026-09-14T11:30:00Z"),
+    zone = "Pacific/Kiritimati";
+  const event = (value: unknown) => ({ kind: "event" as const, data: { startDate: value } });
+  assert.equal(eventPreparationWindow(event("2026-09-14"), now, zone), undefined);
+  const today = eventPreparationWindow(event("2026-09-15"), now, zone)!;
+  assert.deepEqual(today, {
+    expiresAt: Date.parse("2026-09-15T10:00:00Z"),
+    allDay: true,
+    today: true,
+  });
+  assert.equal(eventPreparationWindow(event("2026-09-17"), now, zone)?.allDay, true);
+  assert.equal(eventPreparationWindow(event("2026-09-18"), now, zone), undefined);
+  assert.equal(eventPreparationWindow(event("2026-02-30"), now, zone), undefined);
+  const spring = eventPreparationWindow(
+    event("2026-03-08"),
+    Date.parse("2026-03-08T08:00:00Z"),
+    "America/Los_Angeles",
+  )!;
+  assert.equal(spring.expiresAt, Date.parse("2026-03-09T07:00:00Z"));
+  assert.equal(
+    eventPreparationWindow(event("2011-12-30"), Date.parse("2011-12-29T12:00:00Z"), "Pacific/Apia"),
+    undefined,
+  );
+});
+
+test("timed preparation accepts explicit instants and rejects ambiguous or malformed strings", () => {
+  const now = Date.parse("2026-09-14T16:00:00Z"),
+    event = (startAt: unknown) => ({ kind: "event" as const, data: { startAt } });
+  const at = Date.parse("2026-09-15T09:30:00-07:00");
+  for (const value of [at, "2026-09-15T09:30:00-07:00", "2026-09-15T16:30:00Z"])
+    assert.equal(eventPreparationWindow(event(value), now, "America/Los_Angeles")?.expiresAt, at);
+  for (const value of [
+    "2026-09-15T09:30",
+    "2026-09-15T25:30Z",
+    "2026-09-31T12:00:00Z",
+    "tomorrow",
+    now,
+    now + 49 * 3600000,
+    Infinity,
+  ])
+    assert.equal(eventPreparationWindow(event(value), now, "UTC"), undefined, String(value));
+  assert.equal(
+    eventPreparationWindow({ kind: "event", data: { startAt: at, cancelled: true } }, now, "UTC"),
+    undefined,
+  );
+});
+
+test("automatic preparation includes imported all-day and ISO events with durable deduplication", () => {
+  const directory = mkdtempSync(join(tmpdir(), "ellie-preparation-calendar-"));
+  let now = Date.parse("2026-09-14T11:30:00Z");
+  const store = new LifeStore(join(directory, "life.sqlite")),
+    actor = { userId: "alice" },
+    scope = { type: "user" as const, id: "alice" };
+  try {
+    store.setUserSetting(actor, "timeZone", "Pacific/Kiritimati");
+    store.createRecord(actor, {
+      kind: "event",
+      scope,
+      title: "Trip day",
+      data: { startDate: "2026-09-15", allDay: true },
+    });
+    store.createRecord(actor, {
+      kind: "event",
+      scope,
+      title: "Dinner",
+      data: { startAt: "2026-09-15T19:00:00+14:00" },
+    });
+    store.createRecord(actor, {
+      kind: "event",
+      scope,
+      title: "Old day",
+      data: { startDate: "2026-09-14" },
+    });
+    const engine = new ProactivityEngine(store, () => now);
+    assert.deepEqual(
+      engine.evaluate(actor, scope, { type: "check", at: now }).map((notice) => notice.title),
+      ["Dinner", "Trip day"],
+    );
+    now += 13 * 3600000;
+    assert.equal(engine.evaluate(actor, scope, { type: "check", at: now }).length, 0);
+    assert.equal(store.listRecords(actor, { scope, kinds: ["feedback"] }).length, 2);
+  } finally {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

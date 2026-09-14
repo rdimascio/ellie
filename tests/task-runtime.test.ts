@@ -216,6 +216,44 @@ test("duplicate scheduler ticks create one occurrence and daily schedules avoid 
   }
 });
 
+test("daily schedules preserve minutes across half-hour DST transitions and skip gaps", () => {
+  assert.equal(
+    nextOccurrence(
+      { kind: "daily", time: "02:30", timeZone: "Australia/Lord_Howe" },
+      Date.UTC(2026, 9, 3, 0),
+    ),
+    Date.UTC(2026, 9, 3, 15, 30),
+  );
+  assert.equal(
+    nextOccurrence(
+      { kind: "daily", time: "02:15", timeZone: "Australia/Lord_Howe" },
+      Date.UTC(2026, 9, 3, 0),
+    ),
+    Date.UTC(2026, 9, 4, 15, 15),
+  );
+});
+
+test("weekly schedules preserve calendar weekday in years below 100", () => {
+  const januaryFirst = new Date(0);
+  januaryFirst.setUTCFullYear(50, 0, 1);
+  januaryFirst.setUTCHours(10, 0, 0, 0);
+  const januaryEighth = new Date(0);
+  januaryEighth.setUTCFullYear(50, 0, 8);
+  januaryEighth.setUTCHours(9, 0, 0, 0);
+  assert.equal(
+    nextOccurrence(
+      {
+        kind: "weekly",
+        weekday: januaryFirst.getUTCDay(),
+        time: "09:00",
+        timeZone: "UTC",
+      },
+      januaryFirst.getTime(),
+    ),
+    januaryEighth.getTime(),
+  );
+});
+
 test("cancellation propagates through AbortSignal and marks descendants cancelled", async () => {
   const f = await fixture();
   try {

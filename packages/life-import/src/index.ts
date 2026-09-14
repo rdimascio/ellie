@@ -6,6 +6,7 @@ import type {
   LifeScope,
   LifeStore,
 } from "../../life-core/src/index.ts";
+import { zonedCandidates } from "../../life-time/src/index.ts";
 
 export type LifeImportFormat = "ics" | "vcard";
 export interface ImportItem {
@@ -131,61 +132,6 @@ function validZone(value: string): boolean {
     return false;
   }
 }
-function zoned(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  minute: number,
-  second: number,
-  zone: string,
-): number[] {
-  const format = new Intl.DateTimeFormat("en-US", {
-    timeZone: zone,
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour: "numeric",
-    minute: "numeric",
-    second: "numeric",
-    hourCycle: "h23",
-  });
-  const wall = Date.UTC(year, month - 1, day, hour, minute, second),
-    matches: number[] = [];
-  for (const probe of [wall - 12 * 3_600_000, wall, wall + 12 * 3_600_000]) {
-    const p = Object.fromEntries(
-      format
-        .formatToParts(new Date(probe))
-        .filter((part) => part.type !== "literal")
-        .map((part) => [part.type, Number(part.value)]),
-    );
-    const represented = Date.UTC(
-      Number(p.year),
-      Number(p.month) - 1,
-      Number(p.day),
-      Number(p.hour),
-      Number(p.minute),
-      Number(p.second),
-    );
-    const candidate = wall - (represented - probe),
-      c = Object.fromEntries(
-        format
-          .formatToParts(new Date(candidate))
-          .filter((part) => part.type !== "literal")
-          .map((part) => [part.type, Number(part.value)]),
-      );
-    if (
-      c.year === year &&
-      c.month === month &&
-      c.day === day &&
-      c.hour === hour &&
-      c.minute === minute &&
-      c.second === second
-    )
-      matches.push(candidate);
-  }
-  return [...new Set(matches)].sort((a, b) => a - b);
-}
 function parseDate(
   prop: Property | undefined,
   defaultZone: string | undefined,
@@ -248,7 +194,10 @@ function parseDate(
     warnings.push(`${label} uses unknown time zone ${zone}.`);
     return { [`${label}Local`]: prop.value, timeZone: zone };
   }
-  const candidates = zoned(year!, month!, day!, hour!, minute!, second, zone);
+  const candidates = zonedCandidates(
+    { year: year!, month: month!, day: day!, hour: hour!, minute: minute!, second },
+    zone,
+  );
   if (candidates.length === 0) {
     warnings.push(`${label} falls in a nonexistent local time in ${zone}.`);
     return { [`${label}Local`]: prop.value, timeZone: zone };

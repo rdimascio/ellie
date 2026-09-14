@@ -118,13 +118,79 @@ export const api = {
         score: number;
       }>;
     }>(`/api/life/search?scope=${encodeURIComponent(scope)}&q=${encodeURIComponent(q)}`),
-  source: (value: {
-    filename: string;
-    content: string;
-    mimeType: string;
-    scope: string;
-    encoding?: "base64";
-  }) => request("/api/life/sources", { method: "POST", body: JSON.stringify(value) }),
+  source: (
+    value: {
+      filename: string;
+      content: string;
+      mimeType: string;
+      scope: string;
+      encoding?: "base64";
+    },
+    signal?: AbortSignal,
+  ) => request("/api/life/sources", { method: "POST", body: JSON.stringify(value), signal }),
+  sourceBinary: (
+    file: File,
+    scope: string,
+    signal: AbortSignal,
+    progress: (fraction: number) => void,
+  ) =>
+    new Promise<LifeRecord>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(new DOMException("Upload cancelled", "AbortError"));
+        return;
+      }
+      const extensionMime = /\.docx$/i.test(file.name)
+        ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        : /\.pdf$/i.test(file.name)
+          ? "application/pdf"
+          : /\.png$/i.test(file.name)
+            ? "image/png"
+            : /\.jpe?g$/i.test(file.name)
+              ? "image/jpeg"
+              : "application/octet-stream";
+      const query = new URLSearchParams({
+        scope,
+        filename: file.name,
+        mimeType:
+          extensionMime !== "application/octet-stream"
+            ? extensionMime
+            : file.type || "application/octet-stream",
+      });
+      const xhr = new XMLHttpRequest();
+      const cancelled = () => xhr.abort();
+      signal.addEventListener("abort", cancelled, { once: true });
+      xhr.open("POST", `/api/life/sources/binary?${query}`);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable && event.total > 0) progress(event.loaded / event.total);
+      };
+      xhr.onerror = () => {
+        signal.removeEventListener("abort", cancelled);
+        reject(new ApiError("The file upload failed.", 0));
+      };
+      xhr.onabort = () => {
+        signal.removeEventListener("abort", cancelled);
+        reject(new DOMException("Upload cancelled", "AbortError"));
+      };
+      xhr.onload = () => {
+        signal.removeEventListener("abort", cancelled);
+        let value: (Partial<LifeRecord> & { error?: string; message?: string }) | undefined;
+        try {
+          value = JSON.parse(xhr.responseText);
+        } catch {}
+        if (xhr.status < 200 || xhr.status >= 300)
+          reject(
+            new ApiError(
+              value?.message ?? value?.error ?? `Request failed (${xhr.status})`,
+              xhr.status,
+            ),
+          );
+        else if (value?.id) resolve(value as LifeRecord);
+        else reject(new ApiError("The upload response was invalid.", xhr.status));
+      };
+      xhr.send(file);
+    }),
   settings: (scope: string, values: Record<string, unknown>) =>
     request("/api/life/settings", { method: "POST", body: JSON.stringify({ scope, values }) }),
   feedback: (text: string, scope: string, runId?: string) =>
@@ -177,13 +243,16 @@ export const api = {
       }),
   },
   import: {
-    preview: (value: {
-      scope: string;
-      format: "ics" | "vcard";
-      content: string;
-      fileName?: string;
-      defaultTimeZone?: string;
-    }) =>
+    preview: (
+      value: {
+        scope: string;
+        format: "ics" | "vcard";
+        content: string;
+        fileName?: string;
+        defaultTimeZone?: string;
+      },
+      signal?: AbortSignal,
+    ) =>
       request<{
         format: "ics" | "vcard";
         source: { title: string; contentHash: string };
@@ -196,16 +265,20 @@ export const api = {
           warnings: string[];
         }>;
         warnings: string[];
-      }>("/api/life/import/preview", { method: "POST", body: JSON.stringify(value) }),
-    commit: (value: {
-      scope: string;
-      format: "ics" | "vcard";
-      content: string;
-      fileName?: string;
-      defaultTimeZone?: string;
-      selectedKeys?: string[];
-      sourceId?: string;
-    }) => request("/api/life/import/commit", { method: "POST", body: JSON.stringify(value) }),
+      }>("/api/life/import/preview", { method: "POST", body: JSON.stringify(value), signal }),
+    commit: (
+      value: {
+        scope: string;
+        format: "ics" | "vcard";
+        content: string;
+        fileName?: string;
+        defaultTimeZone?: string;
+        selectedKeys?: string[];
+        sourceId?: string;
+      },
+      signal?: AbortSignal,
+    ) =>
+      request("/api/life/import/commit", { method: "POST", body: JSON.stringify(value), signal }),
   },
   notification: (id: string, action: "dismiss" | "complete", expectedRevision: number) =>
     request(`/api/life/notifications/${encodeURIComponent(id)}/${action}`, {

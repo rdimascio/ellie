@@ -10,8 +10,21 @@ import { ProactivityEngine } from "../../life-context/src/index.ts";
 import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src/index.ts";
 import { builtInManifest } from "../../life-plugins/src/index.ts";
 import { LifeTeaching } from "../../life-teaching/src/index.ts";
+import {
+  addCalendarDays,
+  CalendarTimeError,
+  calendarDateKey,
+  localParts,
+  nextAnnualDate,
+  nextWeekdayDate,
+  parseCalendarDate,
+  parseClock,
+  resolveZoned,
+  startOfLocalDay,
+  validateCalendarDate,
+} from "../../life-time/src/index.ts";
 import type { OwnerScope, TaskRecord } from "../../task-runtime/src/index.ts";
-import { nextOccurrence, TaskRuntime } from "../../task-runtime/src/index.ts";
+import { TaskRuntime } from "../../task-runtime/src/index.ts";
 import type { LifeModel, LifeModelPlan } from "./model.ts";
 export * from "./model.ts";
 
@@ -134,40 +147,6 @@ function modelContext(
   };
 }
 
-function zonedDateTime(
-  year: number,
-  month: number,
-  day: number,
-  hour: number,
-  timeZone: string,
-): number {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-    hour: "numeric",
-    hourCycle: "h23",
-  });
-  const center = Date.UTC(year, month, day, hour);
-  for (let at = center - 15 * 3_600_000; at <= center + 15 * 3_600_000; at += 60_000) {
-    const values = Object.fromEntries(
-      formatter
-        .formatToParts(new Date(at))
-        .filter((part) => part.type !== "literal")
-        .map((part) => [part.type, Number(part.value)]),
-    );
-    if (
-      values.year === year &&
-      values.month === month + 1 &&
-      values.day === day &&
-      values.hour === hour
-    )
-      return at;
-  }
-  throw new Error("Local date does not exist in the configured time zone.");
-}
-
 function parseDelay(message: string): { delay: number; text: string } | undefined {
   const match = /\bin\s+(\d{1,6})\s*(minute|hour|day)s?\s+(?:to\s+)?(.+)$/i.exec(message);
   if (!match) return undefined;
@@ -178,46 +157,61 @@ function parseDelay(message: string): { delay: number; text: string } | undefine
   };
 }
 
-function localTomorrow(
+function localAnchored(
   message: string,
   now: number,
   timeZone: string,
 ): { at: number; text: string } | undefined {
   const match =
-    /\btomorrow(?:\s+at\s+(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?)?\s+(?:to\s+)?(.+)$/i.exec(message);
+    /\b(today|tomorrow|next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday))(?:\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?))?\s+(?:to\s+)?(.+)$/i.exec(
+      message,
+    );
   if (!match) return undefined;
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone,
-    year: "numeric",
-    month: "numeric",
-    day: "numeric",
-  });
-  const local = Object.fromEntries(
-    formatter
-      .formatToParts(new Date(now))
-      .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
-  );
-  const year = Number(local.year),
-    month = Number(local.month),
-    day = Number(local.day);
-  if (![year, month, day].every(Number.isFinite))
-    throw new Error("Could not resolve the configured local date.");
-  const tomorrow = new Date(Date.UTC(year, month - 1, day + 1));
-  let hour = Number(match[1] ?? 9);
-  const meridiem = match[3]?.toLowerCase();
-  if (meridiem === "pm" && hour < 12) hour += 12;
-  if (meridiem === "am" && hour === 12) hour = 0;
-  const at =
-    zonedDateTime(
-      tomorrow.getUTCFullYear(),
-      tomorrow.getUTCMonth(),
-      tomorrow.getUTCDate(),
-      hour,
-      timeZone,
-    ) +
-    Number(match[2] ?? 0) * 60_000;
-  return { at, text: clean(match[4]!) };
+  const current = localParts(now, timeZone);
+  let date = validateCalendarDate(current);
+  if (match[1]!.toLowerCase() === "tomorrow") date = addCalendarDays(date, 1);
+  else if (match[2])
+    date = nextWeekdayDate(
+      date,
+      ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"].indexOf(
+        match[2].toLowerCase(),
+      ),
+    );
+  const clock = parseClock(match[3] ?? "9:00");
+  return { at: resolveZoned({ ...date, ...clock }, timeZone), text: clean(match[4]!) };
+}
+
+type EventWhen = { sortAt: number; dateKey: string; label: string; allDay: boolean };
+function eventWhen(record: LifeRecord, timeZone: string): EventWhen | undefined {
+  const raw = record.data.startAt ?? record.data.startDate ?? record.data.date;
+  const calendar = parseCalendarDate(raw);
+  if (calendar) {
+    const dateKey = calendarDateKey(calendar);
+    return {
+      sortAt:
+        startOfLocalDay(calendar, timeZone) ??
+        Date.UTC(calendar.year, calendar.month - 1, calendar.day, 12),
+      dateKey,
+      label: dateKey,
+      allDay: true,
+    };
+  }
+  let instant: number | undefined;
+  if (typeof raw === "number" && Number.isFinite(raw)) instant = raw;
+  else if (
+    typeof raw === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(raw)
+  ) {
+    const parsed = Date.parse(raw);
+    if (Number.isFinite(parsed)) instant = parsed;
+  }
+  if (instant === undefined) return;
+  return {
+    sortAt: instant,
+    dateKey: calendarDateKey(localParts(instant, timeZone)),
+    label: new Date(instant).toLocaleString("en-US", { timeZone }),
+    allDay: false,
+  };
 }
 
 function findNamed(
@@ -413,9 +407,10 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       tasks: TaskRecord[] = [],
       actions: ChatAction[] = [],
       evidence: ChatResponse["evidence"] = [];
-    const all = () =>
+    const all = (kinds?: LifeRecordKind[]) =>
       options.store.listRecords(request.actor, {
         scope: request.scope,
+        ...(kinds ? { kinds } : {}),
         limit: 500,
       });
     const create = (input: Parameters<LifeStore["createRecord"]>[1]) => {
@@ -462,8 +457,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     const sourceGuidance = /^use\s+(.+?)\s+as guidance[.!?]?$/i.exec(message);
     if (sourceGuidance) {
       const needle = clean(sourceGuidance[1]!).toLowerCase();
-      const matches = all().filter(
-        (record) => record.kind === "source" && clean(record.title).toLowerCase() === needle,
+      const matches = all(["source"]).filter(
+        (record) => clean(record.title).toLowerCase() === needle,
       );
       if (matches.length !== 1)
         return finish(
@@ -580,18 +575,18 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         scope: request.scope,
         data: { interests },
       });
-      const date = new Intl.DateTimeFormat("en-CA", {
-        timeZone,
-        ...(birthYear === undefined ? {} : { birthYear }),
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      }).format(new Date(birthdayAt));
+      const date = calendarDateKey(localParts(birthdayAt, timeZone));
       const event = create({
         kind: "birthday",
         title: `${name}'s birthday`,
         scope: request.scope,
-        data: { month: month + 1, day, nextDate: date, timeZone },
+        data: {
+          month: month + 1,
+          day,
+          nextDate: date,
+          timeZone,
+          ...(birthYear === undefined ? {} : { birthYear }),
+        },
         relationships: [{ type: "person", targetId: contact.id }],
       });
       const need = create({
@@ -600,7 +595,9 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         scope: request.scope,
         data: {
           completed: false,
-          deadlineAt: birthdayAt,
+          deadlineAt:
+            startOfLocalDay(addCalendarDays(localParts(birthdayAt, timeZone), 1), timeZone) ??
+            birthdayAt,
           interests,
           ...(budget === undefined ? {} : { budget }),
         },
@@ -633,10 +630,10 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     };
 
     const relativeBirthday =
-      /my friend(?:'s|’s) birthday is next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)/i.exec(
+      /^my friend(?:'s|’s) birthday is next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i.exec(
         message,
       );
-    if (relativeBirthday) {
+    if (relativeBirthday && !message.includes("?")) {
       const weekday = [
         "sunday",
         "monday",
@@ -646,17 +643,10 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         "friday",
         "saturday",
       ].indexOf(relativeBirthday[1]!.toLowerCase());
-      const birthdayAt = nextOccurrence(
-        { kind: "weekly", weekday, time: "09:00", timeZone },
-        now(),
-      )!;
-      const local = new Intl.DateTimeFormat("en-US", {
-        timeZone,
-        month: "numeric",
-        day: "numeric",
-      }).formatToParts(new Date(birthdayAt));
-      const month = Number(local.find((part) => part.type === "month")!.value) - 1,
-        day = Number(local.find((part) => part.type === "day")!.value);
+      const date = nextWeekdayDate(validateCalendarDate(localParts(now(), timeZone)), weekday);
+      const birthdayAt = resolveZoned({ ...date, hour: 9, minute: 0 }, timeZone);
+      const month = date.month - 1,
+        day = date.day;
       const interest = /they love\s+([^.!?]+)/i.exec(message)?.[1];
       const budget = /under\s+\$(\d{1,6})/i.exec(message)?.[1];
       return createBirthdayPlan(
@@ -670,38 +660,75 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     }
 
     const birthday =
-      /(?:remember\s+)?(?:that\s+)?(.+?)(?:'s|’s) birthday is\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?/i.exec(
+      /^(?:please\s+)?(?:remember\s+)?(?:that\s+)?(.+?)(?:'s|’s) birthday is\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?(?:\s+and\s+(?:she|he|they)\s+(?:loves?|likes?)\s+([^.!?]+?))?(?:[.!]\s*help me get something under\s+\$(\d{1,6}))?[.!]?$/i.exec(
         message,
       );
-    if (birthday && months.includes(birthday[2]!.toLowerCase())) {
+    const birthdayStatement =
+      !message.includes("?") &&
+      !/^(?:don't|do not|never|do|does|did|can|could|would|will|is|are|for example|example)\b/i.test(
+        message,
+      );
+    if (birthdayStatement && birthday && months.includes(birthday[2]!.toLowerCase())) {
       const name = clean(birthday[1]!),
         month = months.indexOf(birthday[2]!.toLowerCase()),
         day = Number(birthday[3]);
       const check = new Date(Date.UTC(2024, month, day));
       if (check.getUTCMonth() !== month || check.getUTCDate() !== day)
         return finish("That birthday date isn’t valid.");
-      const localYear = Number(
-        new Intl.DateTimeFormat("en-US", { timeZone, year: "numeric" }).format(new Date(now())),
-      );
-      let year = localYear;
-      let birthdayAt = zonedDateTime(year, month, day, 9, timeZone);
-      if (birthdayAt <= now()) {
-        year++;
-        birthdayAt = zonedDateTime(year, month, day, 9, timeZone);
-      }
+      const nextDate = nextAnnualDate({ month: month + 1, day }, now(), timeZone);
+      const birthdayAt = resolveZoned({ ...nextDate, hour: 9, minute: 0 }, timeZone);
       return createBirthdayPlan(
         name,
         birthdayAt,
         month,
         day,
-        [],
-        undefined,
+        birthday[5] ? [clean(birthday[5])] : [],
+        birthday[6] ? Number(birthday[6]) : undefined,
         birthday[4] ? Number(birthday[4]) : undefined,
       );
     }
 
+    const saveEvent = (title: string, startAt: number) => {
+      if (startAt <= now())
+        return finish("That event time is in the past. Please give me a future date.");
+      const event = create({
+        kind: "event",
+        title: titleCase(title),
+        scope: request.scope,
+        data: { startAt, endAt: startAt + 3_600_000, timeZone },
+      });
+      actions.push({ label: `Create ${event.title}`, status: "completed" });
+      return finish(
+        `Added “${event.title}” for ${new Date(startAt).toLocaleString("en-US", { timeZone })}.`,
+      );
+    };
+    const anchoredEvent =
+      /^(?:schedule|add|create)\s+(?:an?\s+)?(.+?)(?:\s+(?:appointment|event))?\s+(?:on\s+)?(today|tomorrow|next\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday))\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/i.exec(
+        message,
+      );
+    if (anchoredEvent) {
+      try {
+        const current = localParts(now(), timeZone);
+        let date = validateCalendarDate(current);
+        if (anchoredEvent[2]!.toLowerCase() === "tomorrow") date = addCalendarDays(date, 1);
+        else if (anchoredEvent[3])
+          date = nextWeekdayDate(
+            date,
+            ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"].indexOf(
+              anchoredEvent[3].toLowerCase(),
+            ),
+          );
+        return saveEvent(
+          clean(anchoredEvent[1]!),
+          resolveZoned({ ...date, ...parseClock(anchoredEvent[4]!) }, timeZone),
+        );
+      } catch (error) {
+        if (error instanceof CalendarTimeError) return finish(error.message);
+        throw error;
+      }
+    }
     const eventRequest =
-      /^(?:schedule|add|create)\s+(?:an?\s+)?(.+?)(?:\s+(?:appointment|event))?\s+on\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?\s+at\s+(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?$/i.exec(
+      /^(?:schedule|add|create)\s+(?:an?\s+)?(.+?)(?:\s+(?:appointment|event))?\s+on\s+([a-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/i.exec(
         message,
       );
     if (eventRequest && months.includes(eventRequest[2]!.toLowerCase())) {
@@ -715,31 +742,21 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
           }).format(new Date(now())),
         ),
         year = eventRequest[4] ? Number(eventRequest[4]) : localYear;
-      let hour = Number(eventRequest[5]),
-        minute = Number(eventRequest[6] ?? 0);
-      if (eventRequest[7]?.toLowerCase() === "pm" && hour < 12) hour += 12;
-      if (eventRequest[7]?.toLowerCase() === "am" && hour === 12) hour = 0;
-      const check = new Date(Date.UTC(year, month, day));
-      if (check.getUTCMonth() !== month || check.getUTCDate() !== day || hour > 23)
-        return finish("That event date or time isn’t valid.");
-      const startAt = zonedDateTime(year, month, day, hour, timeZone) + minute * 60_000;
-      if (startAt <= now())
-        return finish("That event time is in the past. Please give me a future date.");
-      const event = create({
-        kind: "event",
-        title: titleCase(title),
-        scope: request.scope,
-        data: { startAt, endAt: startAt + 3_600_000, timeZone },
-      });
-      actions.push({ label: `Create ${event.title}`, status: "completed" });
-      return finish(
-        `Added “${event.title}” for ${new Date(startAt).toLocaleString("en-US", { timeZone })}.`,
-      );
+      try {
+        const date = validateCalendarDate({ year, month: month + 1, day });
+        return saveEvent(
+          title,
+          resolveZoned({ ...date, ...parseClock(eventRequest[5]!) }, timeZone),
+        );
+      } catch (error) {
+        if (error instanceof CalendarTimeError) return finish(error.message);
+        throw error;
+      }
     }
 
     if (/\b(upcoming birthdays|birthdays coming up)\b/i.test(message)) {
-      const birthdays = all()
-        .filter((record) => record.kind === "birthday")
+      const birthdays = all(["birthday"])
+        .filter(active)
         .sort(
           (a, b) =>
             Number(a.data.month) - Number(b.data.month) || Number(a.data.day) - Number(b.data.day),
@@ -753,27 +770,38 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     }
 
     if (/\b(upcoming events|appointments coming up|what(?:'s| is) upcoming)\b/i.test(message)) {
-      const events = all()
-        .filter(
-          (record) =>
-            record.kind === "event" &&
-            typeof record.data.startAt === "number" &&
-            record.data.startAt >= now(),
+      const today = calendarDateKey(localParts(now(), timeZone));
+      const events = all(["event"])
+        .filter(active)
+        .map((record) => ({ record, when: eventWhen(record, timeZone) }))
+        .filter((item): item is { record: LifeRecord; when: EventWhen } =>
+          Boolean(
+            item.when &&
+            (item.when.allDay ? item.when.dateKey >= today : item.when.sortAt >= now()),
+          ),
         )
-        .sort((a, b) => Number(a.data.startAt) - Number(b.data.startAt))
+        .sort((a, b) => a.when.sortAt - b.when.sortAt)
         .slice(0, 20);
       return finish(
         events.length
-          ? `Upcoming: ${events.map((record) => `${record.title} (${new Date(Number(record.data.startAt)).toLocaleString("en-US", { timeZone })})`).join("; ")}.`
+          ? `Upcoming: ${events.map(({ record, when }) => `${record.title} (${when.label})`).join("; ")}.`
           : "I don’t see any upcoming events in this space.",
       );
     }
 
     const reminderStart = /^(?:please\s+)?(remind me|set (?:a )?timer)\s+/i.exec(message);
     if (reminderStart) {
-      const parsed = parseDelay(message) ?? localTomorrow(message, now(), timeZone);
+      let parsed: ReturnType<typeof parseDelay> | ReturnType<typeof localAnchored>;
+      try {
+        parsed = parseDelay(message) ?? localAnchored(message, now(), timeZone);
+      } catch (error) {
+        if (error instanceof CalendarTimeError) return finish(error.message);
+        throw error;
+      }
       if (parsed) {
         const dueAt = "delay" in parsed ? now() + parsed.delay : parsed.at;
+        if (dueAt <= now())
+          return finish("That reminder time is in the past. Please choose a future time.");
         const kind = /timer/i.test(reminderStart[1]!) ? "timer" : "reminder";
         const record = create({
           kind,
@@ -799,16 +827,19 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     }
 
     const routine =
-      /^every\s+(day|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+at\s+(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?\s+(?:remind me to\s+)?(.+)$/i.exec(
+      /^every\s+(day|sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s+(?:remind me to\s+)?(.+)$/i.exec(
         message,
       );
     if (routine) {
-      let hour = Number(routine[2]),
-        minute = Number(routine[3] ?? 0);
-      if (routine[4]?.toLowerCase() === "pm" && hour < 12) hour += 12;
-      if (routine[4]?.toLowerCase() === "am" && hour === 12) hour = 0;
-      if (hour > 23) return finish("That routine time isn’t valid.");
-      const text = clean(routine[5]!);
+      let clock: { hour: number; minute: number };
+      try {
+        clock = parseClock(routine[2]!);
+      } catch (error) {
+        if (error instanceof CalendarTimeError) return finish(error.message);
+        throw error;
+      }
+      const { hour, minute } = clock;
+      const text = clean(routine[3]!);
       const record = create({
         kind: "routine",
         title: text,
@@ -899,7 +930,11 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
 
     const correction = /^correct\s+(.+?)\s+(?:to|:)\s+(.+)$/i.exec(message);
     if (correction) {
-      const record = findNamed(all(), ["memory", "contact", "need", "reminder"], correction[1]!);
+      const record = findNamed(
+        all(["memory", "contact", "need", "reminder"]),
+        ["memory", "contact", "need", "reminder"],
+        correction[1]!,
+      );
       if (!record) return finish(`I couldn’t find “${clean(correction[1]!)}” in this space.`);
       const value = clean(correction[2]!);
       const updated = options.store.updateRecord(request.actor, record.id, record.revision, {
@@ -917,7 +952,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     const forget = /^(?:please\s+)?forget\s+(.+)$/i.exec(message);
     if (forget) {
       const record = findNamed(
-        all(),
+        all(["memory", "contact", "birthday", "need", "source"]),
         ["memory", "contact", "birthday", "need", "source"],
         forget[1]!,
       );
@@ -930,7 +965,11 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
 
     const completion = /^(complete|cancel)\s+(.+)$/i.exec(message);
     if (completion) {
-      const record = findNamed(all(), ["need", "reminder", "timer"], completion[2]!);
+      const record = findNamed(
+        all(["need", "reminder", "timer"]),
+        ["need", "reminder", "timer"],
+        completion[2]!,
+      );
       if (!record) return finish(`I couldn’t find an open item named “${clean(completion[2]!)}”.`);
       const cancelled = completion[1]!.toLowerCase() === "cancel";
       const updated = options.store.updateRecord(request.actor, record.id, record.revision, {
@@ -943,7 +982,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       records.push(updated);
       if (typeof record.data.taskId === "string")
         options.tasks.cancel(record.data.taskId, scopeOwner(request.scope));
-      for (const reminder of all().filter(
+      for (const reminder of all(["reminder"]).filter(
         (item) =>
           item.kind === "reminder" &&
           item.relationships.some((relation) => relation.targetId === record.id),
@@ -959,14 +998,23 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     }
 
     if (/\b(today|what(?:'s| is) next|agenda)\b/i.test(message)) {
-      const end = now() + 24 * 60 * 60_000;
-      const due = all()
+      const localToday = validateCalendarDate(localParts(now(), timeZone)),
+        todayKey = calendarDateKey(localToday),
+        start = startOfLocalDay(localToday, timeZone) ?? now(),
+        end = startOfLocalDay(addCalendarDays(localToday, 1), timeZone) ?? start + 86_400_000;
+      const due = all(["reminder", "timer", "event", "birthday", "need"])
         .filter(
           (record) =>
-            ["reminder", "timer", "event", "birthday", "need"].includes(record.kind) &&
             active(record) &&
-            (typeof record.data.dueAt !== "number" ||
-              (record.data.dueAt >= now() && record.data.dueAt <= end)),
+            (record.kind === "event"
+              ? eventWhen(record, timeZone)?.dateKey === todayKey
+              : record.kind === "birthday"
+                ? Number(record.data.month) === localToday.month &&
+                  Number(record.data.day) === localToday.day
+                : typeof (record.data.dueAt ?? record.data.deadlineAt) === "number"
+                  ? Number(record.data.dueAt ?? record.data.deadlineAt) >= start &&
+                    Number(record.data.dueAt ?? record.data.deadlineAt) < end
+                  : record.kind === "need"),
         )
         .slice(0, 10);
       return finish(
@@ -1090,11 +1138,9 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
           "",
         ),
       ).replace(/[?]+$/, "");
-      const memories = all()
-        .filter(
-          (record) =>
-            record.kind === "memory" &&
-            `${record.title} ${record.body ?? ""}`.toLowerCase().includes(query.toLowerCase()),
+      const memories = all(["memory"])
+        .filter((record) =>
+          `${record.title} ${record.body ?? ""}`.toLowerCase().includes(query.toLowerCase()),
         )
         .slice(0, 5);
       const found = options.store.search(request.actor, {

@@ -49,6 +49,7 @@
         "@ellie/life-ingest": "workspace:*",
         "@ellie/life-learning": "workspace:*",
         "@ellie/life-plugins": "workspace:*",
+        "@ellie/life-teaching": "workspace:*",
         "@ellie/task-runtime": "workspace:*",
       },
     },
@@ -111,6 +112,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/life-core": "workspace:*",
+        "@ellie/life-time": "workspace:*",
       },
     },
     "packages/life-core": {
@@ -125,6 +127,7 @@
         "@ellie/life-core": "*",
         "@ellie/life-plugins": "*",
         "@ellie/life-teaching": "*",
+        "@ellie/life-time": "*",
         "@ellie/task-runtime": "*",
       },
     },
@@ -133,6 +136,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/life-core": "*",
+        "@ellie/life-time": "*",
       },
     },
     "packages/life-ingest": {
@@ -156,6 +160,10 @@
       "dependencies": {
         "@ellie/life-core": "workspace:*",
       },
+    },
+    "packages/life-time": {
+      "name": "@ellie/life-time",
+      "version": "0.1.0",
     },
     "packages/macos": {
       "name": "@ellie/macos",
@@ -200,6 +208,9 @@
     "packages/task-runtime": {
       "name": "@ellie/task-runtime",
       "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-time": "*",
+      },
     },
     "packages/transport": {
       "name": "@ellie/transport",
@@ -243,6 +254,8 @@
     "@ellie/life-plugins": ["@ellie/life-plugins@workspace:packages/life-plugins"],
 
     "@ellie/life-teaching": ["@ellie/life-teaching@workspace:packages/life-teaching"],
+
+    "@ellie/life-time": ["@ellie/life-time@workspace:packages/life-time"],
 
     "@ellie/life-ui": ["@ellie/life-ui@workspace:apps/life-ui"],
 

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { DocxError, extractDocx } from "./docx.ts";
 
 const MAX_INPUT = 50 * 1024 * 1024;
 const MAX_TEXT = 5 * 1024 * 1024;
@@ -17,6 +18,7 @@ const TEXT_TYPES = new Set([
   "text/csv",
 ]);
 const NATIVE_TYPES = new Set(["application/pdf", "image/png", "image/jpeg"]);
+const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 export interface ExtractDocumentInput {
   filename: string;
@@ -105,6 +107,7 @@ function inferredMime(input: ExtractDocumentInput) {
         ".png": "image/png",
         ".jpg": "image/jpeg",
         ".jpeg": "image/jpeg",
+        ".docx": DOCX_TYPE,
       } as Record<string, string>
     )[ext] ?? "application/octet-stream"
   );
@@ -246,7 +249,16 @@ export async function extractDocument(
       { ...input, filename: safeName(input.filename), mimeType: mime },
       options.signal,
     );
+  if (mime === DOCX_TYPE)
+    try {
+      const result = extractDocx(input.bytes, options.signal);
+      return { text: cleanText(result.text), metadata: { ...result.metadata, mimeType: mime } };
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") throw error;
+      if (error instanceof DocxError) throw new DocumentExtractionError(error.message);
+      throw new DocumentExtractionError("The DOCX is corrupt or could not be extracted.");
+    }
   throw new DocumentExtractionError(
-    `Unsupported document type: ${mime || "unknown"}. Use text, Markdown, HTML, email, PDF, PNG, or JPEG.`,
+    `Unsupported document type: ${mime || "unknown"}. Use text, Markdown, HTML, email, DOCX, PDF, PNG, or JPEG.`,
   );
 }
