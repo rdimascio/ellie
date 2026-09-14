@@ -158,7 +158,10 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
         userId: options.userId,
         extractor: (input) => ingestPackage.extractDocument(input, { signal: input.signal }),
       });
-    let closed = false;
+    let closed = false,
+      closeInFlight: Promise<void> | undefined,
+      pluginsClosed = false,
+      storeClosed = false;
     return {
       server,
       async listen() {
@@ -173,11 +176,25 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
       },
       async close() {
         if (closed) return;
-        await server.close();
-        await taskRuntime.close();
-        pluginStore.close();
-        lifeStore.close();
-        closed = true;
+        if (closeInFlight) return closeInFlight;
+        closeInFlight = (async () => {
+          await server.close();
+          await taskRuntime.close();
+          if (!pluginsClosed) {
+            pluginStore.close();
+            pluginsClosed = true;
+          }
+          if (!storeClosed) {
+            lifeStore.close();
+            storeClosed = true;
+          }
+          closed = true;
+        })();
+        try {
+          await closeInFlight;
+        } finally {
+          if (!closed) closeInFlight = undefined;
+        }
       },
     };
   } catch (error) {
@@ -218,9 +235,23 @@ export async function runLife(args: string[]): Promise<void> {
   const application = await createLifeApplication(parseArguments(args));
   const ready = await application.listen();
   console.log(`Ellie Life ready at ${ready.launchUrl}`);
-  const shutdown = () => void application.close().then(() => process.exit(0));
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
+  let shutdownInFlight: Promise<void> | undefined;
+  const shutdown = () => {
+    if (shutdownInFlight) return;
+    shutdownInFlight = application
+      .close()
+      .then(() => {
+        process.off("SIGINT", shutdown);
+        process.off("SIGTERM", shutdown);
+        process.exit(0);
+      })
+      .catch(() => {
+        shutdownInFlight = undefined;
+        console.error("Ellie Life is still finishing active work; send the shutdown signal again.");
+      });
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)

@@ -1,4 +1,12 @@
-import type { Bootstrap, LifeKind, LifeRecord, Scope } from "./types";
+import type {
+  Bootstrap,
+  LifeKind,
+  LifeRecord,
+  PluginRevision,
+  PluginSummary,
+  Scope,
+  TaskDetail,
+} from "./types";
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -85,6 +93,27 @@ export const api = {
     request<void>(`/api/life/records/${encodeURIComponent(id)}?revision=${revision}`, {
       method: "DELETE",
     }),
+  record: (id: string) => request<LifeRecord>(`/api/life/records/${encodeURIComponent(id)}`),
+  records: (scope: string, options: { cursor?: string; q?: string; kinds?: string[] } = {}) => {
+    const query = new URLSearchParams({ scope });
+    if (options.cursor) query.set("cursor", options.cursor);
+    if (options.q) query.set("q", options.q);
+    if (options.kinds?.length) query.set("kinds", options.kinds.join(","));
+    return request<{
+      records: LifeRecord[];
+      page: { hasMore: boolean; nextCursor?: string };
+    }>(`/api/life/records?${query}`);
+  },
+  search: (scope: string, q: string) =>
+    request<{
+      results: Array<{
+        sourceId: string;
+        sourceTitle: string;
+        text: string;
+        reference?: string;
+        score: number;
+      }>;
+    }>(`/api/life/search?scope=${encodeURIComponent(scope)}&q=${encodeURIComponent(q)}`),
   source: (value: {
     filename: string;
     content: string;
@@ -98,11 +127,27 @@ export const api = {
     request("/api/life/feedback", { method: "POST", body: JSON.stringify({ text, scope, runId }) }),
   task: (id: string, action: "pause" | "resume" | "cancel" | "run") =>
     request(`/api/life/tasks/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" }),
+  taskDetail: (id: string) =>
+    request<TaskDetail>(`/api/life/tasks/${encodeURIComponent(id)}/detail`),
   buildPlugin: (requestText: string, scope: string) =>
     request("/api/life/plugins/build", {
       method: "POST",
       body: JSON.stringify({ request: requestText, scope }),
     }),
+  pluginHistory: (id: string) =>
+    request<{ revisions: PluginRevision[] }>(`/api/life/plugins/${encodeURIComponent(id)}/history`),
+  revisePlugin: (id: string, requestText: string, expectedVersion: number) =>
+    request<PluginSummary>(`/api/life/plugins/${encodeURIComponent(id)}/revise`, {
+      method: "POST",
+      body: JSON.stringify({ request: requestText, expectedVersion }),
+    }),
+  rollbackPlugin: (id: string, expectedVersion: number, targetVersion: number) =>
+    request<PluginSummary>(`/api/life/plugins/${encodeURIComponent(id)}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ expectedVersion, targetVersion }),
+    }),
+  deletePlugin: (id: string) =>
+    request<void>(`/api/life/plugins/${encodeURIComponent(id)}`, { method: "DELETE" }),
   learning: {
     record: (value: {
       scope: string;

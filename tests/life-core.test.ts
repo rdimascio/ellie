@@ -88,6 +88,64 @@ test("settings resolve precedence and cannot override permissions", async () => 
       () => store.resolveSettings(alice, { task: { authority: "owner" } }),
       LifeAccessError,
     );
+    const completed = store.createRecord(alice, {
+        kind: "need",
+        title: "Completed need",
+        scope: { type: "user", id: "alice" },
+        data: { completed: true },
+      }),
+      linked = store.createRecord(alice, {
+        kind: "reminder",
+        title: "Preparation reminder",
+        scope: { type: "user", id: "alice" },
+        data: {},
+        relationships: [{ type: "need", targetId: completed.id }],
+      }),
+      linkedSummary = store
+        .listRecordSummaries(alice, {
+          scope: { type: "user", id: "alice" },
+          kinds: ["reminder"],
+        })
+        .items.find((record) => record.id === linked.id);
+    assert.equal(linkedSummary?.relatedCompleted, true);
+    const unrelated = store.createRecord(alice, {
+        kind: "contact",
+        title: "Completed contact",
+        scope: { type: "user", id: "alice" },
+        data: { completed: true },
+      }),
+      unrelatedReminder = store.createRecord(alice, {
+        kind: "reminder",
+        title: "Contact reminder",
+        scope: { type: "user", id: "alice" },
+        data: {},
+        relationships: [{ type: "contact", targetId: unrelated.id }],
+      }),
+      cancelledNeed = store.createRecord(alice, {
+        kind: "need",
+        title: "Cancelled need",
+        scope: { type: "user", id: "alice" },
+        data: { cancelled: true },
+      }),
+      cancelledReminder = store.createRecord(alice, {
+        kind: "reminder",
+        title: "Cancelled preparation",
+        scope: { type: "user", id: "alice" },
+        data: {},
+        relationships: [{ type: "need", targetId: cancelledNeed.id }],
+      }),
+      summaries = store.listRecordSummaries(alice, {
+        scope: { type: "user", id: "alice" },
+        kinds: ["reminder"],
+      }).items;
+    assert.equal(
+      summaries.find((record) => record.id === unrelatedReminder.id)?.relatedCompleted,
+      false,
+    );
+    assert.equal(
+      summaries.find((record) => record.id === cancelledReminder.id)?.relatedCompleted,
+      true,
+    );
     store.close();
   } finally {
     await rm(f.dir, { recursive: true, force: true });
@@ -451,6 +509,58 @@ test("imports are atomic, stable, related and preserve edited records", async ()
       /selected items/,
     );
     assert.equal(store.listRecords(alice).length, before);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("compact record summaries page stably across equal timestamps and restart", async () => {
+  const f = await fixture();
+  try {
+    let store = f.open(500);
+    for (let index = 0; index < 501; index++)
+      store.createRecord(alice, {
+        kind: "memory",
+        title: `Memory ${index}`,
+        body: `Preview ${index} ${"x".repeat(300)}`,
+        scope: { type: "user", id: "alice" },
+        data: {
+          privateBulk: "x".repeat(10_000),
+          date: { nested: "x".repeat(10_000) },
+          status: "x".repeat(1_000),
+          completed: index % 2 === 0,
+        },
+      });
+    const first = store.listRecordSummaries(alice, {
+      scope: { type: "user", id: "alice" },
+      limit: 500,
+    });
+    assert.equal(first.items.length, 500);
+    assert.equal(first.hasMore, true);
+    assert.equal(first.items[0]?.bodyPreview?.length, 240);
+    assert.equal(first.items[0]?.hasMoreBody, true);
+    assert.equal(first.items[0]?.data.privateBulk, undefined);
+    assert.equal(first.items[0]?.data.date, undefined);
+    assert.equal(first.items[0]?.data.status, undefined);
+    store.close();
+    store = f.open(500);
+    const second = store.listRecordSummaries(alice, {
+      scope: { type: "user", id: "alice" },
+      limit: 500,
+      cursor: first.nextCursor,
+    });
+    assert.equal(second.items.length, 1);
+    assert.equal(second.hasMore, false);
+    assert.equal(new Set([...first.items, ...second.items].map((record) => record.id)).size, 501);
+    assert.throws(
+      () =>
+        store.listRecordSummaries(alice, {
+          scope: { type: "user", id: "alice" },
+          cursor: "forged",
+        }),
+      /cursor/,
+    );
     store.close();
   } finally {
     await rm(f.dir, { recursive: true, force: true });

@@ -6,7 +6,7 @@ import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { LifeStore } from "../packages/life-core/src/index.ts";
 import { ProactivityEngine } from "../packages/life-context/src/index.ts";
-import { PluginStore } from "../packages/life-plugins/src/index.ts";
+import { PluginStore, groupStorageKey } from "../packages/life-plugins/src/index.ts";
 import type { LifePlugin } from "../packages/life-plugins/src/index.ts";
 import type { OwnerScope, TaskRecord, TaskRuntime } from "../packages/task-runtime/src/index.ts";
 import { createLifeServer, type LifeHarnessLike } from "../apps/life/src/server.ts";
@@ -41,6 +41,7 @@ async function fixture() {
       return true;
     },
     runNow: async () => {},
+    progress: () => [],
   } as unknown as TaskRuntime;
   const harness: LifeHarnessLike = {
     async chat(input) {
@@ -212,7 +213,10 @@ test("record CRUD, settings and sources persist through a server restart", async
         await fetch(`${running.url}/api/life/settings`, {
           method: "POST",
           headers: jsonHeaders(running.url, cookie),
-          body: JSON.stringify({ scope: "user:local", values: { voice: "short" } }),
+          body: JSON.stringify({
+            scope: "user:local",
+            values: { voice: "short", timeZone: "America/Los_Angeles" },
+          }),
         })
       ).status,
       200,
@@ -261,9 +265,11 @@ test("record CRUD, settings and sources persist through a server restart", async
     ).json()) as {
       records: Array<{ id: string; data: Record<string, unknown> }>;
       settings: { values: Record<string, unknown> };
+      profile: { timeZone: string };
     };
     assert.equal(bootstrap.records.find((item) => item.id === record.id)?.data.day, 11);
     assert.equal(bootstrap.settings.values.voice, "short");
+    assert.equal(bootstrap.profile.timeZone, "America/Los_Angeles");
     assert.equal(
       bootstrap.records.some((item) => item.data.format === "markdown"),
       true,
@@ -295,6 +301,169 @@ test("record CRUD, settings and sources persist through a server restart", async
     );
     assert.equal(f.cancelledTasks.has("linked-task"), true);
     await running.server.close();
+  } finally {
+    await f.close();
+  }
+});
+
+test("bootstrap stays compact while record detail and search remain scoped", async () => {
+  const f = await fixture();
+  try {
+    const source = f.life.ingestSource(
+      { userId: "local" },
+      {
+        title: "Large notes",
+        scope: { type: "user", id: "local" },
+        format: "text",
+        content: `orchid-evidence ${"x".repeat(1_200_000)} private-tail-marker`,
+        metadata: { filename: "large.txt", mimeType: "text/plain", internal: "omit" },
+      },
+    );
+    const other = f.life.createRecord(
+      { userId: "other" },
+      {
+        kind: "memory",
+        title: "Other person's record",
+        scope: { type: "user", id: "other" },
+        data: {},
+      },
+    );
+    for (let index = 0; index < 101; index++)
+      f.life.createRecord(
+        { userId: "local" },
+        {
+          kind: "memory",
+          title: `Paged memory ${index}`,
+          scope: { type: "user", id: "local" },
+          data: {},
+        },
+      );
+    f.setNow(1_800_000_000_001);
+    f.life.updateSource({ userId: "local" }, source.id, source.revision, {
+      content: source.body!,
+    });
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43)),
+      bootstrapResponse = await fetch(`${running.url}/api/life/bootstrap`, {
+        headers: { cookie },
+      }),
+      bootstrapText = await bootstrapResponse.text();
+    assert.equal(bootstrapResponse.status, 200);
+    assert.ok(Buffer.byteLength(bootstrapText) < 100_000);
+    assert.doesNotMatch(bootstrapText, /private-tail-marker/);
+    const bootstrap = JSON.parse(bootstrapText) as {
+      records: Array<{
+        id: string;
+        bodyPreview?: string;
+        hasMoreBody: boolean;
+        data: { metadata?: Record<string, unknown> };
+      }>;
+      recordsPage: { hasMore: boolean; nextCursor?: string };
+    };
+    const summary = bootstrap.records.find((record) => record.id === source.id);
+    assert.equal(summary?.bodyPreview?.length, 240);
+    assert.equal(summary?.hasMoreBody, true);
+    assert.deepEqual(summary?.data.metadata, {
+      filename: "large.txt",
+      mimeType: "text/plain",
+    });
+    assert.equal(bootstrap.records.length, 100);
+    assert.equal(bootstrap.recordsPage.hasMore, true);
+    const nextPage = (await (
+      await fetch(
+        `${running.url}/api/life/records?scope=user:local&limit=100&cursor=${encodeURIComponent(bootstrap.recordsPage.nextCursor!)}`,
+        { headers: { cookie } },
+      )
+    ).json()) as { records: Array<{ id: string }>; page: { hasMore: boolean } };
+    assert.equal(nextPage.records.length, 2);
+    assert.equal(nextPage.page.hasMore, false);
+    assert.equal(
+      new Set([...bootstrap.records, ...nextPage.records].map((record) => record.id)).size,
+      102,
+    );
+    const detail = (await (
+      await fetch(`${running.url}/api/life/records/${source.id}`, { headers: { cookie } })
+    ).json()) as { body: string };
+    assert.match(detail.body, /private-tail-marker$/);
+    const search = (await (
+      await fetch(`${running.url}/api/life/search?scope=user:local&q=orchid-evidence`, {
+        headers: { cookie },
+      })
+    ).json()) as { results: Array<{ sourceId: string; text: string }> };
+    assert.equal(search.results[0]?.sourceId, source.id);
+    assert.match(search.results[0]?.text ?? "", /orchid-evidence/);
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/search?scope=user:other&q=orchid-evidence`, {
+          headers: { cookie },
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (await fetch(`${running.url}/api/life/records/${other.id}`, { headers: { cookie } })).status,
+      404,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("source growth cannot crowd commitments or notifications out of bootstrap", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" },
+      scope = { type: "user" as const, id: "local" },
+      appointment = f.life.createRecord(actor, {
+        kind: "event",
+        title: "Older appointment",
+        scope,
+        data: { startAt: 1_900_000_000_000 },
+      }),
+      notification = f.life.createRecord(actor, {
+        kind: "feedback",
+        title: "Older notification",
+        scope,
+        body: "Still actionable",
+        data: {
+          notification: true,
+          relatedRecordId: appointment.id,
+          dismissed: false,
+        },
+      });
+    f.setNow(1_800_000_000_001);
+    for (let index = 0; index < 101; index++)
+      f.life.ingestSource(actor, {
+        title: `New source ${index}`,
+        scope,
+        format: "text",
+        content: `Source ${index}`,
+      });
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43)),
+      bootstrap = (await (
+        await fetch(`${running.url}/api/life/bootstrap`, { headers: { cookie } })
+      ).json()) as {
+        records: Array<{ id: string }>;
+        recordsPage: { hasMore: boolean };
+        agendaRecords: Array<{ id: string }>;
+        agendaPage: { hasMore: boolean; nextCursor?: string };
+        notifications: Array<{ id: string }>;
+      };
+    assert.equal(
+      bootstrap.records.some((record) => record.id === appointment.id),
+      false,
+    );
+    assert.equal(bootstrap.recordsPage.hasMore, true);
+    assert.equal(
+      bootstrap.agendaRecords.some((record) => record.id === appointment.id),
+      true,
+    );
+    assert.equal(bootstrap.agendaPage.hasMore, false);
+    assert.equal(
+      bootstrap.notifications.some((record) => record.id === notification.id),
+      true,
+    );
   } finally {
     await f.close();
   }
@@ -353,7 +522,10 @@ test("group and plugin lookup cannot bypass authorized owners", async () => {
       body: JSON.stringify({ action: "storage.set", payload: { key: "highScore", value: 42 } }),
     });
     assert.equal(set.status, 200);
-    assert.equal(f.plugins.storageGet("group:home", plugin.id, "user:local:highScore"), 42);
+    assert.equal(
+      f.plugins.storageGet("group:home", plugin.id, groupStorageKey("local", "highScore")),
+      42,
+    );
     f.life.setGroupMember({ userId: "local" }, "home", { userId: "bob", role: "member" });
     await running.server.close();
     running = await f.start("b".repeat(43), "bob");
@@ -375,16 +547,37 @@ test("group and plugin lookup cannot bypass authorized owners", async () => {
     await running.server.close();
     running = await f.start("c".repeat(43));
     cookie = await authenticate(running.url, "c".repeat(43));
+    f.life.setGroupSetting({ userId: "local" }, "home", "timeZone", "America/New_York");
+    f.life.setUserSetting({ userId: "local" }, "timeZone", "America/Los_Angeles");
     const localBootstrap = (await (
       await fetch(`${running.url}/api/life/bootstrap?scope=group:home`, { headers: { cookie } })
-    ).json()) as { plugins: Array<{ id: string; data: { highScore: number } }> };
+    ).json()) as {
+      profile: { timeZone: string };
+      plugins: Array<{ id: string; data: { highScore: number } }>;
+    };
     assert.equal(localBootstrap.plugins.find((item) => item.id === plugin.id)?.data.highScore, 42);
+    assert.equal(localBootstrap.profile.timeZone, "America/Los_Angeles");
     f.plugins.update("group:home", plugin.id, 1, {
       name: "Star arcade",
       description: "Version two",
       kind: "arcade",
       capabilities: ["storage"],
     });
+    const historyResponse = await fetch(`${running.url}/api/life/plugins/${plugin.id}/history`, {
+      headers: { cookie },
+    });
+    assert.equal(historyResponse.status, 200);
+    const history = (await historyResponse.json()) as {
+      revisions: Array<{ version: number; active: boolean; capabilities: string[] }>;
+    };
+    assert.deepEqual(
+      history.revisions.map(({ version, active }) => ({ version, active })),
+      [
+        { version: 2, active: true },
+        { version: 1, active: false },
+      ],
+    );
+    assert.deepEqual(history.revisions[0]?.capabilities, ["storage"]);
     const rollback = await fetch(`${running.url}/api/life/plugins/${plugin.id}/rollback`, {
       method: "POST",
       headers: jsonHeaders(running.url, cookie),
@@ -417,6 +610,147 @@ test("group and plugin lookup cannot bypass authorized owners", async () => {
   }
 });
 
+test("bootstrap rechecks group membership after an awaited provider read", async () => {
+  const f = await fixture();
+  let markProviderStarted!: () => void;
+  let finish = () => {};
+  const providerStarted = new Promise<void>((resolve) => {
+    markProviderStarted = resolve;
+  });
+  try {
+    f.life.createGroup({ userId: "local" }, { id: "shared", name: "Shared" });
+    f.life.setGroupMember({ userId: "local" }, "shared", { userId: "bob", role: "member" });
+    f.plugins.install("group:shared", {
+      name: "MLB",
+      description: "Delayed scores",
+      kind: "mlb",
+      capabilities: ["mlb.read"],
+    });
+    const gate = new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+      running = await f.start("b".repeat(43), "bob", {
+        mlb: {
+          async snapshot() {
+            markProviderStarted();
+            await gate;
+            return { games: [] };
+          },
+        },
+      }),
+      cookie = await authenticate(running.url, "b".repeat(43)),
+      response = fetch(`${running.url}/api/life/bootstrap?scope=group:shared`, {
+        headers: { cookie },
+      });
+    await providerStarted;
+    f.life.setGroupMember({ userId: "local" }, "shared", { userId: "bob", remove: true });
+    finish();
+    assert.equal((await response).status, 403);
+  } finally {
+    finish();
+    await f.close();
+  }
+});
+
+test("group plugin storage separates colon user ids from crafted keys", async () => {
+  const f = await fixture();
+  try {
+    const ownerActor = { userId: "local" };
+    f.life.createGroup(ownerActor, { id: "arcade-room", name: "Arcade room" });
+    f.life.setGroupMember(ownerActor, "arcade-room", { userId: "alice", role: "member" });
+    f.life.setGroupMember(ownerActor, "arcade-room", {
+      userId: "alice:bob",
+      role: "member",
+    });
+    const plugin = f.plugins.install("group:arcade-room", {
+      name: "Arcade",
+      description: "Scores",
+      kind: "arcade",
+      capabilities: ["storage"],
+    });
+    let running = await f.start("a".repeat(43), "alice"),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const setScore = (key: string, value: number) =>
+      fetch(`${running.url}/api/life/plugins/${plugin.id}/action`, {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({ action: "storage.set", payload: { key, value } }),
+      });
+    assert.equal((await setScore("bob:highScore", 99)).status, 200);
+    await running.server.close();
+    running = await f.start("b".repeat(43), "alice:bob");
+    cookie = await authenticate(running.url, "b".repeat(43));
+    assert.equal((await setScore("highScore", 7)).status, 200);
+    assert.notEqual(
+      groupStorageKey("alice", "bob:highScore"),
+      groupStorageKey("alice:bob", "highScore"),
+    );
+    assert.equal(
+      f.plugins.storageGet(
+        "group:arcade-room",
+        plugin.id,
+        groupStorageKey("alice", "bob:highScore"),
+      ),
+      99,
+    );
+    assert.equal(
+      f.plugins.storageGet(
+        "group:arcade-room",
+        plugin.id,
+        groupStorageKey("alice:bob", "highScore"),
+      ),
+      7,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("successful record mutations invalidate scoped conversation context", async () => {
+  const f = await fixture();
+  const invalidated: string[] = [];
+  try {
+    const actor = { userId: "local" },
+      record = f.life.createRecord(actor, {
+        kind: "memory",
+        title: "Mutable",
+        scope: { type: "user", id: "local" },
+        data: {},
+      }),
+      running = await f.start("a".repeat(43), "local", {
+        harness: {
+          ...f.harness,
+          invalidateContext(_actor, scope) {
+            invalidated.push(`${scope.type}:${scope.id}`);
+          },
+        },
+      }),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/records/${record.id}`, {
+          method: "PATCH",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({ expectedRevision: 1, title: "Changed" }),
+        })
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/records/${record.id}?revision=2`, {
+          method: "DELETE",
+          headers: jsonHeaders(running.url, cookie),
+        })
+      ).status,
+      204,
+    );
+    assert.deepEqual(invalidated, ["user:local", "user:local"]);
+  } finally {
+    await f.close();
+  }
+});
+
 test("application factory assembles isolated stores and reports readiness", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-life-app-"));
   await chmod(root, 0o700);
@@ -433,6 +767,8 @@ test("application factory assembles isolated stores and reports readiness", asyn
   try {
     const ready = await application.listen();
     assert.match(ready.launchUrl, /^http:\/\/127\.0\.0\.1:\d+\/#token=/);
+    await Promise.all([application.close(), application.close(), application.close()]);
+    await application.close();
   } finally {
     await application.close();
     await rm(root, { recursive: true, force: true });
@@ -744,6 +1080,119 @@ test("server close refuses to release stores while an HTTP handler remains activ
     await running.server.close();
   } finally {
     release();
+    await f.close();
+  }
+});
+
+test("task detail suppresses an aggregate result after a cited source changes", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" },
+      scope = { type: "user" as const, id: "local" },
+      source = f.life.ingestSource(actor, {
+        title: "Reference",
+        scope,
+        format: "text",
+        content: "Original evidence",
+      });
+    f.taskRows.set("summary-root", {
+      id: "summary-root",
+      owner: "user:local",
+      handler: "knowledge.aggregate",
+      input: {
+        query: "garden evidence",
+        sourceIds: [source.id],
+        rawPrompt: "must never be returned",
+      },
+      state: "succeeded",
+      requiredCapabilities: [],
+      allowedCapabilities: [],
+      rootId: "summary-root",
+      dependsOn: [],
+      budget: {},
+      attempt: 1,
+      idempotencyKey: "summary-root:0",
+      result: {
+        status: "complete",
+        summary: "Verified aggregate",
+        citations: [
+          {
+            sourceId: source.id,
+            sourceRevision: source.revision,
+            title: source.title,
+            references: ["chunk 1"],
+          },
+        ],
+        omitted: 0,
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const running = await f.start("a".repeat(43), "local", {
+        harness: {
+          ...f.harness,
+          rerunBackgroundSummary({ taskId }) {
+            assert.equal(taskId, "summary-root");
+            const rerun: TaskRecord = {
+              ...f.taskRows.get(taskId)!,
+              id: "summary-rerun",
+              rootId: "summary-rerun",
+              state: "queued",
+              result: undefined,
+              idempotencyKey: "summary-rerun:0",
+              createdAt: 2,
+              updatedAt: 2,
+            };
+            f.taskRows.set(rerun.id, rerun);
+            return rerun;
+          },
+        },
+      }),
+      cookie = await authenticate(running.url, "a".repeat(43)),
+      detail = async () =>
+        (await (
+          await fetch(`${running.url}/api/life/tasks/summary-root/detail`, {
+            headers: { cookie },
+          })
+        ).json()) as {
+          task?: { title: string; actions: string[] };
+          result?: { summary: string };
+          stale?: boolean;
+          staleReason?: string;
+        };
+    const current = await detail();
+    assert.equal(current.result?.summary, "Verified aggregate");
+    assert.equal(current.task?.title, "Summarize garden evidence");
+    assert.deepEqual(current.task?.actions, ["rerun"]);
+    assert.doesNotMatch(JSON.stringify(current), /must never be returned|knowledge\.aggregate/);
+    f.life.updateSource(actor, source.id, source.revision, { content: "Changed evidence" });
+    const stale = await detail();
+    assert.equal(stale.stale, true);
+    assert.equal(stale.result, undefined);
+    assert.match(stale.staleReason ?? "", /Run this task again/);
+    assert.doesNotMatch(JSON.stringify(stale), /must never be returned/);
+    const rerun = await fetch(`${running.url}/api/life/tasks/summary-root/run`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: "{}",
+    });
+    assert.equal(rerun.status, 200);
+    const rerunTask = (await rerun.json()) as { id: string; status: string; actions: string[] };
+    assert.equal(rerunTask.id, "summary-rerun");
+    assert.equal(rerunTask.status, "queued");
+    assert.deepEqual(rerunTask.actions, ["pause", "cancel", "run"]);
+    assert.equal(f.taskRows.get("summary-root")?.state, "succeeded");
+    f.taskRows.get("summary-root")!.result = {
+      status: "complete",
+      summary: "No current source passages remain for this summary.",
+      citations: [],
+      omitted: 1,
+      reason: "no_current_sources",
+    };
+    const empty = await detail();
+    assert.equal(empty.stale, false);
+    assert.equal(empty.result?.summary, "No current source passages remain for this summary.");
+  } finally {
     await f.close();
   }
 });

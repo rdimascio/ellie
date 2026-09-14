@@ -11,6 +11,13 @@ bun install --frozen-lockfile
 bun run life
 ```
 
+For the isolated overnight checkout on this Mac, the ready-to-run command is:
+
+```sh
+cd /Users/ryan/ellie-life-harness
+PATH=/Users/ryan/.volta/tools/image/node/24.21.0/bin:$PATH bun run life
+```
+
 Open the one-use link printed by the launcher. The sign-in token is removed from the browser address immediately after the client reads it. The local service binds to `127.0.0.1:7440`; `--port 0` selects an available port. Data defaults to `~/.ellie-life`. Stop the foreground process with Control-C. Restarting preserves records, installed apps, scores, settings and scheduled work; browser sessions and conversational context start fresh.
 
 For a separate state directory:
@@ -33,8 +40,14 @@ The directory must be outside the source checkout, owned by the current OS user,
 - “Every Monday at 9 am remind me to plan the week.”
 - “Build an arcade shooter with a high score widget.”
 - “Build an MLB standings and today's games widget.”
+- “Teach Ellie: Offer two options when helping me plan dinner.”
+- “List guidance.”
+- “Use Cooking handbook as guidance.” (For an uploaded source up to 4,000 characters.)
+- “Summarize orchids in the background.” (Uses matching uploaded sources.)
 
-Use Your world to inspect and correct the resulting records, teach from files, or review a calendar/contact import. Your space holds playable and readable extensions. Activity shows durable work and feedback. Today shows current commitments and delivered notifications. Settings supports default, active group and user preferences; authority remains separate from those preferences.
+Use Your world to inspect and correct the resulting records, teach from files, or review a calendar/contact import. Source lists use compact previews; opening a record loads its full content. Your space holds playable and readable extensions with retained revision controls. Activity shows durable work, source-worker progress, cited summaries and feedback. Today shows current commitments and delivered notifications. Settings supports default, active group and user preferences; authority remains separate from those preferences.
+
+Adopted guidance is versioned configuration. Pause or resume a listed guide through chat using its title. Source changes disable stale guidance until the current content is reviewed. Background summaries coordinate up to four source workers; deleted or changed source content is omitted, and an old stored result becomes unavailable when its citations are no longer current. See [teaching through content](life-teaching.md).
 
 Place-linked suggestions currently depend on explicit fresh context signals, including “I'm shopping at …”. They do not imply continuous phone location, access to unrelated apps, a retailer account, or a price-feed subscription. A sleeping or stopped coordinator cannot deliver new browser notifications. Timers that must sound while the coordinator is asleep need a future native local-delivery integration.
 

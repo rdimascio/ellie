@@ -10,6 +10,27 @@ import { extractDocument } from "../../../packages/life-ingest/src/index.ts";
 import { MLBAdapter, PluginStore } from "../../../packages/life-plugins/src/index.ts";
 import { TaskRuntime } from "../../../packages/task-runtime/src/index.ts";
 import { createLifeServer } from "../../life/src/server.ts";
+import { agendaDate, dayHeading } from "../src/dates.ts";
+
+const dateFixture = (kind: "event" | "birthday", data: Record<string, unknown>) =>
+  ({ kind, data }) as Parameters<typeof agendaDate>[0];
+assert.equal(
+  agendaDate(dateFixture("event", { startDate: "2026-02-30" }), "Pacific/Kiritimati"),
+  undefined,
+);
+assert.equal(agendaDate(dateFixture("event", { startAt: "not-a-date" }), "UTC"), undefined);
+assert.deepEqual(
+  agendaDate(
+    dateFixture("birthday", { nextDate: "2020-02-29", month: 2, day: 29 }),
+    "Pacific/Kiritimati",
+    new Date("2027-03-01T00:00:00Z"),
+  ),
+  { value: "2028-02-29", allDay: true },
+);
+assert.match(
+  dayHeading("2026-01-01", "Pacific/Kiritimati", new Date("2026-01-01T00:00:00Z")),
+  /Thursday/,
+);
 
 const root = await mkdtemp(join(tmpdir(), "ellie-life-e2e-"));
 await chmod(root, 0o700);
@@ -42,7 +63,26 @@ const tasks = new TaskRuntime({
   capabilityResolver: () => ["life.records.read", "life.records.write"],
 });
 const mlb = new MLBAdapter();
-const harness = createLifeHarness({ store, plugins, tasks, mlb });
+let customBuild = 0;
+const harness = createLifeHarness({
+  store,
+  plugins,
+  tasks,
+  mlb,
+  model: {
+    async plan() {
+      return { reply: "Fixture summary of the cited source.", actions: [] };
+    },
+    async build() {
+      customBuild += 1;
+      return {
+        name: "Pocket notebook",
+        description: `Notebook revision ${customBuild}`,
+        html: `<!doctype html><main><h1>Pocket notebook</h1><p>Revision ${customBuild}</p></main>`,
+      };
+    },
+  },
+});
 const server = createLifeServer({
   stateDir: root,
   assetsDir: resolve("apps/life-ui/dist"),
@@ -63,6 +103,8 @@ try {
   const listening = await server.listen();
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
   const page = await context.newPage();
+  const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
+  if (artifactDir) await mkdir(artifactDir, { recursive: true });
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
   await page.goto(listening.launchUrl);
@@ -100,7 +142,87 @@ try {
     mimeType: "text/plain",
     buffer: Buffer.from("Garden gate code is 2468. This is untrusted source content."),
   });
-  await page.getByText("garden.txt").waitFor();
+  await page.locator(".record-list strong").getByText("garden.txt", { exact: true }).waitFor();
+  await page.locator(".record-list button").filter({ hasText: "garden.txt" }).click();
+  assert.equal(
+    await page.getByLabel("Details").inputValue(),
+    "Garden gate code is 2468. This is untrusted source content.",
+    "lazy source detail retains the full editable body",
+  );
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByLabel("Search your world").fill("gate code 2468");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await page
+    .locator(".search-results")
+    .getByText(/Garden gate code is 2468/)
+    .waitFor();
+  await page.locator(".search-results button").filter({ hasText: "garden.txt" }).click();
+  assert.match(await page.getByLabel("Details").inputValue(), /untrusted source content/);
+  await page.getByRole("button", { name: "Close" }).click();
+  await page.getByRole("button", { name: "Clear" }).click();
+  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await page.getByLabel("Message Ellie").fill("Summarize gate code in the background");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/queued a background summary/i).waitFor();
+  const summaryRoot = tasks
+    .list({ owner: "user:e2e-user" })
+    .find((task) => task.handler === "knowledge.aggregate");
+  assert.ok(summaryRoot);
+  await page.getByRole("button", { name: /Activity/ }).click();
+  await page.waitForFunction(async (taskId) => {
+    const bootstrap = await (await fetch("/api/life/bootstrap")).json();
+    return bootstrap.tasks.some(
+      (task: { id: string; status: string }) => task.id === taskId && task.status === "succeeded",
+    );
+  }, summaryRoot.id);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  const summaryTask = page.locator(`[data-task-id="${summaryRoot.id}"]`);
+  await summaryTask.getByRole("button", { name: "Inspect" }).click();
+  await page.getByRole("heading", { name: "Result" }).waitFor();
+  await page.getByText("Fixture summary of the cited source.").waitFor();
+  await page.locator(".task-result strong").getByText("garden.txt", { exact: true }).waitFor();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-task-result.png"), fullPage: true });
+  await page.getByRole("button", { name: "Close" }).click();
+  const gardenSource = store
+    .listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["source"] },
+    )
+    .find((record) => record.title === "garden.txt");
+  assert.ok(gardenSource);
+  const revisedGarden = store.updateRecord(
+    { userId: "e2e-user" },
+    gardenSource.id,
+    gardenSource.revision,
+    { body: "Garden gate code is now 8642. This is current source content." },
+  );
+  await summaryTask.getByRole("button", { name: "Inspect" }).click();
+  await page.getByText(/cited source changed|run this task again/i).waitFor();
+  assert.equal(await page.getByText("Fixture summary of the cited source.").count(), 0);
+  await page.getByRole("dialog").getByRole("button", { name: "Run again" }).click();
+  await page.waitForFunction(
+    async ({ previousId, revision }) => {
+      const bootstrap = await (await fetch("/api/life/bootstrap")).json();
+      const candidates = bootstrap.tasks.filter(
+        (task: { id: string; title: string; status: string }) =>
+          task.id !== previousId && /summarize gate code/i.test(task.title),
+      );
+      for (const task of candidates) {
+        if (task.status !== "succeeded") continue;
+        const detail = await (await fetch(`/api/life/tasks/${task.id}/detail`)).json();
+        if (
+          detail.result?.citations?.some(
+            (citation: { sourceRevision: number }) => citation.sourceRevision === revision,
+          )
+        )
+          return true;
+      }
+      return false;
+    },
+    { previousId: summaryRoot.id, revision: revisedGarden.revision },
+  );
+  await page.getByRole("button", { name: /Your world/ }).click();
   const pdfChooser = page.waitForEvent("filechooser");
   await page.getByText("Teach Ellie from a file").click();
   await (
@@ -193,7 +315,10 @@ try {
   await page.getByRole("button", { name: "Mark complete" }).click();
   await page.getByText("Gift for Maya").waitFor();
   await page.getByRole("button", { name: "Today" }).click();
-  assert.equal(await page.locator(".timeline").getByText("Plan Maya's birthday gift").count(), 0);
+  await page
+    .locator(".timeline")
+    .getByText("Plan Maya's birthday gift")
+    .waitFor({ state: "detached" });
   assert.match(
     (await page
       .locator(".agenda-day")
@@ -203,7 +328,7 @@ try {
   );
   await page.getByRole("button", { name: /Activity/ }).click();
   const birthdayTask = page.locator(".tasks article").filter({ hasText: /Maya|birthday gift/i });
-  await birthdayTask.getByRole("button", { name: "Run" }).click();
+  await birthdayTask.getByRole("button", { name: "Run now" }).click();
   await page.waitForFunction(async () => {
     const data = await (await fetch("/api/life/bootstrap")).json();
     return data.tasks.some(
@@ -353,6 +478,51 @@ try {
   assert.equal(await mlbCard.getByText("capabilities", { exact: true }).count(), 0);
   assert.equal((await mlbCard.textContent())?.includes('"standings"'), false);
 
+  await page.getByPlaceholder(/family board/).fill("Build a custom private notebook");
+  await page.getByRole("button", { name: "Build it" }).click();
+  const notebook = page.locator(".plugins article").filter({ hasText: "Pocket notebook" });
+  await notebook.getByText("Notebook revision 1").waitFor();
+  const notebookId = await page.evaluate(async () => {
+    const bootstrap = await (await fetch("/api/life/bootstrap")).json();
+    const plugin = bootstrap.plugins.find(
+      (item: { name: string }) => item.name === "Pocket notebook",
+    );
+    await fetch(`/api/life/plugins/${plugin.id}/action`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ action: "storage.set", payload: { key: "note", value: "kept" } }),
+    });
+    return plugin.id as string;
+  });
+  await notebook.getByRole("button", { name: "Manage" }).click();
+  await page.getByLabel("Describe a correction").fill("Make the notebook revision clearer");
+  await page.getByRole("button", { name: "Create revision" }).click();
+  await page.getByText("App revision created").waitFor();
+  await notebook.getByText("Notebook revision 2").waitFor();
+  await notebook.getByRole("button", { name: "Manage" }).click();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-plugin-manage.png"), fullPage: true });
+  await page.getByLabel("Revision to restore").selectOption("1");
+  await page.getByRole("button", { name: "Restore selected" }).click();
+  await page.getByText("Restored version 1 as a new revision").waitFor();
+  await notebook.getByText("Notebook revision 1").waitFor();
+  assert.equal(
+    await page.evaluate(async (id) => {
+      const response = await fetch(`/api/life/plugins/${id}/action`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "storage.get", payload: { key: "note" } }),
+      });
+      return (await response.json()).value;
+    }, notebookId),
+    "kept",
+  );
+  await notebook.getByRole("button", { name: "Manage" }).click();
+  await page.getByText("I understand this removes the app and its saved app data.").click();
+  await page.getByRole("button", { name: "Remove app" }).click();
+  await page.getByText("App removed").waitFor();
+  await notebook.waitFor({ state: "detached" });
+
   await page.getByRole("button", { name: /Settings/ }).click();
   await page.locator(".setting-scope select").selectOption("user:e2e-user");
   await page
@@ -390,9 +560,7 @@ try {
   await page.getByRole("button", { name: "Send feedback" }).click();
   await page.getByRole("button", { name: "Send feedback" }).waitFor();
 
-  const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
   if (artifactDir) {
-    await mkdir(artifactDir, { recursive: true });
     await page.screenshot({ path: join(artifactDir, "life-desktop.png"), fullPage: true });
     for (const [name, file] of [
       ["Today", "today"],
@@ -433,6 +601,37 @@ try {
     );
     await mobile.screenshot({ path: join(artifactDir, "life-mobile.png"), fullPage: true });
   }
+  store.createRecord(
+    { userId: "e2e-user" },
+    {
+      kind: "event",
+      title: "Buried appointment",
+      scope: { type: "user", id: "e2e-user" },
+      data: { startAt: Date.now() + 14 * 86_400_000 },
+    },
+  );
+  for (let index = 0; index < 110; index++)
+    store.createRecord(
+      { userId: "e2e-user" },
+      {
+        kind: "memory",
+        title: `Paged memory ${index}`,
+        scope: { type: "user", id: "e2e-user" },
+        data: { explicit: true },
+      },
+    );
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await page.getByRole("button", { name: "Your world" }).click();
+  await page.getByRole("button", { name: "Load more" }).waitFor();
+  const firstPageCount = await page.locator(".record-list > button").count();
+  assert.equal(firstPageCount, 100);
+  await page.getByRole("button", { name: "Load more" }).click();
+  await page.waitForFunction(
+    (count) => document.querySelectorAll(".record-list > button").length > count,
+    firstPageCount,
+  );
+  await page.getByRole("button", { name: "Today" }).click();
+  await page.getByText("Buried appointment").waitFor();
   assert.deepEqual(errors, []);
   console.log(`life UI E2E passed at ${listening.url}`);
   await context.close();

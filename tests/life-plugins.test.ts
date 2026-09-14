@@ -6,6 +6,8 @@ import { Script } from "node:vm";
 import { test } from "node:test";
 import {
   builtInManifest,
+  groupStorageKey,
+  groupStoragePrefix,
   MLBAdapter,
   PluginStore,
   validateManifest,
@@ -120,6 +122,17 @@ test("plugin manifests bound generated UI and storage, and shipped inline progra
     assert.equal(store.storageSet("group:home", shared.id, longKey, 25), 25);
     assert.equal(store.storageSet("group:home", shared.id, longKey, 3), 25);
     assert.throws(() => store.storageSet("group:home", shared.id, longKey, -1));
+    const alice = groupStorageKey("alice", "bob:highScore"),
+      bob = groupStorageKey("alice:bob", "highScore");
+    assert.notEqual(alice, bob);
+    assert.equal(bob.startsWith(groupStoragePrefix("alice")), false);
+    assert.equal(groupStorageKey("a".repeat(200), "highScore").length < 512, true);
+    store.storageSet("group:home", shared.id, alice, 5);
+    store.storageSet("group:home", shared.id, bob, 50);
+    assert.equal(store.storageSet("group:home", shared.id, bob, 2), 50);
+    assert.equal(store.storageGet("group:home", shared.id, alice), 5);
+    assert.throws(() => groupStoragePrefix("invalid user"));
+    assert.throws(() => groupStorageKey("alice", "x".repeat(512)));
   } finally {
     store.close();
     rmSync(directory, { recursive: true, force: true });

@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, establishSessionFromFragment, parsePluginBridgeRequest } from "./api";
 import type { Bootstrap, LifeRecord, PluginSummary } from "./types";
+import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
 
 type View = "chat" | "today" | "world" | "space" | "activity" | "settings";
 type Message = {
@@ -26,76 +27,15 @@ const labels: Record<View, string> = {
   settings: "Settings",
 };
 const timedKinds = new Set(["reminder", "timer", "event", "birthday", "holiday"]);
-const agendaDate = (record: LifeRecord, timeZone: string, now = new Date()) => {
-  const direct =
-    record.kind === "reminder" || record.kind === "timer"
-      ? record.data.dueAt
-      : (record.data.startAt ?? record.data.startDate ?? record.data.date);
-  if (typeof direct === "number" || (typeof direct === "string" && direct.trim()))
-    return {
-      value: direct,
-      allDay: typeof direct === "string" && /^\d{4}-\d{2}-\d{2}$/.test(direct),
-    };
-  if (record.kind !== "birthday") return undefined;
-  if (typeof record.data.nextDate === "string")
-    return { value: record.data.nextDate, allDay: true };
-  const month = Number(record.data.month),
-    day = Number(record.data.day);
-  if (!Number.isInteger(month) || !Number.isInteger(day)) return undefined;
-  const localYear = Number(
-    new Intl.DateTimeFormat("en-US", { year: "numeric", timeZone }).format(now),
-  );
-  let value = `${localYear}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-  const today = calendarKey(now, timeZone);
-  if (value < today)
-    value = `${localYear + 1}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-  return { value, allDay: true };
-};
-const dateValue = (value: string | number) =>
-  typeof value === "number"
-    ? new Date(value)
-    : new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T12:00:00` : value);
-const calendarKey = (date: Date, zone: string) => {
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat("en-US", {
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit",
-      timeZone: zone,
-    })
-      .formatToParts(date)
-      .map((part) => [part.type, part.value]),
-  );
-  return `${parts.year}-${parts.month}-${parts.day}`;
-};
-const dayKey = (value: string | number, zone: string) =>
-  typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ? value
-    : calendarKey(dateValue(value), zone);
-const friendlyDay = (value: string | number, zone?: string) =>
-  new Intl.DateTimeFormat(undefined, {
-    weekday: "short",
-    month: "short",
-    day: "numeric",
-    timeZone: typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value) ? "UTC" : zone,
-  }).format(dateValue(value));
-const dayHeading = (value: string | number, zone: string, today = new Date()) => {
-  const dateOnly = typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
-  const key = dayKey(value, zone);
-  const parts = Object.fromEntries(
-    new Intl.DateTimeFormat(undefined, {
-      weekday: "long",
-      month: "long",
-      ...(key.slice(0, 4) === calendarKey(today, zone).slice(0, 4) ? {} : { year: "numeric" }),
-      timeZone: dateOnly ? "UTC" : zone,
-    })
-      .formatToParts(dateValue(value))
-      .map((part) => [part.type, part.value]),
-  );
-  return `${parts.weekday}, ${parts.month}${parts.year ? ` ${parts.year}` : ""}`;
-};
 const needsSourceReview = (record: LifeRecord) =>
+  record.provenanceStatus === "needs-review" ||
   record.provenance?.some((item) => item.invalidatedAt !== undefined) === true;
+const taskTitle = (task: { title: string }) =>
+  task.title === "knowledge.aggregate"
+    ? "Background source summary"
+    : task.title === "knowledge.summarize-source"
+      ? "Summarize source"
+      : task.title;
 const friendly = (value: string, zone?: string) => {
   const date = /^\d{10,}$/.test(value) ? new Date(Number(value)) : new Date(value);
   return Number.isNaN(date.valueOf())
@@ -314,7 +254,7 @@ export function App() {
           <Chat
             name={data.profile.name}
             messages={messages}
-            records={data.records}
+            records={data.agendaRecords ?? data.records}
             scope={scope}
             busy={busy === "chat"}
             send={send}
@@ -326,6 +266,10 @@ export function App() {
           <Space
             plugins={data.plugins}
             open={setExpanded}
+            changed={async (message) => {
+              setNotice(message);
+              await load(desiredScope.current);
+            }}
             build={async (r) => {
               const generation = scopeGeneration.current;
               setBusy("build");
@@ -494,7 +438,7 @@ function Chat({
       (item): item is { record: LifeRecord; when: { value: string | number; allDay: boolean } } =>
         Boolean(item.when),
     )
-    .sort((a, b) => dateValue(a.when.value).valueOf() - dateValue(b.when.value).valueOf())
+    .sort((a, b) => compareAgenda(a, b, Intl.DateTimeFormat().resolvedOptions().timeZone))
     .slice(0, 2);
   return (
     <section className="conversation">
@@ -614,12 +558,26 @@ function Today({
   refresh: () => Promise<void>;
   notify: (value: string) => void;
 }) {
+  const baseAgenda = data.agendaRecords ?? data.records;
+  const [agendaExtras, setAgendaExtras] = useState<LifeRecord[]>([]),
+    [agendaPage, setAgendaPage] = useState(data.agendaPage),
+    [loadingAgenda, setLoadingAgenda] = useState(false),
+    [agendaError, setAgendaError] = useState("");
+  const agendaScope = useRef(data.scope);
+  agendaScope.current = data.scope;
+  useEffect(() => {
+    setAgendaExtras([]);
+    setAgendaPage(data.agendaPage);
+    setAgendaError("");
+  }, [data.scope]);
+  const allAgenda = [...baseAgenda, ...agendaExtras];
   const byId = new Map(data.records.map((record) => [record.id, record]));
-  const entries = data.records
+  const entries = allAgenda
     .filter((record) => {
       if (!timedKinds.has(record.kind)) return false;
       if (record.data.completed === true || record.data.cancelled === true) return false;
       if (record.kind === "event" && record.data.type === "notification") return false;
+      if (record.relatedCompleted) return false;
       return !record.relationships?.some((relation) => {
         if (relation.type !== "need") return false;
         const need = byId.get(relation.targetId);
@@ -635,7 +593,7 @@ function Today({
         when: { value: string | number; allDay: boolean };
       } => Boolean(item.when),
     )
-    .sort((a, b) => dateValue(a.when.value).valueOf() - dateValue(b.when.value).valueOf());
+    .sort((a, b) => compareAgenda(a, b, data.profile.timeZone));
   const groups = new Map<string, typeof entries>();
   for (const entry of entries) {
     const key = dayKey(entry.when.value, data.profile.timeZone);
@@ -695,7 +653,9 @@ function Today({
                   <div>
                     <span>{record.kind}</span>
                     <h2>{record.title}</h2>
-                    {record.body && <p>{record.body}</p>}
+                    {(record.bodyPreview || record.body) && (
+                      <p>{record.bodyPreview || record.body}</p>
+                    )}
                     {needsSourceReview(record) && (
                       <strong className="source-warning">Source changed — review needed</strong>
                     )}
@@ -712,6 +672,48 @@ function Today({
           body="Tell Ellie about a commitment or reminder and it will appear here."
         />
       )}
+      {agendaError && (
+        <p className="settings-error" role="alert">
+          {agendaError}
+        </p>
+      )}
+      {agendaPage?.hasMore && (
+        <button
+          className="load-more"
+          disabled={loadingAgenda}
+          onClick={async () => {
+            if (!agendaPage.nextCursor) return;
+            const requestedScope = data.scope;
+            setLoadingAgenda(true);
+            setAgendaError("");
+            try {
+              const next = await api.records(requestedScope, {
+                cursor: agendaPage.nextCursor,
+                kinds: ["reminder", "timer", "event", "birthday", "holiday"],
+              });
+              if (agendaScope.current !== requestedScope) return;
+              setAgendaExtras((current) => [
+                ...current,
+                ...next.records.filter(
+                  (record) =>
+                    !baseAgenda.some((existing) => existing.id === record.id) &&
+                    !current.some((existing) => existing.id === record.id),
+                ),
+              ]);
+              setAgendaPage(next.page);
+            } catch (error) {
+              if (agendaScope.current === requestedScope)
+                setAgendaError(
+                  error instanceof Error ? error.message : "More commitments could not be loaded.",
+                );
+            } finally {
+              if (agendaScope.current === requestedScope) setLoadingAgenda(false);
+            }
+          }}
+        >
+          {loadingAgenda ? "Loading…" : "Load more commitments"}
+        </button>
+      )}
     </Page>
   );
 }
@@ -725,9 +727,40 @@ function World({
   notify: (s: string) => void;
 }) {
   const [tab, setTab] = useState("all"),
-    [editing, setEditing] = useState<LifeRecord | null>(null);
+    [editing, setEditing] = useState<LifeRecord | null>(null),
+    [extras, setExtras] = useState<LifeRecord[]>([]),
+    [page, setPage] = useState(data.recordsPage),
+    [query, setQuery] = useState(""),
+    [searchResults, setSearchResults] = useState<
+      Awaited<ReturnType<typeof api.search>>["results"] | null
+    >(null),
+    [loadingRecords, setLoadingRecords] = useState(false),
+    [recordError, setRecordError] = useState("");
+  const worldScope = useRef(data.scope);
+  worldScope.current = data.scope;
+  useEffect(() => {
+    setExtras([]);
+    setPage(data.recordsPage);
+    setQuery("");
+    setSearchResults(null);
+    setEditing(null);
+  }, [data.scope]);
   const groups = ["all", "memory", "contact", "need", "source"];
-  const records = data.records.filter((r) => tab === "all" || r.kind === tab);
+  const records = [...data.records, ...extras].filter((r) => tab === "all" || r.kind === tab);
+  const openRecord = async (id: string) => {
+    const requestedScope = data.scope;
+    setLoadingRecords(true);
+    setRecordError("");
+    try {
+      const detail = await api.record(id);
+      if (worldScope.current === requestedScope) setEditing(detail);
+    } catch (error) {
+      if (worldScope.current === requestedScope)
+        setRecordError(error instanceof Error ? error.message : "That detail could not be loaded.");
+    } finally {
+      if (worldScope.current === requestedScope) setLoadingRecords(false);
+    }
+  };
   return (
     <Page title="Your world" lede="What Ellie knows, where it came from, and who can see it.">
       <div className="tabs">
@@ -737,17 +770,85 @@ function World({
           </button>
         ))}
       </div>
-      {records.length ? (
+      <form
+        className="record-search"
+        onSubmit={async (event) => {
+          event.preventDefault();
+          const requestedScope = data.scope;
+          setLoadingRecords(true);
+          setRecordError("");
+          try {
+            if (!query.trim()) setSearchResults(null);
+            else {
+              const results = (await api.search(requestedScope, query.trim())).results;
+              if (worldScope.current === requestedScope) setSearchResults(results);
+            }
+          } catch (error) {
+            if (worldScope.current === requestedScope)
+              setRecordError(
+                error instanceof Error ? error.message : "Search could not be completed.",
+              );
+          } finally {
+            if (worldScope.current === requestedScope) setLoadingRecords(false);
+          }
+        }}
+      >
+        <input
+          aria-label="Search your world"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Search memories, people, and sources"
+        />
+        <button disabled={loadingRecords}>{loadingRecords ? "Looking…" : "Search"}</button>
+        {searchResults && (
+          <button
+            type="button"
+            onClick={() => {
+              setQuery("");
+              setSearchResults(null);
+            }}
+          >
+            Clear
+          </button>
+        )}
+      </form>
+      {recordError && (
+        <p className="settings-error" role="alert">
+          {recordError}
+        </p>
+      )}
+      {searchResults ? (
+        searchResults.length ? (
+          <div className="record-list search-results">
+            {searchResults.map((result, index) => (
+              <button
+                key={`${result.sourceId}:${result.reference ?? index}`}
+                onClick={() => void openRecord(result.sourceId)}
+              >
+                <span className="kind">s</span>
+                <span>
+                  <strong>{result.sourceTitle}</strong>
+                  <small>{result.text}</small>
+                  {result.reference && <em>{result.reference}</em>}
+                </span>
+                <em>Source</em>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <Empty title="Nothing matched" body="Try a name or a distinctive phrase from a source." />
+        )
+      ) : records.length ? (
         <div className="record-list">
           {records.map((r) => (
-            <button key={r.id} onClick={() => setEditing(r)}>
+            <button key={r.id} onClick={() => void openRecord(r.id)}>
               <span className="kind">{r.kind.slice(0, 1)}</span>
               <span>
                 <strong>{r.title}</strong>
                 <small>
                   {needsSourceReview(r)
                     ? "Source changed — review needed"
-                    : r.body || `Updated ${friendly(r.updatedAt)}`}
+                    : r.bodyPreview || r.body || `Updated ${friendly(r.updatedAt)}`}
                 </small>
               </span>
               <em>{r.scope.type === "user" ? "Private" : "Shared"}</em>
@@ -759,6 +860,39 @@ function World({
           title={`No ${tab === "all" ? "saved details" : `${tab} records`} yet`}
           body="You can teach Ellie in chat or add a source below."
         />
+      )}
+      {!searchResults && page?.hasMore && (
+        <button
+          className="load-more"
+          disabled={loadingRecords}
+          onClick={async () => {
+            if (!page.nextCursor) return;
+            const requestedScope = data.scope;
+            setLoadingRecords(true);
+            try {
+              const next = await api.records(requestedScope, { cursor: page.nextCursor });
+              if (worldScope.current !== requestedScope) return;
+              setExtras((current) => [
+                ...current,
+                ...next.records.filter(
+                  (record) =>
+                    !data.records.some((existing) => existing.id === record.id) &&
+                    !current.some((existing) => existing.id === record.id),
+                ),
+              ]);
+              setPage(next.page);
+            } catch (error) {
+              if (worldScope.current === requestedScope)
+                setRecordError(
+                  error instanceof Error ? error.message : "More records could not be loaded.",
+                );
+            } finally {
+              if (worldScope.current === requestedScope) setLoadingRecords(false);
+            }
+          }}
+        >
+          {loadingRecords ? "Loading…" : "Load more"}
+        </button>
       )}
       <SourceUpload
         scope={data.scope}
@@ -1045,15 +1179,18 @@ function RecordModal({
 function Space({
   plugins,
   open,
+  changed,
   build,
   busy,
 }: {
   plugins: PluginSummary[];
   open: (p: PluginSummary) => void;
+  changed: (message: string) => Promise<void>;
   build: (s: string) => Promise<void>;
   busy: boolean;
 }) {
-  const [idea, setIdea] = useState("");
+  const [idea, setIdea] = useState(""),
+    [managed, setManaged] = useState<PluginSummary | null>(null);
   return (
     <Page title="Your space" lede="Useful things Ellie has made for your life.">
       <form
@@ -1090,7 +1227,10 @@ function Space({
               <h2>{p.name}</h2>
               <p>{p.description}</p>
               <WidgetData plugin={p} />
-              <button onClick={() => open(p)}>Open</button>
+              <div className="plugin-actions">
+                <button onClick={() => open(p)}>Open</button>
+                <button onClick={() => setManaged(p)}>Manage</button>
+              </div>
             </article>
           ))}
         </div>
@@ -1098,6 +1238,16 @@ function Space({
         <Empty
           title="Room to make something"
           body="Describe a small tool or view above. Ellie will show progress in Activity."
+        />
+      )}
+      {managed && (
+        <PluginManager
+          plugin={managed}
+          close={() => setManaged(null)}
+          changed={async (message) => {
+            setManaged(null);
+            await changed(message);
+          }}
         />
       )}
     </Page>
@@ -1167,6 +1317,147 @@ function WidgetData({ plugin }: { plugin: PluginSummary }) {
     </div>
   );
 }
+function PluginManager({
+  plugin,
+  close,
+  changed,
+}: {
+  plugin: PluginSummary;
+  close: () => void;
+  changed: (message: string) => Promise<void>;
+}) {
+  const [history, setHistory] = useState<
+      Awaited<ReturnType<typeof api.pluginHistory>>["revisions"]
+    >([]),
+    [request, setRequest] = useState(""),
+    [targetVersion, setTargetVersion] = useState(""),
+    [confirmRemove, setConfirmRemove] = useState(false),
+    [busy, setBusy] = useState(""),
+    [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    void api
+      .pluginHistory(plugin.id)
+      .then((result) => {
+        if (active) {
+          setHistory(result.revisions);
+          const previous = result.revisions.find((revision) => !revision.active);
+          setTargetVersion(previous ? String(previous.version) : "");
+        }
+      })
+      .catch(
+        (cause) =>
+          active &&
+          setError(cause instanceof Error ? cause.message : "Revision history could not load."),
+      );
+    return () => {
+      active = false;
+    };
+  }, [plugin.id]);
+  const mutate = async (name: string, operation: () => Promise<unknown>, message: string) => {
+    setBusy(name);
+    setError("");
+    try {
+      await operation();
+      await changed(message);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "The app could not be updated.");
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <Modal title={`Manage ${plugin.name}`} close={close}>
+      <p className="impact">
+        Version {plugin.version} is active. Ellie retains recent revisions so you can review or
+        restore them.
+      </p>
+      <label>
+        Describe a correction
+        <textarea
+          rows={4}
+          value={request}
+          onChange={(event) => setRequest(event.target.value)}
+          placeholder="Make the score easier to read and keep saved data working."
+        />
+      </label>
+      <button
+        className="primary"
+        disabled={Boolean(busy) || !request.trim()}
+        onClick={() =>
+          void mutate(
+            "revise",
+            () => api.revisePlugin(plugin.id, request.trim(), plugin.version),
+            "App revision created",
+          )
+        }
+      >
+        {busy === "revise" ? "Revising…" : "Create revision"}
+      </button>
+      <section className="revision-history">
+        <h3>Revision history</h3>
+        {history.map((revision) => (
+          <p key={revision.version}>
+            <strong>
+              Version {revision.version}
+              {revision.active ? " · active" : ""}
+            </strong>
+            <span>{revision.description}</span>
+          </p>
+        ))}
+        <div className="rollback-row">
+          <select
+            aria-label="Revision to restore"
+            value={targetVersion}
+            onChange={(event) => setTargetVersion(event.target.value)}
+          >
+            {history
+              .filter((revision) => !revision.active)
+              .map((revision) => (
+                <option key={revision.version} value={revision.version}>
+                  Version {revision.version}
+                </option>
+              ))}
+          </select>
+          <button
+            disabled={Boolean(busy) || !targetVersion}
+            onClick={() =>
+              void mutate(
+                "rollback",
+                () => api.rollbackPlugin(plugin.id, plugin.version, Number(targetVersion)),
+                `Restored version ${targetVersion} as a new revision`,
+              )
+            }
+          >
+            {busy === "rollback" ? "Restoring…" : "Restore selected"}
+          </button>
+        </div>
+      </section>
+      <div className="remove-plugin">
+        <label>
+          <input
+            type="checkbox"
+            checked={confirmRemove}
+            onChange={(event) => setConfirmRemove(event.target.checked)}
+          />
+          I understand this removes the app and its saved app data.
+        </label>
+        <button
+          className="danger"
+          disabled={Boolean(busy) || !confirmRemove}
+          onClick={() => void mutate("remove", () => api.deletePlugin(plugin.id), "App removed")}
+        >
+          {busy === "remove" ? "Removing…" : "Remove app"}
+        </button>
+      </div>
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+    </Modal>
+  );
+}
 function PluginModal({ plugin, close }: { plugin: PluginSummary; close: () => void }) {
   const frame = useRef<HTMLIFrameElement>(null),
     channel = useRef<MessageChannel | undefined>(undefined),
@@ -1234,37 +1525,76 @@ function Activity({
 }) {
   const [feedback, setFeedback] = useState("");
   const [sending, setSending] = useState(false);
+  const [detail, setDetail] = useState<Awaited<ReturnType<typeof api.taskDetail>> | null>(null);
+  const [detailError, setDetailError] = useState("");
   return (
     <Page title="Activity" lede="Work in motion, waiting points, and recent outcomes.">
       {data.tasks.length ? (
         <div className="tasks">
-          {data.tasks.map((t) => (
-            <article key={t.id}>
-              <i className={`status ${t.status}`} />
-              <div>
-                <span>{t.status}</span>
-                <h2>{t.title}</h2>
-                {t.detail && <p>{t.detail}</p>}
-              </div>
-              <div>
-                {t.status === "running" ? (
-                  <button disabled={busy === t.id} onClick={() => act(t.id, "pause")}>
-                    Pause
-                  </button>
-                ) : (
+          {data.tasks.map((t) => {
+            const permits = (action: "pause" | "resume" | "cancel" | "run") =>
+              t.actions
+                ? t.actions.includes(action)
+                : action === "pause"
+                  ? t.status === "running"
+                  : action === "resume"
+                    ? t.status === "paused"
+                    : action === "run"
+                      ? t.status === "scheduled"
+                      : ["running", "paused", "queued", "scheduled"].includes(t.status);
+            return (
+              <article key={t.id} data-task-id={t.id}>
+                <i className={`status ${t.status}`} />
+                <div>
+                  <span>{t.status}</span>
+                  <h2>{taskTitle(t)}</h2>
+                  {t.detail && <p>{t.detail}</p>}
+                </div>
+                <div>
                   <button
-                    disabled={busy === t.id}
-                    onClick={() => act(t.id, t.status === "paused" ? "resume" : "run")}
+                    onClick={() => {
+                      setDetailError("");
+                      void api
+                        .taskDetail(t.id)
+                        .then(setDetail)
+                        .catch((cause) =>
+                          setDetailError(
+                            cause instanceof Error ? cause.message : "Task detail could not load.",
+                          ),
+                        );
+                    }}
                   >
-                    {t.status === "paused" ? "Resume" : "Run"}
+                    Inspect
                   </button>
-                )}
-                <button disabled={busy === t.id} onClick={() => act(t.id, "cancel")}>
-                  Cancel
-                </button>
-              </div>
-            </article>
-          ))}
+                  {permits("pause") && (
+                    <button disabled={busy === t.id} onClick={() => act(t.id, "pause")}>
+                      Pause
+                    </button>
+                  )}
+                  {permits("resume") && (
+                    <button disabled={busy === t.id} onClick={() => act(t.id, "resume")}>
+                      Resume
+                    </button>
+                  )}
+                  {permits("run") && (
+                    <button disabled={busy === t.id} onClick={() => act(t.id, "run")}>
+                      Run now
+                    </button>
+                  )}
+                  {t.actions?.includes("rerun") && (
+                    <button disabled={busy === t.id} onClick={() => act(t.id, "run")}>
+                      Run again
+                    </button>
+                  )}
+                  {permits("cancel") && (
+                    <button disabled={busy === t.id} onClick={() => act(t.id, "cancel")}>
+                      Cancel
+                    </button>
+                  )}
+                </div>
+              </article>
+            );
+          })}
         </div>
       ) : (
         <Empty
@@ -1300,6 +1630,72 @@ function Activity({
         </div>
       </form>
       <LearningPanel scope={data.scope} />
+      {detailError && (
+        <p className="settings-error" role="alert">
+          {detailError}
+        </p>
+      )}
+      {detail && (
+        <Modal title={taskTitle(detail.task)} close={() => setDetail(null)}>
+          <p className="impact">Status: {detail.task.status}</p>
+          {detail.stale ? (
+            <div className="stale-result">
+              <p className="settings-error">
+                {detail.staleReason ??
+                  "The sources changed, so this stored result needs to be run again."}
+              </p>
+              <button
+                className="primary"
+                onClick={() => {
+                  act(detail.task.id, "run");
+                  setDetail(null);
+                }}
+              >
+                Run again
+              </button>
+            </div>
+          ) : detail.result ? (
+            <section className="task-result">
+              <h3>Result</h3>
+              <p>{detail.result.summary}</p>
+              {detail.result.citations.map((citation) => (
+                <p key={`${citation.sourceId}:${citation.sourceRevision}`}>
+                  <strong>{citation.title}</strong>
+                  {citation.references.length > 0 && <span>{citation.references.join(", ")}</span>}
+                </p>
+              ))}
+              {detail.result.omitted ? (
+                <small>{detail.result.omitted} additional results omitted.</small>
+              ) : null}
+            </section>
+          ) : null}
+          {detail.children.length > 0 && (
+            <section className="task-children">
+              <h3>Steps</h3>
+              {detail.children.map((child) => (
+                <p key={child.id}>
+                  <i className={`status ${child.status}`} />
+                  <span>
+                    <strong>{taskTitle(child)}</strong>
+                    {child.detail && <small>{child.detail}</small>}
+                  </span>
+                  <em>{child.status}</em>
+                </p>
+              ))}
+            </section>
+          )}
+          {detail.progress.length > 0 && (
+            <section className="task-progress">
+              <h3>Progress</h3>
+              {detail.progress.slice(-8).map((item, index) => (
+                <p key={`${item.at ?? "progress"}:${index}`}>
+                  {item.message ?? `${item.current ?? 0} of ${item.total ?? "?"}`}
+                </p>
+              ))}
+            </section>
+          )}
+        </Modal>
+      )}
     </Page>
   );
 }

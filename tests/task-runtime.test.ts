@@ -72,6 +72,94 @@ test("a queued task survives restart and a running unsafe task becomes unknown",
   }
 });
 
+test("atomic workflows persist, wait for children, inherit bounds, and cancel as one tree", async () => {
+  const f = await fixture();
+  try {
+    f.runtime.registerHandler(handler("child"));
+    f.runtime.registerHandler(handler("aggregate"));
+    assert.throws(
+      () =>
+        f.runtime.enqueueWorkflow({
+          root: { owner, handler: "aggregate" },
+          children: [{ handler: "missing" }],
+        }),
+      /Unknown task handler/,
+    );
+    assert.deepEqual(f.runtime.list({ owner }), []);
+    assert.throws(
+      () =>
+        f.runtime.enqueueWorkflow({
+          root: { owner, handler: "aggregate", id: "cycle-root" },
+          children: [{ handler: "child", dependsOn: ["cycle-root"] } as never],
+        }),
+      /caller-supplied dependencies/,
+    );
+    assert.equal(f.runtime.get("cycle-root", owner), undefined);
+
+    const deadlineAt = 20_000;
+    const cancelled = f.runtime.enqueueWorkflow({
+      root: {
+        owner,
+        handler: "aggregate",
+        deadlineAt,
+        allowedCapabilities: [],
+        budget: { maxTasks: 3, maxConcurrency: 2 },
+      },
+      children: [{ handler: "child" }, { handler: "child" }],
+    });
+    assert.deepEqual(
+      cancelled.root.dependsOn,
+      cancelled.children.map((child) => child.id),
+    );
+    assert.ok(cancelled.children.every((child) => child.deadlineAt === deadlineAt));
+    assert.equal(f.runtime.cancel(cancelled.root.id, owner), true);
+    assert.ok(
+      cancelled.children.every((child) => f.runtime.get(child.id, owner)?.state === "cancelled"),
+    );
+
+    const expiring = f.runtime.enqueueWorkflow({
+      root: { owner, handler: "aggregate", deadlineAt: 1_500, allowedCapabilities: [] },
+      children: [{ handler: "child" }],
+    });
+    f.setNow(1_501);
+    await f.runtime.tick();
+    assert.equal(f.runtime.get(expiring.root.id, owner)?.state, "expired");
+    assert.equal(f.runtime.get(expiring.children[0]!.id, owner)?.state, "expired");
+
+    const persisted = f.runtime.enqueueWorkflow({
+      root: { owner, handler: "aggregate", allowedCapabilities: [] },
+      children: [
+        { handler: "child", input: "one" },
+        { handler: "child", input: "two" },
+      ],
+    });
+    await f.runtime.close();
+    const reopened = new TaskRuntime({ directory: f.directory, now: () => 2_000 });
+    reopened.registerHandler(handler("child"));
+    reopened.registerHandler(handler("aggregate"));
+    await reopened.tick();
+    assert.equal(reopened.get(persisted.root.id, owner)?.state, "queued");
+    await reopened.tick();
+    assert.equal(reopened.get(persisted.root.id, owner)?.state, "succeeded");
+    await reopened.close();
+  } finally {
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});
+
+test("runNow rejects terminal tasks instead of pretending to rerun them", async () => {
+  const f = await fixture();
+  try {
+    f.runtime.registerHandler(handler("once"));
+    const task = f.runtime.enqueue({ owner, handler: "once" });
+    await f.runtime.tick();
+    assert.equal(f.runtime.get(task.id, owner)?.state, "succeeded");
+    await assert.rejects(() => f.runtime.runNow(task.id, owner), /terminal state succeeded/);
+  } finally {
+    await f.close();
+  }
+});
+
 test("resumable handlers retry after restart only with an explicit retry policy", async () => {
   const f = await fixture();
   try {

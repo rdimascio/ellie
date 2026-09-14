@@ -98,6 +98,16 @@ export interface EnqueueTask {
   retry?: RetryPolicy;
 }
 
+export interface EnqueueWorkflow {
+  root: EnqueueTask;
+  children: Array<Omit<EnqueueTask, "owner" | "parentId" | "dependsOn">>;
+}
+
+export interface WorkflowRecord {
+  root: TaskRecord;
+  children: TaskRecord[];
+}
+
 export interface ScheduleTask extends EnqueueTask {
   schedule: TaskSchedule;
   missedRunPolicy?: MissedRunPolicy;

@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { nextOccurrence, occurrenceKey } from "./schedule.ts";
 import type {
   EnqueueTask,
+  EnqueueWorkflow,
   HandlerContext,
   MissedRunPolicy,
   OwnerScope,
@@ -18,6 +19,7 @@ import type {
   WatchEvent,
   WatchRecord,
   WatchTask,
+  WorkflowRecord,
 } from "./types.ts";
 
 type Row = Record<string, unknown>;
@@ -167,6 +169,44 @@ export class TaskRuntime {
 
   enqueue(request: EnqueueTask): TaskRecord {
     return this.insert(request, "queued");
+  }
+
+  /** Atomically creates a cancellable root whose execution waits for every child. */
+  enqueueWorkflow(request: EnqueueWorkflow): WorkflowRecord {
+    if (
+      !Array.isArray(request.children) ||
+      request.children.length < 1 ||
+      request.children.length > 64
+    )
+      throw new Error("A workflow requires 1 through 64 children.");
+    if (request.children.some((child) => "dependsOn" in child))
+      throw new Error("Workflow children cannot have caller-supplied dependencies.");
+    if (request.root.parentId || request.root.dependsOn?.length)
+      throw new Error("A workflow root cannot have a parent or caller-supplied dependencies.");
+    const rootRequest = { ...request.root, id: request.root.id ?? randomUUID() };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const root = this.insert(rootRequest, "queued");
+      const children = request.children.map((child) =>
+        this.insert(
+          {
+            ...child,
+            id: child.id ?? randomUUID(),
+            owner: root.owner,
+            parentId: root.id,
+          },
+          "queued",
+        ),
+      );
+      this.db
+        .prepare("UPDATE tasks SET dependencies=?,updated_at=? WHERE id=?")
+        .run(JSON.stringify(children.map((child) => child.id)), this.now(), root.id);
+      this.db.exec("COMMIT");
+      return { root: this.getInternal(root.id)!, children };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   schedule(request: ScheduleTask): TaskRecord {
@@ -687,6 +727,8 @@ export class TaskRuntime {
   async runNow(id: string, owner: OwnerScope): Promise<void> {
     const task = this.get(id, owner);
     if (!task) throw new Error("Task not found in owner scope.");
+    if (terminal.has(task.state))
+      throw new Error(`Task in terminal state ${task.state} cannot be run again.`);
     if (task.schedule && task.state === "scheduled") this.materialize(task, this.now());
     else if (task.state === "scheduled" || task.state === "paused" || task.state === "waiting")
       this.db

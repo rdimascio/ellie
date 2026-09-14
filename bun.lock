@@ -45,7 +45,9 @@
         "@ellie/life-context": "workspace:*",
         "@ellie/life-core": "workspace:*",
         "@ellie/life-harness": "workspace:*",
+        "@ellie/life-import": "workspace:*",
         "@ellie/life-ingest": "workspace:*",
+        "@ellie/life-learning": "workspace:*",
         "@ellie/life-plugins": "workspace:*",
         "@ellie/task-runtime": "workspace:*",
       },
@@ -122,6 +124,7 @@
         "@ellie/life-context": "*",
         "@ellie/life-core": "*",
         "@ellie/life-plugins": "*",
+        "@ellie/life-teaching": "*",
         "@ellie/task-runtime": "*",
       },
     },
@@ -146,6 +149,13 @@
     "packages/life-plugins": {
       "name": "@ellie/life-plugins",
       "version": "0.1.0",
+    },
+    "packages/life-teaching": {
+      "name": "@ellie/life-teaching",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-core": "workspace:*",
+      },
     },
     "packages/macos": {
       "name": "@ellie/macos",
@@ -231,6 +241,8 @@
     "@ellie/life-learning": ["@ellie/life-learning@workspace:packages/life-learning"],
 
     "@ellie/life-plugins": ["@ellie/life-plugins@workspace:packages/life-plugins"],
+
+    "@ellie/life-teaching": ["@ellie/life-teaching@workspace:packages/life-teaching"],
 
     "@ellie/life-ui": ["@ellie/life-ui@workspace:apps/life-ui"],
 

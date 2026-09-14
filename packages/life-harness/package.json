@@ -11,6 +11,7 @@
     "@ellie/life-context": "*",
     "@ellie/life-core": "*",
     "@ellie/life-plugins": "*",
+    "@ellie/life-teaching": "*",
     "@ellie/task-runtime": "*"
   }
 }

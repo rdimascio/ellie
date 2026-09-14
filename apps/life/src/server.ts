@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import type {
   LifeActor,
   LifeRecord,
+  LifeRecordKind,
+  LifeRecordSummary,
   LifeScope,
   LifeStore,
   TextSourceFormat,
@@ -20,7 +22,11 @@ import {
 } from "../../../packages/life-import/src/index.ts";
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
 import type { LifePlugin, PluginStore } from "../../../packages/life-plugins/src/index.ts";
-import { PluginError, builtInManifest } from "../../../packages/life-plugins/src/index.ts";
+import {
+  PluginError,
+  builtInManifest,
+  groupStorageKey,
+} from "../../../packages/life-plugins/src/index.ts";
 import type {
   OwnerScope,
   TaskRecord,
@@ -62,6 +68,12 @@ export interface LifeHarnessLike {
     request: string;
     expectedVersion: number;
   }): Promise<LifePlugin>;
+  invalidateContext?(actor: LifeActor, scope: LifeScope): void;
+  rerunBackgroundSummary?(input: {
+    actor: LifeActor;
+    scope: LifeScope;
+    taskId: string;
+  }): TaskRecord;
 }
 export interface MlbLike {
   snapshot(date?: string): Promise<unknown>;
@@ -137,17 +149,56 @@ function serializeRecord(record: LifeRecord): Record<string, unknown> {
     updatedAt: new Date(record.updatedAt).toISOString(),
   };
 }
-function serializeTask(task: TaskRecord, records: LifeRecord[] = []): Record<string, unknown> {
+function serializeSummary(record: LifeRecordSummary): Record<string, unknown> {
+  return {
+    ...record,
+    createdAt: new Date(record.createdAt).toISOString(),
+    updatedAt: new Date(record.updatedAt).toISOString(),
+  };
+}
+function serializeTask(
+  task: TaskRecord,
+  records: Array<Pick<LifeRecord, "id" | "title">> = [],
+): Record<string, unknown> {
   const input =
       task.input && typeof task.input === "object" ? (task.input as Record<string, unknown>) : {},
     linked =
       typeof input.recordId === "string"
         ? records.find((record) => record.id === input.recordId)
+        : undefined,
+    source =
+      typeof input.sourceId === "string"
+        ? records.find((record) => record.id === input.sourceId)
         : undefined;
+  let title: string;
+  if (task.handler === "reminder.notify") title = linked?.title ?? "Reminder";
+  else if (task.handler === "knowledge.aggregate")
+    title =
+      typeof input.query === "string" && input.query.trim()
+        ? `Summarize ${input.query.trim().slice(0, 160)}`
+        : "Summarize sources";
+  else if (task.handler === "knowledge.summarize-source")
+    title = source ? `Read ${source.title}` : "Read source";
+  else
+    title =
+      typeof input.title === "string" && input.title.trim()
+        ? input.title.trim().slice(0, 200)
+        : "Background work";
+  const actions =
+    task.state === "queued" || task.state === "scheduled" || task.state === "waiting"
+      ? ["pause", "cancel", "run"]
+      : task.state === "paused"
+        ? ["resume", "cancel", "run"]
+        : task.state === "running"
+          ? ["cancel"]
+          : task.handler === "knowledge.aggregate"
+            ? ["rerun"]
+            : [];
   return {
     id: task.id,
-    title: linked?.title ?? (typeof input.title === "string" ? input.title : task.handler),
+    title,
     status: task.state,
+    actions,
     ...(typeof input.detail === "string"
       ? { detail: input.detail }
       : task.scheduledFor
@@ -422,14 +473,7 @@ export class LifeHttpServer {
     ];
   }
   private dateForScope(scope: LifeScope): string {
-    const settings = this.options.store.resolveSettings(
-        this.actor,
-        scope.type === "group" ? { groupId: scope.id } : {},
-      ).values,
-      configured =
-        typeof settings.timeZone === "string"
-          ? settings.timeZone
-          : (this.options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+    const configured = this.timeZoneForScope(scope);
     let formatter: Intl.DateTimeFormat;
     try {
       formatter = new Intl.DateTimeFormat("en-US", {
@@ -453,6 +497,28 @@ export class LifeHttpServer {
         .map((part) => [part.type, part.value]),
     );
     return `${parts.year}-${parts.month}-${parts.day}`;
+  }
+  private timeZoneForScope(scope: LifeScope): string {
+    const settings = this.options.store.resolveSettings(
+        this.actor,
+        scope.type === "group" ? { groupId: scope.id } : {},
+      ).values,
+      configured =
+        typeof settings.timeZone === "string"
+          ? settings.timeZone
+          : (this.options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone);
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: configured }).format(0);
+      return configured;
+    } catch {
+      return "UTC";
+    }
+  }
+  private recheckOwner(ownerId: OwnerScope): void {
+    const split = ownerId.indexOf(":"),
+      type = ownerId.slice(0, split) as "user" | "group",
+      id = ownerId.slice(split + 1);
+    this.scope({ type, id });
   }
   private findPlugin(id: string): { plugin: LifePlugin; owner: OwnerScope } {
     for (const candidate of this.authorizedOwners()) {
@@ -479,6 +545,12 @@ export class LifeHttpServer {
         return await this.group(request, response);
       if (path === "/api/life/records" && request.method === "POST")
         return await this.createRecord(request, response);
+      if (path === "/api/life/records" && request.method === "GET")
+        return this.records(url, response);
+      if (/^\/api\/life\/records\/[^/]+$/.test(path) && request.method === "GET")
+        return this.recordDetail(response, path);
+      if (path === "/api/life/search" && request.method === "GET")
+        return this.search(url, response);
       if (
         path.startsWith("/api/life/records/") &&
         (request.method === "PATCH" || request.method === "DELETE")
@@ -516,10 +588,14 @@ export class LifeHttpServer {
         request.method === "POST"
       )
         return await this.task(request, response, path);
+      if (/^\/api\/life\/tasks\/[^/]+\/detail$/.test(path) && request.method === "GET")
+        return this.taskDetail(response, path);
       if (path === "/api/life/plugins/build" && request.method === "POST")
         return await this.build(request, response);
       if (/^\/api\/life\/plugins\/[^/]+\/view$/.test(path) && request.method === "GET")
         return this.pluginView(response, path);
+      if (/^\/api\/life\/plugins\/[^/]+\/history$/.test(path) && request.method === "GET")
+        return this.pluginHistory(response, path);
       if (/^\/api\/life\/plugins\/[^/]+\/action$/.test(path) && request.method === "POST")
         return await this.pluginAction(request, response, path);
       if (/^\/api\/life\/plugins\/[^/]+\/rollback$/.test(path) && request.method === "POST")
@@ -562,11 +638,31 @@ export class LifeHttpServer {
   private async bootstrap(url: URL, response: ServerResponse): Promise<void> {
     const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
       ownerId = owner(scope);
-    const rawRecords = this.options.store.listRecords(this.actor, { scope, limit: 500 }),
-      records = rawRecords.map(serializeRecord),
+    const recordsPage = this.options.store.listRecordSummaries(this.actor, { scope, limit: 100 }),
+      agendaKinds: LifeRecordKind[] = ["reminder", "timer", "event", "birthday", "holiday"],
+      agendaPage = this.options.store.listRecordSummaries(this.actor, {
+        scope,
+        kinds: agendaKinds,
+        limit: 100,
+      }),
+      notificationPage = this.options.store.listRecordSummaries(this.actor, {
+        scope,
+        kinds: ["event", "feedback"],
+        limit: 500,
+      }),
+      needRecords = this.options.store.listRecordSummaries(this.actor, {
+        scope,
+        kinds: ["need"],
+        limit: 500,
+      }).items,
+      supportingRecords = this.options.store.listRecordSummaries(this.actor, {
+        scope,
+        limit: 500,
+      }).items,
+      records = recordsPage.items.map(serializeSummary),
       tasks = this.options.tasks
         .list({ owner: ownerId })
-        .map((task) => serializeTask(task, rawRecords)),
+        .map((task) => serializeTask(task, supportingRecords)),
       ownedPlugins = this.options.plugins.list(ownerId),
       settings = this.options.store.resolveSettings(
         this.actor,
@@ -582,7 +678,9 @@ export class LifeHttpServer {
               this.options.plugins.storageGet(
                 ownerId,
                 plugin.id,
-                ownerId.startsWith("group:") ? `user:${this.actor.userId}:highScore` : "highScore",
+                ownerId.startsWith("group:")
+                  ? groupStorageKey(this.actor.userId, "highScore")
+                  : "highScore",
               ) ?? 0,
           };
         if (plugin.kind === "mlb")
@@ -595,7 +693,7 @@ export class LifeHttpServer {
         return summary;
       }),
     );
-    const reminderNotifications = rawRecords
+    const reminderNotifications = notificationPage.items
         .filter(
           (record) =>
             record.kind === "event" &&
@@ -605,12 +703,12 @@ export class LifeHttpServer {
         .map((record) => ({
           id: record.id,
           title: record.title,
-          body: record.body,
+          body: record.bodyPreview,
           revision: record.revision,
           reminderId: record.data.reminderId,
           deliveredAt: record.data.deliveredAt,
         })),
-      proactiveNotifications = rawRecords
+      proactiveNotifications = notificationPage.items
         .filter(
           (record) =>
             record.kind === "feedback" &&
@@ -621,28 +719,41 @@ export class LifeHttpServer {
         .map((record) => ({
           id: record.id,
           title: record.title,
-          body: record.body,
+          body: record.bodyPreview,
           revision: record.revision,
-          ...(rawRecords.find((candidate) => candidate.id === record.data.relatedRecordId)?.kind ===
-          "need"
+          ...(needRecords.some((candidate) => candidate.id === record.data.relatedRecordId)
             ? { needId: record.data.relatedRecordId }
             : {}),
           ...record.data,
         })),
       notifications = [...reminderNotifications, ...proactiveNotifications];
+    this.recheckOwner(ownerId);
     this.send(response, 200, {
       profile: {
         id: this.actor.userId,
         name: this.options.userName ?? "You",
-        timeZone: this.options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timeZone: this.timeZoneForScope(scope),
       },
       groups: this.options.store.listGroups(this.actor).map(({ id, name }) => ({ id, name })),
       scope: ownerId,
       records,
+      recordsPage: {
+        hasMore: recordsPage.hasMore,
+        ...(recordsPage.nextCursor ? { nextCursor: recordsPage.nextCursor } : {}),
+      },
+      agendaRecords: agendaPage.items.map(serializeSummary),
+      agendaPage: {
+        hasMore: agendaPage.hasMore,
+        ...(agendaPage.nextCursor ? { nextCursor: agendaPage.nextCursor } : {}),
+      },
       tasks,
       plugins,
       settings,
       notifications,
+      notificationsPage: {
+        hasMore: notificationPage.hasMore,
+        ...(notificationPage.nextCursor ? { nextCursor: notificationPage.nextCursor } : {}),
+      },
       capabilities: { sources: true, plugins: true, tasks: true },
     });
   }
@@ -665,6 +776,42 @@ export class LifeHttpServer {
     });
     this.send(response, 201, serializeRecord(record));
   }
+  private records(url: URL, response: ServerResponse): void {
+    const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
+      kindsValue = url.searchParams.get("kinds"),
+      kinds = kindsValue
+        ? kindsValue.split(",").map((kind) => identifier(kind, "record kind") as LifeRecordKind)
+        : undefined,
+      page = this.options.store.listRecordSummaries(this.actor, {
+        scope,
+        ...(kinds ? { kinds } : {}),
+        ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+        ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+      });
+    this.send(response, 200, {
+      records: page.items.map(serializeSummary),
+      page: {
+        hasMore: page.hasMore,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+      },
+    });
+  }
+  private recordDetail(response: ServerResponse, path: string): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!)),
+      record = this.options.store.getRecord(this.actor, id);
+    if (!record) throw new HttpError(404, "Record not found.");
+    this.send(response, 200, serializeRecord(record));
+  }
+  private search(url: URL, response: ServerResponse): void {
+    const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
+      query = bounded(url.searchParams.get("q"), "q", 1000),
+      results = this.options.store.search(this.actor, {
+        scope,
+        query,
+        ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+      });
+    this.send(response, 200, { results });
+  }
   private async recordMutation(
     request: IncomingMessage,
     response: ServerResponse,
@@ -684,6 +831,7 @@ export class LifeHttpServer {
             (task.input as Record<string, unknown>).recordId === current.id,
         );
       this.options.store.deleteRecord(this.actor, id, revision);
+      this.options.harness.invalidateContext?.(this.actor, current.scope);
       for (const task of linkedTasks) this.options.tasks.cancel(task.id, task.owner);
       this.send(response, 204);
       return;
@@ -697,6 +845,7 @@ export class LifeHttpServer {
         : { body: body.body === null ? null : bounded(body.body, "body", 100_000) }),
       ...(body.data === undefined ? {} : { data: jsonObject(body.data) }),
     });
+    this.options.harness.invalidateContext?.(this.actor, current.scope);
     this.send(response, 200, serializeRecord(updated));
   }
   private async source(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -804,6 +953,7 @@ export class LifeHttpServer {
         ...(selectedKeys === undefined ? {} : { selectedKeys }),
         ...(body.sourceId === undefined ? {} : { sourceId: identifier(body.sourceId, "sourceId") }),
       });
+    this.options.harness.invalidateContext?.(this.actor, input.scope);
     this.send(response, 200, {
       ...result,
       source: serializeRecord(result.source),
@@ -918,14 +1068,16 @@ export class LifeHttpServer {
   }
   private async chat(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = jsonObject(await this.body(request)),
+      scope = this.scope(body.scope),
       result = await this.options.harness.chat({
         actor: this.actor,
-        scope: this.scope(body.scope),
+        scope,
         message: bounded(body.message, "message", 100_000),
         ...(body.conversationId === undefined
           ? {}
           : { conversationId: identifier(body.conversationId, "conversationId") }),
       });
+    this.recheckOwner(owner(scope));
     this.send(response, 200, result);
   }
   private async signal(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -965,6 +1117,7 @@ export class LifeHttpServer {
         action,
         this.now(),
       );
+    this.options.harness.invalidateContext?.(this.actor, result.notification.scope);
     if (result.linked) {
       const linkedIds = new Set([result.linked.id]);
       if (result.linked.kind === "need" || result.linked.kind === "goal")
@@ -1002,7 +1155,40 @@ export class LifeHttpServer {
         .map((candidate) => ({ candidate, task: this.options.tasks.get(decoded, candidate) }))
         .find((item) => item.task);
     if (!found) throw new HttpError(404, "Task not found.");
-    if (action === "run") await this.options.tasks.runNow(decoded, found.candidate);
+    if (
+      action === "run" &&
+      ["succeeded", "failed", "cancelled", "expired", "unknown"].includes(found.task!.state)
+    ) {
+      if (
+        found.task!.handler !== "knowledge.aggregate" ||
+        !this.options.harness.rerunBackgroundSummary
+      )
+        throw new HttpError(409, "This completed task cannot be run again.");
+      const split = found.candidate.indexOf(":"),
+        scope = {
+          type: found.candidate.slice(0, split) as "user" | "group",
+          id: found.candidate.slice(split + 1),
+        },
+        rerun = (() => {
+          try {
+            return this.options.harness.rerunBackgroundSummary!({
+              actor: this.actor,
+              scope,
+              taskId: decoded,
+            });
+          } catch {
+            throw new HttpError(409, "This summary cannot be rerun with current sources.");
+          }
+        })();
+      this.send(response, 200, serializeTask(rerun));
+      return;
+    }
+    if (action === "run")
+      try {
+        await this.options.tasks.runNow(decoded, found.candidate);
+      } catch {
+        throw new HttpError(409, "Task state did not allow this action.");
+      }
     else {
       const changed =
         action === "pause"
@@ -1013,6 +1199,98 @@ export class LifeHttpServer {
       if (!changed) throw new HttpError(409, "Task state did not allow this action.");
     }
     this.send(response, 200, serializeTask(this.options.tasks.get(decoded, found.candidate)!));
+  }
+  private taskDetail(response: ServerResponse, path: string): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-2)!)),
+      found = this.authorizedOwners()
+        .map((candidate) => ({ owner: candidate, task: this.options.tasks.get(id, candidate) }))
+        .find((item) => item.task);
+    if (!found?.task) throw new HttpError(404, "Task not found.");
+    const [scopeType, ...scopeId] = found.owner.split(":"),
+      scope = { type: scopeType as "user" | "group", id: scopeId.join(":") },
+      records = this.options.store.listRecordSummaries(this.actor, { scope, limit: 500 }).items,
+      progress = this.options.tasks
+        .progress(id, found.owner)
+        .slice(-100)
+        .map((item) => ({ ...item, at: new Date(item.at).toISOString() })),
+      children = this.options.tasks
+        .list({ owner: found.owner, parentId: id, limit: 500 })
+        .map((child) => serializeTask(child, records));
+    this.send(response, 200, {
+      task: serializeTask(found.task, records),
+      progress,
+      children,
+      ...this.verifiedTaskResult(found.task, scope),
+    });
+  }
+  private verifiedTaskResult(
+    task: TaskRecord,
+    scope: LifeScope,
+  ):
+    | { result: Record<string, unknown>; stale: false }
+    | { stale: true; staleReason: string }
+    | undefined {
+    if (!task.result || typeof task.result !== "object" || Array.isArray(task.result)) return;
+    const value = task.result as Record<string, unknown>;
+    if (value.status !== "complete" || !Array.isArray(value.citations)) return;
+    const citations: Array<{
+      sourceId: string;
+      sourceRevision: number;
+      title: string;
+      references: string[];
+    }> = [];
+    let stale = false;
+    for (const raw of value.citations) {
+      try {
+        const citation = jsonObject(raw),
+          sourceId = identifier(citation.sourceId, "sourceId"),
+          sourceRevision = Number(citation.sourceRevision),
+          source = this.options.store.getRecord(this.actor, sourceId),
+          references = Array.isArray(citation.references)
+            ? citation.references.slice(0, 100).map((item) => bounded(item, "reference", 1000))
+            : (() => {
+                throw new HttpError(400, "Invalid stored citation.");
+              })();
+        if (
+          !Number.isSafeInteger(sourceRevision) ||
+          !source ||
+          source.kind !== "source" ||
+          source.scope.type !== scope.type ||
+          source.scope.id !== scope.id ||
+          source.revision !== sourceRevision
+        ) {
+          stale = true;
+          continue;
+        }
+        citations.push({
+          sourceId,
+          sourceRevision,
+          title: bounded(citation.title, "citation title", 2000),
+          references,
+        });
+      } catch {
+        stale = true;
+      }
+    }
+    if (stale)
+      return {
+        stale: true,
+        staleReason: "A cited source changed or is unavailable. Run this task again.",
+      };
+    try {
+      return {
+        result: {
+          status: "complete",
+          summary: bounded(value.summary, "task summary", 100_000),
+          citations,
+          omitted: Number.isSafeInteger(value.omitted) ? value.omitted : 0,
+          ...(value.reason === "no_current_sources" ? { reason: value.reason } : {}),
+        },
+        stale: false,
+      };
+    } catch {
+      return;
+    }
   }
   private async build(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = jsonObject(await this.body(request)),
@@ -1036,6 +1314,7 @@ export class LifeHttpServer {
         );
       }
     else throw new HttpError(503, "Custom plugin building is unavailable.");
+    this.recheckOwner(owner(scope));
     this.send(response, 201, serializePlugin(plugin));
   }
   private pluginView(response: ServerResponse, path: string): void {
@@ -1062,6 +1341,11 @@ frame.srcdoc=new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(enco
     response.statusCode = 200;
     response.end(html);
   }
+  private pluginHistory(response: ServerResponse, path: string): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-2)!)),
+      found = this.findPlugin(id);
+    this.send(response, 200, { revisions: this.options.plugins.history(found.owner, id) });
+  }
   private async pluginAction(
     request: IncomingMessage,
     response: ServerResponse,
@@ -1086,11 +1370,14 @@ frame.srcdoc=new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(enco
               id: scopeId.join(":"),
             }),
       );
+      this.recheckOwner(found.owner);
     } else {
       this.options.plugins.authorize(found.owner, id, "storage");
       const payload = jsonObject(body.payload ?? {}),
         key = identifier(payload.key, "storage key"),
-        storageKey = found.owner.startsWith("group:") ? `user:${this.actor.userId}:${key}` : key;
+        storageKey = found.owner.startsWith("group:")
+          ? groupStorageKey(this.actor.userId, key)
+          : key;
       result =
         action === "storage.get"
           ? this.options.plugins.storageGet(found.owner, id, storageKey)
@@ -1137,6 +1424,7 @@ frame.srcdoc=new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(enco
           if (error instanceof PluginError) throw error;
           throw new HttpError(422, "Connect a local model to revise this app.");
         });
+    this.recheckOwner(found.owner);
     this.send(response, 200, serializePlugin(plugin));
   }
   private pluginDelete(response: ServerResponse, path: string): void {

@@ -54,6 +54,27 @@ export interface SearchResult {
   reference?: string;
   score: number;
 }
+export interface LifeRecordSummary {
+  id: string;
+  kind: LifeRecordKind;
+  title: string;
+  hasMoreTitle: boolean;
+  scope: LifeScope;
+  data: Record<string, unknown>;
+  bodyPreview?: string;
+  hasMoreBody: boolean;
+  relationshipCount: number;
+  relatedCompleted: boolean;
+  provenanceStatus: "valid" | "needs-review";
+  revision: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface LifeRecordSummaryPage {
+  items: LifeRecordSummary[];
+  hasMore: boolean;
+  nextCursor?: string;
+}
 export interface ImportItem {
   key: string;
   kind: Extract<LifeRecordKind, "event" | "holiday" | "contact" | "birthday">;
@@ -99,6 +120,33 @@ const MAX_TEXT = 100_000,
   MAX_RECORDS_PER_SCOPE = 10_000,
   MAX_SOURCES_PER_SCOPE = 1_000,
   MAX_CHUNKS_PER_SCOPE = 100_000;
+const SUMMARY_DATA_KEYS = [
+  "date",
+  "dueAt",
+  "startAt",
+  "startsAt",
+  "startDate",
+  "deadline",
+  "nextDate",
+  "month",
+  "day",
+  "timeZone",
+  "completed",
+  "cancelled",
+  "type",
+  "notification",
+  "dismissed",
+  "reminderId",
+  "relatedRecordId",
+  "deliveredAt",
+  "expiresAt",
+  "trainingEligible",
+  "taskId",
+  "format",
+  "enabled",
+  "status",
+  "version",
+] as const;
 const unsafeKeys = new Set(["__proto__", "prototype", "constructor"]);
 const kinds = new Set<string>(LIFE_RECORD_KINDS);
 const formats = new Set<string>(["text", "markdown", "html", "email", "transcript", "binary"]);
@@ -557,6 +605,120 @@ export class LifeStore {
         )
         .all(user, user, ...(requestedKinds ?? []), limit) as Record<string, unknown>[];
     return rows.map((r) => this.record(r));
+  }
+  listRecordSummaries(
+    actor: LifeActor,
+    query: { scope: LifeScope; kinds?: LifeRecordKind[]; limit?: number; cursor?: string },
+  ): LifeRecordSummaryPage {
+    this.actor(actor);
+    const requestedLimit = query.limit ?? 100;
+    if (!Number.isFinite(requestedLimit) || requestedLimit < 1)
+      throw new TypeError("record summary limit is invalid");
+    const scope = this.scope(actor, query.scope),
+      limit = Math.min(500, Math.trunc(requestedLimit)),
+      requestedKinds = query.kinds?.map((kind) => {
+        if (!kinds.has(kind)) throw new TypeError("record kind is invalid");
+        return kind;
+      });
+    if (requestedKinds?.length === 0) return { items: [], hasMore: false };
+    const filter = requestedKinds?.join(",") ?? "*";
+    let cursor: { updatedAt: number; id: string } | undefined;
+    if (query.cursor !== undefined) {
+      try {
+        if (query.cursor.length > 500) throw new Error();
+        const parsed = JSON.parse(Buffer.from(query.cursor, "base64url").toString("utf8")) as {
+          updatedAt?: unknown;
+          id?: unknown;
+          scope?: unknown;
+          filter?: unknown;
+        };
+        if (
+          !Number.isSafeInteger(parsed.updatedAt) ||
+          Number(parsed.updatedAt) < 0 ||
+          parsed.scope !== `${scope.type}:${scope.id}` ||
+          parsed.filter !== filter
+        )
+          throw new Error();
+        cursor = { updatedAt: Number(parsed.updatedAt), id: identifier(parsed.id, "cursor.id") };
+      } catch {
+        throw new TypeError("record cursor is invalid");
+      }
+    }
+    const kindSql = requestedKinds
+        ? ` AND r.kind IN (${requestedKinds.map(() => "?").join(",")})`
+        : "",
+      cursorSql = cursor ? " AND (r.updated_at < ? OR (r.updated_at=? AND r.id < ?))" : "",
+      summaryDataSql = SUMMARY_DATA_KEYS.map(
+        (key, index) =>
+          `json_type(r.data_json,'$.${key}') data_type_${index},substr(CAST(json_extract(r.data_json,'$.${key}') AS TEXT),1,501) data_value_${index}`,
+      ).join(","),
+      rows = this.db
+        .prepare(
+          `SELECT r.id,r.kind,substr(r.title,1,240) title_preview,length(r.title)>240 has_more_title,r.scope_type,r.scope_id,r.revision,r.created_at,r.updated_at,substr(r.body,1,240) body_preview,length(r.body)>240 has_more_body,json_array_length(r.relationships_json) relationship_count,EXISTS(SELECT 1 FROM json_each(r.provenance_json) WHERE json_type(value,'$.invalidatedAt') IS NOT NULL) provenance_invalid,EXISTS(SELECT 1 FROM json_each(r.relationships_json) rel JOIN records target ON target.id=json_extract(rel.value,'$.targetId') WHERE json_extract(rel.value,'$.type')='need' AND target.kind='need' AND target.scope_type=r.scope_type AND target.scope_id=r.scope_id AND (json_extract(target.data_json,'$.completed')=1 OR json_extract(target.data_json,'$.cancelled')=1)) related_completed,${summaryDataSql},substr(CAST(json_extract(r.data_json,'$.metadata.filename') AS TEXT),1,501) metadata_filename,substr(CAST(json_extract(r.data_json,'$.metadata.mimeType') AS TEXT),1,201) metadata_mime_type FROM records r WHERE r.scope_type=? AND r.scope_id=?${kindSql}${cursorSql} ORDER BY r.updated_at DESC,r.id DESC LIMIT ?`,
+        )
+        .all(
+          scope.type,
+          scope.id,
+          ...(requestedKinds ?? []),
+          ...(cursor ? [cursor.updatedAt, cursor.updatedAt, cursor.id] : []),
+          limit + 1,
+        ) as Record<string, unknown>[],
+      hasMore = rows.length > limit,
+      selected = rows.slice(0, limit),
+      items = selected.map((row): LifeRecordSummary => {
+        const data: Record<string, unknown> = {};
+        for (const [index, key] of SUMMARY_DATA_KEYS.entries()) {
+          const type = row[`data_type_${index}`],
+            raw = row[`data_value_${index}`];
+          if (type === "true" || type === "false") data[key] = type === "true";
+          else if ((type === "integer" || type === "real") && Number.isFinite(Number(raw)))
+            data[key] = Number(raw);
+          else if (type === "text" && typeof raw === "string" && raw.length <= 500) data[key] = raw;
+        }
+        const filename = row.metadata_filename,
+          mimeType = row.metadata_mime_type;
+        if (
+          (typeof filename === "string" && filename.length <= 500) ||
+          (typeof mimeType === "string" && mimeType.length <= 200)
+        )
+          data.metadata = {
+            ...(typeof filename === "string" && filename.length <= 500 ? { filename } : {}),
+            ...(typeof mimeType === "string" && mimeType.length <= 200 ? { mimeType } : {}),
+          };
+        return {
+          id: String(row.id),
+          kind: row.kind as LifeRecordKind,
+          title: String(row.title_preview),
+          hasMoreTitle: Boolean(row.has_more_title),
+          scope: { type: row.scope_type as "user" | "group", id: String(row.scope_id) },
+          data,
+          ...(row.body_preview === null ? {} : { bodyPreview: String(row.body_preview) }),
+          hasMoreBody: Boolean(row.has_more_body),
+          relationshipCount: Number(row.relationship_count),
+          relatedCompleted: Boolean(row.related_completed),
+          provenanceStatus: row.provenance_invalid ? "needs-review" : "valid",
+          revision: Number(row.revision),
+          createdAt: Number(row.created_at),
+          updatedAt: Number(row.updated_at),
+        };
+      });
+    const last = items.at(-1);
+    return {
+      items,
+      hasMore,
+      ...(hasMore && last
+        ? {
+            nextCursor: Buffer.from(
+              JSON.stringify({
+                updatedAt: last.updatedAt,
+                id: last.id,
+                scope: `${scope.type}:${scope.id}`,
+                filter,
+              }),
+            ).toString("base64url"),
+          }
+        : {}),
+    };
   }
   updateRecord(
     actor: LifeActor,
@@ -1134,7 +1296,10 @@ export class LifeStore {
     const user = this.actor(actor),
       terms = tokens(text(input.query, "search.query", 1000));
     if (!terms.length) return [];
-    const limit = Math.max(1, Math.min(50, Math.trunc(input.limit ?? 10)));
+    const requestedLimit = input.limit ?? 10;
+    if (!Number.isFinite(requestedLimit) || requestedLimit < 1)
+      throw new TypeError("search.limit is invalid");
+    const limit = Math.min(50, Math.trunc(requestedLimit));
     const scoreSql = terms
       .map(() => "CASE WHEN c.search_text LIKE ? ESCAPE '\\' THEN 1 ELSE 0 END")
       .join("+");

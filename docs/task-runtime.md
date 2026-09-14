@@ -40,8 +40,12 @@ Parent and child tasks share the root task-count and concurrency budget and an e
 
 Watch templates are owner scoped and capped at 1,000 per owner. `listWatches`, `pauseWatch`, `resumeWatch`, and `removeWatch` provide scoped lifecycle controls. Template inputs, capabilities, retry policy, deadlines, and budgets are validated before persistence.
 
+`enqueueWorkflow({ root, children })` atomically creates a root aggregation task and its bounded children. The root depends on every child, while each child belongs to the root for shared budgets, deadline inheritance, and cancellation propagation. A validation failure rolls back the entire tree.
+
 The SQLite store uses a private exclusively owned file, transactions, dispatch compare-and-set, task leases, a stable logical-operation idempotency key, and durable progress. A second coordinator cannot open the live store. On restart, an interrupted external or unsafe handler becomes `unknown` and is not replayed. A task is requeued only when its handler is explicitly `resumable` and the task has an explicit retry policy with attempts remaining. Handlers should reconcile uncertain downstream state before retrying and pass the stable idempotency key to systems that support it.
 
 Inputs and results are limited to 256 KB of JSON, capability and dependency lists are bounded, progress messages are limited to 4 KB, and each task retains at most 1,000 progress rows. Queries return at most 500 tasks. Terminal task records and watch-event deduplication keys expire after 90 days and are capped at 10,000 rows. Active and scheduled work is never removed by retention.
 
 Call `tick()` for deterministic tests or host-driven scheduling. `start()` installs one unref'ed interval, `stop()` clears it and waits for active handlers, and `close()` stops and closes SQLite. A sleeping coordinator cannot deliver a timer; device-local alerts require a native scheduler. The runtime does not provide encryption, cross-device replication, distributed leases, OS notifications, or exactly-once external side effects.
+
+`runNow` advances only active queued or scheduled work. It rejects terminal tasks rather than implying that succeeded, failed, cancelled, expired, or unknown work was repeated. A product-level rerun creates a new task or workflow with fresh inputs, authority checks, idempotency keys, and deadlines.

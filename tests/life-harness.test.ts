@@ -236,6 +236,8 @@ test("model memory writes require a direct non-negated remember request", async 
   try {
     const harness = f.make(model);
     await harness.chat({ actor, scope, message: "Do you remember my name?" });
+    await harness.chat({ actor, scope, message: "Can you remember my name?" });
+    await harness.chat({ actor, scope, message: "Could you remember my name?" });
     await harness.chat({ actor, scope, message: "Don't remember this" });
     assert.equal(f.store.listRecords(actor, { scope, kinds: ["memory"] }).length, 0);
 
@@ -260,9 +262,244 @@ test("background work queues an actual bounded source summary task", async () =>
       .chat({ actor, scope, message: "Summarize tomatoes in the background" });
     assert.equal(response.actions[0]?.status, "queued");
     await f.tasks.tick();
+    await f.tasks.tick();
     const task = f.tasks.get(response.taskIds[0]!, "user:alice")!;
     assert.equal(task.state, "succeeded");
     assert.match(JSON.stringify(task.result), /six hours/);
+    assert.equal((task.result as { citations: unknown[] }).citations.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("background workflow bounds parallel source children and aggregates citations", async () => {
+  const f = await fixture();
+  let activeCalls = 0;
+  let maxActiveCalls = 0;
+  const model: LifeModel = {
+    async plan(request) {
+      activeCalls++;
+      maxActiveCalls = Math.max(maxActiveCalls, activeCalls);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeCalls--;
+      return {
+        reply: request.evidence.map((item) => item.title).join(", "),
+        actions: [],
+      };
+    },
+  };
+  try {
+    for (const title of ["Alpha one", "Alpha two", "Alpha three"])
+      f.store.ingestSource(actor, {
+        title,
+        scope,
+        format: "text",
+        content: `${title} contains project alpha notes.`,
+      });
+    const response = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Summarize project alpha in the background",
+    });
+    await f.tasks.tick();
+    await f.tasks.tick();
+    await f.tasks.tick();
+    const root = f.tasks.get(response.taskIds[0]!, "user:alice")!;
+    assert.equal(root.state, "succeeded");
+    assert.equal((root.result as { citations: unknown[] }).citations.length, 3);
+    assert.equal(maxActiveCalls, 2);
+    assert.equal(f.tasks.list({ owner: "user:alice", parentId: root.id }).length, 3);
+  } finally {
+    await f.close();
+  }
+});
+
+test("explicit summary rerun creates a fresh tree from current source revisions", async () => {
+  const f = await fixture();
+  try {
+    const source = f.store.ingestSource(actor, {
+      title: "Orchid notes",
+      scope,
+      format: "text",
+      content: "Orchids previously needed the old shelf.",
+    });
+    const harness = f.make();
+    const firstResponse = await harness.chat({
+      actor,
+      scope,
+      message: "Summarize orchids in the background",
+    });
+    await f.tasks.tick();
+    await f.tasks.tick();
+    const first = f.tasks.get(firstResponse.taskIds[0]!, "user:alice")!;
+    assert.match(JSON.stringify(first.result), /old shelf/);
+
+    const updated = f.store.updateSource(actor, source.id, source.revision, {
+      content: "Orchids now need the bright window.",
+    });
+    f.setNow(Date.UTC(2026, 8, 13, 16) + 10_000);
+    const rerun = harness.rerunBackgroundSummary({ actor, scope, taskId: first.id });
+    assert.notEqual(rerun.id, first.id);
+    assert.ok(rerun.deadlineAt! > first.deadlineAt!);
+    const children = f.tasks.list({ owner: "user:alice", parentId: rerun.id });
+    assert.equal(
+      (children[0]!.input as { sourceRevision: number }).sourceRevision,
+      updated.revision,
+    );
+    await f.tasks.tick();
+    await f.tasks.tick();
+    const completed = f.tasks.get(rerun.id, "user:alice")!;
+    assert.match(JSON.stringify(completed.result), /bright window/);
+    assert.doesNotMatch(JSON.stringify(completed.result), /old shelf/);
+    assert.match(JSON.stringify(f.tasks.get(first.id, "user:alice")!.result), /old shelf/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("background summaries discard a source deleted while the model is running", async () => {
+  const f = await fixture();
+  let started!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => (started = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const model: LifeModel = {
+    async plan(request) {
+      assert.equal(request.memories, undefined);
+      assert.equal(request.adoptedGuidance, undefined);
+      started();
+      await blocked;
+      return { reply: "SECRET STALE TEXT", actions: [] };
+    },
+  };
+  try {
+    const source = f.store.ingestSource(actor, {
+      title: "Temporary notes",
+      scope,
+      format: "text",
+      content: "orchids need indirect light",
+    });
+    const response = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Summarize orchids in the background",
+    });
+    const ticking = f.tasks.tick();
+    await entered;
+    f.store.deleteRecord(actor, source.id, source.revision);
+    release();
+    await ticking;
+    await f.tasks.tick();
+    const root = f.tasks.get(response.taskIds[0]!, "user:alice")!;
+    assert.equal(root.state, "succeeded");
+    assert.doesNotMatch(JSON.stringify(root.result), /SECRET STALE TEXT|indirect light/);
+    assert.deepEqual((root.result as { citations: unknown[] }).citations, []);
+    assert.deepEqual(root.result, {
+      status: "complete",
+      summary: "No current source passages remain for this summary.",
+      citations: [],
+      omitted: 1,
+      reason: "no_current_sources",
+    });
+  } finally {
+    await f.close();
+  }
+});
+
+test("background summaries discard group sources when access is revoked in flight", async () => {
+  const f = await fixture();
+  let started!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => (started = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const model: LifeModel = {
+    async plan() {
+      started();
+      await blocked;
+      return { reply: "REVOKED GROUP TEXT", actions: [] };
+    },
+  };
+  const groupScope = { type: "group", id: "team" } as const;
+  try {
+    f.store.createGroup(actor, { id: "team", name: "Team" });
+    f.store.setGroupMember(actor, "team", { userId: "bob", role: "owner" });
+    f.store.ingestSource(actor, {
+      title: "Team notes",
+      scope: groupScope,
+      format: "text",
+      content: "launch planning is confidential",
+    });
+    const response = await f.make(model).chat({
+      actor,
+      scope: groupScope,
+      message: "Summarize launch planning in the background",
+    });
+    const ticking = f.tasks.tick();
+    await entered;
+    f.store.setGroupMember({ userId: "bob" }, "team", {
+      userId: "alice",
+      remove: true,
+    });
+    release();
+    await ticking;
+    await f.tasks.tick();
+    const root = f.tasks.get(response.taskIds[0]!, "group:team")!;
+    assert.doesNotMatch(JSON.stringify(root.result), /REVOKED GROUP TEXT|confidential/);
+    assert.deepEqual((root.result as { citations: unknown[] }).citations, []);
+  } finally {
+    await f.close();
+  }
+});
+
+test("context invalidation clears all conversations for one actor and scope", async () => {
+  const f = await fixture();
+  const histories: number[] = [];
+  const model: LifeModel = {
+    async plan(request) {
+      histories.push(request.history.length);
+      return { reply: "ok", actions: [] };
+    },
+  };
+  try {
+    const harness = f.make(model);
+    await harness.chat({ actor, scope, conversationId: "one", message: "hello" });
+    await harness.chat({ actor, scope, conversationId: "one", message: "hello again" });
+    harness.invalidateContext(actor, scope);
+    await harness.chat({ actor, scope, conversationId: "one", message: "after deletion" });
+    assert.deepEqual(histories, [0, 2, 0]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("context invalidation discards an in-flight model reply without retaining it", async () => {
+  const f = await fixture();
+  let started!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => (started = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const histories: number[] = [];
+  let calls = 0;
+  const model: LifeModel = {
+    async plan(request) {
+      histories.push(request.history.length);
+      if (calls++ === 0) {
+        started();
+        await blocked;
+      }
+      return { reply: "STALE MODEL REPLY", actions: [] };
+    },
+  };
+  try {
+    const harness = f.make(model);
+    const pending = harness.chat({ actor, scope, conversationId: "changing", message: "help me" });
+    await entered;
+    harness.invalidateContext(actor, scope);
+    release();
+    const discarded = await pending;
+    assert.doesNotMatch(discarded.reply, /STALE MODEL REPLY/);
+    await harness.chat({ actor, scope, conversationId: "changing", message: "try again" });
+    assert.deepEqual(histories, [0, 0]);
   } finally {
     await f.close();
   }
@@ -376,6 +613,70 @@ test("model context includes scoped settings and valid memories only", async () 
   }
 });
 
+test("explicit teaching creates controllable guidance for model context", async () => {
+  const f = await fixture();
+  let guidance: Parameters<LifeModel["plan"]>[0]["adoptedGuidance"];
+  const model: LifeModel = {
+    async plan(request) {
+      guidance = request.adoptedGuidance;
+      return { reply: "ok", actions: [] };
+    },
+  };
+  try {
+    const harness = f.make(model);
+    const taught = await harness.chat({
+      actor,
+      scope,
+      message: "Teach Ellie: Use short sentences.",
+    });
+    const guide = taught.records[0]!;
+    await harness.chat({ actor, scope, message: "Help me plan something" });
+    assert.equal(guidance?.[0]?.instructions, "Use short sentences.");
+
+    await harness.chat({ actor, scope, message: `Pause guidance ${guide.title}` });
+    await harness.chat({ actor, scope, message: "Help me plan another thing" });
+    assert.deepEqual(guidance, []);
+    const listed = await harness.chat({ actor, scope, message: "List guidance." });
+    assert.match(listed.reply, /paused/);
+    await harness.chat({ actor, scope, message: `Resume guidance ${guide.title}` });
+    await harness.chat({ actor, scope, message: "Help me once more" });
+    assert.equal(
+      (guidance as Array<{ instructions: string }> | undefined)?.[0]?.instructions,
+      "Use short sentences.",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("source guidance requires direct adoption and an unchanged source revision", async () => {
+  const f = await fixture();
+  let guidance: Parameters<LifeModel["plan"]>[0]["adoptedGuidance"];
+  const model: LifeModel = {
+    async plan(request) {
+      guidance = request.adoptedGuidance;
+      return { reply: "ok", actions: [] };
+    },
+  };
+  try {
+    const source = f.store.ingestSource(actor, {
+      title: "Writing guide.",
+      scope,
+      format: "text",
+      content: "Use short concrete sentences.",
+    });
+    const harness = f.make(model);
+    await harness.chat({ actor, scope, message: "Use Writing guide. as guidance." });
+    await harness.chat({ actor, scope, message: "Draft a note" });
+    assert.equal(guidance?.[0]?.instructions, "Use short concrete sentences.");
+    f.store.updateRecord(actor, source.id, source.revision, { body: "Use long sentences." });
+    await harness.chat({ actor, scope, message: "Draft another note" });
+    assert.deepEqual(guidance, []);
+  } finally {
+    await f.close();
+  }
+});
+
 test("long model questions bound retrieval without truncating the prompt", async () => {
   const f = await fixture();
   let received = "";
@@ -455,6 +756,95 @@ test("custom plugin revisions keep their capability boundary and saved version",
     assert.equal(typeof revisionInput, "object");
     assert.match(JSON.stringify(revisionInput), /Revision 1/);
     assert.equal(f.plugins.rollback("user:alice", revised.id, revised.version, 1).version, 3);
+  } finally {
+    await f.close();
+  }
+});
+
+test("group revocation during model build prevents plugin installation", async () => {
+  const f = await fixture();
+  let started!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => (started = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const groupScope = { type: "group", id: "builders" } as const;
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      started();
+      await blocked;
+      return {
+        name: "Shared tool",
+        description: "Shared",
+        html: "<!doctype html><title>Shared</title>",
+      };
+    },
+  };
+  try {
+    f.store.createGroup(actor, { id: "builders", name: "Builders" });
+    f.store.setGroupMember(actor, "builders", { userId: "bob", role: "owner" });
+    const pending = f.make(model).buildPlugin({ actor, scope: groupScope, request: "custom tool" });
+    await entered;
+    f.store.setGroupMember({ userId: "bob" }, "builders", {
+      userId: "alice",
+      remove: true,
+    });
+    release();
+    await assert.rejects(pending, /member|access/i);
+    assert.deepEqual(f.plugins.list("group:builders"), []);
+  } finally {
+    await f.close();
+  }
+});
+
+test("group revocation during model revision preserves the active plugin", async () => {
+  const f = await fixture();
+  let started!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>((resolve) => (started = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const groupScope = { type: "group", id: "editors" } as const;
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      started();
+      await blocked;
+      return {
+        name: "Changed",
+        description: "Changed",
+        html: "<!doctype html><title>Changed</title>",
+      };
+    },
+  };
+  try {
+    f.store.createGroup(actor, { id: "editors", name: "Editors" });
+    f.store.setGroupMember(actor, "editors", { userId: "bob", role: "owner" });
+    const plugin = f.plugins.install("group:editors", {
+      name: "Original",
+      description: "Original",
+      kind: "custom",
+      capabilities: ["storage"],
+      html: "<!doctype html><title>Original</title>",
+    });
+    const pending = f.make(model).revisePlugin({
+      actor,
+      scope: groupScope,
+      id: plugin.id,
+      request: "change it",
+      expectedVersion: plugin.version,
+    });
+    await entered;
+    f.store.setGroupMember({ userId: "bob" }, "editors", {
+      userId: "alice",
+      remove: true,
+    });
+    release();
+    await assert.rejects(pending, /member|access/i);
+    assert.equal(f.plugins.get("group:editors", plugin.id).version, 1);
   } finally {
     await f.close();
   }

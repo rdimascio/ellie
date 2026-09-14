@@ -9,6 +9,7 @@ import { inferTone, LifeStore } from "../../life-core/src/index.ts";
 import { ProactivityEngine } from "../../life-context/src/index.ts";
 import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src/index.ts";
 import { builtInManifest } from "../../life-plugins/src/index.ts";
+import { LifeTeaching } from "../../life-teaching/src/index.ts";
 import type { OwnerScope, TaskRecord } from "../../task-runtime/src/index.ts";
 import { nextOccurrence, TaskRuntime } from "../../task-runtime/src/index.ts";
 import type { LifeModel, LifeModelPlan } from "./model.ts";
@@ -22,6 +23,7 @@ export interface LifeHarnessOptions {
   model?: LifeModel;
   now?: () => number;
   context?: ProactivityEngine;
+  teaching?: LifeTeaching;
 }
 export interface ChatRequest {
   actor: LifeActor;
@@ -43,6 +45,12 @@ export interface ChatResponse {
 }
 export interface LifeHarness {
   chat(request: ChatRequest): Promise<ChatResponse>;
+  invalidateContext(actor: LifeActor, scope: LifeScope): void;
+  rerunBackgroundSummary(request: {
+    actor: LifeActor;
+    scope: LifeScope;
+    taskId: string;
+  }): TaskRecord;
   buildPlugin(request: {
     actor: LifeActor;
     scope: LifeScope;
@@ -79,7 +87,7 @@ const clean = (value: string): string =>
     .trim();
 const retrievalQuery = (value: string): string => value.trim().slice(0, 1_000);
 const explicitlyRequestsRemembering = (value: string): boolean =>
-  /^(?:(?:please\s+)?remember(?:\s+that)?|(?:can|could|would|will)\s+you\s+(?:please\s+)?remember(?:\s+that)?)\s+\S/i.test(
+  /^(?:(?:please\s+)?remember(?:\s+that)?|(?:can|could|would|will)\s+you\s+(?:please\s+)?remember\s+that)\s+\S/i.test(
     value.trim(),
   );
 const titleCase = (value: string): string =>
@@ -89,7 +97,13 @@ const active = (record: LifeRecord): boolean =>
   record.data.cancelled !== true &&
   record.provenance.every((item) => item.invalidatedAt === undefined);
 
-function modelContext(store: LifeStore, actor: LifeActor, scope: LifeScope, message: string) {
+function modelContext(
+  store: LifeStore,
+  teaching: LifeTeaching,
+  actor: LifeActor,
+  scope: LifeScope,
+  message: string,
+) {
   const terms = new Set(message.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
   const memories = store
     .listRecords(actor, { scope, kinds: ["memory"], limit: 100 })
@@ -114,6 +128,7 @@ function modelContext(store: LifeStore, actor: LifeActor, scope: LifeScope, mess
     preferences: store.resolveSettings(actor, scope.type === "group" ? { groupId: scope.id } : {})
       .values,
     memories,
+    adoptedGuidance: teaching.resolve(actor, scope),
     tone: inferTone(message),
   };
 }
@@ -223,7 +238,9 @@ function findNamed(
 export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   const now = options.now ?? Date.now;
   const context = options.context ?? new ProactivityEngine(options.store, now);
+  const teaching = options.teaching ?? new LifeTeaching(options.store, now);
   const sessions = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
+  const contextGenerations = new Map<string, number>();
   registerHandlers(options.store, options.tasks, options.model, now);
 
   const sessionId = (actor: LifeActor, scope: LifeScope, id: string) => {
@@ -236,6 +253,78 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     history.push({ role, content: content.slice(0, 8000) });
     sessions.set(key, history.slice(-12));
     if (sessions.size > 100) sessions.delete(sessions.keys().next().value!);
+  };
+  const contextKey = (actor: LifeActor, scope: LifeScope) =>
+    `${actor.userId}\0${scope.type}:${scope.id}`;
+  const invalidateContext = (actor: LifeActor, scope: LifeScope) => {
+    options.store.listRecords(actor, { scope, limit: 1 });
+    const generationKey = contextKey(actor, scope);
+    contextGenerations.set(generationKey, (contextGenerations.get(generationKey) ?? 0) + 1);
+    const prefix = `${generationKey}\0`;
+    for (const key of sessions.keys()) if (key.startsWith(prefix)) sessions.delete(key);
+  };
+  const enqueueBackgroundSummary = (
+    actor: LifeActor,
+    scope: LifeScope,
+    query: string,
+  ): TaskRecord | undefined => {
+    const candidates = options.store.search(actor, {
+      query: retrievalQuery(query),
+      scope,
+      limit: 20,
+    });
+    const sources = [...new Set(candidates.map((item) => item.sourceId))]
+      .slice(0, 4)
+      .map((sourceId) => options.store.getRecord(actor, sourceId))
+      .filter(
+        (source): source is LifeRecord =>
+          source?.kind === "source" &&
+          source.scope.type === scope.type &&
+          source.scope.id === scope.id,
+      );
+    if (!sources.length) return undefined;
+    const deadlineAt = now() + 30_000;
+    return options.tasks.enqueueWorkflow({
+      root: {
+        owner: scopeOwner(scope),
+        handler: "knowledge.aggregate",
+        input: { actor, scope, query },
+        allowedCapabilities: ["life.records.read"],
+        budget: { maxTasks: 5, maxConcurrency: 2, maxRuntimeMs: 10_000 },
+        deadlineAt,
+      },
+      children: sources.map((source) => ({
+        handler: "knowledge.summarize-source",
+        input: {
+          actor,
+          scope,
+          query,
+          sourceId: source.id,
+          sourceRevision: source.revision,
+        },
+        deadlineAt,
+      })),
+    }).root;
+  };
+  const rerunBackgroundSummary = (input: {
+    actor: LifeActor;
+    scope: LifeScope;
+    taskId: string;
+  }): TaskRecord => {
+    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
+    const previous = options.tasks.get(input.taskId, scopeOwner(input.scope));
+    if (
+      !previous ||
+      previous.handler !== "knowledge.aggregate" ||
+      !["succeeded", "failed", "cancelled", "expired", "unknown"].includes(previous.state)
+    )
+      throw new Error("A terminal background summary is required for an explicit rerun.");
+    const previousInput = previous.input as Record<string, unknown>;
+    if (typeof previousInput?.query !== "string")
+      throw new Error("The prior background summary query is unavailable.");
+    const task = enqueueBackgroundSummary(input.actor, input.scope, clean(previousInput.query));
+    if (!task) throw new Error("No current scoped sources match the prior summary query.");
+    return task;
   };
 
   async function buildPlugin(input: {
@@ -252,6 +341,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         "A local model is required to build this custom app. I can build an arcade or MLB view without one.",
       );
     const generated = await options.model.build(input.request);
+    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
     return options.plugins.install(scopeOwner(input.scope), {
       ...generated,
       kind: "custom",
@@ -293,6 +383,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         html: previous.html!,
       },
     });
+    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
     return options.plugins.update(owner, input.id, input.expectedVersion, {
       ...generated,
       kind: "custom",
@@ -344,6 +435,86 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       typeof settings.values.timeZone === "string"
         ? settings.values.timeZone
         : Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const teachDirect = /^teach ellie:\s*(.+)$/is.exec(message);
+    if (teachDirect) {
+      const instructions = teachDirect[1]!.trim();
+      if (instructions.length > 4_000)
+        return finish("Please shorten that guidance to 4,000 characters or fewer.");
+      const guide = teaching.create(request.actor, {
+        scope: request.scope,
+        title: instructions.slice(0, 80),
+        instructions,
+        enabled: true,
+      });
+      records.push(guide.record);
+      invalidateContext(request.actor, request.scope);
+      actions.push({ label: `Enable guidance: ${guide.record.title}`, status: "completed" });
+      return finish(`I’ll use “${guide.record.title}” as guidance in this space.`);
+    }
+    const sourceGuidance = /^use\s+(.+?)\s+as guidance[.!?]?$/i.exec(message);
+    if (sourceGuidance) {
+      const needle = clean(sourceGuidance[1]!).toLowerCase();
+      const matches = all().filter(
+        (record) => record.kind === "source" && clean(record.title).toLowerCase() === needle,
+      );
+      if (matches.length !== 1)
+        return finish(
+          matches.length
+            ? "That title matches more than one source. Please rename one first."
+            : `I couldn’t find a source named “${clean(sourceGuidance[1]!)}” in this space.`,
+        );
+      const source = matches[0]!;
+      if (!source.body || source.body.length > 4_000)
+        return finish(
+          "That source is too long to adopt safely. Use “Teach Ellie: …” with the specific instruction text you want.",
+        );
+      const guide = teaching.create(request.actor, {
+        scope: request.scope,
+        title: `${source.title} guidance`.slice(0, 200),
+        instructions: source.body,
+        sources: [{ id: source.id, revision: source.revision }],
+        enabled: true,
+      });
+      records.push(guide.record);
+      invalidateContext(request.actor, request.scope);
+      actions.push({ label: `Enable guidance: ${guide.record.title}`, status: "completed" });
+      return finish(`I adopted “${source.title}” as versioned guidance for this space.`);
+    }
+    if (/^(?:list|show)(?: my)? guidance[.!?]?$/i.test(message)) {
+      const guides = teaching.list(request.actor, request.scope);
+      return finish(
+        guides.length
+          ? guides.map((guide) => `${guide.record.title} — ${guide.status}`).join("\n")
+          : "There is no adopted guidance in this space.",
+      );
+    }
+    const toggleGuidance = /^(pause|resume) guidance\s+(.+?)[.!?]?$/i.exec(message);
+    if (toggleGuidance) {
+      const needle = clean(toggleGuidance[2]!).toLowerCase();
+      const matches = teaching
+        .list(request.actor, request.scope)
+        .filter((guide) => clean(guide.record.title).toLowerCase() === needle);
+      if (matches.length !== 1)
+        return finish(
+          matches.length
+            ? "That name matches more than one guide. Please rename one first."
+            : `I couldn’t find guidance named “${clean(toggleGuidance[2]!)}”.`,
+        );
+      const enabled = toggleGuidance[1]!.toLowerCase() === "resume";
+      const guide = teaching.setEnabled(
+        request.actor,
+        matches[0]!.record.id,
+        matches[0]!.record.revision,
+        enabled,
+      );
+      records.push(guide.record);
+      invalidateContext(request.actor, request.scope);
+      actions.push({
+        label: `${enabled ? "Resume" : "Pause"} guidance: ${guide.record.title}`,
+        status: "completed",
+      });
+      return finish(`${enabled ? "Resumed" : "Paused"} “${guide.record.title}”.`);
+    }
     const placeReminder = /^remind me to\s+(.+?)\s+when i(?:'m| am) at\s+(.+)$/i.exec(message);
     if (placeReminder) {
       const storeName = clean(placeReminder[2]!);
@@ -728,8 +899,11 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         body: record.kind === "memory" ? value : record.body,
       });
       records.push(updated);
+      invalidateContext(request.actor, request.scope);
       actions.push({ label: `Correct ${record.title}`, status: "completed" });
-      return finish(`Updated “${record.title}” to “${value}”.`);
+      return finish(
+        record.kind === "memory" ? "Updated that memory." : `Updated “${record.title}”.`,
+      );
     }
 
     const forget = /^(?:please\s+)?forget\s+(.+)$/i.exec(message);
@@ -741,8 +915,9 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
       if (!record) return finish(`I couldn’t find “${clean(forget[1]!)}” in this space.`);
       options.store.deleteRecord(request.actor, record.id, record.revision);
-      actions.push({ label: `Forget ${record.title}`, status: "completed" });
-      return finish(`Forgot “${record.title}”.`);
+      invalidateContext(request.actor, request.scope);
+      actions.push({ label: "Forget saved item", status: "completed" });
+      return finish("Forgot that saved item.");
     }
 
     const completion = /^(complete|cancel)\s+(.+)$/i.exec(message);
@@ -891,12 +1066,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     );
     if (background) {
       const query = clean(background[1]!);
-      const task = options.tasks.enqueue({
-        owner: scopeOwner(request.scope),
-        handler: "knowledge.summarize",
-        input: { actor: request.actor, scope: request.scope, query },
-        budget: { maxTasks: 4, maxConcurrency: 2, maxRuntimeMs: 30_000 },
-      });
+      const task = enqueueBackgroundSummary(request.actor, request.scope, query);
+      if (!task) return finish(`I couldn't find a scoped source to summarize for “${query}”.`);
       tasks.push(task);
       actions.push({ label: `Summarize ${query}`, status: "queued" });
       return finish(
@@ -954,6 +1125,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
           ...(item.reference ? { reference: item.reference } : {}),
         })),
       );
+      const generationKey = contextKey(request.actor, request.scope);
+      const generation = contextGenerations.get(generationKey) ?? 0;
       const plan = await options.model.plan({
         message,
         evidence: found.map((item) => ({
@@ -963,8 +1136,18 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
           ...(item.reference ? { reference: item.reference } : {}),
         })),
         history: sessions.get(conversationKey)?.slice(0, -1) ?? [],
-        ...modelContext(options.store, request.actor, request.scope, message),
+        ...modelContext(options.store, teaching, request.actor, request.scope, message),
       });
+      if ((contextGenerations.get(generationKey) ?? 0) !== generation)
+        return {
+          reply:
+            "The saved context changed while I was answering. Please ask again so I can use the current version.",
+          conversationId,
+          actions: [],
+          records: [],
+          taskIds: [],
+          evidence: [],
+        };
       return applyModelPlan(
         plan,
         request,
@@ -982,7 +1165,13 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       `${tone.tone === "frustrated" ? "I hear the frustration. " : ""}I can remember or correct facts, set reminders and timers, track birthdays and needs, search your sources, show today’s agenda, record feedback, queue source summaries, and build an arcade or MLB view. Try “remember that I prefer mornings” or “remind me in 20 minutes to check the oven.”`,
     );
   }
-  return { chat, buildPlugin, revisePlugin };
+  return {
+    chat,
+    invalidateContext,
+    rerunBackgroundSummary,
+    buildPlugin,
+    revisePlugin,
+  };
 }
 
 function scheduleReminder(
@@ -998,6 +1187,32 @@ function scheduleReminder(
     input: { recordId: record.id, scope, userId: actor.userId },
     schedule: { kind: "once", at: dueAt },
   });
+}
+
+type SourceSummaryInput = {
+  actor: LifeActor;
+  scope: LifeScope;
+  query: string;
+  sourceId: string;
+  sourceRevision: number;
+};
+type SourceSummaryResult = {
+  status: "complete" | "skipped";
+  sourceId: string;
+  sourceRevision: number;
+  title?: string;
+  summary?: string;
+  references?: string[];
+  reason?: string;
+};
+function currentSource(store: LifeStore, input: SourceSummaryInput): LifeRecord | undefined {
+  const source = store.getRecord(input.actor, input.sourceId);
+  return source?.kind === "source" &&
+    source.revision === input.sourceRevision &&
+    source.scope.type === input.scope.type &&
+    source.scope.id === input.scope.id
+    ? source
+    : undefined;
 }
 
 function registerHandlers(
@@ -1057,31 +1272,63 @@ function registerHandlers(
       ["delivered", "skipped"].includes(String((result as { status?: unknown }).status)),
   });
   register({
-    name: "knowledge.summarize",
+    name: "knowledge.summarize-source",
     requiredCapabilities: ["life.records.read"],
     resumable: true,
     async run(context, raw) {
-      const input = raw as {
-        actor: LifeActor;
-        scope: LifeScope;
-        query: string;
-      };
-      const found = store.search(input.actor, {
-        query: retrievalQuery(input.query),
-        scope: input.scope,
-        limit: 10,
-      });
+      const input = raw as SourceSummaryInput;
+      if (!currentSource(store, input))
+        return {
+          status: "skipped",
+          sourceId: input.sourceId,
+          sourceRevision: input.sourceRevision,
+          reason: "source_unavailable",
+        } satisfies SourceSummaryResult;
+      const found = store
+        .search(input.actor, {
+          query: retrievalQuery(input.query),
+          scope: input.scope,
+          limit: 20,
+        })
+        .filter((item) => item.sourceId === input.sourceId)
+        .slice(0, 5);
       context.progress({
-        message: `Found ${found.length} source passages`,
+        message: `Found ${found.length} passages in one source`,
         current: found.length,
         total: found.length,
       });
-      if (!model)
+      const beforeResult = currentSource(store, input);
+      if (!beforeResult)
+        return {
+          status: "skipped",
+          sourceId: input.sourceId,
+          sourceRevision: input.sourceRevision,
+          reason: "source_unavailable",
+        } satisfies SourceSummaryResult;
+      const references = [
+        ...new Set(found.flatMap((item) => (item.reference ? [item.reference] : []))),
+      ];
+      if (!model) {
+        const summary = found
+          .map((item) => item.text)
+          .join("\n")
+          .slice(0, 24_000);
+        if (!currentSource(store, input))
+          return {
+            status: "skipped",
+            sourceId: input.sourceId,
+            sourceRevision: input.sourceRevision,
+            reason: "source_unavailable",
+          } satisfies SourceSummaryResult;
         return {
           status: "complete",
-          summary: found.map((item) => `${item.sourceTitle}: ${item.text}`).join("\n"),
-          sources: found.map((item) => item.sourceId),
-        };
+          sourceId: input.sourceId,
+          sourceRevision: input.sourceRevision,
+          title: beforeResult.title,
+          summary,
+          references,
+        } satisfies SourceSummaryResult;
+      }
       const plan = await model.plan(
         {
           message: `Summarize: ${input.query}`,
@@ -1092,14 +1339,125 @@ function registerHandlers(
             ...(item.reference ? { reference: item.reference } : {}),
           })),
           history: [],
-          ...modelContext(store, input.actor, input.scope, input.query),
+          tone: inferTone(input.query),
         },
         context.signal,
       );
+      const afterModel = currentSource(store, input);
+      if (!afterModel)
+        return {
+          status: "skipped",
+          sourceId: input.sourceId,
+          sourceRevision: input.sourceRevision,
+          reason: "source_unavailable",
+        } satisfies SourceSummaryResult;
       return {
         status: "complete",
-        summary: plan.reply,
-        sources: found.map((item) => item.sourceId),
+        sourceId: input.sourceId,
+        sourceRevision: input.sourceRevision,
+        title: afterModel.title,
+        summary: plan.reply.slice(0, 24_000),
+        references,
+      } satisfies SourceSummaryResult;
+    },
+    checkOutcome: (_context, result) =>
+      ["complete", "skipped"].includes(String((result as { status?: unknown }).status)),
+  });
+  register({
+    name: "knowledge.aggregate",
+    requiredCapabilities: ["life.records.read"],
+    resumable: true,
+    async run(context, raw) {
+      const input = raw as { actor: LifeActor; scope: LifeScope; query: string };
+      const children = tasks.list({
+        owner: context.task.owner,
+        parentId: context.task.id,
+        limit: 64,
+      });
+      const available = children
+        .filter((child) => child.state === "succeeded" && child.outcomeVerified)
+        .map((child) => child.result as SourceSummaryResult)
+        .filter((result) => {
+          if (result.status !== "complete" || !result.summary) return false;
+          return Boolean(
+            currentSource(store, {
+              actor: input.actor,
+              scope: input.scope,
+              query: input.query,
+              sourceId: result.sourceId,
+              sourceRevision: result.sourceRevision,
+            }),
+          );
+        });
+      const citations = available.map((result) => ({
+        sourceId: result.sourceId,
+        sourceRevision: result.sourceRevision,
+        title: result.title!,
+        references: result.references ?? [],
+      }));
+      let summary = available.map((result) => `${result.title}: ${result.summary}`).join("\n\n");
+      if (model && available.length) {
+        const plan = await model.plan(
+          {
+            message: `Combine these source summaries for: ${input.query}`,
+            evidence: available.map((result) => ({
+              sourceId: result.sourceId,
+              title: result.title!,
+              text: result.summary!,
+            })),
+            history: [],
+            tone: inferTone(input.query),
+          },
+          context.signal,
+        );
+        const allStillCurrent = available.every((result) =>
+          currentSource(store, {
+            actor: input.actor,
+            scope: input.scope,
+            query: input.query,
+            sourceId: result.sourceId,
+            sourceRevision: result.sourceRevision,
+          }),
+        );
+        if (allStillCurrent) summary = plan.reply;
+        else {
+          const currentIds = new Set(
+            available
+              .filter((result) =>
+                currentSource(store, {
+                  actor: input.actor,
+                  scope: input.scope,
+                  query: input.query,
+                  sourceId: result.sourceId,
+                  sourceRevision: result.sourceRevision,
+                }),
+              )
+              .map((result) => result.sourceId),
+          );
+          summary = available
+            .filter((result) => currentIds.has(result.sourceId))
+            .map((result) => `${result.title}: ${result.summary}`)
+            .join("\n\n");
+          citations.splice(
+            0,
+            citations.length,
+            ...citations.filter((item) => currentIds.has(item.sourceId)),
+          );
+        }
+      }
+      context.progress({
+        message: `Aggregated ${citations.length} current sources`,
+        current: citations.length,
+        total: children.length,
+      });
+      return {
+        status: "complete",
+        summary: citations.length
+          ? summary.slice(0, 64_000)
+          : "No current source passages remain for this summary.",
+        citations,
+        omitted: children.length - citations.length,
+        ...(citations.length ? {} : { reason: "no_current_sources" }),
       };
     },
     checkOutcome: (_context, result) => (result as { status?: unknown }).status === "complete",

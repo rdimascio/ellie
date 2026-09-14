@@ -46,6 +46,14 @@ function ownerScope(value: string): string {
     throw new PluginError("invalid");
   return value;
 }
+/** Encoded identities keep a user ID containing ':' distinct from another user's storage key. */
+export function groupStoragePrefix(userId: string): string {
+  ownerScope(`user:${identifier(userId)}`);
+  return `user64:${Buffer.from(userId, "utf8").toString("base64url")}:`;
+}
+export function groupStorageKey(userId: string, key: string): string {
+  return identifier(`${groupStoragePrefix(userId)}${identifier(key)}`);
+}
 function bounded(value: unknown, max: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > max)
     throw new PluginError("invalid");
@@ -267,7 +275,9 @@ export class PluginStore {
     if (!json || Buffer.byteLength(json) > 16_384) throw new PluginError("invalid");
     if (
       plugin.kind === "arcade" &&
-      (key === "highScore" || (key.startsWith("user:") && key.endsWith(":highScore")))
+      (key === "highScore" ||
+        (key.startsWith("user:") && key.endsWith(":highScore")) ||
+        /^user64:[A-Za-z0-9_-]+:highScore$/.test(key))
     ) {
       if (!Number.isSafeInteger(value) || Number(value) < 0 || Number(value) > 1_000_000)
         throw new PluginError("invalid");

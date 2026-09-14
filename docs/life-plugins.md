@@ -42,7 +42,7 @@ Requests are `{id, method, key?, value?}`. Replies are `{id, ok: true, result}` 
 | `storage.set`  | `storage`           | Stored value, bounded to 16 KiB and 128 keys per extension.   |
 | `mlb.snapshot` | `mlb.read`          | Normalized standings and games with freshness/error metadata. |
 
-Arcade scores use a user-specific key even in a group-owned extension. The host accepts only bounded nonnegative integer high scores and retains the maximum. This is personal persistence, not an anti-cheat competitive leaderboard.
+Arcade scores use a user-specific key even in a group-owned extension. The host uses `groupStorageKey(userId, key)` with an encoded identity prefix so a colon in a user ID cannot collide with another user's key. The host accepts only bounded nonnegative integer high scores and retains the maximum. This is personal persistence, not an anti-cheat competitive leaderboard. Earlier unreleased prototype group keys are not automatically reinterpreted, because their raw identity prefixes can be ambiguous.
 
 The MLB adapter calls fixed MLB endpoints, never an arbitrary URL supplied by a plugin. Requests have timeouts and response-size bounds; concurrent reads of the same date coalesce, at most four distinct dates refresh concurrently, and successful results cache for one minute. Failed refreshes label cached results stale. When there is no successful cache, the result is an explicit unavailable state. Opening the view starts periodic refresh while visible. This feature does not imply a commercial data availability guarantee.
 
