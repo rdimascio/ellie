@@ -44,6 +44,21 @@ const canonicalArm =
   '{"authorizationFormatVersion":1,"candidateBindingScope":"authenticated-candidate-capture","candidateBindingVersion":1,"digestAlgorithm":"sha256","envelopePolicyDigest":"4869431c87452a2a378b72ac62e018bca62d60caadef2f65bdfed50d70a16cb5","launcherVerification":"full-candidate-and-installed-role-v1","payloadPolicyDigest":"8018ebd7d746542ef0a42cb70a0a0fad41f8218189c8b44592f0b23029571783","publisherTeamID":"ABCDEFGHIJ","receiptVersion":2,"roles":[{"bundleIdentifier":"org.ellie.assistant.coordinator.app","name":"coordinator"},{"bundleIdentifier":"org.ellie.assistant.node.app","name":"node"}],"scope":"authenticated-service-activation","selectionJournalVersion":2,"version":1}\n';
 const armDigest = "3497bc3e451d746bdbc0241fdef8cd93e262448811a96dacd41d8c6b3ddae064";
 const validProbe = Buffer.from(`${canonicalArm}${armDigest}\n`);
+const policyChildDeadline = 120_000;
+const childCleanupGrace = 7_000;
+const opcodeDeadline = 15_000;
+// Generation uses two children. The configured path then runs nine more bounded
+// compiler/runtime children and three independent opcode probes.
+const configuredAggregateDeadline =
+  11 * (policyChildDeadline + childCleanupGrace) + 3 * opcodeDeadline + 30_000;
+const unavailableAggregateDeadline =
+  4 * (policyChildDeadline + childCleanupGrace) + opcodeDeadline + 30_000;
+const oppositeArchitectureAggregateDeadline =
+  5 * (policyChildDeadline + childCleanupGrace) + opcodeDeadline + 30_000;
+const generationAggregateDeadline = 12 * (policyChildDeadline + childCleanupGrace) + 30_000;
+const machoAggregateDeadline = 4 * (policyChildDeadline + childCleanupGrace) + 30_000;
+const refusalAggregateDeadline =
+  4 * (5_000 + childCleanupGrace) + (1_000 + childCleanupGrace) + 10_000;
 const loaderProbeSource = `import Foundation
 @main struct LoaderProbe { static func main() {
   do {
@@ -99,7 +114,7 @@ async function compileBlob(source: string, output: string, architecture = hostAr
 function auditOpcode(binary: string) {
   return spawnSync(binary, ["test-compiled-activation-policy"], {
     encoding: "utf8",
-    timeout: 15_000,
+    timeout: opcodeDeadline,
     maxBuffer: 64 * 1024,
     killSignal: "SIGKILL",
   });
@@ -107,7 +122,7 @@ function auditOpcode(binary: string) {
 
 test(
   "configured blob is the sole policy representation in three optimized binaries",
-  { skip: !mac, timeout: 180_000 },
+  { skip: !mac, timeout: configuredAggregateDeadline },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-policy-blob-"));
     let completed = false;
@@ -192,7 +207,7 @@ test(
 
 test(
   "unavailable blob is retained and refused by ordinary optimized binaries",
-  { skip: !mac, timeout: 120_000 },
+  { skip: !mac, timeout: unavailableAggregateDeadline },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-policy-unavailable-"));
     let completed = false;
@@ -232,7 +247,7 @@ test(
 
 test(
   "runtime loader refuses canonical policy bytes for the other architecture",
-  { skip: !mac, timeout: 120_000 },
+  { skip: !mac, timeout: oppositeArchitectureAggregateDeadline },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-policy-opposite-"));
     let completed = false;
@@ -261,7 +276,7 @@ test(
 
 test(
   "blob generation is deterministic, exclusive, and bound to Team ID and architecture",
-  { skip: !mac, timeout: 180_000 },
+  { skip: !mac, timeout: generationAggregateDeadline },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-policy-generate-"));
     let completed = false;
@@ -329,7 +344,7 @@ test(
 
 test(
   "Mach-O policy audit rejects malformed binary structure and wrong architecture",
-  { skip: !mac, timeout: 120_000 },
+  { skip: !mac, timeout: machoAggregateDeadline },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-policy-macho-"));
     let completed = false;
@@ -400,7 +415,7 @@ test(
 
 test(
   "parser, child bounds, unsafe sources, and development builder authority fail closed",
-  { timeout: 30_000 },
+  { timeout: refusalAggregateDeadline },
   async (t) => {
     for (const value of [
       Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), validProbe]),
