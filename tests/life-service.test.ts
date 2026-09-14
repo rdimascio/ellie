@@ -269,8 +269,22 @@ async function fixture() {
       const task = taskRows.get(id);
       return task && (!owner || task.owner === owner) ? task : undefined;
     },
-    list: ({ owner }: { owner: OwnerScope }) =>
-      [...taskRows.values()].filter((task) => task.owner === owner),
+    list: ({ owner, parentId }: { owner: OwnerScope; parentId?: string }) =>
+      [...taskRows.values()].filter(
+        (task) => task.owner === owner && (parentId === undefined || task.parentId === parentId),
+      ),
+    deliveryOccurrences: (templateId: string, owner: OwnerScope) => {
+      const children = [...taskRows.values()]
+        .filter((task) => task.owner === owner && task.parentId === templateId)
+        .sort((left, right) => right.createdAt - left.createdAt || right.id.localeCompare(left.id));
+      return {
+        active: children.find(
+          (task) =>
+            !["succeeded", "failed", "cancelled", "expired", "unknown"].includes(task.state),
+        ),
+        latest: children[0],
+      };
+    },
     pause: () => false,
     resume: () => false,
     cancel: (id: string) => {
@@ -1625,6 +1639,57 @@ test("private improvement routes reject forged scope and abort without late pers
       1,
       "the aborted engine cannot persist another proposal",
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test("record DTO reports the authoritative bound delivery state", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" },
+      draft = f.life.createRecord(actor, {
+        kind: "reminder",
+        title: "Call Mum",
+        scope: { type: "user", id: "local" },
+        data: { dueAt: 50_000, completed: false },
+      }),
+      reminder = f.life.updateRecord(actor, draft.id, draft.revision, {
+        data: { ...draft.data, taskId: "call-delivery" },
+      }),
+      running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    f.taskRows.set("call-delivery", {
+      id: "call-delivery",
+      owner: "user:local",
+      handler: "reminder.notify",
+      input: { recordId: reminder.id, scope: reminder.scope },
+      state: "scheduled",
+      requiredCapabilities: [],
+      allowedCapabilities: [],
+      rootId: "call-delivery",
+      dependsOn: [],
+      budget: {},
+      attempt: 0,
+      idempotencyKey: "call-delivery:0",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const detail = (await (
+      await fetch(`${running.url}/api/life/records/${reminder.id}`, { headers: { cookie } })
+    ).json()) as { delivery: { taskId: string; status: string; actions: string[] } };
+    assert.deepEqual(detail.delivery, {
+      taskId: "call-delivery",
+      status: "scheduled",
+      scheduleStatus: "scheduled",
+      actions: ["pause", "cancel", "run"],
+    });
+    f.taskRows.get("call-delivery")!.state = "paused";
+    const refreshed = (await (
+      await fetch(`${running.url}/api/life/records/${reminder.id}`, { headers: { cookie } })
+    ).json()) as { delivery: { status: string; actions: string[] } };
+    assert.equal(refreshed.delivery.status, "paused");
+    assert.deepEqual(refreshed.delivery.actions, ["resume", "cancel", "run"]);
   } finally {
     await f.close();
   }

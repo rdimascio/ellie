@@ -15,6 +15,7 @@ import type {
   TeachingSource,
 } from "./types";
 import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
+import { deliveryLabel, occurrenceLabel } from "./delivery";
 
 type View = "chat" | "today" | "world" | "space" | "activity" | "settings";
 type Message = {
@@ -1011,7 +1012,7 @@ function Chat({
           <>
             <p>Teach me something, make a plan, or ask what needs your attention.</p>
             <div className="suggestions">
-              {["What should I know today?", "Remember a preference", "Help me plan something"].map(
+              {["What should I know today?", "List reminders", "Help me plan something"].map(
                 (x) => (
                   <button key={x} disabled={busy} onClick={() => send(x)}>
                     {x}
@@ -1019,6 +1020,10 @@ function Chat({
                 ),
               )}
             </div>
+            <small className="schedule-example">
+              You can also say “Pause reminder [exact title]”, “Resume reminder [exact title]”, or
+              “Cancel reminder [exact title]”. These change future delivery only.
+            </small>
             {upcoming.length > 0 && (
               <div className="glance">
                 <span>On the horizon</span>
@@ -1477,6 +1482,8 @@ function Today({
     .filter((record) => {
       if (!timedKinds.has(record.kind)) return false;
       if (record.data.completed === true || record.data.cancelled === true) return false;
+      if (record.delivery?.status === "cancelled" || record.delivery?.status === "complete")
+        return false;
       if (record.kind === "event" && record.data.type === "notification") return false;
       if (record.relatedCompleted) return false;
       return !record.relationships?.some((relation) => {
@@ -1557,6 +1564,14 @@ function Today({
                   <div>
                     <span>{record.kind}</span>
                     <h2>{record.title}</h2>
+                    {deliveryLabel(record) && (
+                      <strong className={`delivery-state ${record.delivery?.status}`}>
+                        {deliveryLabel(record)}
+                      </strong>
+                    )}
+                    {occurrenceLabel(record) && (
+                      <small className="occurrence-state">{occurrenceLabel(record)}</small>
+                    )}
                     {(record.bodyPreview || record.body) && (
                       <p>{record.bodyPreview || record.body}</p>
                     )}
@@ -1758,8 +1773,12 @@ function World({
                 <small>
                   {needsSourceReview(r)
                     ? "Source changed — review needed"
-                    : r.bodyPreview || r.body || `Updated ${friendly(r.updatedAt)}`}
+                    : deliveryLabel(r) ||
+                      r.bodyPreview ||
+                      r.body ||
+                      `Updated ${friendly(r.updatedAt)}`}
                 </small>
+                {occurrenceLabel(r) && <small>{occurrenceLabel(r)}</small>}
               </span>
               <em>{r.scope.type === "user" ? "Private" : "Shared"}</em>
             </button>
@@ -2558,6 +2577,7 @@ function RecordModal({
               </button>
             )}
           {(["reminder", "timer", "event"] as string[]).includes(record.kind) &&
+            !record.delivery &&
             record.data.cancelled !== true &&
             record.data.completed !== true && (
               <button
@@ -2579,6 +2599,48 @@ function RecordModal({
                 Cancel {record.kind}
               </button>
             )}
+          {record.delivery && (
+            <section className="delivery-controls">
+              <h3>Delivery</h3>
+              <strong className={`delivery-state ${record.delivery.status}`}>
+                {deliveryLabel(record)}
+              </strong>
+              {occurrenceLabel(record) && (
+                <span className="occurrence-state">{occurrenceLabel(record)}</span>
+              )}
+              <p>
+                These controls manage future delivery or future routine runs. They do not freeze a
+                timer countdown or undo notifications that were already delivered. The saved record
+                remains in your history.
+              </p>
+              <div>
+                {record.delivery.actions.includes("pause") && (
+                  <button
+                    disabled={busy}
+                    onClick={() => void mutate(() => api.task(record.delivery!.taskId, "pause"))}
+                  >
+                    Pause future delivery
+                  </button>
+                )}
+                {record.delivery.actions.includes("resume") && (
+                  <button
+                    disabled={busy}
+                    onClick={() => void mutate(() => api.task(record.delivery!.taskId, "resume"))}
+                  >
+                    Resume future delivery
+                  </button>
+                )}
+                {record.delivery.actions.includes("cancel") && (
+                  <button
+                    disabled={busy}
+                    onClick={() => void mutate(() => api.task(record.delivery!.taskId, "cancel"))}
+                  >
+                    Cancel future delivery
+                  </button>
+                )}
+              </div>
+            </section>
+          )}
           <div className="modal-actions">
             <button
               className="danger"

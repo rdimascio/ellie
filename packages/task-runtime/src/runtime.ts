@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { nextOccurrence, occurrenceKey } from "./schedule.ts";
 import type {
+  DeliveryOccurrences,
   EnqueueTask,
   EnqueueWorkflow,
   HandlerContext,
@@ -1286,6 +1287,28 @@ export class TaskRuntime {
     }));
   }
 
+  /** Direct schedule children selected in SQL, without a bounded history scan. */
+  deliveryOccurrences(templateId: string, owner: OwnerScope): DeliveryOccurrences {
+    if (!this.get(templateId, owner)) return {};
+    const active = this.db
+        .prepare(
+          `SELECT * FROM tasks WHERE parent_id=? AND owner_scope=?
+           AND state NOT IN ('succeeded','failed','cancelled','expired','unknown')
+           ORDER BY updated_at DESC,rowid DESC LIMIT 1`,
+        )
+        .get(templateId, owner) as Row | undefined,
+      latest = this.db
+        .prepare(
+          `SELECT * FROM tasks WHERE parent_id=? AND owner_scope=?
+           ORDER BY created_at DESC,rowid DESC LIMIT 1`,
+        )
+        .get(templateId, owner) as Row | undefined;
+    return {
+      ...(active ? { active: this.fromRow(active)! } : {}),
+      ...(latest ? { latest: this.fromRow(latest)! } : {}),
+    };
+  }
+
   pause(id: string, owner: OwnerScope): boolean {
     this.assertNotHeldForReplacement(id, owner);
     return this.transition(id, owner, ["queued", "scheduled", "waiting"], "paused");
@@ -1293,31 +1316,47 @@ export class TaskRuntime {
   resume(id: string, owner: OwnerScope): boolean {
     this.assertAdmission(owner);
     this.assertNotHeldForReplacement(id, owner);
-    return this.transition(id, owner, ["paused", "waiting"], "queued");
+    const task = this.get(id, owner);
+    if (!task || !["paused", "waiting"].includes(task.state)) return false;
+    return this.transition(
+      id,
+      owner,
+      [task.state],
+      task.schedule && task.scheduledFor !== undefined ? "scheduled" : "queued",
+    );
   }
 
   cancel(id: string, owner: OwnerScope): boolean {
     this.assertNotHeldForReplacement(id, owner);
     const task = this.get(id, owner);
-    if (!task || terminal.has(task.state)) return false;
+    if (!task) return false;
     const ids = [
       id,
       ...(
         this.db
           .prepare(
-            "WITH RECURSIVE tree(id) AS (SELECT id FROM tasks WHERE parent_id = ? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id = tree.id) SELECT id FROM tree",
+            "WITH RECURSIVE tree(id) AS (SELECT id FROM tasks WHERE parent_id=? AND owner_scope=? UNION ALL SELECT t.id FROM tasks t JOIN tree ON t.parent_id=tree.id WHERE t.owner_scope=?) SELECT id FROM tree",
           )
-          .all(id) as Row[]
+          .all(id, owner, owner) as Row[]
       ).map((r) => String(r.id)),
     ];
+    for (const taskId of ids) this.assertNotHeldForReplacement(taskId, owner);
     const now = this.now();
     const update = this.db.prepare(
       "UPDATE tasks SET state='cancelled', outcome_code='cancelled', updated_at=? WHERE id=? AND state NOT IN ('succeeded','failed','cancelled','expired','unknown')",
     );
-    for (const taskId of ids) {
-      this.active.get(taskId)?.controller.abort(new Error("Task cancelled."));
-      update.run(now, taskId);
+    let changed = 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const taskId of ids) changed += Number(update.run(now, taskId).changes);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
+    if (!changed) return false;
+    for (const taskId of ids)
+      this.active.get(taskId)?.controller.abort(new Error("Task cancelled."));
     return true;
   }
 
@@ -1335,7 +1374,8 @@ export class TaskRuntime {
     if (!task) throw new Error("Task not found in owner scope.");
     if (terminal.has(task.state))
       throw new Error(`Task in terminal state ${task.state} cannot be run again.`);
-    if (task.schedule && task.state === "scheduled") this.materialize(task, this.now());
+    if (task.schedule && (task.state === "scheduled" || task.state === "paused"))
+      this.materialize(task, this.now());
     else if (task.state === "scheduled" || task.state === "paused" || task.state === "waiting")
       this.db
         .prepare("UPDATE tasks SET state='queued',scheduled_for=NULL,updated_at=? WHERE id=?")

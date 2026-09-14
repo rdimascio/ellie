@@ -517,6 +517,47 @@ main {
   max-width: 560px;
   text-align: left;
 }
+.schedule-example {
+  display: block;
+  max-width: 680px;
+  margin: 14px auto 0;
+  color: var(--muted);
+}
+.delivery-state {
+  display: inline-block;
+  margin-top: 5px;
+  color: var(--moss);
+  font-size: 12px;
+}
+.delivery-state.paused,
+.delivery-state.cancelled,
+.delivery-state.failed,
+.delivery-state.skipped,
+.delivery-state.unknown {
+  color: var(--coral);
+}
+.occurrence-state {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+.delivery-controls {
+  margin: 18px 0;
+  padding: 16px;
+  background: var(--soft);
+  border-radius: 10px;
+}
+.delivery-controls p {
+  color: var(--muted);
+  font-size: 13px;
+}
+.delivery-controls > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .glance > span {
   display: block;
   color: var(--muted);

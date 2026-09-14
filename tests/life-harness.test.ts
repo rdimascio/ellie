@@ -132,6 +132,111 @@ test("a reminder persists and produces one meaningful notification when due", as
   }
 });
 
+test("chat lists and controls future reminder delivery by exact title", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const harness = f.make();
+    const scheduled = await harness.chat({
+      actor,
+      scope,
+      message: "Remind me tomorrow at 10 to call Mum",
+    });
+    const record = scheduled.records.filter((item) => item.kind === "reminder").at(-1)!;
+    const taskId = String(record.data.taskId);
+    const listed = await harness.chat({ actor, scope, message: "List reminders." });
+    assert.match(listed.reply, /call Mum \(scheduled\)/i);
+
+    const paused = await harness.chat({ actor, scope, message: "Pause reminder call Mum." });
+    assert.match(paused.reply, /paused future delivery.*already running may finish/i);
+    assert.equal(f.tasks.get(taskId, "user:alice")?.state, "paused");
+    const resumed = await harness.chat({ actor, scope, message: "Resume reminder call Mum." });
+    assert.match(resumed.reply, /saved missed-run policy applies/i);
+    assert.equal(f.tasks.get(taskId, "user:alice")?.state, "scheduled");
+    const cancelled = await harness.chat({ actor, scope, message: "Cancel reminder call Mum." });
+    assert.match(cancelled.reply, /cancelled future delivery.*active delivery/i);
+    assert.equal(f.tasks.get(taskId, "user:alice")?.state, "cancelled");
+    assert.equal(f.store.getRecord(actor, record.id)?.data.completed, false);
+  } finally {
+    await f.close();
+  }
+});
+
+test("chat delivery controls reject ambiguous exact reminder titles", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const harness = f.make();
+    await harness.chat({ actor, scope, message: "Remind me tomorrow at 10 to call Mum" });
+    await harness.chat({ actor, scope, message: "Remind me tomorrow at 11 to call Mum" });
+    const result = await harness.chat({ actor, scope, message: "Pause reminder call Mum" });
+    assert.match(result.reply, /more than one reminder/i);
+    assert.equal(result.actions.length, 0);
+    assert.equal(f.tasks.list({ owner: "user:alice", state: "scheduled" }).length, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test("modeled agenda queries distinguish paused, cancelled, and unbound delivery history", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  const model: LifeModel = {
+    async plan() {
+      return {
+        reply: "Everything is active.",
+        actions: [{ type: "life_operation", intent: { kind: "query", view: "today" } }],
+      };
+    },
+  };
+  try {
+    f.store.setUserSetting(actor, "timeZone", "UTC");
+    const harness = f.make(model);
+    const paused = await harness.chat({
+      actor,
+      scope,
+      message: "Set a timer in 20 minutes to check the bread",
+    });
+    const pausedRecord = paused.records.filter((record) => record.kind === "timer").at(-1)!;
+    f.tasks.pause(String(pausedRecord.data.taskId), "user:alice");
+    const cancelled = await harness.chat({
+      actor,
+      scope,
+      message: "Set a timer in 30 minutes to check the soup",
+    });
+    const cancelledRecord = cancelled.records.filter((record) => record.kind === "timer").at(-1)!;
+    f.tasks.cancel(String(cancelledRecord.data.taskId), "user:alice");
+    f.store.createRecord(actor, {
+      kind: "reminder",
+      title: "old unbound reminder",
+      scope,
+      data: { dueAt: Date.UTC(2026, 8, 13, 17) },
+    });
+    f.store.createRecord(actor, {
+      kind: "need",
+      title: "Oat Milk",
+      scope,
+      data: { completed: false },
+    });
+
+    const response = await harness.chat({
+      actor,
+      scope,
+      message: "Explain the notification delivery status for check the bread. Has it delivered?",
+    });
+    assert.match(response.reply, /Here’s what’s active: Oat Milk\./i);
+    assert.match(response.reply, /check the bread \(paused\)/i);
+    assert.match(response.reply, /check the soup \(cancelled\)/i);
+    assert.match(response.reply, /old unbound reminder \(unknown\)/i);
+    assert.doesNotMatch(response.reply, /Everything is active/);
+    const deterministic = await harness.chat({ actor, scope, message: "What is next today?" });
+    assert.match(deterministic.reply, /Here’s what’s active: Oat Milk\./i);
+    assert.match(deterministic.reply, /check the bread \(paused\)/i);
+    assert.match(deterministic.reply, /check the soup \(cancelled\)/i);
+  } finally {
+    await f.close();
+  }
+});
+
 test("birthday planning links a gift need and completion suppresses its reminder", async () => {
   const f = await fixture();
   try {

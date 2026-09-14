@@ -42,11 +42,13 @@ import type { LifeIntent } from "./operations.ts";
 import { parseMissingReminder, pendingDirective, PendingAnswerInputError } from "./continuation.ts";
 import type { ContinuationDirective, PendingLifeIntent, TemporalAnswer } from "./continuation.ts";
 import { BoundedPluginBuilder, PluginBuildError, pluginBuildTimeout } from "./build.ts";
+import { ScheduledDeliveries, ScheduledDeliveryError } from "./schedules.ts";
 export * from "./model.ts";
 export * from "./operations.ts";
 export * from "./continuation.ts";
 export * from "./build.ts";
 export * from "../../life-learning/src/improvement.ts";
+export * from "./schedules.ts";
 
 export interface LifeHarnessOptions {
   store: LifeStore;
@@ -101,6 +103,7 @@ export interface ChatResponse {
 }
 export interface LifeHarness {
   improvements: LifeImprovementEngine;
+  deliveries: ScheduledDeliveries;
   chat(request: ChatRequest): Promise<ChatResponse>;
   continuePendingIntent(request: {
     actor: LifeActor;
@@ -172,6 +175,7 @@ const active = (record: LifeRecord): boolean =>
 function modelContext(
   store: LifeStore,
   teaching: LifeTeaching,
+  deliveries: ScheduledDeliveries,
   actor: LifeActor,
   scope: LifeScope,
   message: string,
@@ -204,7 +208,25 @@ function modelContext(
     },
     memories,
     adoptedGuidance: teaching.resolve(actor, scope),
-    world: selectModelWorld(store, actor, scope, message),
+    world: selectModelWorld(store, actor, scope, message, (record) => {
+      if (
+        !["reminder", "timer", "routine"].includes(record.kind) ||
+        typeof record.data.taskId !== "string"
+      )
+        return undefined;
+      try {
+        const delivery = deliveries.statusFor(record);
+        return {
+          status: delivery.status,
+          scheduleStatus: delivery.scheduleStatus,
+          ...(delivery.occurrence ? { occurrenceStatus: delivery.occurrence.status } : {}),
+        };
+      } catch (error) {
+        if (error instanceof ScheduledDeliveryError && error.code === "invalid_binding")
+          return { status: "unknown", scheduleStatus: "unknown" };
+        throw error;
+      }
+    }),
     tone: inferTone(message),
   };
 }
@@ -376,6 +398,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       model: options.model,
       now,
     });
+  const deliveries = new ScheduledDeliveries(options.store, options.tasks);
   const sessions = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
   const contextGenerations = new Map<string, number>();
   const actorGenerations = new Map<string, number>();
@@ -456,6 +479,15 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     tasks: options.tasks,
     now,
     enqueueSummary: enqueueBackgroundSummary,
+    deliveryStatus: (record) => {
+      try {
+        return deliveries.statusFor(record);
+      } catch (error) {
+        if (error instanceof ScheduledDeliveryError && error.code === "invalid_binding")
+          return { status: "unknown", scheduleStatus: "unknown" };
+        throw error;
+      }
+    },
   });
   const continuePendingIntent: LifeHarness["continuePendingIntent"] = async (request) => {
     const pending = request.pendingIntent;
@@ -870,6 +902,67 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         ...(createdGroup ? { createdGroup } : {}),
       };
     };
+    const listDeliveries = /^(?:please\s+)?list\s+(reminders|timers|routines)[.!?]?$/i.exec(
+      message,
+    );
+    if (listDeliveries) {
+      const kind = listDeliveries[1]!.toLowerCase().slice(0, -1) as
+        | "reminder"
+        | "timer"
+        | "routine";
+      const page = deliveries.list(request.actor, { scope: request.scope, kinds: [kind] });
+      const items = page.items.filter((item) => item.record.kind === kind);
+      return finish(
+        items.length
+          ? `${listDeliveries[1]![0]!.toUpperCase()}${listDeliveries[1]!.slice(1).toLowerCase()}: ${items.map((item) => `${item.record.title} (${item.status})`).join("; ")}.${page.hasMore ? " More records may exist outside this bounded list." : ""}`
+          : page.hasMore
+            ? `I didn’t find a ${kind} in the bounded list; more records may exist.`
+            : `You don’t have any ${kind}s with scheduled delivery in this space.`,
+      );
+    }
+    const deliveryControl =
+      /^(pause|resume|cancel)\s+(reminder|timer|routine)\s+(.+?)[.!?]?$/i.exec(message);
+    if (deliveryControl) {
+      const action = deliveryControl[1]!.toLowerCase() as "pause" | "resume" | "cancel",
+        kind = deliveryControl[2]!.toLowerCase() as "reminder" | "timer" | "routine",
+        title = clean(deliveryControl[3]!),
+        page = deliveries.list(request.actor, { scope: request.scope, kinds: [kind] }),
+        matches = page.items.filter(
+          (item) =>
+            item.record.kind === kind &&
+            clean(item.record.title).toLowerCase() === title.toLowerCase(),
+        );
+      if (matches.length !== 1 || page.hasMore)
+        return finish(
+          matches.length > 1
+            ? `More than one ${kind} is named “${title}”. Open scheduled deliveries to choose one.`
+            : page.hasMore
+              ? `I couldn’t uniquely identify “${title}” in the bounded ${kind} list. Open scheduled deliveries to choose it.`
+              : `I couldn’t find a scheduled ${kind} named “${title}”.`,
+        );
+      try {
+        const changed = await deliveries.control(request.actor, {
+          scope: request.scope,
+          idOrTitle: matches[0]!.record.id,
+          kinds: [kind],
+          action,
+        });
+        actions.push({
+          label: `${titleCase(action)} ${kind} delivery: ${changed.record.title}`,
+          status: "completed",
+        });
+        return finish(
+          action === "pause"
+            ? `Paused future delivery for “${changed.record.title}”. A delivery already running may finish.`
+            : action === "resume"
+              ? `Resumed future delivery for “${changed.record.title}”. Its saved missed-run policy applies.`
+              : `Cancelled future delivery for “${changed.record.title}”. Any active delivery was also cancelled.`,
+        );
+      } catch (error) {
+        if (error instanceof ScheduledDeliveryError) return finish(error.message);
+        throw error;
+      }
+    }
     const lower = message.toLowerCase();
     const settings = options.store.resolveSettings(
       request.actor,
@@ -1805,9 +1898,22 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         todayKey = calendarDateKey(localToday),
         start = startOfLocalDay(localToday, timeZone) ?? now(),
         end = startOfLocalDay(addCalendarDays(localToday, 1), timeZone) ?? start + 86_400_000;
-      const due = all(["reminder", "timer", "event", "birthday", "need"])
+      const agendaRows = all(["reminder", "timer", "event", "birthday", "need"])
+        .map((record) => {
+          if (record.kind !== "reminder" && record.kind !== "timer") return { record };
+          try {
+            return { record, delivery: deliveries.statusFor(record) };
+          } catch (error) {
+            if (error instanceof ScheduledDeliveryError && error.code === "invalid_binding")
+              return {
+                record,
+                delivery: { status: "unknown", scheduleStatus: "unknown" },
+              };
+            throw error;
+          }
+        })
         .filter(
-          (record) =>
+          ({ record }) =>
             active(record) &&
             (record.kind === "event"
               ? eventWhen(record, timeZone)?.dateKey === todayKey
@@ -1818,12 +1924,34 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
                   ? Number(record.data.dueAt ?? record.data.deadlineAt) >= start &&
                     Number(record.data.dueAt ?? record.data.deadlineAt) < end
                   : record.kind === "need"),
+        );
+      const due = agendaRows
+        .filter(
+          ({ record, delivery }) =>
+            (record.kind !== "reminder" && record.kind !== "timer") ||
+            delivery?.status === "scheduled" ||
+            delivery?.status === "running",
+        )
+        .slice(0, 10);
+      const deliveryNotes = agendaRows
+        .filter(
+          ({ record, delivery }) =>
+            (record.kind === "reminder" || record.kind === "timer") &&
+            delivery &&
+            delivery.status !== "scheduled" &&
+            delivery.status !== "running",
         )
         .slice(0, 10);
       return finish(
         due.length
-          ? `Here’s what’s active: ${due.map((item) => item.title).join("; ")}.`
-          : "You don’t have anything due in this space today.",
+          ? `Here’s what’s active: ${due.map(({ record }) => record.title).join("; ")}.${
+              deliveryNotes.length
+                ? ` Delivery status: ${deliveryNotes.map(({ record, delivery }) => `${record.title} (${delivery!.status})`).join("; ")}.`
+                : ""
+            }`
+          : deliveryNotes.length
+            ? `You don’t have anything active in this space today. Delivery status: ${deliveryNotes.map(({ record, delivery }) => `${record.title} (${delivery!.status})`).join("; ")}.`
+            : "You don’t have anything active in this space today.",
       );
     }
 
@@ -1979,6 +2107,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
           ...modelContext(
             options.store,
             teaching,
+            deliveries,
             request.actor,
             request.scope,
             message,
@@ -2023,6 +2152,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   }
   return {
     improvements,
+    deliveries,
     chat,
     continuePendingIntent,
     invalidateContext,

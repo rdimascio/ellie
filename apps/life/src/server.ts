@@ -30,6 +30,10 @@ import {
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
 import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
 import { PluginBuildError } from "../../../packages/life-harness/src/build.ts";
+import {
+  ScheduledDeliveries,
+  ScheduledDeliveryError,
+} from "../../../packages/life-harness/src/schedules.ts";
 import type { ModelStatus } from "./model-status.ts";
 import { pluginChildDocument } from "./plugin-bootstrap.ts";
 import type { LifePlugin, PluginStore } from "../../../packages/life-plugins/src/index.ts";
@@ -393,12 +397,14 @@ export class LifeHttpServer {
   private readonly options: LifeServerOptions;
   private readonly learning: LifeLearning;
   private readonly teaching: LifeTeaching;
+  private readonly deliveries: ScheduledDeliveries;
   constructor(options: LifeServerOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
     this.actor = { userId: identifier(options.userId ?? "local", "userId") };
     this.learning = new LifeLearning(options.store);
     this.teaching = new LifeTeaching(options.store, this.now);
+    this.deliveries = new ScheduledDeliveries(options.store, options.tasks);
     this.recoverReminderReschedules();
     const pendingReset = options.store.getPersonalReset(this.actor);
     this.personalResetActive = Boolean(pendingReset && pendingReset.state !== "completed");
@@ -1234,7 +1240,7 @@ export class LifeHttpServer {
         scope,
         limit: 500,
       }).items,
-      records = recordsPage.items.map(serializeSummary),
+      records = recordsPage.items.map((record) => this.recordDto(record, true)),
       tasks = this.options.tasks
         .list({ owner: ownerId })
         .map((task) => serializeTask(task, supportingRecords)),
@@ -1328,7 +1334,7 @@ export class LifeHttpServer {
         hasMore: recordsPage.hasMore,
         ...(recordsPage.nextCursor ? { nextCursor: recordsPage.nextCursor } : {}),
       },
-      agendaRecords: agendaPage.items.map(serializeSummary),
+      agendaRecords: agendaPage.items.map((record) => this.recordDto(record, true)),
       agendaPage: {
         hasMore: agendaPage.hasMore,
         ...(agendaPage.nextCursor ? { nextCursor: agendaPage.nextCursor } : {}),
@@ -1420,7 +1426,7 @@ export class LifeHttpServer {
         ...(url.searchParams.has("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
       });
     this.send(response, 200, {
-      records: page.items.map(serializeSummary),
+      records: page.items.map((record) => this.recordDto(record, true)),
       page: {
         hasMore: page.hasMore,
         ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
@@ -1431,7 +1437,32 @@ export class LifeHttpServer {
     const id = identifier(decodeURIComponent(path.split("/").at(-1)!)),
       record = this.options.store.getRecord(this.actor, id);
     if (!record) throw new HttpError(404, "Record not found.");
-    this.send(response, 200, serializeRecord(record));
+    this.send(response, 200, this.recordDto(record));
+  }
+
+  private recordDto(
+    record: LifeRecord | LifeRecordSummary,
+    summary = false,
+  ): Record<string, unknown> {
+    const serialized = summary
+      ? serializeSummary(record as LifeRecordSummary)
+      : serializeRecord(record as LifeRecord);
+    if (
+      (record.kind === "reminder" || record.kind === "timer" || record.kind === "routine") &&
+      typeof record.data.taskId === "string"
+    )
+      try {
+        serialized.delivery = this.deliveries.statusFor(record);
+      } catch (error) {
+        if (!(error instanceof ScheduledDeliveryError) || error.code !== "invalid_binding")
+          throw error;
+        serialized.delivery = {
+          taskId: record.data.taskId,
+          status: "unknown",
+          actions: [],
+        };
+      }
+    return serialized;
   }
   private search(url: URL, response: ServerResponse): void {
     const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),

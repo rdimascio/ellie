@@ -38,6 +38,10 @@ The directory must be outside the source checkout, owned by the current OS user,
 - “Complete buy a garden gift.”
 - “Set a timer for 2 minutes.”
 - “Every Monday at 9 am remind me to plan the week.”
+- “List routines.”
+- “Pause routine plan the week.”
+- “Resume routine plan the week.”
+- “Cancel routine plan the week.”
 - “Could you remind me to phone Maya?” (Ellie asks when and keeps the draft.)
 - “Create a group called Family.” (Open the returned space to add shared records.)
 - “In this conversation, be brief.”
@@ -57,6 +61,8 @@ Use Your world to inspect and correct the resulting records, teach from files, o
 Adopted guidance is versioned configuration. Pause or resume a listed guide through chat using its title, or open Guidance in Your world to review linked sources, revise instructions and restore a retained version. Source changes exclude stale guidance until the current content is reviewed. Background summaries coordinate up to four source workers; deleted or changed source content is omitted, and an old stored result becomes unavailable when its citations are no longer current. See [teaching through content](life-teaching.md).
 
 While the service is running, Ellie checks timed events within 48 hours and all-day events today or in the next two local calendar days on startup and every fifteen minutes. Preparation appears in Today using your time zone, proactivity preference and quiet hours. Pending preparation notices are deduplicated; checking again does not create a pile of reminders for the same event. Postponing or cancelling the linked event hides notices that are no longer relevant.
+
+Delivery controls manage notification scheduling. Pausing preserves the original schedule and missed-run policy; it does not freeze a timer countdown. Cancellation stops remaining work where possible and preserves the saved record and prior outcomes. A completed scheduling step is separate from a verified delivered notification. Today, Your world and chat show this distinction.
 
 Place-linked suggestions currently depend on explicit fresh context signals, including “I'm shopping at …”. They do not imply continuous phone location, access to unrelated apps, a retailer account, or a price-feed subscription. A sleeping or stopped coordinator cannot deliver new browser notifications. Timers that must sound while the coordinator is asleep need a future native local-delivery integration.
 

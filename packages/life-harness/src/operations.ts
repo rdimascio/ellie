@@ -59,6 +59,9 @@ export interface LifeOperationsOptions {
   tasks: TaskRuntime;
   now: () => number;
   enqueueSummary?: (actor: LifeActor, scope: LifeScope, query: string) => TaskRecord | undefined;
+  deliveryStatus?: (
+    record: Pick<LifeRecord, "id" | "kind" | "scope" | "data">,
+  ) => { status: string; scheduleStatus: string } | undefined;
 }
 export interface ReminderRescheduleJournal {
   prepared(value: { operationId: string; replacementTaskId: string; dueAt: number }): void;
@@ -524,8 +527,15 @@ export class LifeOperations {
         limit: 500,
       })
       .filter(current);
-    const visible = rows
-      .map((record) => ({ record, when: this.recordWhen(record, zone) }))
+    const candidates = rows
+      .map((record) => ({
+        record,
+        when: this.recordWhen(record, zone),
+        delivery:
+          record.kind === "reminder" || record.kind === "timer"
+            ? this.options.deliveryStatus?.(record)
+            : undefined,
+      }))
       .filter(({ record, when }) =>
         when
           ? view === "today"
@@ -534,16 +544,38 @@ export class LifeOperations {
               ? when.dateKey >= todayKey
               : when.at >= this.options.now()
           : view === "today" && record.kind === "need",
+      );
+    const visible = candidates
+      .filter(
+        ({ record, delivery }) =>
+          (record.kind !== "reminder" && record.kind !== "timer") ||
+          delivery === undefined ||
+          delivery.status === "scheduled" ||
+          delivery.status === "running",
       )
       .sort((a, b) => (a.when?.at ?? 0) - (b.when?.at ?? 0))
       .slice(0, 20);
+    const deliveryNotes = candidates
+      .filter(
+        ({ record, delivery }) =>
+          (record.kind === "reminder" || record.kind === "timer") &&
+          delivery &&
+          delivery.status !== "scheduled" &&
+          delivery.status !== "running",
+      )
+      .slice(0, 20);
+    const activeReply = visible.length
+      ? `${view === "today" ? "Here’s what’s active" : "Upcoming"}: ${visible.map(({ record }) => record.title).join("; ")}.`
+      : view === "today"
+        ? "You don’t have anything active in this space today."
+        : "I don’t see any upcoming events in this space.";
     return {
       status: "completed",
-      reply: visible.length
-        ? `${view === "today" ? "Here’s what’s active" : "Upcoming"}: ${visible.map(({ record }) => record.title).join("; ")}.`
-        : view === "today"
-          ? "You don’t have anything due in this space today."
-          : "I don’t see any upcoming events in this space.",
+      reply: `${activeReply}${
+        deliveryNotes.length
+          ? ` Delivery status: ${deliveryNotes.map(({ record, delivery }) => `${record.title} (${delivery!.status})`).join("; ")}.`
+          : ""
+      }`,
       records: [],
       tasks: [],
     };

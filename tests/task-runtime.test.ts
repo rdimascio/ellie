@@ -216,6 +216,144 @@ test("duplicate scheduler ticks create one occurrence and daily schedules avoid 
   }
 });
 
+test("resuming a paused recurring template preserves its schedule and missed-run policy", async () => {
+  const f = await fixture(1_000);
+  try {
+    let runs = 0;
+    f.runtime.registerHandler(handler("recurring", async () => ++runs));
+    const template = f.runtime.schedule({
+      owner,
+      handler: "recurring",
+      schedule: { kind: "interval", everyMs: 1_000, anchor: 2_000 },
+      missedRunPolicy: { kind: "latest" },
+    });
+    assert.equal(f.runtime.pause(template.id, owner), true);
+    f.setNow(5_500);
+    assert.equal(f.runtime.resume(template.id, owner), true);
+    const resumed = f.runtime.get(template.id, owner)!;
+    assert.equal(resumed.state, "scheduled");
+    assert.equal(resumed.scheduledFor, 2_000);
+    assert.deepEqual(resumed.missedRunPolicy, { kind: "latest" });
+    await f.runtime.tick();
+    assert.equal(runs, 1);
+    assert.equal(f.runtime.list({ owner, parentId: template.id }).length, 1);
+    assert.equal(f.runtime.get(template.id, owner)?.state, "scheduled");
+    assert.equal(f.runtime.get(template.id, owner)?.scheduledFor, 6_000);
+  } finally {
+    await f.close();
+  }
+});
+
+test("runNow materializes a paused schedule occurrence without executing the template", async () => {
+  const f = await fixture(1_000);
+  try {
+    let runs = 0;
+    f.runtime.registerHandler(handler("manual-occurrence", async () => ++runs));
+    const template = f.runtime.schedule({
+      owner,
+      handler: "manual-occurrence",
+      schedule: { kind: "interval", everyMs: 1_000, anchor: 2_000 },
+    });
+    f.runtime.pause(template.id, owner);
+    f.setNow(1_500);
+    await f.runtime.runNow(template.id, owner);
+    assert.equal(runs, 1);
+    assert.equal(f.runtime.get(template.id, owner)?.state, "paused");
+    assert.equal(f.runtime.get(template.id, owner)?.scheduledFor, 2_000);
+    const children = f.runtime.list({ owner, parentId: template.id });
+    assert.equal(children.length, 1);
+    assert.equal(children[0]?.state, "succeeded");
+  } finally {
+    await f.close();
+  }
+});
+
+test("delivery occurrence lookup returns newest active and latest direct children by owner", async () => {
+  const f = await fixture(1_000);
+  try {
+    f.runtime.registerHandler(handler("delivery-lookup"));
+    const template = f.runtime.schedule({
+      owner,
+      handler: "delivery-lookup",
+      schedule: { kind: "interval", everyMs: 1_000, anchor: 2_000 },
+      budget: { maxTasks: 10 },
+    });
+    f.setNow(1_500);
+    await f.runtime.runNow(template.id, owner);
+    for (let index = 0; index < 505; index += 1) {
+      f.setNow(2_000 + index);
+      await f.runtime.runNow(template.id, owner);
+    }
+    const completed = f.runtime.deliveryOccurrences(template.id, owner).latest!;
+    assert.equal(completed.state, "succeeded");
+    assert.equal(
+      f.runtime
+        .list({ owner, parentId: template.id, limit: 500 })
+        .some((task) => task.id === completed.id),
+      false,
+    );
+    f.setNow(2_900);
+    f.runtime.enqueue({ owner, handler: "delivery-lookup", parentId: template.id });
+    const sameClockNewest = f.runtime.enqueue({
+      owner,
+      handler: "delivery-lookup",
+      parentId: template.id,
+    });
+    await f.runtime.tick();
+    assert.equal(f.runtime.deliveryOccurrences(template.id, owner).latest?.id, sameClockNewest.id);
+    f.setNow(3_000);
+    const active = f.runtime.enqueue({
+      owner,
+      handler: "delivery-lookup",
+      parentId: template.id,
+    });
+    assert.deepEqual(f.runtime.deliveryOccurrences(template.id, owner), {
+      active,
+      latest: active,
+    });
+    assert.deepEqual(f.runtime.deliveryOccurrences(template.id, "user:bob"), {});
+    assert.deepEqual(f.runtime.deliveryOccurrences(completed.id, owner), {});
+  } finally {
+    await f.close();
+  }
+});
+
+test("cancelling a completed one-shot template still propagates to its active occurrence", async () => {
+  const f = await fixture(1_000);
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => (entered = resolve));
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  let aborted = false;
+  try {
+    f.runtime.registerHandler(
+      handler("one-shot-child", async (signal) => {
+        entered();
+        signal.addEventListener("abort", () => (aborted = true), { once: true });
+        await blocked;
+      }),
+    );
+    const template = f.runtime.schedule({
+      owner,
+      handler: "one-shot-child",
+      schedule: { kind: "once", at: 2_000 },
+    });
+    f.setNow(2_000);
+    const ticking = f.runtime.tick();
+    await started;
+    assert.equal(f.runtime.get(template.id, owner)?.state, "succeeded");
+    assert.equal(f.runtime.cancel(template.id, owner), true);
+    release();
+    await ticking;
+    assert.equal(aborted, true);
+    assert.equal(f.runtime.get(template.id, owner)?.state, "succeeded");
+    assert.equal(f.runtime.list({ owner, parentId: template.id })[0]?.state, "cancelled");
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
 test("daily schedules preserve minutes across half-hour DST transitions and skip gaps", () => {
   assert.equal(
     nextOccurrence(

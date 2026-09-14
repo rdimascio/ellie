@@ -20,6 +20,8 @@ import {
 import { TaskRuntime } from "../../../packages/task-runtime/src/index.ts";
 import { createLifeServer } from "../../life/src/server.ts";
 import { agendaDate, dayHeading } from "../src/dates.ts";
+import { deliveryLabel, occurrenceLabel } from "../src/delivery.ts";
+import type { LifeRecord } from "../src/types.ts";
 
 const dateFixture = (kind: "event" | "birthday", data: Record<string, unknown>) =>
   ({ kind, data }) as Parameters<typeof agendaDate>[0];
@@ -39,6 +41,44 @@ assert.deepEqual(
 assert.match(
   dayHeading("2026-01-01", "Pacific/Kiritimati", new Date("2026-01-01T00:00:00Z")),
   /Thursday/,
+);
+const deliveryFixture = (delivery: LifeRecord["delivery"]) =>
+  ({ delivery }) as Pick<LifeRecord, "delivery"> as LifeRecord;
+const activeOnce = deliveryFixture({
+  taskId: "once-template",
+  activeTaskId: "once-child",
+  status: "scheduled",
+  scheduleStatus: "complete",
+  occurrence: { taskId: "once-child", state: "queued", status: "scheduled" },
+  actions: ["cancel"],
+});
+assert.equal(deliveryLabel(activeOnce), "Scheduled");
+assert.equal(occurrenceLabel(activeOnce), "Current occurrence: scheduled");
+const skippedOnce = deliveryFixture({
+  taskId: "skipped-template",
+  status: "skipped",
+  scheduleStatus: "complete",
+  occurrence: {
+    taskId: "skipped-child",
+    state: "succeeded",
+    status: "skipped",
+    outcomeCode: "quiet_hours",
+    outcomeVerified: true,
+  },
+  actions: [],
+});
+assert.equal(deliveryLabel(skippedOnce), "Delivery skipped");
+assert.equal(occurrenceLabel(skippedOnce), "Last occurrence: skipped");
+assert.equal(
+  deliveryLabel(
+    deliveryFixture({
+      taskId: "cancelled-template",
+      status: "cancelled",
+      scheduleStatus: "cancelled",
+      actions: [],
+    }),
+  ),
+  "Future delivery cancelled",
 );
 
 const root = await mkdtemp(join(tmpdir(), "ellie-life-e2e-"));
@@ -644,7 +684,46 @@ try {
   assert.equal(await page.getByLabel("Tone").inputValue(), "");
   await page.getByText(/Saved user: playful/i).waitFor();
   await page.getByLabel("Sharing with").selectOption("user:e2e-user");
+  await page.getByLabel("Message Ellie").fill("Every day at 9 am remind me to stretch");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/Scheduled “stretch” every day at 09:00/).waitFor();
+  const routine = store
+    .listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["routine"] },
+    )
+    .find((record) => record.title === "stretch")!;
+  assert.ok(routine);
+  await page.getByLabel("Message Ellie").fill("List routines");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/stretch \(scheduled\)/i).waitFor();
+  await page.getByLabel("Message Ellie").fill("Pause routine stretch");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/Paused future delivery for “stretch”/).waitFor();
   await page.getByRole("button", { name: /Your world/ }).click();
+  const routineRow = page.locator(".record-list button").filter({ hasText: "stretch" });
+  await routineRow.getByText("Future delivery paused").waitFor();
+  await routineRow.click();
+  await page.getByText("Pause future delivery").waitFor({ state: "detached" });
+  await page.getByText("Resume future delivery").waitFor();
+  await page.getByText(/do not freeze a timer countdown or undo notifications/i).waitFor();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await page.getByLabel("Message Ellie").fill("Resume routine stretch");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/Resumed future delivery for “stretch”/).waitFor();
+  await page.getByLabel("Message Ellie").fill("Cancel routine stretch");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText(/Cancelled future delivery for “stretch”/).waitFor();
+  await page.getByRole("button", { name: /Your world/ }).click();
+  await page
+    .locator(".record-list button")
+    .filter({ hasText: "stretch" })
+    .getByText("Future delivery cancelled")
+    .waitFor();
+  assert.equal(store.getRecord({ userId: "e2e-user" }, routine.id)?.data.completed, false);
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-delivery-status.png"), fullPage: false });
   await page
     .getByText(/morning appointments/i)
     .first()

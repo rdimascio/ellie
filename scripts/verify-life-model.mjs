@@ -147,6 +147,45 @@ try {
     },
     { scope: { type: "group", id: group.id } },
   );
+  const scheduled = await harness.chat({
+      actor,
+      scope,
+      message: "Set a timer in 30 minutes to check the bread",
+    }),
+    timer = scheduled.records.findLast((record) => record.kind === "timer");
+  assert.ok(timer);
+  await run("pause-delivery", `Pause timer ${timer.title}`, (result) => {
+    assert.equal(harness.deliveries.find(actor, scope, timer.id).status, "paused");
+    assert.equal(result.actions[0]?.status, "completed");
+  });
+  const beforeDeliveryAdvice = {
+    records: store.listRecords(actor, { scope }).map((record) => [record.id, record.revision]),
+    tasks: tasks.list({ owner: `user:${actor.userId}` }).map((task) => [task.id, task.state]),
+  };
+  await run(
+    "paused-delivery-advice",
+    `Explain the notification delivery status for ${timer.title}. Has it delivered?`,
+    (result) => {
+      assert.match(result.reply, /paused/i);
+      assert.equal(result.records.length, 0);
+      assert.equal(result.taskIds.length, 0);
+      assert.equal(harness.deliveries.find(actor, scope, timer.id).status, "paused");
+      assert.deepEqual(
+        {
+          records: store
+            .listRecords(actor, { scope })
+            .map((record) => [record.id, record.revision]),
+          tasks: tasks.list({ owner: `user:${actor.userId}` }).map((task) => [task.id, task.state]),
+        },
+        beforeDeliveryAdvice,
+      );
+    },
+  );
+  await run("cancel-delivery", `Cancel timer ${timer.title}`, (result) => {
+    assert.equal(harness.deliveries.find(actor, scope, timer.id).status, "cancelled");
+    assert.equal(result.actions[0]?.status, "completed");
+    assert.deepEqual(store.getRecord(actor, timer.id), timer);
+  });
 } finally {
   await tasks.close();
   plugins.close();

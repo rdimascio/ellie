@@ -38,6 +38,12 @@ The final gift response suggested relevant categories without claiming verified 
 
 An early generated water-counter app used `localStorage`, which is unavailable in the opaque plugin sandbox. After the SDK was introduced, a fresh generation and two plain-language revisions produced the unchanged fixture in `apps/life-ui/tests/fixtures/sdk-water-counter-v3.json`, using the trusted `window.ellie.storage` SDK. The real browser acceptance adds two glasses, verifies host storage, restores the value after closing and after a full page reload, persists Reset, retains the old count after an injected write failure, and keeps controls disabled until retry after an injected read failure. The generated app still parses stored values permissively and makes its retry message clickable rather than using a semantic button; this acceptance records tested behavior rather than a general quality guarantee.
 
+## Delivery lifecycle acceptance
+
+The tenth slice extended the synthetic script with timer pause, a modeled delivery-status question and cancellation. The first run exposed an agenda operation that ignored the paused runtime state and called the timer active. Both modeled and deterministic agenda reads now resolve authoritative delivery state. The final nine-case run passed: the pause and cancellation commands used zero model calls; the status question used one and returned “check the bread (paused)” without record or task mutations. The six earlier cases also passed their stored-effect and privacy checks. Full output: `/tmp/ellie-life-model-acceptance/delivery-final-cases.log`.
+
+The gift answer in this rerun again claimed that all suggested options fit the stored budget without current prices. The script does not verify recommendation prices or general factual quality. This remains a demonstrated limitation of the tested 4B model despite the budget/price distinction in its instructions; passing the functional cases must not be represented as resolving it. The status reply also returned a broader agenda than the question needed, while accurately labeling paused delivery.
+
 ## Feedback-to-guidance acceptance
 
 The ninth slice used the same pinned local model through the actual private improvement engine. Reproduce with an already running local endpoint:

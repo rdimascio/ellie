@@ -108,6 +108,11 @@ export interface WorkflowRecord {
   children: TaskRecord[];
 }
 
+export interface DeliveryOccurrences {
+  active?: TaskRecord;
+  latest?: TaskRecord;
+}
+
 export interface ScheduleTask extends EnqueueTask {
   schedule: TaskSchedule;
   missedRunPolicy?: MissedRunPolicy;

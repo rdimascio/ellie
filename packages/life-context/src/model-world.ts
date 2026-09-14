@@ -23,11 +23,26 @@ export interface ModelWorldContext {
   candidateWindowsTruncated: boolean;
   omittedMatches: number;
 }
+export type ModelDeliveryStatus =
+  | "scheduled"
+  | "paused"
+  | "running"
+  | "delivered"
+  | "complete"
+  | "cancelled"
+  | "failed"
+  | "skipped"
+  | "unknown";
+export interface ModelDeliveryContext {
+  status: ModelDeliveryStatus;
+  scheduleStatus: ModelDeliveryStatus;
+  occurrenceStatus?: ModelDeliveryStatus;
+}
 
 const families: LifeRecordKind[][] = [
   ["contact", "birthday"],
   ["need", "goal"],
-  ["event", "reminder", "holiday"],
+  ["event", "reminder", "timer", "holiday"],
   ["place", "routine"],
 ];
 const kinds = new Set(families.flat());
@@ -76,7 +91,10 @@ const dataFields = [
 ] as const;
 const timeFields = ["dueAt", "deadlineAt", "startAt", "endAt", "startDate", "date"] as const;
 
-function project(record: LifeRecord): ModelWorldRecord | undefined {
+function project(
+  record: LifeRecord,
+  resolveDelivery?: (record: LifeRecord) => ModelDeliveryContext | undefined,
+): ModelWorldRecord | undefined {
   if (
     !kinds.has(record.kind) ||
     instructionTypes.has(String(record.data.type)) ||
@@ -104,6 +122,13 @@ function project(record: LifeRecord): ModelWorldRecord | undefined {
     else if (typeof value === "string" && parseCalendarDate(value))
       facts.push(`${key} (calendar date): ${value}`);
   }
+  const delivery = resolveDelivery?.(record);
+  if (delivery !== undefined) {
+    facts.push(`notificationDeliveryStatus: ${delivery.status}`);
+    facts.push(`notificationScheduleStatus: ${delivery.scheduleStatus}`);
+    if (delivery.occurrenceStatus !== undefined)
+      facts.push(`notificationOccurrenceStatus: ${delivery.occurrenceStatus}`);
+  }
   const result: ModelWorldRecord = {
     id: record.id,
     revision: record.revision,
@@ -124,6 +149,7 @@ export function selectModelWorld(
   actor: LifeActor,
   scope: LifeScope,
   message: string,
+  resolveDelivery?: (record: LifeRecord) => ModelDeliveryContext | undefined,
 ): ModelWorldContext {
   const query = terms(message),
     preferred = new Set<LifeRecordKind>(),
@@ -145,6 +171,11 @@ export function selectModelWorld(
     preferred.add("routine");
   }
   if (mentions(/\b(near|where|restaurant|place|places)\b/i)) preferred.add("place");
+  if (mentions(/\b(timer|timers|reminder|reminders|routine|routines)\b/i)) {
+    preferred.add("timer");
+    preferred.add("reminder");
+    preferred.add("routine");
+  }
   const pages = families.map((family) =>
       store.listRecordSummaries(actor, { scope, kinds: family, limit: 50 }),
     ),
@@ -182,7 +213,7 @@ export function selectModelWorld(
     selected.add(id);
     const record = store.getRecord(actor, id);
     if (!record || record.scope.type !== scope.type || record.scope.id !== scope.id) return;
-    const projected = project(record);
+    const projected = project(record, resolveDelivery);
     if (projected) records.push(projected);
   };
   for (const { record } of candidates.slice(0, 8)) add(record.id);

@@ -42,6 +42,38 @@ export interface LifeRecord {
   revision: number;
   createdAt: string;
   updatedAt: string;
+  delivery?: {
+    taskId: string;
+    activeTaskId?: string;
+    status:
+      | "scheduled"
+      | "paused"
+      | "running"
+      | "delivered"
+      | "complete"
+      | "cancelled"
+      | "failed"
+      | "skipped"
+      | "unknown";
+    scheduleStatus:
+      | "scheduled"
+      | "paused"
+      | "running"
+      | "delivered"
+      | "complete"
+      | "cancelled"
+      | "failed"
+      | "skipped"
+      | "unknown";
+    occurrence?: {
+      taskId: string;
+      state: string;
+      status: string;
+      outcomeCode?: string;
+      outcomeVerified?: boolean;
+    };
+    actions: Array<"pause" | "resume" | "cancel" | "run">;
+  };
 }
 export interface TaskSummary {
   id: string;

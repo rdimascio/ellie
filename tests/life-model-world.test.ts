@@ -249,3 +249,61 @@ test("world context excludes paused guidance and unadopted improvement instructi
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("modeled schedule advice receives current delivery state without rewriting the saved commitment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-model-world-")),
+    store = new LifeStore(join(root, "life.sqlite")),
+    plugins = new PluginStore(join(root, "plugins.sqlite")),
+    tasks = new TaskRuntime({ directory: join(root, "tasks") }),
+    actor = { userId: "alice" },
+    scope = { type: "user" as const, id: actor.userId },
+    observed: string[][] = [];
+  try {
+    tasks.registerHandler({ name: "reminder.notify", run: async () => undefined });
+    const draft = store.createRecord(actor, {
+        kind: "timer",
+        scope,
+        title: "Bread timer",
+        data: { dueAt: Date.now() + 3_600_000, completed: false },
+      }),
+      task = tasks.schedule({
+        owner: "user:alice",
+        handler: "reminder.notify",
+        input: { recordId: draft.id, scope },
+        schedule: { kind: "once", at: Date.now() + 3_600_000 },
+      }),
+      record = store.updateRecord(actor, draft.id, draft.revision, {
+        data: { ...draft.data, taskId: task.id },
+      }),
+      harness = createLifeHarness({
+        store,
+        plugins,
+        tasks,
+        mlb: new MLBAdapter(),
+        model: {
+          async plan(request) {
+            const current = request.world?.records.find((item) => item.id === record.id);
+            assert.ok(current);
+            observed.push(current.facts);
+            assert.equal(JSON.stringify(current).includes(task.id), false);
+            return { reply: "The delivery state is separate from the saved timer.", actions: [] };
+          },
+        },
+      });
+    for (const state of ["scheduled", "paused", "cancelled"]) {
+      if (state === "paused") tasks.pause(task.id, "user:alice");
+      if (state === "cancelled") tasks.cancel(task.id, "user:alice");
+      await harness.chat({ actor, scope, message: "Explain the Bread timer status" });
+      assert.ok(observed.at(-1)!.includes(`notificationDeliveryStatus: ${state}`));
+      assert.ok(observed.at(-1)!.includes(`notificationScheduleStatus: ${state}`));
+      assert.ok(observed.at(-1)!.includes("completed: false"));
+    }
+    assert.equal(observed.length, 3);
+    assert.deepEqual(store.getRecord(actor, record.id), record);
+  } finally {
+    await tasks.close();
+    plugins.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
