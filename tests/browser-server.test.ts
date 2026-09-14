@@ -180,9 +180,28 @@ async function fixture(
     state = structuredClone(next);
   });
   let nativeState = NativeAuth.empty();
-  const nativeAuth = new NativeAuth(nativeState, async (next) => {
-    nativeState = structuredClone(next);
-  });
+  let nativeNow: number | undefined;
+  let nativeSaveGate:
+    | {
+        entered: ReturnType<typeof deferred<void>>;
+        release: ReturnType<typeof deferred<void>>;
+        fail: boolean;
+      }
+    | undefined;
+  const nativeAuth = new NativeAuth(
+    nativeState,
+    async (next) => {
+      const gate = nativeSaveGate;
+      if (gate) {
+        nativeSaveGate = undefined;
+        gate.entered.resolve();
+        await gate.release.promise;
+        if (gate.fail) throw new Error("private native state must stay redacted");
+      }
+      nativeState = structuredClone(next);
+    },
+    { now: () => nativeNow ?? Date.now() },
+  );
   const household = HouseholdState.memory();
   const speechInput: SpeechInput = {
     async *transcribe(audio) {
@@ -275,6 +294,15 @@ async function fixture(
     request,
     failSave(value: boolean) {
       failSave = value;
+    },
+    blockNextNativeSave(fail = false) {
+      assert.equal(nativeSaveGate, undefined);
+      const gate = { entered: deferred<void>(), release: deferred<void>(), fail };
+      nativeSaveGate = gate;
+      return gate;
+    },
+    nativeNow(value: number) {
+      nativeNow = value;
     },
     persisted: () => structuredClone(state) as BrowserAuthState,
     close() {
@@ -1230,7 +1258,7 @@ async function nativeControlSession(f: Awaited<ReturnType<typeof fixture>>) {
   assert.equal(paired.status, 200);
   return {
     headers: { "x-ellie-version": "1", authorization: `Bearer ${token}` },
-    client: (paired.body as { client: { id: string } }).client,
+    client: (paired.body as { client: { id: string; expiresAt: number } }).client,
   };
 }
 
@@ -1333,6 +1361,74 @@ test("native inventory and dispatch recheck revocation after asynchronous discov
     assert.equal((await pending).status, 401);
     assert.equal(calls, 0);
   }
+});
+
+test("native command admission waits for queued revoke, logout, expiry, and failed save", async (t) => {
+  for (const operation of ["revoke", "logout", "expiry", "failed-revoke"] as const) {
+    const discoveryStarted = deferred<void>();
+    const discovery = deferred<(typeof nativeTarget)[]>();
+    let dispatches = 0;
+    const f = await fixture(undefined, {
+      nodes: () => {
+        discoveryStarted.resolve();
+        return discovery.promise;
+      },
+      async openApp() {
+        dispatches += 1;
+        return { ok: true, message: "opened" };
+      },
+    });
+    t.after(() => f.close());
+    const { headers, client } = await nativeControlSession(f);
+    const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+    await discoveryStarted.promise;
+
+    const gate = f.blockNextNativeSave(operation === "failed-revoke");
+    const mutation =
+      operation === "logout"
+        ? f.nativeAuth.logout(headers.authorization)
+        : operation === "expiry"
+          ? f.nativeAuth.invite({
+              label: "Another test phone",
+              grants: [{ target: nativeTarget.id, capabilities: ["app.open"] }],
+            })
+          : f.nativeAuth.revoke(client.id);
+    await gate.entered.promise;
+    if (operation === "expiry") f.nativeNow(client.expiresAt);
+    discovery.resolve([nativeTarget]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dispatches, 0, operation);
+    gate.release.resolve();
+
+    if (operation === "failed-revoke") await assert.rejects(mutation);
+    else await mutation;
+    assert.equal((await pending).status, operation === "failed-revoke" ? 503 : 401, operation);
+    assert.equal(dispatches, 0, operation);
+  }
+});
+
+test("native command admitted before revocation dispatches once without replay", async (t) => {
+  const dispatched = deferred<void>();
+  const result = deferred<{ ok: boolean; message: string }>();
+  let dispatches = 0;
+  const f = await fixture(undefined, {
+    async nodes() {
+      return [nativeTarget];
+    },
+    openApp() {
+      dispatches += 1;
+      dispatched.resolve();
+      return result.promise;
+    },
+  });
+  t.after(() => f.close());
+  const { headers, client } = await nativeControlSession(f);
+  const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+  await dispatched.promise;
+  assert.equal(await f.nativeAuth.revoke(client.id), true);
+  result.reject(new Error("outcome lost after admission"));
+  assert.equal((await pending).status, 502);
+  assert.equal(dispatches, 1);
 });
 
 test("native dispatch refuses missing, offline and incapable targets and redacts discovery failures", async (t) => {
