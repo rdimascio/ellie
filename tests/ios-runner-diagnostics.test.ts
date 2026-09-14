@@ -25,7 +25,10 @@ type FixtureMode =
   | "interrupt"
   | "retained"
   | "cleanup-failure"
-  | "kill-escalation";
+  | "kill-escalation"
+  | "split"
+  | "build-failure"
+  | "test-failure";
 
 async function fixture(mode: FixtureMode) {
   const root = await mkdtemp(join(tmpdir(), "ellie-ios-runner-test-"));
@@ -116,8 +119,20 @@ fi
     join(bin, "xcodebuild"),
     `#!/bin/sh
 printf '%s\n' "$$" >> "$ELLIE_RUNNER_TEST_ROOT/mock-process-groups"
+for argument in "$@"; do
+  if [ "$previous_argument" = "-resultBundlePath" ]; then result_bundle="$argument"; fi
+  printf '%s\n' "$argument"
+  last_argument="$argument"
+  previous_argument="$argument"
+done >> "$ELLIE_RUNNER_TEST_ROOT/xcodebuild-arguments"
+if [ "$last_argument" = "test-without-building" ] && [ -n "$result_bundle" ]; then mkdir -p "$result_bundle"; fi
+printf '%s\n' END >> "$ELLIE_RUNNER_TEST_ROOT/xcodebuild-arguments"
 if [ "$1" = "-version" ]; then
   printf '%s\n' 'Xcode 16.4' 'Build version 16F6'
+elif [ "$ELLIE_RUNNER_TEST_MODE" = "build-failure" ] && [ "$last_argument" = "build-for-testing" ]; then
+  exit 9
+elif [ "$ELLIE_RUNNER_TEST_MODE" = "test-failure" ] && [ "$last_argument" = "test-without-building" ]; then
+  exit 10
 else
   exit 0
 fi
@@ -135,6 +150,7 @@ async function runFixture(mode: FixtureMode) {
         result: ReturnType<typeof spawnSync>;
         retainedDerived: number;
         retainedEvidence: string | undefined;
+        xcodeArguments: string;
       }
     | undefined;
   let operationError: unknown;
@@ -164,7 +180,13 @@ async function runFixture(mode: FixtureMode) {
       mode === "retained"
         ? await readFile(join(owned.root, "test-results/native-ios.xcresult/retained"), "utf8")
         : undefined;
-    outcome = { diagnostic, result, retainedDerived, retainedEvidence };
+    let xcodeArguments = "";
+    try {
+      xcodeArguments = await readFile(join(owned.root, "xcodebuild-arguments"), "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    outcome = { diagnostic, result, retainedDerived, retainedEvidence, xcodeArguments };
   } catch (error) {
     operationError = error;
   }
@@ -193,6 +215,40 @@ async function runFixture(mode: FixtureMode) {
   assert.ok(outcome);
   return outcome;
 }
+
+test("build and UI execution use separate xcodebuild invocations", async () => {
+  const { result, xcodeArguments } = await runFixture("split");
+  assert.equal(result.status, 0);
+  const calls = xcodeArguments
+    .split("END\n")
+    .map((value) => value.trim().split("\n"))
+    .filter((value) => value[0]);
+  assert.equal(calls.length, 3);
+  const build = calls[1];
+  const testCall = calls[2];
+  assert.ok(build && testCall);
+  assert.equal(build.at(-1), "build-for-testing");
+  assert.equal(build.includes("-resultBundlePath"), false);
+  assert.equal(testCall.at(-1), "test-without-building");
+  assert.equal(testCall.includes("-resultBundlePath"), true);
+});
+
+test("a build-for-testing failure never starts UI execution", async () => {
+  const { diagnostic, result, xcodeArguments } = await runFixture("build-failure");
+  assert.equal(result.status, 1);
+  assert.match(diagnostic, /stage=xcode-build-for-testing outcome=exit-status/);
+  assert.match(xcodeArguments, /build-for-testing/);
+  assert.doesNotMatch(xcodeArguments, /test-without-building/);
+});
+
+test("a test-without-building failure retains its distinct stage and result", async () => {
+  const { diagnostic, result, xcodeArguments } = await runFixture("test-failure");
+  assert.equal(result.status, 1);
+  assert.match(diagnostic, /stage=xcode-test-without-building outcome=exit-status/);
+  assert.match(diagnostic, /result=retained/);
+  assert.match(xcodeArguments, /build-for-testing/);
+  assert.match(xcodeArguments, /test-without-building/);
+});
 
 function guardCleanOuterResult(result: ReturnType<typeof spawnSync> | undefined) {
   if (!result || result.error || result.signal || !Number.isInteger(result.status))

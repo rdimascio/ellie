@@ -8,6 +8,12 @@ Phone control is off unless the browser server's caller injects a private `Brows
 
 The phone must pair as a `phone_controller` with an `app.open` grant for each intended node. Grants are fixed by the invitation and cannot be added by the browser. TV sessions are read-only. Revoking the browser client removes access, including when revocation happens while a device lookup is in progress.
 
+Command admission is ordered with browser authorization changes. A revoke or logout that entered
+the authorization queue first must settle successfully before admission and prevents dispatch. A
+failed authorization save poisons admission until the state is reopened. Once command admission
+wins that order, a later revoke does not undo the already admitted native side effect; its result
+may still complete or remain unknown.
+
 ## Using the demo
 
 Open the trusted browser HTTPS origin, pair the phone, select an available Mac, and either tap an app shortcut or enter a supported command such as `Open Safari`. The selected Mac must be online and report the `app.open` capability.
