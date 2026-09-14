@@ -75,16 +75,18 @@ private let migrationRecovery =
 private let migrationUnavailable =
   "Ellie could not verify that both legacy service labels are unloaded."
 let migrationSwitchRecovery =
-  "Legacy service migration switching requires explicit recover-migration-switch."
+  "A legacy service transaction requires its explicit recover-migration-switch or recover-legacy-restore command."
 func migrationSwitchPending(_ services: Int32) throws -> Bool {
-  var value = stat()
-  if fstatat(services, "migration-switch-journal.json", &value, AT_SYMLINK_NOFOLLOW) == 0 {
-    guard (value.st_mode & S_IFMT) == S_IFREG, value.st_uid == getuid(), value.st_nlink == 1,
-      (value.st_mode & 0o7777) == 0o600
-    else { throw MigrationSwitchPendingFailure() }
-    return true
+  for name in ["migration-switch-journal.json", "legacy-restore-journal.json"] {
+    var value = stat()
+    if fstatat(services, name, &value, AT_SYMLINK_NOFOLLOW) == 0 {
+      guard (value.st_mode & S_IFMT) == S_IFREG, value.st_uid == getuid(), value.st_nlink == 1,
+        (value.st_mode & 0o7777) == 0o600
+      else { throw MigrationSwitchPendingFailure() }
+      return true
+    }
+    guard errno == ENOENT else { throw MigrationSwitchPendingFailure() }
   }
-  guard errno == ENOENT else { throw MigrationSwitchPendingFailure() }
   return false
 }
 private let migrationMaxFile: UInt64 = 128 * 1024 * 1024
@@ -834,6 +836,189 @@ func migrationLegacyEvidence(
   }
 }
 
+private func legacyPartialModes(_ final: Int) -> Set<Int> {
+  Set([0, 0o022, 0o027, 0o077].map { final & ~$0 })
+}
+
+private func legacyWritePrefixFile(
+  _ parent: Int32, _ name: String, data: Data, mode: Int, stopAfter: Int? = nil
+) throws {
+  let fd = openat(
+    parent, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode_t(mode))
+  guard fd >= 0 else { throw MigrationSwitchPendingFailure() }
+  defer { close(fd) }
+  let limit = min(stopAfter ?? data.count, data.count)
+  var offset = 0
+  while offset < limit {
+    let count = data.withUnsafeBytes {
+      write(fd, $0.baseAddress!.advanced(by: offset), limit - offset)
+    }
+    guard count > 0 else { throw MigrationSwitchPendingFailure() }
+    offset += count
+  }
+  guard fsync(fd) == 0 else { throw MigrationSwitchPendingFailure() }
+  if limit == data.count {
+    guard fchmod(fd, mode_t(mode)) == 0, fsync(fd) == 0 else {
+      throw MigrationSwitchPendingFailure()
+    }
+  }
+}
+
+private func legacyCreateDirectory(_ parent: Int32, _ name: String) throws -> Int32 {
+  guard mkdirat(parent, name, 0o700) == 0 else { throw MigrationSwitchPendingFailure() }
+  return try selectionOpenOwnedDirectory(parent: parent, name: name)
+}
+
+func migrationStageLegacyRole(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, agents: Int32,
+  applicationName: String, plistName: String, truncatePath: String? = nil
+) throws {
+  let application = try legacyCreateDirectory(applications, applicationName)
+  defer { close(application) }
+  let contents = try legacyCreateDirectory(application, "Contents")
+  defer { close(contents) }
+  let macos = try legacyCreateDirectory(contents, "MacOS")
+  defer { close(macos) }
+  let resources = try legacyCreateDirectory(contents, "Resources")
+  defer { close(resources) }
+  let signature = try legacyCreateDirectory(contents, "_CodeSignature")
+  defer { close(signature) }
+  for path in evidence.files.keys.sorted() where path != "launch-agent.plist" {
+    guard let item = evidence.files[path] else { throw MigrationSwitchPendingFailure() }
+    let destination: (Int32, String)
+    if path.hasPrefix("application/Contents/MacOS/") {
+      destination = (macos, (path as NSString).lastPathComponent)
+    } else if path.hasPrefix("application/Contents/Resources/") {
+      destination = (resources, (path as NSString).lastPathComponent)
+    } else if path.hasPrefix("application/Contents/_CodeSignature/") {
+      destination = (signature, (path as NSString).lastPathComponent)
+    } else if path == "application/Contents/Info.plist" {
+      destination = (contents, "Info.plist")
+    } else {
+      throw MigrationSwitchPendingFailure()
+    }
+    try legacyWritePrefixFile(
+      destination.0, destination.1, data: item.data, mode: item.mode,
+      stopAfter: truncatePath == path ? max(1, item.data.count / 2) : nil)
+    if truncatePath == path { throw MigrationSwitchPendingFailure() }
+  }
+  guard let plist = evidence.files["launch-agent.plist"] else {
+    throw MigrationSwitchPendingFailure()
+  }
+  try legacyWritePrefixFile(
+    agents, plistName, data: plist.data, mode: plist.mode,
+    stopAfter: truncatePath == "launch-agent.plist" ? max(1, plist.data.count / 2) : nil)
+  if truncatePath == "launch-agent.plist" { throw MigrationSwitchPendingFailure() }
+  for (directory, key) in [
+    (signature, "application/Contents/_CodeSignature"),
+    (resources, "application/Contents/Resources"), (macos, "application/Contents/MacOS"),
+    (contents, "application/Contents"),
+  ] {
+    guard let mode = evidence.directoryModes[key], fchmod(directory, mode_t(mode)) == 0,
+      fsync(directory) == 0
+    else { throw MigrationSwitchPendingFailure() }
+  }
+  guard fchmod(application, 0o700) == 0, fsync(application) == 0 else {
+    throw MigrationSwitchPendingFailure()
+  }
+  guard fsync(applications) == 0, fsync(agents) == 0 else {
+    throw MigrationSwitchPendingFailure()
+  }
+}
+
+func migrationSealLegacyApplication(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+) throws {
+  let application = try selectionOpenOwnedDirectory(parent: applications, name: applicationName)
+  defer { close(application) }
+  guard let mode = evidence.directoryModes["application"], fchmod(application, mode_t(mode)) == 0,
+    fsync(application) == 0, fsync(applications) == 0
+  else { throw MigrationSwitchPendingFailure() }
+  try validateMigrationLegacyApplication(
+    evidence, applications: applications, applicationName: applicationName)
+}
+
+private func validateLegacyPrefixFile(
+  _ parent: Int32, _ name: String, expected: (mode: Int, data: Data, sha256: String)
+) throws {
+  let fd = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+  guard fd >= 0 else { throw MigrationSwitchPendingFailure() }
+  defer { close(fd) }
+  var info = stat()
+  guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG, info.st_uid == getuid(),
+    info.st_nlink == 1, info.st_size >= 0, info.st_size <= expected.data.count,
+    legacyPartialModes(expected.mode).contains(Int(info.st_mode & 0o7777))
+  else { throw MigrationSwitchPendingFailure() }
+  var data = Data(count: Int(info.st_size))
+  let length = data.count
+  var offset = 0
+  while offset < length {
+    let count = data.withUnsafeMutableBytes {
+      read(fd, $0.baseAddress!.advanced(by: offset), length - offset)
+    }
+    guard count > 0 else { throw MigrationSwitchPendingFailure() }
+    offset += count
+  }
+  var after = stat()
+  guard fstat(fd, &after) == 0, after.st_dev == info.st_dev, after.st_ino == info.st_ino,
+    after.st_size == info.st_size, lseek(fd, 0, SEEK_CUR) == info.st_size,
+    data == expected.data.prefix(data.count)
+  else { throw MigrationSwitchPendingFailure() }
+}
+
+func migrationValidatePartialLegacyApplication(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+) throws {
+  let application = try selectionOpenOwnedDirectory(parent: applications, name: applicationName)
+  defer { close(application) }
+  var rootInfo = stat()
+  guard fstat(application, &rootInfo) == 0,
+    legacyPartialModes(evidence.directoryModes["application"] ?? -1).contains(
+      Int(rootInfo.st_mode & 0o7777)) || (rootInfo.st_mode & 0o7777) == 0o700
+  else { throw MigrationSwitchPendingFailure() }
+  let expectedNames: [String: Set<String>] = [
+    "": ["Contents"], "Contents": ["Info.plist", "MacOS", "Resources", "_CodeSignature"],
+    "Contents/MacOS": ["EllieService"],
+    "Contents/Resources": ["Ellie.icns", "ellie-build.json", "runtime.json"],
+    "Contents/_CodeSignature": ["CodeResources"],
+  ]
+  func walk(_ directory: Int32, _ path: String) throws {
+    let names = try migrationNames(directory)
+    guard Set(names).isSubset(of: expectedNames[path] ?? []) else {
+      throw MigrationSwitchPendingFailure()
+    }
+    for name in names {
+      let child = path.isEmpty ? name : path + "/" + name
+      if expectedNames[child] != nil {
+        let fd = try selectionOpenOwnedDirectory(parent: directory, name: name)
+        defer { close(fd) }
+        var info = stat()
+        let key = "application/" + child
+        guard fstat(fd, &info) == 0,
+          legacyPartialModes(evidence.directoryModes[key] ?? -1).contains(
+            Int(info.st_mode & 0o7777)) || (info.st_mode & 0o7777) == 0o700
+        else { throw MigrationSwitchPendingFailure() }
+        try walk(fd, child)
+      } else {
+        guard let expected = evidence.files["application/" + child] else {
+          throw MigrationSwitchPendingFailure()
+        }
+        try validateLegacyPrefixFile(directory, name, expected: expected)
+      }
+    }
+  }
+  try walk(application, "")
+}
+
+func migrationValidatePartialLegacyPlist(
+  _ evidence: MigrationLegacyRoleEvidence, agents: Int32, plistName: String
+) throws {
+  guard let expected = evidence.files["launch-agent.plist"] else {
+    throw MigrationSwitchPendingFailure()
+  }
+  try validateLegacyPrefixFile(agents, plistName, expected: expected)
+}
+
 private func validateMigrationLegacyRole(
   _ evidence: MigrationLegacyRoleEvidence, applications: Int32, agents: Int32,
   applicationName: String, plistName: String
@@ -844,7 +1029,8 @@ private func validateMigrationLegacyRole(
 }
 
 private func validateMigrationLegacyApplication(
-  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String,
+  allowedRootModes: Set<Int>? = nil
 ) throws {
   let app = try selectionOpenOwnedDirectory(parent: applications, name: applicationName)
   defer { close(app) }
@@ -863,7 +1049,10 @@ private func validateMigrationLegacyApplication(
   ]
   for (fd, path) in directories {
     var info = stat()
-    guard fstat(fd, &info) == 0, Int(info.st_mode & 0o7777) == evidence.directoryModes[path]
+    let expected = evidence.directoryModes[path]
+    let allowed =
+      path == "application" ? (allowedRootModes ?? Set([expected ?? -1])) : Set([expected ?? -1])
+    guard fstat(fd, &info) == 0, allowed.contains(Int(info.st_mode & 0o7777))
     else { throw MigrationSwitchPendingFailure() }
   }
   guard try migrationNames(app) == ["Contents"],
@@ -890,6 +1079,29 @@ private func validateMigrationLegacyApplication(
   }
   try selectionValidateSignature(
     path: try selectionPathFromFD(app), identifier: evidence.identifier)
+}
+
+func migrationValidatePhasedLegacyApplication(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+) throws {
+  guard let final = evidence.directoryModes["application"] else {
+    throw MigrationSwitchPendingFailure()
+  }
+  try validateMigrationLegacyApplication(
+    evidence, applications: applications, applicationName: applicationName,
+    allowedRootModes: [final, 0o700])
+}
+
+func migrationUnsealLegacyApplication(
+  _ evidence: MigrationLegacyRoleEvidence, applications: Int32, applicationName: String
+) throws {
+  try migrationValidatePhasedLegacyApplication(
+    evidence, applications: applications, applicationName: applicationName)
+  let application = try selectionOpenOwnedDirectory(parent: applications, name: applicationName)
+  defer { close(application) }
+  guard fchmod(application, 0o700) == 0, fsync(application) == 0, fsync(applications) == 0 else {
+    throw MigrationSwitchPendingFailure()
+  }
 }
 
 private func validateMigrationLegacyPlist(

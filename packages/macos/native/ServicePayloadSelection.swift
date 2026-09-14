@@ -1432,6 +1432,520 @@ func runMigrationSwitchCommand(_ input: [String]) throws -> Never {
   }
 }
 
+private let legacyRestoreError =
+  "Legacy file restoration requires explicit recover-legacy-restore; retained evidence was preserved."
+
+private struct LegacyRestoreJournal: Codable {
+  let version: Int
+  let direction: String
+  let transactionID: String
+  let adoptionTransactionID: String
+  let snapshotID: String
+  let manifestSHA256: String
+  let roles: [SelectedRole]
+  let packagedReceipt: Data
+  let completedAdoption: Data
+}
+
+private struct CompletedLegacyRestore: Codable {
+  let version: Int
+  let outcome: String
+  let runtimeCompatibility: String
+  let journal: LegacyRestoreJournal
+}
+
+private func legacyRestorePackagedApp(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-legacy-restore-\(transaction)-packaged-\(role.rawValue).app"
+}
+private func legacyRestorePackagedPlist(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-legacy-restore-\(transaction)-packaged-\(role.rawValue).plist"
+}
+private func legacyRestoreStagedApp(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-legacy-restore-\(transaction)-stage-\(role.rawValue).app"
+}
+private func legacyRestoreStagedPlist(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-legacy-restore-\(transaction)-stage-\(role.rawValue).plist"
+}
+
+private func decodedCompletedAdoption(_ data: Data, transaction: String) throws
+  -> CompletedMigrationSwitch
+{
+  let value = try JSONDecoder().decode(CompletedMigrationSwitch.self, from: data)
+  guard value.version == 1, value.outcome == "committed",
+    value.journal.transactionID == transaction, try canonical(value) == data
+  else { throw MigrationSwitchPendingFailure() }
+  _ = try decodedMigrationSwitchJournal(try canonical(value.journal))
+  return value
+}
+
+private func decodedLegacyRestoreJournal(_ data: Data) throws -> LegacyRestoreJournal {
+  let value = try JSONDecoder().decode(LegacyRestoreJournal.self, from: data)
+  guard value.version == 1, value.direction == "packaged-to-legacy",
+    UUID(uuidString: value.transactionID)?.uuidString.lowercased() == value.transactionID,
+    UUID(uuidString: value.adoptionTransactionID)?.uuidString.lowercased()
+      == value.adoptionTransactionID,
+    value.roles == SelectedRole.allCases.filter(value.roles.contains), !value.roles.isEmpty,
+    Set(value.roles).count == value.roles.count, try canonical(value) == data
+  else { throw MigrationSwitchPendingFailure() }
+  let completed = try decodedCompletedAdoption(
+    value.completedAdoption, transaction: value.adoptionTransactionID)
+  guard completed.journal.snapshotID == value.snapshotID,
+    completed.journal.manifestSHA256 == value.manifestSHA256,
+    completed.journal.roles == value.roles, completed.journal.newReceipt == value.packagedReceipt
+  else { throw MigrationSwitchPendingFailure() }
+  return value
+}
+
+private func recoverLegacyRestore(
+  paths: SelectionPaths, directories: SelectionDirectories, journal: LegacyRestoreJournal,
+  evidence: MigrationLegacyEvidence, testLoaded: Set<SelectedRole>,
+  fault: (String) -> Void = { _ in }
+) throws -> String {
+  func requireUnloaded() throws {
+    for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+      throw SelectionFailure.loaded
+    }
+  }
+  try requireUnloaded()
+  guard try entry(directories.services, paths.journalName) == nil,
+    try entry(directories.services, "migration-switch-journal.json") == nil
+  else { throw MigrationSwitchPendingFailure() }
+  if let migrations = try entry(directories.services, "migrations") {
+    guard (migrations.st_mode & S_IFMT) == S_IFDIR else { throw MigrationSwitchPendingFailure() }
+    let fd = try selectionOpenOwnedDirectory(parent: directories.services, name: "migrations")
+    defer { close(fd) }
+    guard try entry(fd, "migration-preparation.json") == nil else {
+      throw MigrationSwitchPendingFailure()
+    }
+  }
+  let current = try readPrivateAt(
+    directories.receipts, paths.receiptName, maximum: 32 * 1024, missing: true)
+  let committed: Bool
+  if current == journal.packagedReceipt {
+    committed = false
+  } else if current == nil {
+    committed = true
+  } else {
+    throw MigrationSwitchPendingFailure()
+  }
+  let packaged = try decodedReceipt(journal.packagedReceipt)
+  guard evidence.snapshotID == journal.snapshotID,
+    evidence.manifestSHA256 == journal.manifestSHA256,
+    evidence.roles == journal.roles.map(\.rawValue)
+  else { throw MigrationSwitchPendingFailure() }
+  for role in journal.roles {
+    guard let legacy = evidence.roleEvidence[role.rawValue], let record = packaged[role] else {
+      throw MigrationSwitchPendingFailure()
+    }
+    let packagedApp = legacyRestorePackagedApp(role, journal.transactionID)
+    let packagedPlist = legacyRestorePackagedPlist(role, journal.transactionID)
+    let stagedApp = legacyRestoreStagedApp(role, journal.transactionID)
+    let stagedPlist = legacyRestoreStagedPlist(role, journal.transactionID)
+    try migrationValidateLegacyApplication(
+      legacy, applications: directories.applications,
+      applicationName: switchBackupApp(role, journal.adoptionTransactionID))
+    try migrationValidateLegacyPlist(
+      legacy, agents: directories.agents,
+      plistName: switchBackupPlist(role, journal.adoptionTransactionID))
+    let retainedLegacyApp =
+      ".ellie-legacy-restore-\(journal.transactionID)-legacy-\(role.rawValue).app"
+    let retainedLegacyPlist =
+      ".ellie-legacy-restore-\(journal.transactionID)-legacy-\(role.rawValue).plist"
+    let retainedStageApp =
+      ".ellie-legacy-restore-\(journal.transactionID)-partial-stage-\(role.rawValue).app"
+    let retainedStagePlist =
+      ".ellie-legacy-restore-\(journal.transactionID)-partial-stage-\(role.rawValue).plist"
+    if try entry(directories.applications, retainedLegacyApp) != nil {
+      try migrationValidatePhasedLegacyApplication(
+        legacy, applications: directories.applications, applicationName: retainedLegacyApp)
+    }
+    if try entry(directories.applications, retainedStageApp) != nil {
+      try migrationValidatePartialLegacyApplication(
+        legacy, applications: directories.applications, applicationName: retainedStageApp)
+    }
+    if try entry(directories.agents, retainedLegacyPlist) != nil {
+      try migrationValidateLegacyPlist(
+        legacy, agents: directories.agents, plistName: retainedLegacyPlist)
+    }
+    if try entry(directories.agents, retainedStagePlist) != nil {
+      try migrationValidatePartialLegacyPlist(
+        legacy, agents: directories.agents, plistName: retainedStagePlist)
+    }
+    if committed {
+      try migrationValidatePhasedLegacyApplication(
+        legacy, applications: directories.applications, applicationName: role.appName)
+      try migrationValidateLegacyPlist(
+        legacy, agents: directories.agents, plistName: role.plistName)
+      try validatePhasedApplication(
+        paths: paths, directories: directories, role: role, record: record, name: packagedApp)
+      try validateAsset(
+        paths: paths, directories: directories, role: role, record: record, asset: .plist,
+        name: packagedPlist)
+    } else {
+      let appEvidence = try entry(directories.applications, packagedApp) != nil
+      let plistEvidence = try entry(directories.agents, packagedPlist) != nil
+      if appEvidence {
+        try validatePhasedApplication(
+          paths: paths, directories: directories, role: role, record: record, name: packagedApp)
+        if try entry(directories.applications, role.appName) != nil {
+          try migrationValidatePhasedLegacyApplication(
+            legacy, applications: directories.applications, applicationName: role.appName)
+        } else {
+          try migrationValidateLegacyApplication(
+            legacy, applications: directories.applications,
+            applicationName: switchBackupApp(role, journal.adoptionTransactionID))
+        }
+      } else {
+        try validatePhasedApplication(
+          paths: paths, directories: directories, role: role, record: record, name: role.appName)
+      }
+      if plistEvidence {
+        try validateAsset(
+          paths: paths, directories: directories, role: role, record: record, asset: .plist,
+          name: packagedPlist)
+        if try entry(directories.agents, role.plistName) != nil {
+          try migrationValidateLegacyPlist(
+            legacy, agents: directories.agents, plistName: role.plistName)
+        } else {
+          try migrationValidateLegacyPlist(
+            legacy, agents: directories.agents,
+            plistName: switchBackupPlist(role, journal.adoptionTransactionID))
+        }
+      } else {
+        try validateAsset(
+          paths: paths, directories: directories, role: role, record: record, asset: .plist,
+          name: role.plistName)
+      }
+      if try entry(directories.applications, stagedApp) != nil {
+        try migrationValidatePartialLegacyApplication(
+          legacy, applications: directories.applications, applicationName: stagedApp)
+      }
+      if try entry(directories.agents, stagedPlist) != nil {
+        try migrationValidatePartialLegacyPlist(
+          legacy, agents: directories.agents, plistName: stagedPlist)
+      }
+    }
+  }
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  try requireUnloaded()
+  if !committed {
+    for role in journal.roles {
+      guard let record = packaged[role], let legacy = evidence.roleEvidence[role.rawValue] else {
+        throw MigrationSwitchPendingFailure()
+      }
+      let packagedApp = legacyRestorePackagedApp(role, journal.transactionID)
+      let packagedPlist = legacyRestorePackagedPlist(role, journal.transactionID)
+      let stagedApp = legacyRestoreStagedApp(role, journal.transactionID)
+      let stagedPlist = legacyRestoreStagedPlist(role, journal.transactionID)
+      if try entry(directories.applications, packagedApp) != nil {
+        let legacyEvidence =
+          ".ellie-legacy-restore-\(journal.transactionID)-legacy-\(role.rawValue).app"
+        if try entry(directories.applications, role.appName) != nil,
+          try entry(directories.applications, legacyEvidence) == nil
+        {
+          try migrationUnsealLegacyApplication(
+            legacy, applications: directories.applications, applicationName: role.appName)
+          fault("recovery-after-legacy-app-unseal-\(role.rawValue)")
+          try renameExclusive(
+            from: directories.applications, role.appName, to: directories.applications,
+            legacyEvidence)
+          fault("recovery-after-legacy-app-evidence-\(role.rawValue)")
+        }
+        try renameExclusive(
+          from: directories.applications, packagedApp, to: directories.applications, role.appName)
+        fault("recovery-before-packaged-app-seal-\(role.rawValue)")
+        try sealApplication(
+          paths: paths, directories: directories, role: role, record: record,
+          name: role.appName)
+        fault("recovery-after-packaged-app-seal-\(role.rawValue)")
+      } else if try applicationMode(directories.applications, role.appName) == 0o700 {
+        fault("recovery-before-packaged-app-seal-\(role.rawValue)")
+        try sealApplication(
+          paths: paths, directories: directories, role: role, record: record,
+          name: role.appName)
+        fault("recovery-after-packaged-app-seal-\(role.rawValue)")
+      }
+      if try entry(directories.agents, packagedPlist) != nil {
+        let legacyEvidence =
+          ".ellie-legacy-restore-\(journal.transactionID)-legacy-\(role.rawValue).plist"
+        if try entry(directories.agents, role.plistName) != nil,
+          try entry(directories.agents, legacyEvidence) == nil
+        {
+          try renameExclusive(
+            from: directories.agents, role.plistName, to: directories.agents, legacyEvidence)
+        }
+        try renameExclusive(
+          from: directories.agents, packagedPlist, to: directories.agents, role.plistName)
+      }
+      if try entry(directories.applications, stagedApp) != nil {
+        let evidenceName =
+          ".ellie-legacy-restore-\(journal.transactionID)-partial-stage-\(role.rawValue).app"
+        guard try entry(directories.applications, evidenceName) == nil else {
+          throw MigrationSwitchPendingFailure()
+        }
+        try renameExclusive(
+          from: directories.applications, stagedApp, to: directories.applications, evidenceName)
+      }
+      if try entry(directories.agents, stagedPlist) != nil {
+        let evidenceName =
+          ".ellie-legacy-restore-\(journal.transactionID)-partial-stage-\(role.rawValue).plist"
+        guard try entry(directories.agents, evidenceName) == nil else {
+          throw MigrationSwitchPendingFailure()
+        }
+        try renameExclusive(
+          from: directories.agents, stagedPlist, to: directories.agents, evidenceName)
+      }
+    }
+    try validateSelection(paths: paths, directories: directories, receipt: packaged)
+  } else {
+    for role in journal.roles {
+      guard let legacy = evidence.roleEvidence[role.rawValue] else {
+        throw MigrationSwitchPendingFailure()
+      }
+      try migrationSealLegacyApplication(
+        legacy, applications: directories.applications, applicationName: role.appName)
+      fault("recovery-after-legacy-app-seal-\(role.rawValue)")
+    }
+  }
+  try sync(directories.applications)
+  try sync(directories.agents)
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  try requireUnloaded()
+  let completed = try canonical(
+    CompletedLegacyRestore(
+      version: 1, outcome: committed ? "restored-legacy" : "restored-packaged",
+      runtimeCompatibility: "unverified", journal: journal))
+  let completedName = ".legacy-restore-evidence-\(journal.transactionID).json"
+  let completedTemporary =
+    ".ellie-write-\(journal.transactionID)-legacy-restore-completed"
+  if let existing = try readPrivateAt(
+    directories.services, completedName, maximum: 160 * 1024, missing: true)
+  {
+    guard existing == completed, try entry(directories.services, completedTemporary) == nil else {
+      throw MigrationSwitchPendingFailure()
+    }
+  } else if try entry(directories.services, completedTemporary) != nil {
+    try finalizePrivatePrefix(
+      directories.services, source: completedTemporary, target: completedName,
+      expected: completed)
+  } else {
+    try writePrivateAt(
+      directories.services, name: completedName, data: completed, replace: false,
+      transaction: journal.transactionID + "-legacy-restore-completed")
+  }
+  fault("after-completed")
+  guard unlinkat(directories.services, "legacy-restore-journal.json", 0) == 0 else {
+    throw MigrationSwitchPendingFailure()
+  }
+  try sync(directories.services)
+  return committed ? "restored-legacy" : "restored-packaged"
+}
+
+func runLegacyRestoreCommand(_ input: [String]) throws -> Never {
+  var args = input
+  let command = args.removeFirst()
+  var testHome: String?
+  var testLoaded = Set<SelectedRole>()
+  var testFault: String?
+  var testTruncateRole: SelectedRole?
+  #if ELLIE_INSTALLER_TESTING
+    if let index = args.firstIndex(of: "--test-home-root"), index + 1 < args.count {
+      testHome = args[index + 1]
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-loaded"), index + 1 < args.count {
+      testLoaded = Set(
+        args[index + 1].split(separator: ",").compactMap { SelectedRole(rawValue: String($0)) })
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-legacy-restore-fault"), index + 1 < args.count {
+      testFault = args[index + 1]
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-legacy-truncate"), index + 1 < args.count {
+      testTruncateRole = SelectedRole(rawValue: args[index + 1])
+      args.removeSubrange(index...index + 1)
+    }
+  #endif
+  func fault(_ point: String) {
+    #if ELLIE_INSTALLER_TESTING
+      if point == testFault { _exit(89) }
+    #endif
+  }
+  let roles: [SelectedRole]
+  let adoptionTransaction: String?
+  if command == "recover-legacy-restore" {
+    guard args.isEmpty else { throw MigrationSwitchPendingFailure() }
+    roles = []
+    adoptionTransaction = nil
+  } else {
+    guard command == "restore-legacy", args.count == 3, args[1] == "--roles",
+      UUID(uuidString: args[0])?.uuidString.lowercased() == args[0]
+    else { throw MigrationSwitchPendingFailure() }
+    adoptionTransaction = args[0]
+    switch args[2] {
+    case "coordinator": roles = [.coordinator]
+    case "node": roles = [.node]
+    case "coordinator,node": roles = [.coordinator, .node]
+    default: throw MigrationSwitchPendingFailure()
+    }
+  }
+  let paths = try selectionPaths(testHome: testHome)
+  let directories = try openSelectionDirectories(paths)
+  defer { directories.closeAll() }
+  let lock = openat(
+    directories.services, "selection.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600)
+  var lockInfo = stat()
+  guard lock >= 0, fstat(lock, &lockInfo) == 0, (lockInfo.st_mode & S_IFMT) == S_IFREG,
+    lockInfo.st_uid == getuid(), lockInfo.st_nlink == 1, (lockInfo.st_mode & 0o7777) == 0o600,
+    flock(lock, LOCK_EX | LOCK_NB) == 0
+  else {
+    if lock >= 0 { close(lock) }
+    throw MigrationSwitchPendingFailure()
+  }
+  defer {
+    flock(lock, LOCK_UN)
+    close(lock)
+  }
+  let active = try readPrivateAt(
+    directories.services, "legacy-restore-journal.json", maximum: 128 * 1024, missing: true)
+  if command == "recover-legacy-restore" {
+    guard let active else { exit(0) }
+    let journal = try decodedLegacyRestoreJournal(active)
+    let evidence = try migrationLegacyEvidence(
+      services: directories.services, snapshotID: journal.snapshotID,
+      requiredRoles: journal.roles.map(\.rawValue))
+    let outcome = try recoverLegacyRestore(
+      paths: paths, directories: directories, journal: journal, evidence: evidence,
+      testLoaded: testLoaded, fault: fault)
+    print(
+      "Legacy restore recovery outcome \(outcome); managed LaunchAgents remain unloaded; runtime compatibility is unverified."
+    )
+    exit(0)
+  }
+  guard active == nil, try entry(directories.services, paths.journalName) == nil,
+    try entry(directories.services, "migration-switch-journal.json") == nil,
+    let adoptionTransaction
+  else { throw MigrationSwitchPendingFailure() }
+  if let migrationsInfo = try entry(directories.services, "migrations") {
+    guard (migrationsInfo.st_mode & S_IFMT) == S_IFDIR else {
+      throw MigrationSwitchPendingFailure()
+    }
+    let migrations = try selectionOpenOwnedDirectory(
+      parent: directories.services, name: "migrations")
+    defer { close(migrations) }
+    guard try entry(migrations, "migration-preparation.json") == nil else {
+      throw MigrationSwitchPendingFailure()
+    }
+  }
+  let completedName = ".migration-switch-evidence-\(adoptionTransaction).json"
+  guard
+    let completedData = try readPrivateAt(
+      directories.services, completedName, maximum: 96 * 1024)
+  else { throw MigrationSwitchPendingFailure() }
+  let completed = try decodedCompletedAdoption(completedData, transaction: adoptionTransaction)
+  guard completed.journal.roles == roles else { throw MigrationSwitchPendingFailure() }
+  guard
+    let current = try readPrivateAt(
+      directories.receipts, paths.receiptName, maximum: 32 * 1024)
+  else { throw MigrationSwitchPendingFailure() }
+  guard current == completed.journal.newReceipt else { throw MigrationSwitchPendingFailure() }
+  let packaged = try decodedReceipt(current)
+  try validateSelection(paths: paths, directories: directories, receipt: packaged)
+  let evidence = try migrationLegacyEvidence(
+    services: directories.services, snapshotID: completed.journal.snapshotID,
+    requiredRoles: roles.map(\.rawValue))
+  guard evidence.manifestSHA256 == completed.journal.manifestSHA256 else {
+    throw MigrationSwitchPendingFailure()
+  }
+  for role in roles {
+    guard let legacy = evidence.roleEvidence[role.rawValue] else {
+      throw MigrationSwitchPendingFailure()
+    }
+    try migrationValidateLegacyRole(
+      legacy, applications: directories.applications, agents: directories.agents,
+      applicationName: switchBackupApp(role, adoptionTransaction),
+      plistName: switchBackupPlist(role, adoptionTransaction))
+  }
+  for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+    throw SelectionFailure.loaded
+  }
+  let transaction = UUID().uuidString.lowercased()
+  let journal = LegacyRestoreJournal(
+    version: 1, direction: "packaged-to-legacy", transactionID: transaction,
+    adoptionTransactionID: adoptionTransaction, snapshotID: completed.journal.snapshotID,
+    manifestSHA256: completed.journal.manifestSHA256, roles: roles,
+    packagedReceipt: current, completedAdoption: completedData)
+  try writePrivateAt(
+    directories.services, name: "legacy-restore-journal.json", data: try canonical(journal),
+    replace: false, transaction: transaction + "-legacy-restore-journal")
+  fault("after-journal")
+  for role in roles {
+    guard let legacy = evidence.roleEvidence[role.rawValue] else {
+      throw MigrationSwitchPendingFailure()
+    }
+    try migrationStageLegacyRole(
+      legacy, applications: directories.applications, agents: directories.agents,
+      applicationName: legacyRestoreStagedApp(role, transaction),
+      plistName: legacyRestoreStagedPlist(role, transaction),
+      truncatePath: testTruncateRole == role ? "application/Contents/Info.plist" : nil)
+  }
+  fault("after-staging")
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+    throw SelectionFailure.loaded
+  }
+  for role in roles {
+    guard let record = packaged[role], let legacy = evidence.roleEvidence[role.rawValue] else {
+      throw MigrationSwitchPendingFailure()
+    }
+    try unsealApplication(
+      paths: paths, directories: directories, role: role, record: record, name: role.appName)
+    fault("after-packaged-app-unseal-\(role.rawValue)")
+    try renameExclusive(
+      from: directories.applications, role.appName, to: directories.applications,
+      legacyRestorePackagedApp(role, transaction))
+    fault("after-packaged-app-\(role.rawValue)")
+    try renameExclusive(
+      from: directories.applications, legacyRestoreStagedApp(role, transaction),
+      to: directories.applications, role.appName)
+    fault("after-legacy-app-publish-\(role.rawValue)")
+    try migrationSealLegacyApplication(
+      legacy, applications: directories.applications, applicationName: role.appName)
+    fault("after-legacy-app-seal-\(role.rawValue)")
+    try renameExclusive(
+      from: directories.agents, role.plistName, to: directories.agents,
+      legacyRestorePackagedPlist(role, transaction))
+    try renameExclusive(
+      from: directories.agents, legacyRestoreStagedPlist(role, transaction),
+      to: directories.agents, role.plistName)
+    try migrationValidateLegacyPlist(
+      legacy, agents: directories.agents, plistName: role.plistName)
+    fault("after-role-\(role.rawValue)")
+  }
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+    throw SelectionFailure.loaded
+  }
+  guard unlinkat(directories.receipts, paths.receiptName, 0) == 0 else {
+    throw MigrationSwitchPendingFailure()
+  }
+  try sync(directories.receipts)
+  fault("after-receipt")
+  let outcome = try recoverLegacyRestore(
+    paths: paths, directories: directories, journal: journal, evidence: evidence,
+    testLoaded: testLoaded, fault: fault)
+  print(
+    "Legacy restore outcome \(outcome) for \(roles.map(\.rawValue).joined(separator: ",")); managed LaunchAgents remain unloaded; runtime compatibility is unverified."
+  )
+  exit(0)
+}
+
+func failLegacyRestoreCommand(_ error: Error) -> Never {
+  FileHandle.standardError.write(Data((legacyRestoreError + "\n").utf8))
+  exit(1)
+}
+
 func runSelectionCommand(_ input: [String]) throws -> Never {
   var args = input
   let command = args.removeFirst()

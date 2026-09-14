@@ -58,6 +58,12 @@ function canonicalJSON(value: unknown): string {
 }
 const run = (file: string, args: string[]) =>
   spawnSync(file, args, { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
+const runWithUmask = (mask: "027" | "077", file: string, args: string[]) =>
+  spawnSync("/bin/sh", ["-c", `umask ${mask}; exec "$@"`, "ellie-test", file, ...args], {
+    encoding: "utf8",
+    timeout: 15_000,
+    maxBuffer: 1024 * 1024,
+  });
 
 async function files(root: string, current = root): Promise<object[]> {
   const result: object[] = [];
@@ -1896,6 +1902,22 @@ test(
       assert.ok(completedRecord);
       assert.equal(completedRecord.outcome, "committed");
       assert.equal(completedRecord.journal.releaseID, id);
+      const bothRestore = run(installer, [
+        "restore-legacy",
+        completedRecord.journal.transactionID as string,
+        "--roles",
+        "coordinator,node",
+        "--test-home-root",
+        home,
+        "--test-legacy-restore-fault",
+        "after-receipt",
+      ]);
+      assert.notEqual(bothRestore.status, 0);
+      const bothRecovery = run(installer, ["recover-legacy-restore", "--test-home-root", home]);
+      assert.equal(bothRecovery.status, 0, bothRecovery.stderr);
+      assert.match(bothRecovery.stdout, /restored-legacy/);
+      const readoptBoth = run(installer, switchArguments);
+      assert.equal(readoptBoth.status, 0, readoptBoth.stderr);
       for (const role of ["coordinator", "node"]) {
         assert.equal(
           (await readdir(join(home, "Applications"))).some(
@@ -1954,6 +1976,227 @@ test(
       );
       assert.equal(singleReceipt.coordinator.releaseID, id);
       assert.equal(singleReceipt.node, null);
+      const singleCompletedRecords = await Promise.all(
+        (await readdir(services))
+          .filter(
+            (name) => name.startsWith(".migration-switch-evidence-") && name.endsWith(".json"),
+          )
+          .map(async (name) => ({
+            name,
+            value: JSON.parse(await readFile(join(services, name), "utf8")),
+          })),
+      );
+      const singleCompleted = singleCompletedRecords.find(
+        ({ value }) =>
+          value.outcome === "committed" &&
+          value.journal.roles.length === 1 &&
+          value.journal.roles[0] === "coordinator",
+      );
+      assert.ok(singleCompleted);
+      const adoptionTransaction = singleCompleted.value.journal.transactionID as string;
+      const exactSingleReceipt = await readFile(join(services, "receipts/installed.json"));
+      const laterReceipt = JSON.parse(exactSingleReceipt.toString());
+      laterReceipt.coordinator.releaseID = `${id}-later`;
+      await writeFile(join(services, "receipts/installed.json"), canonicalJSON(laterReceipt), {
+        mode: 0o600,
+      });
+      const laterSelectionRefusal = run(installer, [
+        "restore-legacy",
+        adoptionTransaction,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+      ]);
+      assert.notEqual(laterSelectionRefusal.status, 0);
+      assert.match(laterSelectionRefusal.stderr, /recover-legacy-restore/);
+      await writeFile(join(services, "receipts/installed.json"), exactSingleReceipt, {
+        mode: 0o600,
+      });
+      for (const restoreFault of [
+        "after-packaged-app-unseal-coordinator",
+        "after-packaged-app-coordinator",
+        "after-legacy-app-publish-coordinator",
+        "after-legacy-app-seal-coordinator",
+      ]) {
+        const interruptedRestore = run(installer, [
+          "restore-legacy",
+          adoptionTransaction,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-legacy-restore-fault",
+          restoreFault,
+        ]);
+        assert.notEqual(interruptedRestore.status, 0);
+        if (restoreFault === "after-legacy-app-seal-coordinator") {
+          for (const recoveryFault of [
+            "recovery-after-legacy-app-unseal-coordinator",
+            "recovery-after-legacy-app-evidence-coordinator",
+          ]) {
+            const interruptedRecovery = run(installer, [
+              "recover-legacy-restore",
+              "--test-home-root",
+              home,
+              "--test-legacy-restore-fault",
+              recoveryFault,
+            ]);
+            assert.notEqual(interruptedRecovery.status, 0);
+            if (recoveryFault === "recovery-after-legacy-app-evidence-coordinator") {
+              const restoreJournal = JSON.parse(
+                await readFile(join(services, "legacy-restore-journal.json"), "utf8"),
+              );
+              const retainedRoot = join(
+                home,
+                `Applications/.ellie-legacy-restore-${restoreJournal.transactionID as string}-legacy-coordinator.app`,
+              );
+              const codeResources = join(retainedRoot, "Contents/_CodeSignature/CodeResources");
+              const heldCodeResources = join(root, "held-complete-legacy-CodeResources");
+              await rename(codeResources, heldCodeResources);
+              assert.notEqual(
+                run(installer, ["recover-legacy-restore", "--test-home-root", home]).status,
+                0,
+              );
+              await rename(heldCodeResources, codeResources);
+            }
+          }
+        }
+        const firstRecovery = run(installer, [
+          "recover-legacy-restore",
+          "--test-home-root",
+          home,
+          "--test-legacy-restore-fault",
+          "recovery-before-packaged-app-seal-coordinator",
+        ]);
+        assert.notEqual(firstRecovery.status, 0);
+        assert.equal(
+          run(installer, ["recover-legacy-restore", "--test-home-root", home]).status,
+          0,
+        );
+        assert.equal(
+          JSON.parse(await readFile(join(services, "receipts/installed.json"), "utf8")).coordinator
+            .releaseID,
+          id,
+        );
+      }
+      for (const mask of ["027", "077"] as const) {
+        const partialRestore = runWithUmask(mask, installer, [
+          "restore-legacy",
+          adoptionTransaction,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-legacy-truncate",
+          "coordinator",
+        ]);
+        assert.notEqual(partialRestore.status, 0);
+        if (mask === "027") {
+          const activeRestore = JSON.parse(
+            await readFile(join(services, "legacy-restore-journal.json"), "utf8"),
+          );
+          const partialApp = join(
+            home,
+            `Applications/.ellie-legacy-restore-${activeRestore.transactionID as string}-stage-coordinator.app`,
+          );
+          const partialInfo = join(partialApp, "Contents/Info.plist");
+          const originalMode = (await lstat(partialInfo)).mode & 0o7777;
+          await chmod(partialInfo, 0o600);
+          await writeFile(partialInfo, "altered");
+          await chmod(partialInfo, originalMode);
+          assert.notEqual(
+            run(installer, ["recover-legacy-restore", "--test-home-root", home]).status,
+            0,
+          );
+          const snapshotInfo = await readFile(
+            join(snapshot, "roles/coordinator/application/Contents/Info.plist"),
+          );
+          await chmod(partialInfo, 0o600);
+          await writeFile(
+            partialInfo,
+            snapshotInfo.subarray(0, Math.max(1, snapshotInfo.length / 2)),
+          );
+          await chmod(partialInfo, originalMode);
+          await writeFile(join(partialApp, "unexpected"), "x", { mode: 0o600 });
+          assert.notEqual(
+            run(installer, ["recover-legacy-restore", "--test-home-root", home]).status,
+            0,
+          );
+          await rm(join(partialApp, "unexpected"));
+        }
+        const partialRecovery = run(installer, [
+          "recover-legacy-restore",
+          "--test-home-root",
+          home,
+        ]);
+        assert.equal(partialRecovery.status, 0, partialRecovery.stderr);
+        assert.equal(
+          JSON.parse(await readFile(join(services, "receipts/installed.json"), "utf8")).coordinator
+            .releaseID,
+          id,
+        );
+      }
+      const restored = run(installer, [
+        "restore-legacy",
+        adoptionTransaction,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-legacy-restore-fault",
+        "after-receipt",
+      ]);
+      assert.notEqual(restored.status, 0);
+      assert.equal(
+        await lstat(join(services, "receipts/installed.json"))
+          .then(() => false)
+          .catch(() => true),
+        true,
+        restored.stderr,
+      );
+      const committedRestoreJournal = JSON.parse(
+        await readFile(join(services, "legacy-restore-journal.json"), "utf8"),
+      );
+      const committedRestoreRecord = Buffer.from(
+        canonicalJSON({
+          journal: committedRestoreJournal,
+          outcome: "restored-legacy",
+          runtimeCompatibility: "unverified",
+          version: 1,
+        }),
+      );
+      await writeFile(
+        join(
+          services,
+          `.ellie-write-${committedRestoreJournal.transactionID as string}-legacy-restore-completed`,
+        ),
+        committedRestoreRecord.subarray(0, 11),
+        { mode: 0o600 },
+      );
+      const committedLegacyRecovery = run(installer, [
+        "recover-legacy-restore",
+        "--test-home-root",
+        home,
+        "--test-legacy-restore-fault",
+        "after-completed",
+      ]);
+      assert.notEqual(committedLegacyRecovery.status, 0);
+      const repeatedLegacyRecovery = run(installer, [
+        "recover-legacy-restore",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(repeatedLegacyRecovery.status, 0, repeatedLegacyRecovery.stderr);
+      assert.equal(
+        await lstat(join(services, "receipts/installed.json"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      assert.deepEqual(await readFile(appManifest), appBefore);
+      assert.deepEqual(await readFile(plist), plistBefore);
+      assert.equal(run(installer, ["recover-legacy-restore", "--test-home-root", home]).status, 0);
     });
   },
 );

@@ -1110,6 +1110,9 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "restore-legacy" || arguments.first == "recover-legacy-restore" {
+      do { try runLegacyRestoreCommand(arguments) } catch { failLegacyRestoreCommand(error) }
+    }
     if arguments.first == "adopt-migration" || arguments.first == "recover-migration-switch" {
       do { try runMigrationSwitchCommand(arguments) } catch { failSelectionCommand(error) }
     }
