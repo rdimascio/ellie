@@ -270,6 +270,9 @@ private func validatedRuntime(root: String) throws -> (node: String, entrypoint:
 @main
 enum ElliePackagedService {
     static func main() {
+        #if ELLIE_POLICY_AUDIT_TESTING
+        if runCompiledActivationPolicyAudit(Array(CommandLine.arguments.dropFirst())) { return }
+        #endif
         if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--register" {
             exit(LSRegisterURL(Bundle.main.bundleURL as CFURL, true) == noErr ? 0 : 70)
         }

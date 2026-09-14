@@ -20,6 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { unavailableActivationPolicySource } from "./activation-policy-source.mjs";
 
 const scriptRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MAX_COMMAND_OUTPUT = 1024 * 1024;
@@ -320,11 +321,28 @@ function launcherInfo(role) {
 `;
 }
 
-export async function buildPackagedLaunchers({ source, payload, architecture, work }) {
+function requireDevelopmentOptions(options, allowed) {
+  if (
+    !options ||
+    typeof options !== "object" ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => !allowed.includes(key))
+  )
+    throw new Error("Unknown development payload builder option.");
+}
+
+export async function buildPackagedLaunchers(options) {
+  requireDevelopmentOptions(options, ["source", "payload", "architecture", "work"]);
+  const { source, payload, architecture, work } = options;
   const helperArchitecture = nativeArchitecture(architecture);
   const iconset = join(work, "Ellie.iconset");
   const icon = join(work, "Ellie.icns");
   await mkdir(iconset, { recursive: true, mode: 0o700 });
+  const resolvedPolicySource = join(work, "CompiledAuthenticatedActivationPolicy.swift");
+  await writeFile(resolvedPolicySource, unavailableActivationPolicySource(), {
+    mode: 0o600,
+    flag: "wx",
+  });
   for (const size of [16, 32, 128, 256, 512]) {
     for (const scale of [1, 2]) {
       command(
@@ -362,6 +380,7 @@ export async function buildPackagedLaunchers({ source, payload, architecture, wo
         `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
         "-D",
         value.define,
+        resolvedPolicySource,
         join(source, "packages/macos/native/PackagedServiceLauncher.swift"),
         "-o",
         executable,
@@ -679,6 +698,15 @@ function assertClean(root) {
 }
 
 export async function buildServicePayload(options) {
+  requireDevelopmentOptions(options, [
+    "source",
+    "output",
+    "nodeArchive",
+    "nodeSha256",
+    "architecture",
+    "bun",
+    "bunCache",
+  ]);
   const source = resolve(options.source ?? scriptRoot);
   const output = resolve(options.output);
   const architecture = targetArchitecture(options.architecture);
@@ -780,6 +808,8 @@ export async function buildServicePayload(options) {
     const minimumPattern = new RegExp(`minos ${MINIMUM_MACOS.replace(".", "\\.")}(?:\\s|$)`);
     if (!/platform MACOS/.test(buildVersion) || !minimumPattern.test(buildVersion))
       throw new Error("Native helper minimum macOS version does not match the payload.");
+    const policySource = join(scratch, "CompiledAuthenticatedActivationPolicy.swift");
+    await writeFile(policySource, unavailableActivationPolicySource(), { mode: 0o600, flag: "wx" });
     const launchers = await buildPackagedLaunchers({
       source: buildSource,
       payload,
@@ -797,6 +827,7 @@ export async function buildServicePayload(options) {
         "-parse-as-library",
         "-target",
         `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+        policySource,
         join(buildSource, "packages/macos/native/ServicePayloadAuthorization.swift"),
         join(buildSource, "packages/macos/native/ServicePayloadAuthenticatedInspection.swift"),
         join(buildSource, "packages/macos/native/AuthenticatedActivationPolicy.swift"),
