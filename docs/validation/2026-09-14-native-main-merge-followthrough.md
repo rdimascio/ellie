@@ -64,6 +64,14 @@ The exact PR84 `32b6f67` source archive (tree `e8edefd5b658749771011b90037796a55
 
 Retained logs: `/tmp/ellie-pr84-swift-test.log` SHA-256 `fb6b940d97ef8bbb3f0babe1d94ff6bafa742e829a6aa06d4acaaa9be456ed74`; `/tmp/ellie-pr84-ios-ui.log` hash `4b000b285cc070a25a618d7f768d8656f3681d19196f1680532f59a6c106453b`; `/tmp/ellie-pr84-bun-install.log` hash `e5d329f793763b8cd977c28c4962088c26e31c1ca7f3c1e6b919668a0e5ecc4a`. Setup-only locale/directory corrections occurred before extraction or tests; no test was rerun. This establishes current Swift and Simulator UI acceptance on the MacBook, not physical-phone, microphone, desktop-action or installed-service acceptance.
 
+## Phone test runner merge review
+
+PR20 was updated with main `a239d9f`, preserving the latest validation records and native-first roadmap. Runtime review found two authorization gaps in the optional hardware command path: late navigation could occur between the original origin check and a fresh element lookup, and option clicking was not followed by confirmation of the selected node value.
+
+The corrected runner retains WebDriver element handles, checks the exact page origin and then mutates only those handles. It applies this ordering to invitation entry, pairing submission, option selection, Open and logout. Before Open, it reads the select's effective `value` and requires exact equality with the explicitly authorized node ID. The command outcome becomes unknown only immediately before the one submitted click; lost responses never trigger replay. Fake-driver regressions change origin after target-property verification or refuse to commit selection, and assert zero Open clicks and session closure. No physical phone was used for this correction.
+
+Independent final review cleared source SHA-256 `434c27dc77eafcd91f202f8c923767508c8308ffb35141add59b62f006d45d91` and test SHA-256 `94b97687d071525ce960d964a52fbc177837ea8772da4ddf0819081934433b7d`. The final complete Node 24/Bun 1.4.2 gate passed 177 tests with one skip, lint, formatting, contracts, types and web build. Log `/tmp/ellie-pr20-main-smoke-final2-check.log`, hash `4f895bca76bdd1d3851509abc576469b7c8bd318ccab72b077233ce46fa2e773`. Earlier intermediate passes are not substituted for this final source. PR20 must pass fresh hosted checks before merging.
+
 ## Acceptance limits
 
 No household deployment, new desktop action, physical iPhone interaction or installed packaged-service acceptance occurred. Mini checks use actual compilation and ad-hoc signatures with synthetic state; hosted iOS checks use Simulators. Earlier owner acceptance applies only to the checkout-backed household installation. Developer ID validation still awaits the already-requested Keychain unlock, and no new signing attempt was made. Live checkout edits, identities, credentials, TCC, service definitions, MacBook checkout and the separate life-harness task remain preserved.

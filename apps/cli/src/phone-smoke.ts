@@ -169,8 +169,13 @@ export async function runPhoneSmoke(
       throw new Error("Test element unavailable.");
     return encodeURIComponent(id);
   }
+  async function clickElement(id: string): Promise<void> {
+    await call("POST", route(`/element/${id}/click`), {});
+  }
   async function click(using: "css selector" | "xpath", value: string): Promise<void> {
-    await call("POST", route(`/element/${await element(using, value)}/click`), {});
+    const target = await element(using, value);
+    await checkOrigin();
+    await clickElement(target);
   }
   async function checkOrigin(): Promise<void> {
     const current = await call("GET", route("/url"));
@@ -213,9 +218,10 @@ export async function runPhoneSmoke(
     await call("POST", route("/timeouts"), { implicit: 10_000, pageLoad: 15_000, script: 5000 });
     report.stage = "trusted-page";
     await call("POST", route("/url"), { url: config.origin });
+    const pairingInput = await element("css selector", "#pairing-code");
     await checkOrigin();
     report.stage = "pair";
-    await call("POST", route(`/element/${await element("css selector", "#pairing-code")}/value`), {
+    await call("POST", route(`/element/${pairingInput}/value`), {
       text: invite.code,
     });
     report.pairAttempted = true;
@@ -229,12 +235,19 @@ export async function runPhoneSmoke(
     report.refreshed = true;
     if (config.app && config.nodeId) {
       report.stage = "command";
-      await click("css selector", `#remote-node option[value="${config.nodeId}"]`);
-      report.command = "unknown";
-      await click(
+      const option = await element("css selector", `#remote-node option[value="${config.nodeId}"]`);
+      await checkOrigin();
+      await clickElement(option);
+      const select = await element("css selector", "#remote-node");
+      const openButton = await element(
         "xpath",
         `//div[@class='remote-apps']/button[contains(., 'Open ${APPS[config.app]}')]`,
       );
+      const selected = await call("GET", route(`/element/${select}/property/value`));
+      if (selected.value !== config.nodeId) throw new Error("Command target unavailable.");
+      await checkOrigin();
+      report.command = "unknown";
+      await clickElement(openButton);
       await call("POST", route("/timeouts"), { implicit: 40_000, pageLoad: 15_000, script: 5000 });
       // Wait by finding success; command submission is never retried.
       const success = await element("css selector", ".remote-result.success");

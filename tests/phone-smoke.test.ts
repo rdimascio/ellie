@@ -23,10 +23,14 @@ function driver(
     oversized?: boolean;
     redirected?: boolean;
     pairFailure?: boolean;
+    lateRedirect?: boolean;
+    selectionFailure?: boolean;
   } = {},
 ) {
   const calls: { path: string; method: string; body: Record<string, unknown> }[] = [];
   let clicked = false;
+  let selectedNode = "";
+  let leftTrustedPage = false;
   const fetcher: typeof fetch = async (input, init) => {
     const path = new URL(String(input)).pathname;
     const method = init?.method ?? "GET";
@@ -42,7 +46,7 @@ function driver(
     if (path === "/session")
       value = { sessionId: "isolated", capabilities: { platformName: options.platform ?? "iOS" } };
     else if (path.endsWith("/url") && method === "GET")
-      value = options.redirected ? "http://outside.test" : config.origin;
+      value = options.redirected || leftTrustedPage ? "http://outside.test" : config.origin;
     else if (
       path.endsWith("/element") &&
       body.value === "#phone-remote-heading" &&
@@ -53,9 +57,18 @@ function driver(
       value = {
         "element-6066-11e4-a52e-4f735466cecf": String(body.value).includes("remote-apps")
           ? "command-button"
-          : "element",
+          : body.value === "#remote-node"
+            ? "node-select"
+            : String(body.value).includes("#remote-node option")
+              ? "node-option"
+              : "element",
       };
-    else if (path.endsWith("/text")) value = clicked ? "Opened Arc." : "";
+    else if (path.endsWith("node-option/click")) {
+      if (!options.selectionFailure) selectedNode = "mini";
+    } else if (path.endsWith("node-select/property/value")) {
+      value = selectedNode;
+      if (options.lateRedirect) leftTrustedPage = true;
+    } else if (path.endsWith("/text")) value = clicked ? "Opened Arc." : "";
     return Response.json({ value });
   };
   return { calls, fetcher };
@@ -135,6 +148,21 @@ test("a command clicks once, confirms result and never retries a lost command re
     assert.equal(report.sessionClosed, true);
     assert.equal(fake.calls.filter((call) => call.path.endsWith("command-button/click")).length, 1);
     assert.doesNotMatch(JSON.stringify(report), /private|token|transcript/);
+  }
+});
+
+test("late navigation or an uncommitted node selection prevents command dispatch", async () => {
+  for (const options of [{ lateRedirect: true }, { selectionFailure: true }]) {
+    const fake = driver(options);
+    const report = await runPhoneSmoke(
+      { ...config, nodeId: "mini", app: "arc" },
+      invitation(),
+      fake.fetcher,
+    );
+    assert.equal(report.passed, false);
+    assert.equal(report.command, "not-sent");
+    assert.equal(fake.calls.filter((call) => call.path.endsWith("command-button/click")).length, 0);
+    assert.equal(report.sessionClosed, true);
   }
 });
 
