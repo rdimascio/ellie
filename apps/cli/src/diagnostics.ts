@@ -9,7 +9,7 @@ import {
   record,
 } from "@ellie/protocol";
 import type { Capability } from "@ellie/protocol";
-import { Keychain, nodeConfig, serverConfig, stateDir } from "@ellie/config";
+import { Keychain, nativeHelperPath, nodeConfig, serverConfig, stateDir } from "@ellie/config";
 import type { InferenceWorkerConfig, NodeConfig, ServerConfig } from "@ellie/config";
 import { MacOSExecutor } from "@ellie/macos";
 import { Client } from "@ellie/transport";
@@ -231,7 +231,7 @@ export async function doctorService(
     fail(`${coordinator ? "Coordinator" : "Node"} credentials could not be checked.`);
   }
 
-  const helper = join(environment.stateDir, "bin", "ellie-macos");
+  const helper = nativeHelperPath(process.env, environment.stateDir);
   try {
     await environment.access(helper, constants.X_OK);
     const signature = await environment.run("/usr/bin/codesign", ["--verify", "--strict", helper]);

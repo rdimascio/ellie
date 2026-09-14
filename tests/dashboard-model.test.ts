@@ -173,3 +173,40 @@ test("serialization round trips canonical data and storage falls back safely", (
   values.set(DASHBOARD_STORAGE_KEY, '{"version":99}');
   assert.deepEqual(loadDashboardState(storage), state);
 });
+
+function playlistDashboard(youtubePlaylistID: string) {
+  return {
+    version: 1,
+    dashboards: [
+      {
+        id: "home",
+        name: "Home",
+        widgets: [
+          {
+            id: "playlist",
+            type: "playlist",
+            title: "Listening",
+            size: "wide",
+            config: { youtubePlaylistID },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+test("browser v1 accepts bounded native YouTube playlist configuration", () => {
+  const id = "PLSynthetic_123456789";
+  const state = parseDashboardState(playlistDashboard(id));
+  assert.equal(state.dashboards[0]?.widgets[0]?.config.youtubePlaylistID, id);
+});
+
+test("browser v1 round trips native YouTube playlist configuration", () => {
+  const state = parseDashboardState(playlistDashboard("PLSynthetic_123456789"));
+  assert.deepEqual(parseDashboardState(serializeDashboardState(state)), state);
+});
+
+test("browser v1 rejects invalid native YouTube playlist configuration", () => {
+  for (const id of ["not-valid", "PLé12345678901", `PL${"a".repeat(79)}`])
+    assert.throws(() => parseDashboardState(playlistDashboard(id)), DashboardModelError);
+});

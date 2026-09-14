@@ -4,6 +4,16 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { OPERATION_REGISTRY } from "../packages/protocol/src/operations.ts";
 import { JOB_OUTCOME_CODES, JOB_STATES } from "../packages/protocol/src/index.ts";
 
+import {
+  NATIVE_SESSION_CONTRACT,
+  nativeSessionSchemas,
+} from "../packages/protocol/src/native-session-contract.ts";
+import { nativePairingFixtures } from "./native-contract-fixtures.ts";
+import {
+  NATIVE_CONTROL_CONTRACT,
+  nativeControlSchemas,
+} from "../packages/protocol/src/native-controls.ts";
+
 type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 
 const root = fileURLToPath(new URL("..", import.meta.url));
@@ -50,6 +60,174 @@ const boundedString = (maxLength: number) => ({
   maxLength,
   pattern: "\\S",
 });
+const householdRef = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+const exactObject = (required: string[], properties: Record<string, Json>) => ({
+  type: "object",
+  additionalProperties: false,
+  required,
+  properties,
+});
+const dashboardIdentifier = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  pattern: "^(?![\\s\\S]*[^A-Za-z0-9_-])[A-Za-z0-9]",
+};
+const dashboardText = (maximum: number) => ({
+  type: "string",
+  minLength: 1,
+  maxLength: maximum,
+  "x-ellie-max-utf16-code-units": maximum,
+  "x-ellie-no-boundary-foundation-whitespace": true,
+});
+const householdClientIdentifier = {
+  ...identifier,
+  pattern: "^(?![\\s\\S]*[^A-Za-z0-9._-])[A-Za-z0-9]",
+};
+const widgetConfig = (properties: Record<string, Json>) => exactObject([], properties);
+const widgetVariant = (type: string, config: Json) =>
+  exactObject(["id", "type", "title", "size", "config"], {
+    id: householdRef("DashboardIdentifier"),
+    type: { const: type },
+    title: dashboardText(80),
+    size: { enum: ["small", "wide"] },
+    config,
+  });
+const householdSchemas: Record<string, Json> = {
+  HouseholdProfile: { enum: ["shared", "private"] },
+  HouseholdKind: { enum: ["dashboards", "chores"] },
+  HouseholdAccess: { enum: ["read", "write"] },
+  HouseholdRevision: { type: "integer", minimum: 0, maximum: Number.MAX_SAFE_INTEGER },
+  DashboardIdentifier: dashboardIdentifier,
+  HouseholdGrant: exactObject(["clientId", "profile", "kind", "access"], {
+    clientId: householdClientIdentifier,
+    profile: householdRef("HouseholdProfile"),
+    kind: householdRef("HouseholdKind"),
+    access: householdRef("HouseholdAccess"),
+  }),
+  HouseholdAuthorityResponse: exactObject(["grants"], {
+    grants: { type: "array", maxItems: 128, items: householdRef("HouseholdGrant") },
+  }),
+  HouseholdGrantResponse: exactObject(["ok", "grant"], {
+    ok: { const: true },
+    grant: householdRef("HouseholdGrant"),
+  }),
+  HouseholdRevokeRequest: exactObject(["clientId", "profile", "kind"], {
+    clientId: householdClientIdentifier,
+    profile: householdRef("HouseholdProfile"),
+    kind: householdRef("HouseholdKind"),
+  }),
+  HouseholdRevokeResponse: exactObject(["ok", "revoked"], {
+    ok: { const: true },
+    revoked: { type: "boolean" },
+  }),
+  DashboardWidget: {
+    oneOf: [
+      widgetVariant(
+        "clock",
+        widgetConfig({
+          timeZone: {
+            type: "string",
+            maxLength: 100,
+            "x-ellie-time-zone": "IANA or Foundation GMT offset",
+          },
+        }),
+      ),
+      widgetVariant(
+        "note",
+        widgetConfig({
+          text: { type: "string", maxLength: 2_000, "x-ellie-max-utf16-code-units": 2_000 },
+        }),
+      ),
+      widgetVariant("weather", widgetConfig({})),
+      widgetVariant("calendar", widgetConfig({})),
+      widgetVariant("chores", widgetConfig({})),
+      widgetVariant(
+        "playlist",
+        widgetConfig({
+          youtubePlaylistID: {
+            type: "string",
+            minLength: 13,
+            maxLength: 80,
+            pattern: "^(?![\\s\\S]*[^A-Za-z0-9_-])PL",
+          },
+        }),
+      ),
+    ],
+  },
+  Dashboard: exactObject(["id", "name", "widgets"], {
+    id: householdRef("DashboardIdentifier"),
+    name: dashboardText(80),
+    widgets: { type: "array", maxItems: 24, items: householdRef("DashboardWidget") },
+  }),
+  DashboardDocument: exactObject(["version", "dashboards"], {
+    version: { const: 1 },
+    dashboards: { type: "array", maxItems: 12, items: householdRef("Dashboard") },
+  }),
+  ChoreDay: {
+    type: "string",
+    format: "date",
+    minLength: 10,
+    maxLength: 10,
+    pattern: "^(?!0000-)[0-9]{4}-[0-9]{2}-[0-9]{2}$(?![\\s\\S])",
+  },
+  ChoreIdentifier: {
+    type: "string",
+    minLength: 36,
+    maxLength: 36,
+    pattern: "^[0-9A-Fa-f]{8}(?:-[0-9A-Fa-f]{4}){3}-[0-9A-Fa-f]{12}$(?![\\s\\S])",
+  },
+  Chore: exactObject(["id", "title", "member", "body", "dueDay"], {
+    id: householdRef("ChoreIdentifier"),
+    title: dashboardText(120),
+    member: dashboardText(60),
+    body: {
+      type: "string",
+      maxLength: 500,
+      "x-ellie-max-utf16-code-units": 500,
+      "x-ellie-no-boundary-foundation-whitespace": true,
+    },
+    dueDay: householdRef("ChoreDay"),
+    completedDay: { oneOf: [householdRef("ChoreDay"), { type: "null" }] },
+  }),
+  ChoresDocument: exactObject(["version", "householdTimeZone", "chores"], {
+    version: { const: 1 },
+    householdTimeZone: {
+      type: "string",
+      minLength: 1,
+      maxLength: 100,
+      "x-ellie-time-zone": "IANA or Foundation GMT offset",
+    },
+    chores: { type: "array", maxItems: 500, items: householdRef("Chore") },
+  }),
+  HouseholdDocument: {
+    oneOf: [householdRef("DashboardDocument"), householdRef("ChoresDocument")],
+  },
+  HouseholdPutRequest: exactObject(["value"], {
+    value: householdRef("HouseholdDocument"),
+  }),
+  HouseholdDocumentResponse: {
+    oneOf: [
+      exactObject(["profile", "kind", "revision", "value"], {
+        profile: householdRef("HouseholdProfile"),
+        kind: { const: "dashboards" },
+        revision: householdRef("HouseholdRevision"),
+        value: householdRef("DashboardDocument"),
+      }),
+      exactObject(["profile", "kind", "revision", "value"], {
+        profile: householdRef("HouseholdProfile"),
+        kind: { const: "chores" },
+        revision: householdRef("HouseholdRevision"),
+        value: householdRef("ChoresDocument"),
+      }),
+    ],
+  },
+  HouseholdConflictResponse: exactObject(["profile", "kind", "revision"], {
+    profile: householdRef("HouseholdProfile"),
+    kind: householdRef("HouseholdKind"),
+    revision: householdRef("HouseholdRevision"),
+  }),
+};
 const ok = {
   type: "object",
   additionalProperties: false,
@@ -118,6 +296,13 @@ function openApi(): Json {
     Object.fromEntries(codes.map((code) => [code, errorResponses[code]]));
   const versionHeader = [{ $ref: "#/components/parameters/ProtocolVersion" }];
   const operation = (details: Record<string, Json>) => ({ parameters: versionHeader, ...details });
+  const householdManagementChannel = {
+    "x-ellie-request-channel": {
+      controllerBearerOnly: true,
+      forbiddenHeaders: ["Origin", "Cookie", "Sec-Fetch-*"],
+      duplicateHeadersRejected: ["Authorization", "X-Ellie-Version"],
+    },
+  };
   const schemas = openApiRefs(
     (protocolSchema() as { $defs: Record<string, Json> }).$defs as unknown as Json,
   ) as Record<string, Json>;
@@ -224,6 +409,127 @@ function openApi(): Json {
           requestBody: request(ref("BrowserRevokeRequest")),
           responses: {
             "200": response("Browser revocation result.", ref("BrowserRevokeResponse")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/native/invitations": {
+        post: operation({
+          operationId: "createNativeInvitation",
+          summary: "Create a scoped native-app invitation",
+          description:
+            "Controller bearer identity required. The response binds a single-use invitation to the actual native listener origin and leaf certificate pin.",
+          requestBody: request(ref("NativeInvitationSpec")),
+          responses: {
+            "200": response("Native pairing payload created.", ref("NativePairingPayload")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/native/clients": {
+        get: operation({
+          operationId: "listNativeClients",
+          summary: "List public native-app identities and grants",
+          description:
+            "Controller bearer identity required. Credential verifiers are never returned.",
+          responses: {
+            "200": response("Active public native clients.", {
+              type: "array",
+              maxItems: 128,
+              items: ref("NativeClient"),
+            }),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+      },
+      "/v1/native/revoke": {
+        post: operation({
+          operationId: "revokeNativeClient",
+          summary: "Revoke one native-app session",
+          description:
+            "Controller bearer identity required. Revocation is persisted before success.",
+          requestBody: request(ref("BrowserRevokeRequest")),
+          responses: {
+            "200": response("Native revocation result.", ref("BrowserRevokeResponse")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/household/authorities": {
+        get: operation({
+          ...householdManagementChannel,
+          operationId: "listHouseholdAuthorities",
+          summary: "List explicit native household-data grants",
+          description:
+            "Controller bearer identity required. Pairing and app.open grants confer no household-data authority.",
+          responses: {
+            "200": response("Current bounded grants.", ref("HouseholdAuthorityResponse")),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+        post: operation({
+          ...householdManagementChannel,
+          operationId: "grantHouseholdAuthority",
+          summary: "Grant one active native client household-data access",
+          description: "Controller bearer identity required. The grant is durable before success.",
+          requestBody: request(ref("HouseholdGrant")),
+          responses: {
+            "200": response("Grant durably saved.", ref("HouseholdGrantResponse")),
+            ...errors("400", "401", "403", "404", "415", "503"),
+          },
+        }),
+      },
+      "/v1/household/authorities/revoke": {
+        post: operation({
+          ...householdManagementChannel,
+          operationId: "revokeHouseholdAuthority",
+          summary: "Revoke one native client's household-data grant",
+          description: "Controller bearer identity required. Revocation is durable before success.",
+          requestBody: request(ref("HouseholdRevokeRequest")),
+          responses: {
+            "200": response("Revocation durably saved.", ref("HouseholdRevokeResponse")),
+            ...errors("400", "401", "403", "415", "503"),
+          },
+        }),
+      },
+      "/v1/speech/authorities": {
+        get: operation({
+          operationId: "listSpeechAuthorities",
+          summary: "List explicit native speech grants",
+          description:
+            "Controller bearer identity required. Enrollment, app and household grants confer no speech authority.",
+          responses: {
+            "200": response("Current speech grants.", { type: "object" }),
+            ...errors("400", "401", "403", "503"),
+          },
+        }),
+        post: operation({
+          operationId: "grantSpeechAuthority",
+          summary: "Grant one active native client local transcription",
+          requestBody: request({
+            type: "object",
+            required: ["clientId", "capability"],
+            additionalProperties: false,
+            properties: { clientId: ref("Identifier"), capability: { const: "speech.transcribe" } },
+          }),
+          responses: {
+            "200": response("Grant durably saved.", { type: "object" }),
+            ...errors("400", "401", "403", "404", "415", "503"),
+          },
+        }),
+      },
+      "/v1/speech/authorities/revoke": {
+        post: operation({
+          operationId: "revokeSpeechAuthority",
+          summary: "Revoke one native client's local transcription grant",
+          requestBody: request({
+            type: "object",
+            required: ["clientId"],
+            additionalProperties: false,
+            properties: { clientId: ref("Identifier") },
+          }),
+          responses: {
+            "200": response("Revocation durably saved.", { type: "object" }),
             ...errors("400", "401", "403", "415", "503"),
           },
         }),
@@ -410,6 +716,7 @@ function openApi(): Json {
       ),
       schemas: {
         ...schemas,
+        ...householdSchemas,
         PairRequest: {
           type: "object",
           required: ["code", "id"],
@@ -550,6 +857,7 @@ function openApi(): Json {
           required: ["ok", "revoked"],
           properties: { ok: { const: true }, revoked: { type: "boolean" } },
         },
+        ...nativeSessionSchemas(),
         NodeIdRequest: { type: "object", required: ["id"], properties: { id: identifier } },
         OkResponse: ok,
         InstalledModel: {
@@ -739,6 +1047,329 @@ function openApi(): Json {
   };
 }
 
+function nativeOpenApi(): Json {
+  const ref = (name: string) => ({ $ref: `#/components/schemas/${name}` });
+  const response = (description: string, schema: Json) => ({
+    description,
+    content: { "application/json": { schema } },
+    headers: { "Cache-Control": { schema: { const: "no-store" } } },
+  });
+  const documentResponse = (description: string) => {
+    const result = response(description, ref("HouseholdDocumentResponse"));
+    return {
+      ...result,
+      headers: {
+        ...result.headers,
+        ETag: {
+          description:
+            "Exactly matches the JSON revision; use it for an explicit conditional save.",
+          schema: { type: "string", pattern: '^"ellie-revision-(0|[1-9][0-9]*)"$(?![\\s\\S])' },
+        },
+      },
+    };
+  };
+  const request = (schema: Json) => ({
+    required: true,
+    content: { "application/json": { schema } },
+  });
+  const errors = Object.fromEntries(
+    [400, 401, 403, 404, 409, 415, 500, 503].map((status) => [
+      String(status),
+      response(
+        status === 401
+          ? "Native credential rejected or expired."
+          : status === 503 || status === 500
+            ? "Authorization persistence or listener unavailable; a mutation outcome may be uncertain."
+            : "Request rejected by the native listener.",
+        ref("NativeError"),
+      ),
+    ]),
+  );
+  const routes = NATIVE_SESSION_CONTRACT.routes;
+  const common = {
+    parameters: [
+      {
+        name: "X-Ellie-Version",
+        in: "header",
+        required: true,
+        schema: { type: "string", const: "1" },
+      },
+    ],
+    "x-ellie-max-json-post-body-bytes": NATIVE_SESSION_CONTRACT.requestBodyBytes,
+    "x-ellie-request-channel": {
+      exactHost: true,
+      forbiddenHeaders: ["Origin", "Cookie", "Sec-Fetch-*"],
+      duplicateHeadersRejected: ["Host", "Authorization", "X-Ellie-Version"],
+      jsonPostRequiresSingleContentType: true,
+    },
+  };
+  return {
+    openapi: "3.1.0",
+    info: {
+      title: "Ellie native client API",
+      version: "1.0.0",
+      description:
+        "The optional client HTTPS listener exposes native enrollment, sessions and scoped app controls. Use the exact origin from the explicitly confirmed QR. Verify its leaf SHA-256, hostname and certificate validity. Native bearer credentials never authenticate as coordinator, execution-node or browser credentials. No cookies, Origin or Sec-Fetch-* headers are allowed; Host must match the exact listener authority. JSON POST bodies require a single application/json Content-Type, optionally charset=utf-8. No automatic mutation replay is permitted.",
+    },
+    servers: [
+      {
+        url: "{origin}",
+        variables: {
+          origin: {
+            default: "https://coordinator.example:8444",
+            description:
+              "Reserved example only. Replace with the verified QR origin; never infer the coordinator API port.",
+          },
+        },
+      },
+    ],
+    security: [{ nativeBearer: [] }],
+    paths: {
+      [routes.pair.path]: {
+        post: {
+          ...common,
+          operationId: routes.pair.operationId,
+          security: [],
+          summary: "Exchange a single-use invitation for a native session",
+          description:
+            "Authorization is forbidden. Generate and safely retain a random candidate token before the single POST. Success means durable pairing committed. An interrupted response is uncertain: use GET session with the candidate to recover, never replay this POST automatically.",
+          requestBody: request(ref("NativePairRequest")),
+          responses: {
+            ...errors,
+            "200": response(
+              "Pairing durably committed. No credential is returned; the client already holds its candidate.",
+              ref("NativeSessionResponse"),
+            ),
+          },
+        },
+      },
+      [routes.session.path]: {
+        get: {
+          ...common,
+          operationId: routes.session.operationId,
+          summary: "Inspect or recover the native credential",
+          description:
+            "Read-only. Candidate bearer authentication returns the public record after a committed pair, including after a lost pair response. A 401 means the candidate is not currently authorized; this read never consumes an invitation or creates a session.",
+          responses: {
+            ...errors,
+            "200": response("Current native session metadata.", ref("NativeSessionResponse")),
+          },
+        },
+      },
+      [routes.logout.path]: {
+        post: {
+          ...common,
+          operationId: routes.logout.operationId,
+          summary: "Revoke this native credential",
+          description:
+            "The empty JSON body is required. Success confirms durable revocation. On interruption retain uncertainty; GET session may resolve whether the credential still authenticates. Local credential removal alone does not confirm server revocation.",
+          requestBody: request(ref("NativeLogoutRequest")),
+          responses: {
+            ...errors,
+            "200": response("Native credential durably revoked.", ref("NativeLogoutResponse")),
+          },
+        },
+      },
+      "/native/v1/household/authority": {
+        get: {
+          ...common,
+          operationId: "getNativeHouseholdAuthority",
+          summary: "List this native client's explicit household data grants",
+          responses: {
+            ...errors,
+            "200": response("Current data grants.", ref("HouseholdAuthorityResponse")),
+          },
+        },
+      },
+      "/native/v1/household/{profile}/{kind}": {
+        parameters: [
+          ...common.parameters,
+          { name: "profile", in: "path", required: true, schema: { enum: ["shared", "private"] } },
+          { name: "kind", in: "path", required: true, schema: { enum: ["dashboards", "chores"] } },
+        ],
+        get: {
+          operationId: "getNativeHouseholdDocument",
+          summary: "Read one explicitly granted household document",
+          "x-ellie-request-channel": common["x-ellie-request-channel"],
+          responses: {
+            ...errors,
+            "200": documentResponse("Current document and revision."),
+          },
+        },
+        put: {
+          operationId: "putNativeHouseholdDocument",
+          summary: "Conditionally replace one explicitly granted household document",
+          "x-ellie-request-channel": {
+            ...common["x-ellie-request-channel"],
+            jsonPutRequiresSingleContentType: true,
+          },
+          "x-ellie-max-json-body-bytes-by-kind": {
+            dashboards: 128 * 1024 + 1024,
+            chores: 256 * 1024 + 1024,
+          },
+          "x-ellie-duplicate-if-match-rejected": true,
+          parameters: [
+            {
+              name: "If-Match",
+              in: "header",
+              required: true,
+              schema: {
+                type: "string",
+                maxLength: 33,
+                pattern: '^"ellie-revision-(0|[1-9][0-9]*)"$',
+                "x-ellie-maximum-revision": Number.MAX_SAFE_INTEGER,
+              },
+            },
+          ],
+          requestBody: {
+            ...request(ref("HouseholdPutRequest")),
+            description:
+              "The value must match the document kind in the path; accepted values are not normalized.",
+          },
+          responses: {
+            ...errors,
+            "200": documentResponse("Document durably replaced."),
+            "412": response(
+              "Revision conflict without document contents.",
+              ref("HouseholdConflictResponse"),
+            ),
+            "428": response("Conditional revision required.", ref("NativeError")),
+          },
+        },
+      },
+      "/native/v1/speech/availability": {
+        get: {
+          ...common,
+          operationId: "getNativeSpeechAvailability",
+          summary: "Explicitly check configured local speech availability",
+          responses: {
+            ...errors,
+            "200": response("Local speech is configured and currently granted.", {
+              type: "object",
+              required: ["available"],
+              additionalProperties: false,
+              properties: { available: { const: true } },
+            }),
+          },
+        },
+      },
+      "/native/v1/speech/transcriptions": {
+        post: {
+          parameters: [
+            ...common.parameters,
+            {
+              name: "X-Ellie-Turn-ID",
+              in: "header",
+              required: true,
+              schema: { type: "string", format: "uuid" },
+            },
+          ],
+          operationId: "createNativeSpeechTranscription",
+          summary: "Transcribe one bounded WAV turn on the coordinator",
+          description:
+            "Requires a separate speech.transcribe grant. No cloud fallback, persistence or automatic replay.",
+          "x-ellie-request-channel": {
+            ...common["x-ellie-request-channel"],
+            jsonPostRequiresSingleContentType: false,
+            audioWavRequiresSingleContentType: true,
+            exactContentLength: true,
+          },
+          requestBody: {
+            required: true,
+            content: {
+              "audio/wav": { schema: { type: "string", format: "binary", maxLength: 1100000 } },
+            },
+          },
+          responses: {
+            ...errors,
+            "200": response("One editable transcript.", {
+              type: "object",
+              required: ["turnId", "text"],
+              additionalProperties: false,
+              properties: {
+                turnId: { type: "string", format: "uuid" },
+                text: { type: "string", maxLength: 2000 },
+              },
+            }),
+            "499": response(
+              "The caller stopped waiting; no transcript is published.",
+              ref("NativeError"),
+            ),
+          },
+        },
+      },
+      "/native/v1/speech/transcriptions/{turnId}/cancel": {
+        post: {
+          ...common,
+          operationId: "cancelNativeSpeechTranscription",
+          summary: "Signal cancellation for this client's matching active turn",
+          parameters: [
+            {
+              name: "turnId",
+              in: "path",
+              required: true,
+              schema: { type: "string", format: "uuid" },
+            },
+          ],
+          requestBody: request({ type: "object", maxProperties: 0, additionalProperties: false }),
+          responses: {
+            ...errors,
+            "200": response("Cancellation signal result.", {
+              type: "object",
+              required: ["ok", "cancelled"],
+              additionalProperties: false,
+              properties: { ok: { const: true }, cancelled: { type: "boolean" } },
+            }),
+          },
+        },
+      },
+      [NATIVE_CONTROL_CONTRACT.routes.nodes.path]: {
+        get: {
+          ...common,
+          operationId: NATIVE_CONTROL_CONTRACT.routes.nodes.operationId,
+          summary: "List configured devices allowed by this native credential",
+          description:
+            "Read-only, bounded to 16 configured targets and 8192 response bytes. Returns only explicitly granted app.open targets, labels, online state and the app.open capability; no household telemetry. Discovery has a five-second deadline.",
+          responses: {
+            ...errors,
+            "200": response("Granted configured devices.", ref("NativeNodesResponse")),
+          },
+        },
+      },
+      [NATIVE_CONTROL_CONTRACT.routes.commands.path]: {
+        post: {
+          ...common,
+          operationId: NATIVE_CONTROL_CONTRACT.routes.commands.operationId,
+          summary: "Explicitly open an allowed app on a granted device",
+          description:
+            "Only app.open for Arc, Safari or Messages. Revalidates authority and live inventory before dispatch. Shares per-device reservations with browser commands. No persistence or automatic retry. Command dispatch has a 35-second deadline after bounded discovery. A timeout, disconnect or 502 may follow execution; check the Mac before issuing another action. Cancellation requests upstream cancellation but does not undo a launched app. 409 also means the device is offline, incapable or has an unfinished command.",
+          requestBody: request(ref("NativeAppRequest")),
+          responses: {
+            ...errors,
+            "200": response("Known command outcome.", ref("NativeCommandResponse")),
+            "502": response(
+              "Execution outcome is uncertain; never replay automatically.",
+              ref("NativeUnknownResponse"),
+            ),
+          },
+        },
+      },
+    },
+    components: {
+      securitySchemes: {
+        nativeBearer: {
+          type: "http",
+          scheme: "bearer",
+          bearerFormat: "64 lowercase hexadecimal characters",
+          description:
+            "The separate native candidate/session token. Never a controller token, node token, browser cookie or invitation.",
+        },
+      },
+      schemas: { ...nativeSessionSchemas(), ...nativeControlSchemas(), ...householdSchemas },
+    },
+  } as Json;
+}
+
 function serialized(value: Json): string {
   return `${JSON.stringify(value, null, 2)}\n`;
 }
@@ -748,6 +1379,8 @@ export function generatedContracts(): Record<string, string> {
     "operation-registry.v1.json": serialized(OPERATION_REGISTRY as unknown as Json),
     "protocol.v1.schema.json": serialized(protocolSchema()),
     "openapi.v1.json": serialized(openApi()),
+    "native-openapi.v1.json": serialized(nativeOpenApi()),
+    "native-pairing-fixtures.v1.json": serialized(nativePairingFixtures() as Json),
   };
 }
 

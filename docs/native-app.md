@@ -1,6 +1,6 @@
 # Ellie native app
 
-Ellie is a macOS-first SwiftUI application. The initial app provides the dashboard experience as a normal Dock application on macOS 14 and later. Its dashboard model and persistence layer are kept separate from the views so a future iPhone app can share those concepts; an iOS app is not part of the current build.
+Ellie provides native SwiftUI dashboard applications for macOS and iPhone. The macOS app is a normal Dock application on macOS 14 and later. The iPhone target shares its versioned dashboard model and persistence implementation; see the [iPhone development guide](native-ios.md).
 
 ## Requirements
 
@@ -39,18 +39,50 @@ Building the desktop app does not install or launch it. It does not read or chan
 
 ## Native experience and data
 
-The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, native menus, editable widget sheets and macOS open/save dialogs. Edit reveals inline layout controls; contextual actions and adding notes remain available while browsing. Clock, notes, and local dated chores work. The optional [weather widget](native-weather.md) shows current conditions for an explicitly configured place; calendar and playlist connections are separate slices. There is no web view or embedded browser in the app.
+The app uses SwiftUI NavigationSplitView, system toolbar/sidebar, SF Symbols, native menus, editable widget sheets and macOS open/save dialogs. Edit reveals inline layout controls; contextual actions and adding notes remain available while browsing. Clock, notes, local dated chores, selected playlists, the optional [weather widget](native-weather.md), and explicitly imported [offline agenda snapshots](native-calendar.md) are implemented. Selected YouTube playlists use an isolated web player; this does not provide general website control or live Google Calendar access.
 
 The versioned JSON schema accepts the browser dashboard editor’s export. Use File → Import Dashboards to carry layouts and notes over; the app does not reach into browser storage. Dashboard state lives in Application Support/Ellie/dashboardsv1.json with private permissions. Dated chores use the separate private `choresv1.json`; dashboard import and export continue to contain layouts and notes only, never chore content. Invalid startup data remains intact and blocks writes so a malformed file is not silently replaced. `--state-path /absolute/private/dashboards.json` and `--chores-state-path /absolute/private/chores.json` select isolated files for validation. Existing coordinator/node identities, Keychain credentials and services are untouched.
 
 Chore due and completion days are Gregorian date-only values (`YYYY-MM-DD`) interpreted in the household time zone saved with the chore file. The current day changes at midnight in that zone, completion records the household day when the action occurs, and the weekly chart runs Monday through Sunday across daylight-saving transitions. This first local slice has no recurrence, reminder scheduling, chore sync, or chore import/export.
 
-This is the first macOS client slice. Live coordinator controls, model-backed voice, connected provider widgets, native iPhone packaging, shared profiles and signed/notarized distribution remain later slices. An ad hoc development signature is not a notarized release.
+The Mac client also provides connected device status, explicitly targeted app opening, pairing management and reviewed local push-to-talk commands. The [native iPhone client](native-ios.md) shares the dashboard model and implements enrollment, granted app controls and push-to-talk. Explicit [household data authority](native-household-state.md) is required for dashboard synchronization; existing app-opening credentials do not inherit it. These are development features. Conversational voice, live provider accounts, physical phone acceptance and signed/notarized distribution remain separate gates. An ad hoc development signature is not a notarized release.
+
+## Connected device status
+
+Open **Devices** from the dashboard toolbar or View menu (Command-Shift-D). Choose the existing **Coordinator** or **Node** identity on this Mac, then select **Connect**. The app does not initialize an identity or change pairing. A coordinator identity sees household node registrations; a node identity sees only its own registration. The coordinator is not automatically an execution node.
+
+On macOS versions with Local Network privacy controls, Ellie needs its own Local Network consent to reach another Mac. Allow the system prompt, or enable Ellie in System Settings → Privacy & Security → Local Network, then reconnect. Existing terminal or node-service permission does not grant it to this new application. The bundle includes a purpose description and does not alter these privacy settings itself.
+
+Select a Mac to inspect its ID, desktop capabilities and last registration. Online status requires a fresh registration from a reachable, authenticated coordinator. During an interruption, cached rows show **Status unavailable**. Refresh does not run a desktop action.
+
+The app reads the selected role's existing private configuration and pinned certificate under `~/.ellie`. It retrieves the existing Keychain item through the installed Ellie native helper, using only `keychain.get`. Credentials stay in memory; there are no configuration writes, Keychain changes, new service processes or analytics calls. If the identity is missing, finish the existing CLI installation/pairing flow before connecting.
+
+Requests use an ephemeral HTTPS session with exact certificate pinning and bounded responses. Device reads have a five-second deadline. Redirects, cookies and shared credential/cache storage are disabled. Successful reads refresh every ten seconds while the Devices window is open. Availability failures permit three retries after two, four and eight seconds; then monitoring stops until an explicit reconnect. Invalid trust, rejected credentials and malformed responses stop immediately. Closing Devices or selecting another identity cancels monitoring and drops the connection state.
+
+## Open an app on a selected Mac
+
+Connect, select an online Mac with the **Open applications** capability, choose Arc, Safari or Messages, then click **Open**. The selected Mac and app are shown with the result. A node identity can control only itself; an existing coordinator identity can target its paired nodes. The coordinator and node still enforce their existing capabilities, app allowlists and macOS permissions. The screen does not grant permissions or accept arbitrary command text.
+
+Only one command can be in flight. Commands have a 35-second absolute deadline to accommodate the coordinator's default 30-second operation timeout. They are never retried automatically. Opening a window, connecting, refreshing status and restarting the app do not submit desktop actions.
+
+**Stop waiting** closes the command request. The coordinator requests cancellation when it observes that disconnection, but a native action may already have run. Ellie therefore shows an unknown outcome after cancellation, timeouts, interrupted connections or an ambiguous unsuccessful response. Check the target Mac before repeating the command. An already opened app is not closed by cancellation.
+
+## Local push to talk
+
+Devices includes an explicit **Start recording** control. The first use is the only point at which macOS can ask for microphone access. Recording stops when requested or after 30 seconds, stays under 1.1 MB, and is transcribed by the configured local Node.js 24, whisper-cli and GGML model. Choose those three existing files through **Voice Settings**; Ellie does not download a model or use a cloud fallback. The source-checkout app bundle includes the small Node bridge, so this is a development distribution workflow rather than a signed installer promise.
+
+Audio and intermediate transcript files use a private temporary directory. Ellie attempts exact-file cleanup followed by removal of its empty per-turn directory after success, error or cancellation; cleanup failure is reported without exposing a path. Ellie writes neither content to logs. Cancelling recording or transcription terminates the local turn and cannot restore a late result.
+
+The transcript is editable. Only the exact commands Open, Launch or Start followed by Arc, Safari or Messages can be prepared. Preparing a reviewed command changes only the application picker: it does not choose a Mac or send a request. Review the selected Mac and application, then click the existing **Open** button to dispatch through the same capability, allowlist, timeout and cancellation checks. Speech is input, not authentication.
+
+Changing the selected Mac or identity, disconnecting, closing Devices, or losing authenticated availability stops an active wait. While the window remains open, it preserves that uncertainty in the visible result. Rejected credentials immediately discard the connection and cached inventory. The result captures the original target and app; a late response cannot overwrite a cancellation result. There is no persisted command payload, background queue or replay on launch. This initial control does not present a durable job ID or claim confirmation that a running native action stopped.
 
 ## Validation and next slices
 
 The [dated validation record](validation/2026-09-13-native-app.md) separates actual Mac UI checks from automated model tests. CI runs the Swift tests and builds/verifies the app bundle on macOS.
 
-The [native chores validation record](validation/2026-09-13-native-chores.md) covers task creation, completion/undo, chart updates and persistence on the physical mini, plus date and state regression tests on the MacBook.
+The [native connection record](validation/2026-09-13-native-connection.md) covers 44 Swift tests, including real localhost HTTPS, and the physical UI check that identified pending Local Network consent. Live native LAN inventory remains an acceptance step after that consent.
 
-Next, add a native connection and device view using the existing authenticated coordinator protocol, followed by an explicitly targeted granted command. Then add the native iPhone target and pairing flow, and local microphone capture feeding the reviewed transcription adapter. Chores and weather can advance independently with shared data models and native widgets. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.
+The [native app control record](validation/2026-09-13-native-actions.md) distinguishes synthetic command outcomes from physical Mac UI and LAN acceptance. The [native chores validation record](validation/2026-09-13-native-chores.md) covers task creation, completion/undo, chart updates and persistence on the physical mini, plus date and state regression tests on the MacBook.
+
+The [delivery queue](delivery-queue.md) tracks combined source validation, authenticated distribution and installed-service acceptance. Expand local voice only after the reviewed push-to-talk boundary has physical acceptance. Provider accounts, signing credentials and microphone consent remain separate acceptance steps.

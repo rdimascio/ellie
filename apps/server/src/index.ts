@@ -21,6 +21,9 @@ import { readJson } from "@ellie/transport";
 import { selectWorker } from "@ellie/compute";
 import type { Auth, Identity } from "./auth.ts";
 import { handleBrowserManagement } from "./browser-management.ts";
+import { handleNativeManagement } from "./native-management.ts";
+import { handleHouseholdManagement } from "./household-management.ts";
+import { handleSpeechManagement } from "./speech-management.ts";
 import type { BrowserControl } from "./browser-management.ts";
 import type { JobMetadata, JobOutcomeCode, JobState, JobStore } from "./jobs.ts";
 
@@ -256,6 +259,28 @@ export function createEllieServer(options: {
           options.browser,
         );
         if (browserManagement) return send(res, browserManagement.status, browserManagement.body);
+        const nativeManagement = await handleNativeManagement(
+          req,
+          path,
+          identity.role,
+          options.browser,
+        );
+        if (nativeManagement) return send(res, nativeManagement.status, nativeManagement.body);
+        const householdManagement = await handleHouseholdManagement(
+          req,
+          path,
+          identity.role,
+          options.browser,
+        );
+        if (householdManagement)
+          return send(res, householdManagement.status, householdManagement.body);
+        const speechManagement = await handleSpeechManagement(
+          req,
+          path,
+          identity.role,
+          options.browser,
+        );
+        if (speechManagement) return send(res, speechManagement.status, speechManagement.body);
         if (req.method === "POST" && path === "/v1/invite" && identity.role === "controller")
           return send(res, 200, await auth.invite());
         if (req.method === "POST" && path === "/v1/revoke" && identity.role === "controller") {

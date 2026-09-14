@@ -17,6 +17,11 @@ import {
 } from "../apps/server/src/browser-auth.ts";
 import type { BrowserAuthState, BrowserInvitationSpec } from "../apps/server/src/browser-auth.ts";
 import { createBrowserServer } from "../apps/server/src/browser-server.ts";
+import { NativeAuth } from "../apps/server/src/native-auth.ts";
+import { HouseholdState } from "../apps/server/src/household-state.ts";
+import { NativeSpeech } from "../apps/server/src/native-speech.ts";
+import { WhisperCliSpeechInput } from "@ellie/speech";
+import type { SpeechInput } from "@ellie/speech";
 import type { BrowserAssets, BrowserRemote } from "../apps/server/src/browser-server.ts";
 
 const run = promisify(execFile);
@@ -165,7 +170,11 @@ interface Response {
   body: unknown;
 }
 
-async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
+async function fixture(
+  assets?: BrowserAssets,
+  remote?: BrowserRemote,
+  suppliedSpeech?: SpeechInput,
+) {
   const tls = await certificate;
   const port = await availablePort();
   const origin = `https://localhost:${port}`;
@@ -194,7 +203,49 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     },
     { now: () => now },
   );
-  const app = createBrowserServer({ ...tls, origin, auth, assets, remote });
+  let nativeState = NativeAuth.empty();
+  let nativeNow: number | undefined;
+  let nativeSaveGate:
+    | {
+        entered: ReturnType<typeof deferred<void>>;
+        release: ReturnType<typeof deferred<void>>;
+        fail: boolean;
+      }
+    | undefined;
+  const nativeAuth = new NativeAuth(
+    nativeState,
+    async (next) => {
+      const gate = nativeSaveGate;
+      if (gate) {
+        nativeSaveGate = undefined;
+        gate.entered.resolve();
+        await gate.release.promise;
+        if (gate.fail) throw new Error("private native state must stay redacted");
+      }
+      nativeState = structuredClone(next);
+    },
+    { now: () => nativeNow ?? Date.now() },
+  );
+  const household = HouseholdState.memory();
+  const speechInput: SpeechInput = {
+    async *transcribe(audio) {
+      let bytes = 0;
+      for await (const chunk of audio) bytes += chunk.length;
+      if (!bytes) throw new Error();
+      yield { text: "Synthetic transcript", final: true };
+    },
+  };
+  const speech = NativeSpeech.memory(nativeAuth, suppliedSpeech ?? speechInput);
+  const app = createBrowserServer({
+    ...tls,
+    origin,
+    auth,
+    nativeAuth,
+    household,
+    speech,
+    assets,
+    remote,
+  });
   await new Promise<void>((resolve, reject) => {
     app.server.once("error", reject);
     app.server.listen(port, "127.0.0.1", resolve);
@@ -205,8 +256,9 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     path: string,
     options: {
       body?: unknown;
-      rawBody?: string;
+      rawBody?: string | Buffer;
       headers?: Record<string, string>;
+      signal?: AbortSignal;
     } = {},
   ): Promise<Response> {
     const data =
@@ -221,6 +273,7 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
           method,
           ca: tls.ca,
           rejectUnauthorized: true,
+          signal: options.signal,
           headers: {
             host: `localhost:${port}`,
             ...(data === undefined
@@ -257,11 +310,23 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
 
   return {
     auth,
+    nativeAuth,
+    household,
+    speech,
     origin,
     port,
     request,
     failSave(value: boolean) {
       failSave = value;
+    },
+    blockNextNativeSave(fail = false) {
+      assert.equal(nativeSaveGate, undefined);
+      const gate = { entered: deferred<void>(), release: deferred<void>(), fail };
+      nativeSaveGate = gate;
+      return gate;
+    },
+    nativeNow(value: number) {
+      nativeNow = value;
     },
     blockNextSave(fail = false) {
       assert.equal(saveGate, undefined);
@@ -278,6 +343,355 @@ async function fixture(assets?: BrowserAssets, remote?: BrowserRemote) {
     },
   };
 }
+
+test("native bearer channel pairs once, recovers by GET, logs out, and rejects browser authority", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Test iPhone",
+    grants: [{ target: "living-room-mini", capabilities: ["app.open"] }],
+  });
+  const token = "9".repeat(64);
+  const nativeHeaders = { "x-ellie-version": "1" };
+  assert.equal(
+    (await f.request("POST", "/native/v1/pair", { body: { invitation: invitation.code, token } }))
+      .status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token },
+        headers: { "x-ellie-version": "2" },
+      })
+    ).status,
+    403,
+  );
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: nativeHeaders,
+  });
+  assert.equal(paired.status, 200);
+  assert.doesNotMatch(paired.text, new RegExp(`${invitation.code}|${token}|tokenHash`));
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token: "8".repeat(64) },
+        headers: nativeHeaders,
+      })
+    ).status,
+    400,
+  );
+  const session = await f.request("GET", "/native/v1/session", {
+    headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+  });
+  assert.equal(session.status, 200);
+  assert.deepEqual(
+    (session.body as { client: { grants: unknown } }).client.grants,
+    invitation.grants,
+  );
+
+  for (const headers of [
+    { cookie: `__Host-ellie-session=${"a".repeat(64)}` },
+    { origin: f.origin },
+    { "sec-fetch-site": "same-origin" },
+  ] as Record<string, string>[])
+    assert.equal(
+      (
+        await f.request("GET", "/native/v1/session", {
+          headers: { ...nativeHeaders, authorization: `Bearer ${token}`, ...headers },
+        })
+      ).status,
+      403,
+    );
+  assert.equal(
+    (
+      await f.request("GET", "/browser/v1/session", {
+        headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+      })
+    ).status,
+    403,
+  );
+
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/logout", {
+        body: {},
+        headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await f.request("GET", "/native/v1/session", {
+        headers: { ...nativeHeaders, authorization: `Bearer ${token}` },
+      })
+    ).status,
+    401,
+  );
+});
+
+test("native speech HTTPS requires a separate grant and strict bounded audio headers", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Speech iPhone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const token = "6".repeat(64);
+  const bearer = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  const client = (paired.body as { client: { id: string } }).client;
+  assert.equal(
+    (await f.request("GET", "/native/v1/speech/availability", { headers: bearer })).status,
+    403,
+  );
+  await f.speech.grant({ clientId: client.id, capability: "speech.transcribe" });
+  assert.deepEqual(
+    (await f.request("GET", "/native/v1/speech/availability", { headers: bearer })).body,
+    { available: true },
+  );
+  const audio = Buffer.from("synthetic wav bytes");
+  const turnId = "11111111-1111-4111-8111-111111111111";
+  const response = await f.request("POST", "/native/v1/speech/transcriptions", {
+    rawBody: audio,
+    headers: {
+      ...bearer,
+      "content-type": "audio/wav",
+      "content-length": String(audio.length),
+      "x-ellie-turn-id": turnId,
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, { turnId, text: "Synthetic transcript" });
+  assert.deepEqual(
+    (
+      await f.request("POST", `/native/v1/speech/transcriptions/${turnId}/cancel`, {
+        body: {},
+        headers: bearer,
+      })
+    ).body,
+    { ok: true, cancelled: false },
+  );
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/speech/transcriptions", {
+        rawBody: audio,
+        headers: {
+          ...bearer,
+          "content-type": "application/json",
+          "content-length": String(audio.length),
+          "x-ellie-turn-id": turnId,
+        },
+      })
+    ).status,
+    415,
+  );
+});
+
+test("native speech HTTPS rejects invalid WAV before starting Whisper", async (t) => {
+  const f = await fixture(
+    undefined,
+    undefined,
+    new WhisperCliSpeechInput({
+      executable: "/usr/bin/false",
+      model: "/dev/null",
+      timeoutMs: 1_000,
+    }),
+  );
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Speech iPhone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const token = "5".repeat(64),
+    headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  await f.speech.grant({
+    clientId: (paired.body as { client: { id: string } }).client.id,
+    capability: "speech.transcribe",
+  });
+  const body = Buffer.from("not a wave");
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/speech/transcriptions", {
+        rawBody: body,
+        headers: {
+          ...headers,
+          "content-type": "audio/wav",
+          "content-length": String(body.length),
+          "x-ellie-turn-id": "22222222-2222-4222-8222-222222222222",
+        },
+      })
+    ).status,
+    400,
+  );
+});
+
+function validSpeechWave(): Buffer {
+  const body = Buffer.alloc(46);
+  body.write("RIFF", 0);
+  body.writeUInt32LE(38, 4);
+  body.write("WAVEfmt ", 8);
+  body.writeUInt32LE(16, 16);
+  body.writeUInt16LE(1, 20);
+  body.writeUInt16LE(1, 22);
+  body.writeUInt32LE(16_000, 24);
+  body.writeUInt32LE(32_000, 28);
+  body.writeUInt16LE(2, 32);
+  body.writeUInt16LE(16, 34);
+  body.write("data", 36);
+  body.writeUInt32LE(2, 40);
+  return body;
+}
+
+async function speechBearer(f: Awaited<ReturnType<typeof fixture>>, token: string) {
+  const invitation = await f.nativeAuth.invite({
+    label: "Slow speech iPhone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  const clientId = (paired.body as { client: { id: string } }).client.id;
+  await f.speech.grant({ clientId, capability: "speech.transcribe" });
+  return headers;
+}
+
+test("completed speech upload keeps its bounded response window beyond ten seconds", async (t) => {
+  let calls = 0;
+  const input: SpeechInput = {
+    async *transcribe(audio) {
+      calls += 1;
+      for await (const _ of audio) void _;
+      await new Promise((resolve) => setTimeout(resolve, 10_500));
+      yield { text: "Slow synthetic transcript", final: true };
+    },
+  };
+  const f = await fixture(undefined, undefined, input);
+  t.after(() => f.close());
+  const headers = await speechBearer(f, "7".repeat(64));
+  const wave = validSpeechWave();
+  const response = await f.request("POST", "/native/v1/speech/transcriptions", {
+    rawBody: wave,
+    headers: {
+      ...headers,
+      "content-type": "audio/wav",
+      "content-length": String(wave.length),
+      "x-ellie-turn-id": "77777777-7777-4777-8777-777777777777",
+    },
+  });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body, {
+    turnId: "77777777-7777-4777-8777-777777777777",
+    text: "Slow synthetic transcript",
+  });
+  assert.equal(calls, 1);
+});
+
+test("incomplete speech upload retains the ten second socket deadline", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const headers = await speechBearer(f, "9".repeat(64));
+  const tls = await certificate;
+  const started = Date.now();
+  await new Promise<void>((resolve, reject) => {
+    const request = httpsRequest({
+      host: "127.0.0.1",
+      port: f.port,
+      servername: "localhost",
+      path: "/native/v1/speech/transcriptions",
+      method: "POST",
+      ca: tls.ca,
+      rejectUnauthorized: true,
+      headers: {
+        host: `localhost:${f.port}`,
+        ...headers,
+        "content-type": "audio/wav",
+        "content-length": String(validSpeechWave().length),
+        "x-ellie-turn-id": "99999999-9999-4999-8999-999999999999",
+      },
+    });
+    const timer = setTimeout(
+      () => reject(new Error("Stalled upload exceeded its deadline.")),
+      12_000,
+    );
+    request.once("error", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    request.write(validSpeechWave().subarray(0, 12));
+  });
+  assert.ok(Date.now() - started >= 9_000);
+  assert.ok(Date.now() - started < 12_000);
+});
+
+test("native household routes require separate grants and enforce conditional revisions", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Household iPhone",
+    grants: [{ target: "living-room-mini", capabilities: ["app.open"] }],
+  });
+  const token = "8".repeat(64);
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  assert.equal(paired.status, 200);
+  const client = (paired.body as { client: { id: string } }).client;
+  assert.equal(
+    (await f.request("GET", "/native/v1/household/shared/dashboards", { headers })).status,
+    403,
+  );
+  assert.equal(
+    await f.household.grant(f.nativeAuth, {
+      clientId: client.id,
+      profile: "shared",
+      kind: "dashboards",
+      access: "write",
+    }),
+    true,
+  );
+  const empty = await f.request("GET", "/native/v1/household/shared/dashboards", { headers });
+  assert.equal(empty.status, 200);
+  assert.equal(empty.headers.etag, '"ellie-revision-0"');
+  assert.deepEqual(empty.body, {
+    profile: "shared",
+    kind: "dashboards",
+    revision: 0,
+    value: { version: 1, dashboards: [] },
+  });
+  const value = { version: 1, dashboards: [{ id: "home", name: "Home", widgets: [] }] };
+  const saved = await f.request("PUT", "/native/v1/household/shared/dashboards", {
+    body: { value },
+    headers: { ...headers, "if-match": '"ellie-revision-0"' },
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(saved.headers.etag, '"ellie-revision-1"');
+  const conflict = await f.request("PUT", "/native/v1/household/shared/dashboards", {
+    body: { value: { version: 1, dashboards: [] } },
+    headers: { ...headers, "if-match": '"ellie-revision-0"' },
+  });
+  assert.deepEqual(conflict.body, { profile: "shared", kind: "dashboards", revision: 1 });
+  assert.equal(conflict.status, 412);
+  assert.equal((await f.request("GET", "/native/v1/nodes", { headers })).status, 503);
+  await f.household.revoke({ clientId: client.id, profile: "shared", kind: "dashboards" });
+  assert.equal(
+    (await f.request("GET", "/native/v1/household/shared/dashboards", { headers })).status,
+    403,
+  );
+});
 
 function cookieFrom(response: Response): string {
   const setCookie = response.headers["set-cookie"]?.[0];
@@ -944,4 +1358,434 @@ test("browser commands report an unknown outcome without retrying an upstream fa
   });
   assert.equal(dispatches, 1);
   assert.doesNotMatch(response.text, /private upstream|credential/);
+});
+
+const nativeTarget = {
+  id: "living-room-mini",
+  label: "Living room",
+  online: true,
+  capabilities: ["app.open"] as "app.open"[],
+};
+const nativeCommand = { nodeId: nativeTarget.id, action: { tool: "app.open", app: "arc" } };
+async function nativeControlSession(f: Awaited<ReturnType<typeof fixture>>) {
+  const invitation = await f.nativeAuth.invite({
+    label: "Test iPhone",
+    grants: [{ target: nativeTarget.id, capabilities: ["app.open"] }],
+  });
+  const token = "c".repeat(64);
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  assert.equal(paired.status, 200);
+  return {
+    headers: { "x-ellie-version": "1", authorization: `Bearer ${token}` },
+    client: (paired.body as { client: { id: string; expiresAt: number } }).client,
+  };
+}
+
+test("native controls expose only granted inventory and finite redacted outcomes over real TLS", async (t) => {
+  const calls: unknown[] = [];
+  const f = await fixture(undefined, {
+    nodes: async () => [
+      { ...nativeTarget, privateTelemetry: "private detail" } as typeof nativeTarget,
+      { ...nativeTarget, id: "private-mini" },
+    ],
+    openApp: async (id, app, options) => {
+      calls.push([id, app]);
+      assert.ok(options?.signal);
+      return { ok: app !== "messages", message: "private secret" };
+    },
+  });
+  t.after(() => f.close());
+  const { headers } = await nativeControlSession(f);
+  const inventory = await f.request("GET", "/native/v1/nodes", { headers });
+  assert.equal(inventory.status, 200);
+  assert.equal(inventory.headers["cache-control"], "no-store");
+  assert.deepEqual(inventory.body, { nodes: [nativeTarget] });
+  for (const app of ["arc", "safari", "messages"]) {
+    const result = await f.request("POST", "/native/v1/commands", {
+      headers,
+      body: { ...nativeCommand, action: { tool: "app.open", app } },
+    });
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, { outcome: app === "messages" ? "failed" : "completed" });
+  }
+  assert.deepEqual(
+    calls,
+    ["arc", "safari", "messages"].map((app) => [nativeTarget.id, app]),
+  );
+});
+
+test("native controls reject browser authority, ungranted targets and noncanonical actions before dispatch", async (t) => {
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: async () => [nativeTarget],
+    openApp: async () => {
+      calls++;
+      return { ok: true, message: "" };
+    },
+  });
+  t.after(() => f.close());
+  const { headers } = await nativeControlSession(f);
+  for (const rejectedHeaders of [
+    {},
+    { ...headers, authorization: `Bearer ${"d".repeat(64)}` },
+    { ...headers, origin: f.origin },
+    { ...headers, cookie: "ellie=browser" },
+    { ...headers, "sec-fetch-site": "same-origin" },
+    { ...headers, "x-ellie-version": "2" },
+  ]) {
+    const result = await f.request("POST", "/native/v1/commands", {
+      headers: rejectedHeaders,
+      body: nativeCommand,
+    });
+    assert.ok([401, 403].includes(result.status));
+  }
+  for (const body of [
+    { ...nativeCommand, nodeId: "private-mini" },
+    { ...nativeCommand, text: "open Arc" },
+    { ...nativeCommand, action: { tool: "app.open", app: "terminal" } },
+    { ...nativeCommand, action: { tool: "app.open", app: "arc", extra: true } },
+    { nodeId: nativeTarget.id, text: "open Arc" },
+  ]) {
+    const result = await f.request("POST", "/native/v1/commands", { headers, body });
+    assert.ok([400, 403].includes(result.status));
+  }
+  assert.equal(calls, 0);
+});
+
+test("native inventory and dispatch recheck revocation after asynchronous discovery", async (t) => {
+  for (const method of ["GET", "POST"]) {
+    const started = deferred<void>();
+    const discovery = deferred<(typeof nativeTarget)[]>();
+    let calls = 0;
+    const f = await fixture(undefined, {
+      nodes: () => {
+        started.resolve();
+        return discovery.promise;
+      },
+      openApp: async () => {
+        calls++;
+        return { ok: true, message: "" };
+      },
+    });
+    t.after(() => f.close());
+    const { headers, client } = await nativeControlSession(f);
+    const pending = f.request(
+      method,
+      method === "GET" ? "/native/v1/nodes" : "/native/v1/commands",
+      { headers, ...(method === "POST" ? { body: nativeCommand } : {}) },
+    );
+    await started.promise;
+    await f.nativeAuth.revoke(client.id);
+    discovery.resolve([nativeTarget]);
+    assert.equal((await pending).status, 401);
+    assert.equal(calls, 0);
+  }
+});
+
+test("native command admission waits for queued revoke, logout, expiry, and failed save", async (t) => {
+  for (const operation of ["revoke", "logout", "expiry", "failed-revoke"] as const) {
+    const discoveryStarted = deferred<void>();
+    const discovery = deferred<(typeof nativeTarget)[]>();
+    let dispatches = 0;
+    const f = await fixture(undefined, {
+      nodes: () => {
+        discoveryStarted.resolve();
+        return discovery.promise;
+      },
+      async openApp() {
+        dispatches += 1;
+        return { ok: true, message: "opened" };
+      },
+    });
+    t.after(() => f.close());
+    const { headers, client } = await nativeControlSession(f);
+    const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+    await discoveryStarted.promise;
+
+    const gate = f.blockNextNativeSave(operation === "failed-revoke");
+    const mutation =
+      operation === "logout"
+        ? f.nativeAuth.logout(headers.authorization)
+        : operation === "expiry"
+          ? f.nativeAuth.invite({
+              label: "Another test phone",
+              grants: [{ target: nativeTarget.id, capabilities: ["app.open"] }],
+            })
+          : f.nativeAuth.revoke(client.id);
+    await gate.entered.promise;
+    if (operation === "expiry") f.nativeNow(client.expiresAt);
+    discovery.resolve([nativeTarget]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(dispatches, 0, operation);
+    gate.release.resolve();
+
+    if (operation === "failed-revoke") await assert.rejects(mutation);
+    else await mutation;
+    assert.equal((await pending).status, operation === "failed-revoke" ? 503 : 401, operation);
+    assert.equal(dispatches, 0, operation);
+  }
+});
+
+test("native command admitted before revocation dispatches once without replay", async (t) => {
+  const dispatched = deferred<void>();
+  const result = deferred<{ ok: boolean; message: string }>();
+  let dispatches = 0;
+  const f = await fixture(undefined, {
+    async nodes() {
+      return [nativeTarget];
+    },
+    openApp() {
+      dispatches += 1;
+      dispatched.resolve();
+      return result.promise;
+    },
+  });
+  t.after(() => f.close());
+  const { headers, client } = await nativeControlSession(f);
+  const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+  await dispatched.promise;
+  assert.equal(await f.nativeAuth.revoke(client.id), true);
+  result.reject(new Error("outcome lost after admission"));
+  assert.equal((await pending).status, 502);
+  assert.equal(dispatches, 1);
+});
+
+test("native dispatch refuses missing, offline and incapable targets and redacts discovery failures", async (t) => {
+  let nodes: (typeof nativeTarget)[] = [];
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: async () => nodes,
+    openApp: async () => {
+      calls++;
+      return { ok: true, message: "" };
+    },
+  });
+  t.after(() => f.close());
+  const { headers } = await nativeControlSession(f);
+  for (const [inventory, status] of [
+    [[], 404],
+    [[{ ...nativeTarget, online: false }], 409],
+    [[{ ...nativeTarget, capabilities: [] }], 409],
+    [[{ ...nativeTarget, label: "secret\ninvalid" }], 503],
+    [Array(17).fill(nativeTarget), 503],
+  ] as [typeof nodes, number][]) {
+    nodes = inventory;
+    const result = await f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+    assert.equal(result.status, status);
+    assert.doesNotMatch(result.text, /secret|invalid/);
+  }
+  assert.equal(calls, 0);
+});
+
+test("native and browser command channels share the per-device reservation", async (t) => {
+  const started = deferred<void>();
+  const operation = deferred<{ ok: boolean; message: string }>();
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: async () => [nativeTarget],
+    openApp: () => {
+      calls++;
+      started.resolve();
+      return operation.promise;
+    },
+  });
+  t.after(() => {
+    operation.resolve({ ok: true, message: "" });
+    f.close();
+  });
+  const { headers } = await nativeControlSession(f);
+  const browserSession = await pairBrowserClient(f, phone);
+  const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+  await started.promise;
+  assert.equal(
+    (await f.request("POST", "/native/v1/commands", { headers, body: nativeCommand })).status,
+    409,
+  );
+  assert.equal(
+    (
+      await f.request("POST", "/browser/v1/commands", {
+        headers: { origin: f.origin, cookie: browserSession.cookie },
+        body: { nodeId: nativeTarget.id, text: "open Arc" },
+      })
+    ).status,
+    409,
+  );
+  operation.resolve({ ok: true, message: "" });
+  assert.equal((await pending).status, 200);
+  assert.equal(calls, 1);
+});
+
+test("native client disconnect cancels discovery without dispatch or replay", async (t) => {
+  const started = deferred<void>();
+  const aborted = deferred<void>();
+  const discovery = deferred<(typeof nativeTarget)[]>();
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: ({ signal } = {}) => {
+      signal!.addEventListener("abort", () => aborted.resolve(), { once: true });
+      started.resolve();
+      return discovery.promise;
+    },
+    openApp: async () => {
+      calls++;
+      return { ok: true, message: "" };
+    },
+  });
+  t.after(() => {
+    discovery.resolve([nativeTarget]);
+    f.close();
+  });
+  const { headers } = await nativeControlSession(f);
+  const controller = new AbortController();
+  const pending = f.request("POST", "/native/v1/commands", {
+    headers,
+    body: nativeCommand,
+    signal: controller.signal,
+  });
+  const rejection = assert.rejects(pending, { name: "AbortError" });
+  await started.promise;
+  controller.abort();
+  await rejection;
+  await aborted.promise;
+  discovery.resolve([nativeTarget]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
+});
+
+test("native command deadline signals cancellation and retains reservation until ignored upstream settles", async (t) => {
+  const started = deferred<void>();
+  const operation = deferred<{ ok: boolean; message: string }>();
+  let signal: AbortSignal | undefined;
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: async () => [nativeTarget],
+    openApp: (_id, _app, options) => {
+      calls++;
+      signal = options?.signal;
+      started.resolve();
+      return operation.promise;
+    },
+  });
+  t.after(() => {
+    operation.resolve({ ok: true, message: "" });
+    f.close();
+  });
+  const { headers } = await nativeControlSession(f);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+  await started.promise;
+  t.mock.timers.tick(35_001);
+  const result = await pending;
+  t.mock.timers.reset();
+  assert.equal(signal?.aborted, true);
+  assert.equal(result.status, 502);
+  assert.deepEqual(result.body, { outcome: "unknown" });
+  assert.equal(
+    (await f.request("POST", "/native/v1/commands", { headers, body: nativeCommand })).status,
+    409,
+  );
+  assert.equal(calls, 1);
+  operation.resolve({ ok: true, message: "" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    (await f.request("POST", "/native/v1/commands", { headers, body: nativeCommand })).status,
+    200,
+  );
+  assert.equal(calls, 2, "Only the new explicit command dispatches after upstream settles");
+});
+
+test("native command exceptions and malformed outcomes are unknown and never leak upstream detail", async (t) => {
+  let mode = 0;
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: async () => [nativeTarget],
+    openApp: async () => {
+      calls++;
+      if (mode === 0) throw new Error("private token secret");
+      return { ok: "yes", message: "private token secret" } as never;
+    },
+  });
+  t.after(() => f.close());
+  const { headers } = await nativeControlSession(f);
+  for (mode = 0; mode < 2; mode++) {
+    const result = await f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+    assert.equal(result.status, 502);
+    assert.deepEqual(result.body, { outcome: "unknown" });
+  }
+  assert.equal(calls, 2);
+});
+
+test("native command disconnect after dispatch cancels upstream without replay or releasing its unsettled reservation", async (t) => {
+  const started = deferred<void>();
+  const aborted = deferred<void>();
+  const operation = deferred<{ ok: boolean; message: string }>();
+  let calls = 0;
+  const f = await fixture(undefined, {
+    nodes: async () => [nativeTarget],
+    openApp: (_id, _app, { signal } = {}) => {
+      calls++;
+      signal!.addEventListener("abort", () => aborted.resolve(), { once: true });
+      started.resolve();
+      return operation.promise;
+    },
+  });
+  t.after(() => {
+    operation.resolve({ ok: true, message: "" });
+    f.close();
+  });
+  const { headers } = await nativeControlSession(f);
+  const controller = new AbortController();
+  const pending = f.request("POST", "/native/v1/commands", {
+    headers,
+    body: nativeCommand,
+    signal: controller.signal,
+  });
+  const rejection = assert.rejects(pending, { name: "AbortError" });
+  await started.promise;
+  controller.abort();
+  await rejection;
+  await aborted.promise;
+  assert.equal(
+    (await f.request("POST", "/native/v1/commands", { headers, body: nativeCommand })).status,
+    409,
+  );
+  operation.resolve({ ok: true, message: "" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 1);
+});
+
+test("native discovery deadline never dispatches after a late inventory response", async (t) => {
+  const started = deferred<void>();
+  const discovery = deferred<(typeof nativeTarget)[]>();
+  let calls = 0;
+  let signal: AbortSignal | undefined;
+  const f = await fixture(undefined, {
+    nodes: (options) => {
+      signal = options?.signal;
+      started.resolve();
+      return discovery.promise;
+    },
+    openApp: async () => {
+      calls++;
+      return { ok: true, message: "" };
+    },
+  });
+  t.after(() => {
+    discovery.resolve([nativeTarget]);
+    f.close();
+  });
+  const { headers } = await nativeControlSession(f);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = f.request("POST", "/native/v1/commands", { headers, body: nativeCommand });
+  await started.promise;
+  t.mock.timers.tick(5_001);
+  assert.equal((await pending).status, 503);
+  t.mock.timers.reset();
+  assert.equal(signal?.aborted, true);
+  discovery.resolve([nativeTarget]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls, 0);
 });

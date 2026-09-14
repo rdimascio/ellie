@@ -1,0 +1,24 @@
+# Native iPhone release integration validation — 2026-09-13
+
+This gate validates the completed native speech backend, iPhone push-to-talk client, and iPhone dashboard sync sources together before their source histories are merged. The working copy is a disposable validation snapshot based on `9e759234106b979145dd8722010545b43e41b592`; it is not a substitute source history for any feature branch.
+
+The snapshot was assembled from these exact quiescent inputs:
+
+- native speech backend commit `1ecad24452fcc3478dc14ecfe3bafba404c288be` (the pre-publication tracked diff SHA-256 was `cdb6ff1429be08c31eed4ad6b082f459c62537da3ed8068785d51c5c7072508d`, and its untracked-file manifest SHA-256 was `2d6a8546b17cf18384ffd20a778d291e979825b1360064671925a0fa135a75ee`)
+- iPhone push-to-talk tracked diff SHA-256 `b7c56a9bd6814939ef3b1c5f810ee76aeb422a2df385a1e2b36d5505101db61a`, untracked-file manifest SHA-256 `e1ee5d752b2f279830114758576d0275824ba66567ccd8ce12829eb251638901`
+- iPhone dashboard sync tracked diff SHA-256 `79081640ecc88177c0afd1d4670bfdf097aa5504c17c09491df2e8da7f1a4104`, untracked-file manifest SHA-256 `bb8f5c564b8ac4ec249aeb3a86ed955f353790ae4a4aebf1632729df030a8574`
+
+The app-hosted iOS gate uses an owned iOS 18.3.1 simulator and the production pinned `NativeEnrollmentTransport`, `SpeechTransport`, `SpeechTurnStore`, HTTPS native listener, `NativeAuth`, `NativeSpeech`, and `WhisperCliSpeechInput`. It uploads a synthetic 16 kHz mono PCM16 WAV to an owned loopback listener. An owned executable fixture receives the adapter's fixed arguments, writes the editable transcript, and remains running for cancellation and disconnect cases so process termination and cleanup cross the real boundary.
+
+The gate covers successful availability and transcription, a transcript returned after an eleven-second inference delay, explicit turn cancellation, client disconnect after upload, a deliberately lost final transcript response without replay, missing speech authority, revoked speech authority, revoked native session, exact pinning, wrong pin and hostname rejection, and absence of any additional app-open dispatch. Exactly five upload requests reach the production listener. Four or five speech processes start: the immediate, delayed, and lost-response turns complete, and the observed count proves at least one cancellation reached a running fixture process that was terminated. Both cancellation cases use a fixed 300 ms delay before the Swift task is cancelled, so the gate does not identify which cancellation started its process or prove a deterministic server acknowledgement before cancellation; the other case may stop safely before process creation. The delayed XCTest requires at least ten seconds to elapse and completion before the server's 35-second inference limit, exercising the Swift transport's 40-second absolute resource deadline through the pinned listener. All fixture audio, model placeholders, certificates, processes, simulator data, and temporary directories are owned by the runner and removed after the run. No microphone, physical device, real Keychain account, enrolled household identity, or live service is used.
+
+Validation results on the MacBook with full Xcode, Node 24.21.0, and Bun 1.4.2:
+
+- the app-hosted pinned HTTPS and native speech integration runner passed 11 Xcode tests, including the eleven-second result, cancellation, denial/revocation, Keychain fixture, and built ATS policy checks;
+- the bounded desktop runner passed 152 Swift/XCTest tests with no failures, including 10 speech-turn and 12 dashboard-sync tests;
+- `bun run check` passed lint, formatting, generated-contract drift, typechecking, 241 of 242 Node tests with one existing platform skip, and the command-center production build;
+- the combined desktop production target compiled in a clean local scratch directory.
+
+The native enrollment v1 contract still requires at least one finite `app.open` target grant when pairing a phone. Speech remains independently denied until its separate controller-issued grant exists, and this gate proves speech operations issue no app-open request. Supporting a speech-only native enrollment would require a deliberate enrollment-contract revision rather than broadening this release slice.
+
+GitHub Actions run `34769051186` at the shared base revision passed TypeScript and every preceding native gate, then failed only `NativeEnrollmentATSTests.testProductionTransportConnectsToPinnedLocalHTTPSUnderATS` with the fixed `unavailable` error after three seconds; its result bundle reported four passes and one failure. The retained result contains no underlying URL error or listener request count, so it cannot distinguish a transient simulator/loopback failure from a transport defect. The current hardened runner did not reproduce it on the MacBook. A repeated CI failure needs added sanitized transport-stage diagnostics rather than an inferred cause.

@@ -2,10 +2,17 @@ import { createServer } from "node:https";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Server as HttpsServer } from "node:https";
 import type { Duplex } from "node:stream";
-import { identifier } from "@ellie/protocol";
+import { identifier, record, VERSION, NATIVE_SESSION_CONTRACT } from "@ellie/protocol";
 import { readJson } from "@ellie/transport";
 import { canOpenApps, phoneAppCommand } from "./browser-remote.ts";
 import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
+import type { NativeAuth } from "./native-auth.ts";
+import { NativeAuthError } from "./native-auth.ts";
+import { NativeControls } from "./native-controls.ts";
+import type { HouseholdState } from "./household-state.ts";
+import { handleNativeHousehold } from "./native-household.ts";
+import type { NativeSpeech } from "./native-speech.ts";
+import { handleNativeSpeech } from "./native-speech-routes.ts";
 export type { BrowserRemote } from "./browser-remote.ts";
 import {
   BrowserAuth,
@@ -16,6 +23,8 @@ import {
   browserSessionToken,
   clearBrowserSessionCookie,
 } from "./browser-auth.ts";
+
+const nativeRoutes = NATIVE_SESSION_CONTRACT.routes;
 
 const MAX_BROWSER_BODY_BYTES = 4096;
 const SECURITY_HEADERS = {
@@ -36,6 +45,9 @@ export interface BrowserServerOptions {
   cert: string | Buffer;
   origin: string;
   auth: BrowserAuth;
+  nativeAuth?: NativeAuth;
+  household?: HouseholdState;
+  speech?: NativeSpeech;
   assets?: BrowserAssets;
   remote?: BrowserRemote;
 }
@@ -139,6 +151,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
   const expected = browserOrigin(options.origin);
   const sockets = new Set<Duplex>();
   const busyNodes = new Set<string>();
+  const nativeControls = new NativeControls(options.remote, busyNodes);
   let stopped = false;
 
   const server = createServer(
@@ -154,6 +167,136 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
         const hosts = rawHeaderValues(request, "host");
         const origins = rawHeaderValues(request, "origin");
         const authorizations = rawHeaderValues(request, "authorization");
+        const cookies = rawHeaderValues(request, "cookie");
+        const versions = rawHeaderValues(request, "x-ellie-version");
+        const method = request.method ?? "";
+        const path = requestPath(request, expected.origin);
+        if (path?.startsWith("/native/v1/")) {
+          const fetchHeaders = request.rawHeaders.filter(
+            (header, index) => index % 2 === 0 && header.toLowerCase().startsWith("sec-fetch-"),
+          );
+          if (
+            hosts.length !== 1 ||
+            hosts[0] !== expected.host ||
+            versions.length !== 1 ||
+            versions[0] !== String(VERSION) ||
+            origins.length !== 0 ||
+            cookies.length !== 0 ||
+            fetchHeaders.length !== 0 ||
+            authorizations.length > 1
+          ) {
+            send(response, 403, { error: "Native request rejected." }, {}, true);
+            return;
+          }
+          if (!options.nativeAuth) {
+            send(response, 503, { error: "Native enrollment unavailable." }, {}, true);
+            return;
+          }
+          const speechUpload = method === "POST" && path === "/native/v1/speech/transcriptions";
+          if ((method === "POST" || method === "PUT") && !speechUpload && !isJson(request)) {
+            send(response, 415, { error: "JSON required." }, {}, true);
+            return;
+          }
+          if (method === nativeRoutes.pair.method && path === nativeRoutes.pair.path) {
+            if (authorizations.length !== 0) {
+              send(response, 403, { error: "Native pairing rejected." }, {}, true);
+              return;
+            }
+            let body: Record<string, unknown>;
+            try {
+              body = record(await readJson(request, NATIVE_SESSION_CONTRACT.requestBodyBytes));
+              if (
+                Object.keys(body).length !== 2 ||
+                typeof body.invitation !== "string" ||
+                typeof body.token !== "string"
+              )
+                throw new Error();
+            } catch {
+              send(response, 400, { error: "Native pairing rejected." }, {}, true);
+              return;
+            }
+            try {
+              const client = await options.nativeAuth.pair(body.invitation, body.token);
+              send(response, 200, { client });
+            } catch (error) {
+              if (error instanceof NativeAuthError && error.kind === "rejected")
+                send(response, 400, { error: "Native pairing rejected." }, {}, true);
+              else send(response, 503, { error: "Native enrollment unavailable." }, {}, true);
+            }
+            return;
+          }
+          const client =
+            authorizations.length === 1
+              ? options.nativeAuth.authenticateBearer(authorizations[0])
+              : undefined;
+          if (!client) {
+            send(response, 401, { error: "Native session required." }, {}, true);
+            return;
+          }
+          if (
+            await handleNativeSpeech(
+              request,
+              response,
+              path,
+              options.speech,
+              authorizations[0]!,
+              (status, body) => {
+                if (!response.destroyed && !response.writableEnded)
+                  send(response, status, body, {}, status !== 200);
+              },
+            )
+          )
+            return;
+          if (options.household) {
+            const handled = await handleNativeHousehold(
+              request,
+              response,
+              path,
+              options.nativeAuth,
+              options.household,
+              authorizations[0]!,
+              (status, body, headers = {}) => send(response, status, body, headers, true),
+            );
+            if (handled) return;
+          }
+          if (!options.household && path.startsWith("/native/v1/household/")) {
+            send(response, 503, { error: "Household state unavailable." }, {}, true);
+            return;
+          }
+          if (method === nativeRoutes.session.method && path === nativeRoutes.session.path) {
+            send(response, 200, { client });
+            return;
+          }
+          if (method === nativeRoutes.logout.method && path === nativeRoutes.logout.path) {
+            try {
+              if (
+                !isEmptyObject(await readJson(request, NATIVE_SESSION_CONTRACT.requestBodyBytes)) ||
+                !(await options.nativeAuth.logout(authorizations[0]))
+              )
+                throw new Error();
+              send(response, 200, { ok: true });
+            } catch {
+              send(response, 503, { error: "Native enrollment unavailable." }, {}, true);
+            }
+            return;
+          }
+          if (
+            await nativeControls.handle(
+              request,
+              response,
+              path,
+              options.nativeAuth,
+              authorizations[0]!,
+              (status, body) => {
+                if (!response.destroyed && !response.writableEnded)
+                  send(response, status, body, {}, status !== 200);
+              },
+            )
+          )
+            return;
+          send(response, 404, { error: "Native route not found." }, {}, true);
+          return;
+        }
         if (hosts.length !== 1 || origins.length > 1 || authorizations.length > 1) {
           send(response, 400, { error: "Invalid browser request." }, {}, true);
           return;
@@ -173,8 +316,6 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
           return;
         }
 
-        const method = request.method ?? "";
-        const path = requestPath(request, expected.origin);
         if (!path) {
           send(response, 400, { error: "Invalid browser request." }, {}, true);
           return;
@@ -397,6 +538,7 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
     shutdown: () => {
       if (stopped) return;
       stopped = true;
+      nativeControls.stop();
       if (server.listening) server.close();
       server.closeAllConnections();
       for (const socket of sockets) socket.destroy();

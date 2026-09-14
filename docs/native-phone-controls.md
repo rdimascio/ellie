@@ -1,0 +1,26 @@
+# Native iPhone app controls
+
+Ellie's primary Mac and iPhone interfaces are SwiftUI. The enrolled iPhone's Coordinator screen now links to native Mac controls. Refresh the configured devices, select a granted Mac and an application, then explicitly open it. This slice supports Arc, Safari and Messages through the existing `app.open` operation. It does not accept free-form instructions, arbitrary application paths or URLs.
+
+Mac labels initially use the registered node ID; friendly device names remain separate work. The native credential remains in the existing device-only Keychain envelope. The client uses its confirmed listener origin, leaf certificate pin, hostname/validity checks and TLS 1.2 minimum. Enrollment and browser authority remain separate. These commands do not grant coordinator authority, create cookies or access unrelated telemetry.
+
+## Listener contract
+
+The optional client HTTPS listener adds two routes to `contracts/native-openapi.v1.json`:
+
+- `GET /native/v1/nodes`: at most 16 configured targets, filtered by the credential's explicit `app.open` grants. The response contains only ID, configured label, online state and app capability, bounded to 8192 bytes.
+- `POST /native/v1/commands`: exact `{nodeId, action: {tool: "app.open", app}}`. Only `arc`, `safari` and `messages` are accepted. Authority is checked before discovery, after discovery and at dispatch.
+
+Both require the existing native bearer and version header with the exact listener Host, no Cookie, Origin or Sec-Fetch headers. Request JSON is bounded to 4096 bytes. The installed coordinator creates the bridge lazily only when the optional client listener is configured. It uses the existing controller identity and pinned loopback coordinator transport, and owns that client through startup, listener failure and shutdown. Inventory comes from currently registered authenticated coordinator nodes, bounded to 16, and every client sees only its granted targets. Existing node allowlists, the operation registry and scheduler still apply. No command is sent during service startup; missing bridge credentials leave controls unavailable while enrollment can remain reachable.
+
+Discovery has a five-second deadline. Dispatch has a 35-second deadline after discovery. Cancellation and client disconnect propagate to the upstream request. Native and browser commands share one active reservation per device. If an upstream ignores cancellation, that reservation stays occupied until it settles.
+
+A known result is `completed` or `failed`. A lost response, malformed dispatch result or post-dispatch failure means `unknown`: the app may have opened. Stop waiting does not undo an action. The interface tells the person to check the selected Mac before another explicit command.
+
+Commands are never saved or automatically retried. Loading the screen, refreshing, reconnecting and restarting do not submit actions. Existing coordinator durable-job recovery remains authoritative; a client request is not a replay queue.
+
+## Validation boundaries
+
+The server tests exercise the real HTTPS listener with synthetic auth, devices and upstream outcomes. They cover pairing into the native channel, grant filtering, exact command grammar, revocation during discovery, offline/incapable targets, browser/native mutual exclusion, deadlines, disconnects before and after dispatch, retained reservations, signal propagation and redacted unknown results.
+
+Swift tests cover the native control store and strict wire decoding. Simulator build and UI evidence is recorded separately in the dated validation report. These tests do not constitute physical iPhone enrollment, microphone acceptance or a native phone-to-household-Mac command. Publishing this PR does not deploy the listener or replace the installed services.

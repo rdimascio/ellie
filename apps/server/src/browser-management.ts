@@ -2,6 +2,9 @@ import type { IncomingMessage } from "node:http";
 import { readJson } from "@ellie/transport";
 import { identifier, record } from "@ellie/protocol";
 import { BrowserAuth, browserInvitationSpec, browserOrigin } from "./browser-auth.ts";
+import type { NativeAuth } from "./native-auth.ts";
+import type { HouseholdState } from "./household-state.ts";
+import type { NativeSpeech } from "./native-speech.ts";
 
 const MAX_BROWSER_MANAGEMENT_BODY_BYTES = 4096;
 const paths = new Set([
@@ -24,7 +27,15 @@ export type BrowserUnavailableReason =
   | "listener_unavailable";
 
 export type BrowserControlSnapshot =
-  | { status: "ready"; origin: string; auth: BrowserAuth }
+  | {
+      status: "ready";
+      origin: string;
+      auth: BrowserAuth;
+      nativeAuth?: NativeAuth;
+      household?: HouseholdState;
+      speech?: NativeSpeech;
+      certificateSha256?: string;
+    }
   | { status: "disabled" }
   | { status: "unavailable"; reason: BrowserUnavailableReason };
 
