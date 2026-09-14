@@ -786,7 +786,7 @@ test("browser listener stays closed until its caller listens and validates its f
   const app = createBrowserServer({ ...tls, origin: "https://localhost:8443", auth });
   assert.equal(app.server.listening, false);
   assert.equal(app.server.maxConnections, 32);
-  assert.equal(app.server.requestTimeout, 10_000);
+  assert.equal(app.server.requestTimeout, 65_000);
   assert.equal(app.server.headersTimeout, 5_000);
   app.shutdown();
   app.shutdown();
