@@ -98,6 +98,22 @@ ambiguous, or incomplete evidence retains the journal and remains blocked; selec
 a service or removes a release. The unloaded check covers the managed LaunchAgent labels. It does
 not coordinate arbitrary foreground processes; a shared runtime lease remains future work.
 
+The same native installer exposes read-only `status coordinator|node|all` and explicit
+`start coordinator|node` and `stop coordinator|node` commands. They accept only a complete,
+verified selection with no pending journal and share the selector lock. Status does not create an
+installation or mutate launchd. Start enables the fixed managed label when necessary and uses
+`bootstrap` without restart semantics; stop disables it and uses the fixed selected plist for
+`bootout`. Queries have a two-second bound and mutations have a twenty-second bound. A timeout or
+failed observation after a request reports an uncertain or partial outcome and is never retried.
+Parsed `launchctl print` text is a strict compatibility observation of the selected plist,
+executable, arguments, and state; it is not a stable API or a filesystem compare-and-swap. The
+final preflight narrows the local replacement window but cannot coordinate an external launchctl
+caller after that check. A successful start means the selected LaunchAgent is enabled and loaded;
+reported running or waiting state does not prove that an application endpoint is ready. A
+successful stop means that managed label is disabled and unloaded. These commands do not claim to
+find or stop arbitrary foreground processes. Every successful start or stop prints the same
+redacted observed-state JSON as status so a waiting result is explicit rather than implied ready.
+
 Generate each LaunchAgent with its stable label and release directory as `WorkingDirectory`; its
 program arguments are the corresponding stable role app and fixed `--launch-agent` mode. Preserve the existing per-user
 `gui/<uid>`, Aqua-session,

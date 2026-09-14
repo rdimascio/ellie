@@ -100,6 +100,162 @@ private struct SelectionDirectories {
   }
 }
 
+struct LifecycleSelectedRole {
+  let role: String
+  let releaseID: String
+  let label: String
+  let plistPath: String
+  let executablePath: String
+}
+struct LifecycleSelectionBusy: Error {}
+
+func withLifecycleSelection<T>(
+  role roleName: String, testHome: String?, exclusive: Bool,
+  _ action: (LifecycleSelectedRole?, () throws -> Void) throws -> T
+) throws -> T {
+  guard let role = SelectedRole(rawValue: roleName) else { throw SelectionFailure.rejected }
+  let paths = try selectionPaths(testHome: testHome)
+  let home = try selectionOpenDirectory(paths.home, privateMode: false)
+  defer { close(home) }
+  func unselected(_ library: Int32?) throws -> T {
+    if let applications = try selectionOpenOwnedDirectoryIfPresent(
+      parent: home, name: "Applications")
+    {
+      defer { close(applications) }
+      for candidate in SelectedRole.allCases where try entry(applications, candidate.appName) != nil
+      {
+        throw SelectionFailure.recoveryRequired
+      }
+    }
+    if let library,
+      let agents = try selectionOpenOwnedDirectoryIfPresent(parent: library, name: "LaunchAgents")
+    {
+      defer { close(agents) }
+      for candidate in SelectedRole.allCases where try entry(agents, candidate.plistName) != nil {
+        throw SelectionFailure.recoveryRequired
+      }
+    }
+    return try action(nil, { throw SelectionFailure.recoveryRequired })
+  }
+  guard let library = try selectionOpenOwnedDirectoryIfPresent(parent: home, name: "Library") else {
+    return try unselected(nil)
+  }
+  defer { close(library) }
+  guard
+    let support = try selectionOpenOwnedDirectoryIfPresent(
+      parent: library, name: "Application Support")
+  else { return try unselected(library) }
+  defer { close(support) }
+  guard let ellie = try selectionOpenOwnedDirectoryIfPresent(parent: support, name: "Ellie") else {
+    return try unselected(library)
+  }
+  defer { close(ellie) }
+  guard let services = try selectionOpenOwnedDirectoryIfPresent(parent: ellie, name: "Services")
+  else {
+    return try unselected(library)
+  }
+  defer { close(services) }
+  var servicesInfo = stat()
+  guard fstat(services, &servicesInfo) == 0, (servicesInfo.st_mode & 0o7777) == 0o700 else {
+    throw SelectionFailure.recoveryRequired
+  }
+  let lockInfo = try entry(services, "selection.lock")
+  let receiptsInfo = try entry(services, "receipts")
+  if lockInfo == nil && receiptsInfo == nil {
+    guard try entry(services, paths.journalName) == nil else {
+      throw SelectionFailure.recoveryRequired
+    }
+    return try unselected(library)
+  }
+  guard lockInfo != nil, receiptsInfo != nil else { throw SelectionFailure.recoveryRequired }
+  let receipts = try selectionOpenOwnedDirectory(parent: services, name: "receipts")
+  defer { close(receipts) }
+  var receiptsMode = stat()
+  guard fstat(receipts, &receiptsMode) == 0, (receiptsMode.st_mode & 0o7777) == 0o700,
+    try entry(receipts, paths.receiptName) != nil
+  else { throw SelectionFailure.recoveryRequired }
+  let applications = try selectionOpenOwnedDirectory(parent: home, name: "Applications")
+  defer { close(applications) }
+  let agents = try selectionOpenOwnedDirectory(parent: library, name: "LaunchAgents")
+  defer { close(agents) }
+  let directories = SelectionDirectories(
+    services: services, receipts: receipts, applications: applications, agents: agents)
+  let lock = openat(
+    services, "selection.lock",
+    (exclusive ? O_RDWR : O_RDONLY) | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+  var verifiedLock = stat()
+  guard lock >= 0, fstat(lock, &verifiedLock) == 0, (verifiedLock.st_mode & S_IFMT) == S_IFREG,
+    verifiedLock.st_uid == getuid(), verifiedLock.st_nlink == 1,
+    (verifiedLock.st_mode & 0o7777) == 0o600
+  else {
+    if lock >= 0 { close(lock) }
+    throw SelectionFailure.recoveryRequired
+  }
+  if flock(lock, exclusive ? LOCK_EX | LOCK_NB : LOCK_SH | LOCK_NB) != 0 {
+    close(lock)
+    if errno == EWOULDBLOCK { throw LifecycleSelectionBusy() }
+    throw SelectionFailure.recoveryRequired
+  }
+  defer {
+    flock(lock, LOCK_UN)
+    close(lock)
+  }
+  guard try entry(services, paths.journalName) == nil,
+    let receiptData = try readPrivateAt(receipts, paths.receiptName, maximum: 32 * 1024)
+  else { throw SelectionFailure.recoveryRequired }
+  let receipt = try decodedReceipt(receiptData)
+  try validateSelection(paths: paths, directories: directories, receipt: receipt)
+  func sameDirectory(_ first: Int32, _ second: Int32) throws {
+    var left = stat()
+    var right = stat()
+    guard fstat(first, &left) == 0, fstat(second, &right) == 0, left.st_dev == right.st_dev,
+      left.st_ino == right.st_ino
+    else { throw SelectionFailure.recoveryRequired }
+  }
+  let revalidate = {
+    let freshHome = try selectionOpenDirectory(paths.home, privateMode: false)
+    defer { close(freshHome) }
+    try sameDirectory(home, freshHome)
+    let freshLibrary = try selectionOpenOwnedDirectory(parent: freshHome, name: "Library")
+    defer { close(freshLibrary) }
+    try sameDirectory(library, freshLibrary)
+    let freshSupport = try selectionOpenOwnedDirectory(
+      parent: freshLibrary, name: "Application Support")
+    defer { close(freshSupport) }
+    try sameDirectory(support, freshSupport)
+    let freshEllie = try selectionOpenOwnedDirectory(parent: freshSupport, name: "Ellie")
+    defer { close(freshEllie) }
+    try sameDirectory(ellie, freshEllie)
+    let freshServices = try selectionOpenOwnedDirectory(parent: freshEllie, name: "Services")
+    defer { close(freshServices) }
+    try sameDirectory(services, freshServices)
+    let freshReceipts = try selectionOpenOwnedDirectory(parent: freshServices, name: "receipts")
+    defer { close(freshReceipts) }
+    try sameDirectory(receipts, freshReceipts)
+    let freshApplications = try selectionOpenOwnedDirectory(parent: freshHome, name: "Applications")
+    defer { close(freshApplications) }
+    try sameDirectory(applications, freshApplications)
+    let freshAgents = try selectionOpenOwnedDirectory(parent: freshLibrary, name: "LaunchAgents")
+    defer { close(freshAgents) }
+    try sameDirectory(agents, freshAgents)
+    guard try entry(freshServices, paths.journalName) == nil,
+      let current = try readPrivateAt(freshReceipts, paths.receiptName, maximum: 32 * 1024),
+      current == receiptData
+    else { throw SelectionFailure.recoveryRequired }
+    let freshDirectories = SelectionDirectories(
+      services: freshServices, receipts: freshReceipts, applications: freshApplications,
+      agents: freshAgents)
+    try validateSelection(paths: paths, directories: freshDirectories, receipt: receipt)
+  }
+  let selected = receipt[role].map {
+    LifecycleSelectedRole(
+      role: role.rawValue, releaseID: $0.releaseID, label: role.label,
+      plistPath: paths.plist(role), executablePath: paths.app(role) + "/Contents/MacOS/EllieService"
+    )
+  }
+  return try action(selected, revalidate)
+}
+
 func failSelectionCommand(_ error: Error) -> Never {
   let message: String
   switch error as? SelectionFailure {
