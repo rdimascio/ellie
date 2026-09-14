@@ -9,7 +9,8 @@ import { createPrivateKey, X509Certificate } from "node:crypto";
 import { generateBrowserTlsIdentity, validateLocalHostname } from "../apps/cli/src/certificate.ts";
 
 const openssl = "/usr/bin/openssl";
-const execute = promisify(execFile);
+const execute = (file: string, args: string[]) =>
+  promisify(execFile)(file, args, { timeout: 30_000, maxBuffer: 64 * 1024 });
 
 test("browser TLS generation creates a constrained CA and one server leaf", async () => {
   const parent = await mkdtemp(join(tmpdir(), "ellie-browser-tls-test-"));
@@ -158,11 +159,65 @@ test("browser TLS generation rejects a matching leaf key signed by a different C
           return execute(file, changed);
         },
       }),
-      /invalid browser TLS identity/,
+      /invalid browser TLS identity \(leaf-signature\)/,
     );
     assert.deepEqual(await readdir(parent), []);
   } finally {
     await rm(parent, { recursive: true, force: true });
+  }
+});
+
+test("browser TLS validation reports fixed parse, key and profile categories", async () => {
+  for (const kind of ["parse", "key", "profile"] as const) {
+    const parent = await mkdtemp(join(tmpdir(), `ellie-browser-tls-${kind}-`));
+    try {
+      await assert.rejects(
+        generateBrowserTlsIdentity("host.local", {
+          openssl,
+          tempDir: parent,
+          run: async (file, args) => {
+            if (args[0] !== "x509") return execute(file, args);
+            if (kind === "profile") {
+              const config = args[args.indexOf("-extfile") + 1]!;
+              await writeFile(
+                config,
+                "[leaf_ext]\nbasicConstraints=critical,CA:false\nkeyUsage=critical,digitalSignature,keyEncipherment\nsubjectAltName=DNS:host.local\n",
+                { mode: 0o600 },
+              );
+            }
+            const result = await execute(file, args);
+            const output = args[args.indexOf("-out") + 1]!;
+            if (kind === "parse") await writeFile(output, "PRIVATE KEY secret\n");
+            if (kind === "key") {
+              const leafKey = join(dirname(output), "leaf-key.pem");
+              await execute(file, [
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                leafKey,
+              ]);
+            }
+            return result;
+          },
+        }),
+        (error) => {
+          const expected =
+            kind === "parse" ? "parse" : kind === "key" ? "leaf-key" : "leaf-profile";
+          assert.equal(
+            String(error),
+            `Error: Certificate creation failed: openssl produced an invalid browser TLS identity (${expected}).`,
+          );
+          assert.doesNotMatch(String(error), /PRIVATE KEY secret|ellie-browser-tls-/);
+          return true;
+        },
+      );
+      assert.deepEqual(await readdir(parent), []);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
   }
 });
 
