@@ -437,6 +437,7 @@ async function main() {
   let node;
   let controller;
   let cleanupCertain = true;
+  let operationError;
   let report;
   try {
     const expanded = join(owned, "original");
@@ -629,6 +630,8 @@ async function main() {
       interruptedOutcome: "unknown_after_restart",
       replayed: false,
     };
+  } catch (error) {
+    operationError = error;
   } finally {
     controller?.close();
     try {
@@ -643,9 +646,10 @@ async function main() {
       await rm(owned, { recursive: true });
     } else {
       console.error(`Owned acceptance state was retained because cleanup is uncertain: ${owned}`);
-      throw new Error("Owned acceptance cleanup was incomplete.");
     }
   }
+  if (!cleanupCertain) throw new Error("Owned acceptance cleanup was incomplete.");
+  if (operationError) throw operationError;
   console.log(JSON.stringify({ ...report, cleanupCertain: true }, null, 2));
 }
 
