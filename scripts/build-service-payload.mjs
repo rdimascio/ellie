@@ -12,6 +12,7 @@ import {
   open,
   readFile,
   readdir,
+  realpath,
   rename,
   rm,
   stat,
@@ -19,7 +20,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import {
   captureActivationPolicyBuildDirectory,
   inspectActivationPolicyBlob,
@@ -1179,7 +1180,19 @@ function parse(argv) {
   return options;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+async function isDirectEntry() {
+  if (!process.argv[1]) return false;
+  try {
+    return (
+      (await realpath(fileURLToPath(import.meta.url))) ===
+      (await realpath(resolve(process.argv[1])))
+    );
+  } catch {
+    return false;
+  }
+}
+
+if (await isDirectEntry()) {
   buildServicePayload(parse(process.argv.slice(2)))
     .then((result) => console.log(`Built ${result.output}`))
     .catch((error) => {
