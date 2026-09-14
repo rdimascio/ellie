@@ -76,6 +76,8 @@ export interface ChatRequest {
   automaticMemoryForgotten?: number;
   isContextCurrent?: () => boolean;
   signal?: AbortSignal;
+  /** Ephemeral, unvalidated reply previews; never durable output or action authority. */
+  onProgress?: (progress: import("./model.ts").LifeModelProgress) => void;
   /** Trusted persisted state for this actor-private conversation. */
   conversationPreferences?: ConversationPreferenceState;
   /** Trusted service data. Never populate this from a client request body. */
@@ -764,6 +766,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       (signal) => options.model!.build!(input.request, signal),
       { signal: input.signal, timeoutMs: input.timeoutMs },
     );
+    pluginBuilder.validateCandidate(generated);
     checkBuildAuthority(input.actor, input.scope);
     checkBuildContext(input, scopeGeneration, actorGeneration);
     return installCandidate(scopeOwner(input.scope), {
@@ -832,6 +835,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         ),
       { signal: input.signal, timeoutMs: input.timeoutMs },
     );
+    pluginBuilder.validateCandidate(generated, { revision: true });
     checkBuildAuthority(input.actor, input.scope);
     checkBuildContext(input, scopeGeneration, actorGeneration);
     let current: LifePlugin;
@@ -2185,28 +2189,32 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       const generation = contextGenerations.get(generationKey) ?? 0;
       const actorGeneration = actorGenerations.get(request.actor.userId) ?? 0;
       const plan = validateModelPlan(
-        await options.model.plan({
-          message,
-          evidence: found.map((item) => ({
-            sourceId: item.sourceId,
-            title: item.sourceTitle,
-            text: item.text,
-            ...(item.reference ? { reference: item.reference } : {}),
-          })),
-          history: suppliedHistory ?? sessions.get(conversationKey)?.slice(0, -1) ?? [],
-          ...(request.automaticMemory ? { automaticMemory: request.automaticMemory } : {}),
-          now: now(),
-          timeZone,
-          ...modelContext(
-            options.store,
-            teaching,
-            deliveries,
-            request.actor,
-            request.scope,
+        await options.model.plan(
+          {
             message,
-            preferenceState.preferences,
-          ),
-        }),
+            evidence: found.map((item) => ({
+              sourceId: item.sourceId,
+              title: item.sourceTitle,
+              text: item.text,
+              ...(item.reference ? { reference: item.reference } : {}),
+            })),
+            history: suppliedHistory ?? sessions.get(conversationKey)?.slice(0, -1) ?? [],
+            ...(request.automaticMemory ? { automaticMemory: request.automaticMemory } : {}),
+            now: now(),
+            timeZone,
+            ...modelContext(
+              options.store,
+              teaching,
+              deliveries,
+              request.actor,
+              request.scope,
+              message,
+              preferenceState.preferences,
+            ),
+          },
+          request.signal,
+          request.onProgress,
+        ),
       );
       options.store.listRecords(request.actor, { scope: request.scope, limit: 1 });
       if (

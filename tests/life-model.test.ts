@@ -633,8 +633,8 @@ test("model deadline returns even when transport ignores abort, retaining bounde
     await Promise.all(
       Array.from({ length: 4 }, () => assert.rejects(model.plan(request), /deadline exceeded/)),
     );
-    await assert.rejects(model.plan(request), /busy/);
-    assert.equal(requests, 4, "timeouts cannot create unlimited orphan inference calls");
+    await assert.rejects(model.plan(request), /deadline exceeded/);
+    assert.equal(requests, 1, "queued timeouts cannot create orphan inference calls");
   } finally {
     for (const release of releases) release(new Response("late"));
   }
@@ -849,10 +849,10 @@ test("app generation has a separate bounded deadline without extending chat plan
   context.mock.timers.tick(10);
   await plan;
   assert.equal(signals[0]!.aborted, true);
-  assert.equal(signals[1]!.aborted, false);
+  assert.equal(signals.length, 1, "a queued build does not overlap an unsettled plan transport");
   context.mock.timers.tick(90);
   await build;
-  assert.equal(signals[1]!.aborted, true);
+  assert.equal(signals.length, 1, "the queued build deadline expires before transport dispatch");
   for (const release of releases) release(new Response("late"));
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.throws(

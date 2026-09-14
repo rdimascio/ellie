@@ -230,7 +230,7 @@ aside nav {
   position: fixed;
   z-index: 20;
   left: 50%;
-  bottom: 24px;
+  bottom: calc(44px + env(safe-area-inset-bottom));
   width: 68px;
   height: 68px;
   transform: translateX(-50%);
@@ -249,7 +249,7 @@ aside nav {
 }
 .ellie-orb::before,
 .ellie-orb::after,
-.ellie-orb > span {
+.ellie-orb > .orb-core {
   content: "";
   position: absolute;
   inset: 10px;
@@ -265,9 +265,33 @@ aside nav {
   filter: saturate(1.18) brightness(1.08);
   transform: translateX(-50%) scale(1.06);
 }
-.ellie-orb.thinking > span,
-.ellie-orb.attention::after {
+.ellie-orb[data-state="working"] > .orb-core,
+.ellie-orb[data-state="attention"]::after {
   animation: orb-pulse 1.8s ease-in-out infinite;
+}
+.ellie-orb[data-state="working"] {
+  filter: hue-rotate(18deg) saturate(1.2);
+}
+.ellie-orb[data-state="attention"] {
+  box-shadow:
+    0 0 0 7px rgb(255 255 255 / 35%),
+    0 0 32px 10px rgb(239 113 59 / 48%),
+    0 12px 32px rgb(7 30 44 / 32%);
+}
+.orb-status {
+  position: absolute;
+  top: calc(100% + 10px);
+  left: 50%;
+  width: max-content;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgb(23 63 72 / 88%);
+  padding: 4px 9px;
+  color: white;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  box-shadow: 0 4px 12px rgb(7 30 44 / 20%);
 }
 @keyframes orb-pulse {
   50% {
@@ -326,6 +350,57 @@ aside nav {
   border-radius: 50%;
   background: rgb(255 255 255 / 90%);
   font-size: 22px;
+}
+.conversation-options {
+  position: relative;
+}
+.conversation-options > summary {
+  cursor: pointer;
+  list-style: none;
+}
+.conversation-options > summary::-webkit-details-marker {
+  display: none;
+}
+.conversation-options > div {
+  position: absolute;
+  z-index: 4;
+  top: calc(100% + 8px);
+  right: 0;
+  width: min(390px, calc(100vw - 48px));
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: white;
+  padding: 14px;
+  box-shadow: 0 18px 44px rgb(7 30 44 / 18%);
+}
+.conversation-options .conversation-style {
+  margin: 0 0 12px;
+}
+.provisional-reply {
+  max-width: min(620px, 76vw);
+  border-left: 2px solid #8a75df;
+  padding: 5px 0 5px 12px;
+  color: var(--slate);
+}
+.provisional-reply b {
+  display: block;
+  margin-bottom: 5px;
+  color: #6551bd;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.provisional-reply p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.widget-state {
+  width: fit-content;
+  border-radius: 999px;
+  background: var(--mist);
+  padding: 3px 8px;
+  color: var(--slate);
+  font-size: 10px;
+  text-transform: capitalize;
 }
 .life-widget-grid {
   display: grid;
@@ -542,7 +617,7 @@ button.life-widget {
 @media (prefers-reduced-motion: reduce) {
   .ellie-orb,
   .ellie-orb::after,
-  .ellie-orb > span,
+  .ellie-orb > .orb-core,
   .conversation-overlay,
   .conversation-overlay > .conversation {
     animation: none !important;

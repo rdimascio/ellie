@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-export const LIFE_SCHEMA_VERSION = 6;
+export const LIFE_SCHEMA_VERSION = 7;
 export const LIFE_RECORD_KINDS = [
   "memory",
   "contact",
@@ -516,6 +516,7 @@ export class LifeStore {
       else if (version === 3) this.migrateV4();
       else if (version === 4) this.migrateV5();
       else if (version === 5) this.migrateV6();
+      else if (version === 6) this.migrateV7();
       this.db
         .prepare(
           "UPDATE conversation_turns SET status='interrupted',updated_at=? WHERE status='pending'",
@@ -646,6 +647,18 @@ export class LifeStore {
     CREATE TRIGGER automatic_prompt_memories_forget_update AFTER UPDATE OF suppressed ON automatic_prompt_memories WHEN OLD.suppressed=0 AND NEW.suppressed=1 BEGIN INSERT INTO automatic_prompt_memory_forget_generation VALUES(NEW.user_id,NEW.scope_type,NEW.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
     CREATE TRIGGER automatic_prompt_memories_forget_delete AFTER DELETE ON automatic_prompt_memories BEGIN INSERT INTO automatic_prompt_memory_forget_generation VALUES(OLD.user_id,OLD.scope_type,OLD.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
     PRAGMA user_version=6;`),
+    );
+    this.migrateV7();
+  }
+  private migrateV7(): void {
+    this.transaction(() =>
+      this.db.exec(`
+    CREATE TABLE automatic_prompt_memory_generations(user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,generation INTEGER NOT NULL,PRIMARY KEY(user_id,scope_type,scope_id)) STRICT;
+    INSERT INTO automatic_prompt_memory_generations SELECT user_id,scope_type,scope_id,1 FROM automatic_prompt_memories GROUP BY user_id,scope_type,scope_id;
+    CREATE TRIGGER automatic_prompt_memories_scope_generation_insert AFTER INSERT ON automatic_prompt_memories BEGIN INSERT INTO automatic_prompt_memory_generations VALUES(NEW.user_id,NEW.scope_type,NEW.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER automatic_prompt_memories_scope_generation_update AFTER UPDATE ON automatic_prompt_memories BEGIN INSERT INTO automatic_prompt_memory_generations VALUES(OLD.user_id,OLD.scope_type,OLD.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; INSERT INTO automatic_prompt_memory_generations SELECT NEW.user_id,NEW.scope_type,NEW.scope_id,1 WHERE NEW.user_id<>OLD.user_id OR NEW.scope_type<>OLD.scope_type OR NEW.scope_id<>OLD.scope_id ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER automatic_prompt_memories_scope_generation_delete AFTER DELETE ON automatic_prompt_memories BEGIN INSERT INTO automatic_prompt_memory_generations VALUES(OLD.user_id,OLD.scope_type,OLD.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
+    PRAGMA user_version=7;`),
     );
   }
   private actor(actor: LifeActor): string {
@@ -942,6 +955,21 @@ export class LifeStore {
                OR (json_extract(data_json,'$.type')='teaching-guide-v1'
                  AND json_extract(data_json,'$.improvementAudit.type')='learning-improvement-v1'))
            ORDER BY updated_at DESC,id DESC LIMIT ?`,
+        )
+        .all(user, limitInput) as Record<string, unknown>[]
+    ).map((row) => this.record(row));
+  }
+  listProactiveDismissalRecords(actor: LifeActor, limitInput = 129): LifeRecord[] {
+    const user = this.actor(actor);
+    if (!Number.isSafeInteger(limitInput) || limitInput < 1 || limitInput > 129)
+      throw new TypeError("proactive dismissal record limit is invalid");
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM records
+           WHERE kind='feedback' AND scope_type='user' AND scope_id=?
+             AND json_extract(data_json,'$.type')='proactive-dismissal-v1'
+           ORDER BY created_at DESC,rowid DESC LIMIT ?`,
         )
         .all(user, limitInput) as Record<string, unknown>[]
     ).map((row) => this.record(row));
@@ -3428,6 +3456,54 @@ export class LifeStore {
         )
         .all(user, scope.type, scope.id, limit) as Record<string, unknown>[]
     ).map((row) => this.automaticPromptMemory(row));
+  }
+  automaticPromptSelectionMemories(
+    actor: LifeActor,
+    input: { scope: LifeScope; limit?: number; excludeTurnId?: string },
+  ): AutomaticPromptMemory[] {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      limit = input.limit ?? 200,
+      excludeTurnId =
+        input.excludeTurnId === undefined
+          ? undefined
+          : identifier(input.excludeTurnId, "excludeTurnId");
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw new TypeError("Prompt selection limit is invalid.");
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM automatic_prompt_memories WHERE user_id=? AND scope_type=? AND scope_id=?
+           AND suppressed=0 AND category<>'transient'${excludeTurnId ? " AND turn_id<>?" : ""}
+           ORDER BY rowid DESC LIMIT ?`,
+        )
+        .all(
+          user,
+          scope.type,
+          scope.id,
+          ...(excludeTurnId ? [excludeTurnId] : []),
+          limit,
+        ) as Record<string, unknown>[]
+    ).map((row) => this.automaticPromptMemory(row));
+  }
+  automaticPromptMemoryRevision(actor: LifeActor, requested: LifeScope): string {
+    const scope = this.scope(actor, requested),
+      user = this.actor(actor),
+      digest = createHash("sha256");
+    // Dedicated automatic-memory triggers advance this exact actor/scope
+    // generation on every insert, update, and delete. This keeps frequent
+    // validity checks O(1) and unrelated state changes cannot self-invalidate.
+    const generation = Number(
+      (
+        this.db
+          .prepare(
+            "SELECT generation FROM automatic_prompt_memory_generations WHERE user_id=? AND scope_type=? AND scope_id=?",
+          )
+          .get(user, scope.type, scope.id) as { generation?: number } | undefined
+      )?.generation ?? 0,
+    );
+    digest.update(`${user}\0${scope.type}\0${scope.id}\0${generation}\0`);
+    return digest.digest("hex");
   }
   automaticPromptMemoryCache(
     actor: LifeActor,

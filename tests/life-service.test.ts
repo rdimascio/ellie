@@ -3382,3 +3382,50 @@ test("concurrent reset starts and completed retries cannot release a newer prefl
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("notification dismissal retains private preference evidence without completing its source", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" },
+      scope = { type: "user" as const, id: "local" },
+      need = f.life.createRecord(actor, {
+        kind: "need",
+        title: "Fixture groceries",
+        scope,
+        data: { completed: false },
+      }),
+      running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    for (const action of ["dismiss", "complete"] as const) {
+      const notification = f.life.createRecord(actor, {
+        kind: "feedback",
+        title: "Fixture suggestion",
+        scope,
+        data: {
+          notification: true,
+          relatedRecordId: need.id,
+          category: "shopping",
+          dismissed: false,
+        },
+        relationships: [{ type: "suggestion-for", targetId: need.id }],
+      });
+      const response = await fetch(
+        `${running.url}/api/life/notifications/${notification.id}/${action}`,
+        {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({ expectedRevision: notification.revision }),
+        },
+      );
+      assert.equal(response.status, 200);
+      const markers = f.life
+        .listRecords(actor, { scope, kinds: ["feedback"] })
+        .filter((record) => record.data.type === "proactive-dismissal-v1");
+      assert.equal(markers.length, 1, "only dismissal writes preference evidence");
+      assert.equal(markers[0]!.data.sourceRecordId, need.id);
+      assert.equal(f.life.getRecord(actor, need.id)!.data.completed, action === "complete");
+    }
+  } finally {
+    await f.close();
+  }
+});

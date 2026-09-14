@@ -1,5 +1,12 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { api, ApiError, establishSessionFromFragment, parsePluginBridgeRequest } from "./api";
+import {
+  api,
+  ApiError,
+  establishSessionFromFragment,
+  isNewerChatProgress,
+  parsePluginBridgeRequest,
+} from "./api";
+import type { ChatResponse } from "./api";
 import type {
   Bootstrap,
   ConversationSummary,
@@ -189,6 +196,7 @@ export function App() {
     [auth, setAuth] = useState(false),
     [busy, setBusy] = useState(""),
     [composerDraft, setComposerDraft] = useState(""),
+    [chatProgress, setChatProgress] = useState<ChatResponse["progress"]>(),
     [messages, setMessages] = useState<Message[]>([]),
     [conversation, setConversation] = useState<string>(),
     [conversationMeta, setConversationMeta] = useState<ConversationSummary>(),
@@ -219,6 +227,8 @@ export function App() {
   const refreshRunning = useRef(false);
   const chatEpoch = useRef(0);
   const chatRequest = useRef<AbortController | undefined>(undefined);
+  const chatProgressRequest = useRef<AbortController | undefined>(undefined);
+  const chatProgressRevision = useRef(-1);
   const pendingIntentRequest = useRef<AbortController | undefined>(undefined);
   const pluginBuildRequest = useRef<AbortController | undefined>(undefined);
   const chatInFlight = useRef("");
@@ -297,15 +307,19 @@ export function App() {
     setConversationOpen(open);
   };
   const visibleBoards = boardsKey === boardStorageKey ? boards : starterBoards();
+  const orbState =
+    busy === "chat" ? "working" : pendingIntent || uncertainRequest ? "attention" : "ready";
   useEffect(() => {
     if (!data) return;
     if (observedChatEpoch.current !== undefined && observedChatEpoch.current !== data.chatEpoch) {
       ++chatEpoch.current;
       chatRequest.current?.abort();
+      chatProgressRequest.current?.abort();
       pendingIntentRequest.current?.abort();
       chatInFlight.current = "";
       setMessages([]);
       setComposerDraft("");
+      setChatProgress(undefined);
       setConversation(undefined);
       setConversationMeta(undefined);
       setConversationPreferences({ preferences: {}, revision: 0 });
@@ -405,12 +419,14 @@ export function App() {
     scopeGeneration.current += 1;
     chatEpoch.current += 1;
     chatRequest.current?.abort();
+    chatProgressRequest.current?.abort();
     pendingIntentRequest.current?.abort();
     pluginBuildRequest.current?.abort();
     chatInFlight.current = "";
     desiredScope.current = nextScope;
     setMessages([]);
     setComposerDraft("");
+    setChatProgress(undefined);
     setConversation(undefined);
     setConversationMeta(undefined);
     setConversationPreferences({ preferences: {}, revision: 0 });
@@ -447,6 +463,8 @@ export function App() {
   async function openConversation(id: string, preserveRequest?: { id: string; scope: string }) {
     const epoch = ++chatEpoch.current;
     chatRequest.current?.abort();
+    chatProgressRequest.current?.abort();
+    setChatProgress(undefined);
     pendingIntentRequest.current?.abort();
     const controller = new AbortController();
     chatRequest.current = controller;
@@ -510,6 +528,7 @@ export function App() {
   useEffect(
     () => () => {
       chatRequest.current?.abort();
+      chatProgressRequest.current?.abort();
       pendingIntentRequest.current?.abort();
     },
     [],
@@ -537,6 +556,42 @@ export function App() {
     setUncertainRequest({ id: requestId, scope });
     setChatUrl(originalConversation, requestId);
     setBusy("chat");
+    setChatProgress(undefined);
+    chatProgressRevision.current = -1;
+    chatProgressRequest.current?.abort();
+    const progressController = new AbortController();
+    chatProgressRequest.current = progressController;
+    void (async () => {
+      while (!progressController.signal.aborted && chatInFlight.current === requestId) {
+        await new Promise((resolve) => window.setTimeout(resolve, 350));
+        if (progressController.signal.aborted || chatInFlight.current !== requestId) return;
+        try {
+          const snapshot = await api.chatRequest(requestId, progressController.signal);
+          if (
+            progressController.signal.aborted ||
+            generation !== scopeGeneration.current ||
+            epoch !== chatEpoch.current ||
+            chatInFlight.current !== requestId
+          )
+            return;
+          if (snapshot.status !== "pending") {
+            setChatProgress(undefined);
+            return;
+          }
+          if (!snapshot.progress) {
+            setChatProgress(undefined);
+          } else if (
+            isNewerChatProgress(chatProgressRevision.current, snapshot.progress.revision)
+          ) {
+            chatProgressRevision.current = snapshot.progress.revision;
+            setChatProgress(snapshot.progress);
+          }
+        } catch {
+          if (progressController.signal.aborted) return;
+          setChatProgress(undefined);
+        }
+      }
+    })();
     try {
       const r = await api.chat(
         message.trim(),
@@ -547,6 +602,10 @@ export function App() {
         controller.signal,
       );
       if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
+      progressController.abort();
+      if (chatProgressRequest.current === progressController)
+        chatProgressRequest.current = undefined;
+      setChatProgress(undefined);
       setConversation(r.conversationId);
       setConversationPreferences(r.conversationPreferences);
       setMessages((current) => {
@@ -591,6 +650,11 @@ export function App() {
           setNotice("The connection ended before Ellie confirmed the outcome.");
       }
     } finally {
+      progressController.abort();
+      if (chatProgressRequest.current === progressController)
+        chatProgressRequest.current = undefined;
+      if (generation === scopeGeneration.current && epoch === chatEpoch.current)
+        setChatProgress(undefined);
       if (chatInFlight.current === requestId) chatInFlight.current = "";
       if (generation === scopeGeneration.current && epoch === chatEpoch.current) setBusy("");
     }
@@ -601,6 +665,8 @@ export function App() {
     const epoch = ++chatEpoch.current;
     const controller = new AbortController();
     chatRequest.current?.abort();
+    chatProgressRequest.current?.abort();
+    setChatProgress(undefined);
     chatInFlight.current = "";
     chatRequest.current = controller;
     setBusy("chat");
@@ -642,10 +708,12 @@ export function App() {
   function newConversation() {
     ++chatEpoch.current;
     chatRequest.current?.abort();
+    chatProgressRequest.current?.abort();
     pendingIntentRequest.current?.abort();
     chatInFlight.current = "";
     setMessages([]);
     setComposerDraft("");
+    setChatProgress(undefined);
     setConversation(undefined);
     setConversationMeta(undefined);
     setConversationPreferences({ preferences: {}, revision: 0 });
@@ -841,6 +909,7 @@ export function App() {
               send={send}
               draft={composerDraft}
               setDraft={setComposerDraft}
+              progress={chatProgress}
               active={conversationMeta}
               preferences={conversationPreferences}
               savedSettings={data.settings}
@@ -978,13 +1047,31 @@ export function App() {
       </main>
       <button
         ref={orbRef}
-        className={`ellie-orb ${busy === "chat" ? "thinking" : ""} ${pendingIntent || uncertainRequest ? "attention" : ""}`}
+        className="ellie-orb"
+        data-state={orbState}
         aria-label="Talk to Ellie"
         aria-expanded={conversationOpen}
+        title={
+          orbState === "working"
+            ? "Ellie is working"
+            : orbState === "attention"
+              ? "Ellie needs your attention"
+              : "Ellie is ready"
+        }
         onClick={() => showConversation(true)}
       >
-        <span aria-hidden="true" />
+        <span className="orb-core" aria-hidden="true" />
+        <span className="orb-status" aria-hidden="true">
+          {orbState === "working" ? "Working" : orbState === "attention" ? "Continue" : "Ask Ellie"}
+        </span>
       </button>
+      <span className="visually-hidden" role="status" aria-live="polite">
+        {orbState === "working"
+          ? "Ellie is working"
+          : orbState === "attention"
+            ? "Ellie needs your attention"
+            : "Ellie is ready"}
+      </span>
       <nav className="bottom" aria-label="Main navigation">
         {(["dashboard", "today", "world", "space"] as View[]).map((v) => (
           <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
@@ -1145,6 +1232,7 @@ function LifeDashboard({
   const [now, setNow] = useState(() => new Date());
   const [plans, setPlans] = useState<LifePlan[]>([]);
   const [planError, setPlanError] = useState(false);
+  const [planLoading, setPlanLoading] = useState(true);
   const [customizing, setCustomizing] = useState(false);
   const widgetKeys = [
     "clock",
@@ -1178,16 +1266,21 @@ function LifeDashboard({
   }, []);
   useEffect(() => {
     const request = new AbortController();
+    setPlanLoading(true);
     void api.plans
       .list(data.scope, request.signal)
       .then((result) => {
         if (!request.signal.aborted) {
           setPlans(result.plans);
           setPlanError(false);
+          setPlanLoading(false);
         }
       })
       .catch(() => {
-        if (!request.signal.aborted) setPlanError(true);
+        if (!request.signal.aborted) {
+          setPlanError(true);
+          setPlanLoading(false);
+        }
       });
     return () => request.abort();
   }, [data.scope, data.records]);
@@ -1259,7 +1352,16 @@ function LifeDashboard({
           {customizing && <DashboardWidgetTools widget="plans" change={changeLayout} />}
           <button className="widget-open" onClick={openPlans}>
             <span className="widget-kicker">Plans</span>
-            <h2>{plans.length ? `${plans.length} saved` : "No checklists yet"}</h2>
+            <h2>
+              {planLoading && !plans.length
+                ? "Loading plans…"
+                : plans.length
+                  ? `${plans.length} saved`
+                  : planError
+                    ? "Plans unavailable"
+                    : "No checklists yet"}
+            </h2>
+            {planLoading && plans.length > 0 && <span className="widget-state">Updating…</span>}
             {planError && <span>Plans are temporarily unavailable.</span>}
             {plans.slice(0, 2).map((plan) => (
               <span key={plan.record.id}>
@@ -1282,6 +1384,7 @@ function LifeDashboard({
               <span className="widget-kicker">App</span>
               <h2>{plugin.name}</h2>
               <p>{plugin.description}</p>
+              <span className={`widget-state state-${plugin.status}`}>{plugin.status}</span>
               <WidgetData plugin={plugin} />
               <small>Open app</small>
             </button>
@@ -1481,6 +1584,7 @@ function Chat({
   send,
   draft,
   setDraft,
+  progress,
   active,
   preferences,
   savedSettings,
@@ -1504,6 +1608,7 @@ function Chat({
   send: (s: string) => void;
   draft: string;
   setDraft: (value: string) => void;
+  progress?: ChatResponse["progress"];
   active?: ConversationSummary;
   preferences: ConversationPreferenceState;
   savedSettings: Record<string, unknown>;
@@ -1524,9 +1629,10 @@ function Chat({
 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
   const end = useRef<HTMLDivElement>(null);
+  const nearBottom = useRef(true);
   useEffect(() => {
-    end.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, busy]);
+    if (nearBottom.current) end.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, busy, progress?.revision]);
   const upcoming = records
     .map((record) => ({
       record,
@@ -1543,7 +1649,13 @@ function Chat({
     .sort((a, b) => compareAgenda(a, b, timeZone))
     .slice(0, 2);
   return (
-    <section className="conversation">
+    <section
+      className="conversation"
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        nearBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 96;
+      }}
+    >
       <div className="conversation-bar">
         <div>
           <strong>{active?.title || "New conversation"}</strong>
@@ -1551,18 +1663,23 @@ function Chat({
             Private · using {scope.startsWith("group:") ? "shared group" : "your"} context
           </span>
         </div>
-        <ModelReadiness />
+        <details className="conversation-options">
+          <summary>Options</summary>
+          <div>
+            <ConversationStyle
+              state={preferences}
+              savedSettings={savedSettings}
+              busy={busy}
+              send={send}
+            />
+            <ModelReadiness />
+          </div>
+        </details>
         <button onClick={() => setHistoryOpen(true)}>History</button>
         <button onClick={newConversation} disabled={!messages.length && !active}>
           New
         </button>
       </div>
-      <ConversationStyle
-        state={preferences}
-        savedSettings={savedSettings}
-        busy={busy}
-        send={send}
-      />
       {uncertainRequest && (
         <div className="request-recovery" role="status">
           <div>
@@ -1653,7 +1770,22 @@ function Chat({
         {busy && (
           <article className="ellie">
             <span>e</span>
-            <div className="typing">● ● ●</div>
+            <div className={progress ? "provisional-reply" : "typing"}>
+              {progress ? (
+                <>
+                  <b>
+                    {progress.phase === "queued"
+                      ? "Getting ready…"
+                      : progress.phase === "validating"
+                        ? "Checking draft…"
+                        : "Drafting…"}
+                  </b>
+                  {progress.text && <p>{progress.text}</p>}
+                </>
+              ) : (
+                "● ● ●"
+              )}
+            </div>
           </article>
         )}
         <div ref={end} />

@@ -26,12 +26,14 @@ A browser phone/TV prototype remains available for compatibility testing. Native
 
 The broader [life harness plan](life-harness-plan.md) sets the direction for a conversational assistant that can remember, anticipate and build capabilities. Delivery proceeds through complete user workflows, with automated local acceptance recorded in the checkpoint. Native location, cross-application context, account connectors and model-weight training are not implied by the local implementation.
 =======
+
 A browser phone/TV prototype remains available for compatibility testing, and the opt-in authenticated phone app-control demo has user-reported physical acceptance. The native clients and explicitly granted household synchronization are implemented as development features. Packaged-service tooling can build, stage and select development payloads, while authenticated capture remains unselectable and cannot authorize installation or launch. Production signing, notarization, installed-service acceptance, live Google account integration, routines, a TV application, an MCP server, analytics and automatic updates remain pending. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for server and CLI execution, and Swift for native applications, macOS Accessibility and Keychain integration.
 
 ## Active product queue
 
 The maintained [delivery queue](delivery-queue.md) records the remaining distribution, installed-lifecycle and physical acceptance gates. Product interfaces use native SwiftUI on macOS and iPhone; the browser prototype remains a compatibility reference, including version 1 dashboard import and export. Simulator Swift-to-Node HTTPS interoperability and synthetic Mac UI checks are recorded separately from physical phone, LAN and installed-service acceptance. [iPhone testing](iphone-testing.md) separates browser automation from physical camera, microphone and trust setup.
->>>>>>> 862fe876ce993da88f2befff3f6e5ab625a1001f
+
+> > > > > > > 862fe876ce993da88f2befff3f6e5ab625a1001f
 
 ## Foundation sequence and current queue
 

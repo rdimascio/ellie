@@ -211,13 +211,20 @@ const mlb = new MLBAdapter();
 let customBuild = 0;
 let releaseSlowChat: (() => void) | undefined;
 let markSlowChatStarted: (() => void) | undefined;
+let releaseProgressClear: (() => void) | undefined;
+let releaseProgressRepaired: (() => void) | undefined;
+let releaseProgressFinal: (() => void) | undefined;
+let markProgressStarted: (() => void) | undefined;
+let markProgressCleared: (() => void) | undefined;
+let markProgressRepaired: (() => void) | undefined;
+let emitLateProgress: (() => void) | undefined;
 const harness = createLifeHarness({
   store,
   plugins,
   tasks,
   mlb,
   model: {
-    async plan(input) {
+    async plan(input, _signal, onProgress) {
       const missingReminder = /^Remind me to (.+)$/i.exec(input.message);
       if (missingReminder)
         return {
@@ -234,6 +241,28 @@ const harness = createLifeHarness({
         await new Promise<void>((resolve) => {
           releaseSlowChat = resolve;
         });
+      }
+      if (/stream repair fixture/i.test(input.message)) {
+        onProgress?.({ phase: "queued" });
+        onProgress?.({ phase: "drafting", text: "Unvalidated fixture draft." });
+        markProgressStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseProgressClear = resolve;
+        });
+        onProgress?.({ phase: "drafting" });
+        markProgressCleared?.();
+        await new Promise<void>((resolve) => {
+          releaseProgressRepaired = resolve;
+        });
+        onProgress?.({ phase: "drafting", text: "Repaired fixture draft." });
+        markProgressRepaired?.();
+        await new Promise<void>((resolve) => {
+          releaseProgressFinal = resolve;
+        });
+        onProgress?.({ phase: "validating", text: "Repaired fixture draft." });
+        emitLateProgress = () =>
+          onProgress?.({ phase: "drafting", text: "Late stale fixture draft." });
+        return { reply: "Final fixture reply.", actions: [] };
       }
       return { reply: "Fixture summary of the cited source.", actions: [] };
     },
@@ -306,6 +335,10 @@ try {
       await page.getByRole("button", { name: "Talk to Ellie", exact: true }).click();
     await page.getByLabel("Message Ellie").waitFor();
   };
+  const openChatOptions = async () => {
+    const options = page.locator("details.conversation-options");
+    if ((await options.getAttribute("open")) === null) await options.locator("summary").click();
+  };
   const selectScope = async (scope: string) => {
     const wasOpen = await page.locator(".conversation-overlay").isVisible();
     await closeChat();
@@ -375,6 +408,13 @@ try {
   const orb = page.getByRole("button", { name: "Talk to Ellie", exact: true });
   const orbBounds = await orb.boundingBox();
   assert.ok(orbBounds && Math.abs(orbBounds.x + orbBounds.width / 2 - 720) < 2);
+  const desktopStatusBounds = await orb.locator(".orb-status").boundingBox();
+  assert.ok(
+    desktopStatusBounds &&
+      desktopStatusBounds.y >= 0 &&
+      desktopStatusBounds.y + desktopStatusBounds.height <= 950,
+    "desktop orb status stays within the viewport",
+  );
   await openChat();
   await page.getByLabel("Message Ellie").fill("an unsent thought");
   await page.keyboard.press("Escape");
@@ -584,6 +624,38 @@ try {
       .some((record) => /water the fern/i.test(record.title)),
     false,
   );
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  const progressStarted = new Promise<void>((resolve) => {
+      markProgressStarted = resolve;
+    }),
+    progressCleared = new Promise<void>((resolve) => {
+      markProgressCleared = resolve;
+    }),
+    progressRepaired = new Promise<void>((resolve) => {
+      markProgressRepaired = resolve;
+    });
+  await page.getByLabel("Message Ellie").fill("stream repair fixture");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await progressStarted;
+  await page.getByText("Unvalidated fixture draft.", { exact: true }).waitFor();
+  await page.getByText("Drafting…", { exact: true }).waitFor();
+  releaseProgressClear?.();
+  await progressCleared;
+  await page
+    .getByText("Unvalidated fixture draft.", { exact: true })
+    .waitFor({ state: "detached" });
+  await page.getByText("Ellie is drafting…", { exact: true }).waitFor();
+  releaseProgressRepaired?.();
+  await progressRepaired;
+  await page.getByText("Repaired fixture draft.", { exact: true }).waitFor();
+  releaseProgressFinal?.();
+  await page.getByText("Final fixture reply.", { exact: true }).waitFor();
+  assert.equal(await page.getByText("Final fixture reply.", { exact: true }).count(), 1);
+  assert.equal(await page.getByText("Repaired fixture draft.", { exact: true }).count(), 0);
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  emitLateProgress?.();
+  await page.waitForTimeout(650);
+  assert.equal(await page.getByText("Late stale fixture draft.", { exact: true }).count(), 0);
   const slowStarted = new Promise<void>((resolve) => {
     markSlowChatStarted = resolve;
   });
@@ -729,9 +801,11 @@ try {
     .getByText("remember that family tea is at four", { exact: true })
     .waitFor();
   await page.getByText("Private · using shared group context").waitFor();
+  await openChatOptions();
   await page.getByLabel("Length").selectOption("brief");
   await page.getByText(/keep this conversation brief/i).waitFor();
   await page.reload();
+  await openChatOptions();
   await expect(page.getByLabel("Length")).toHaveValue("brief");
   assert.equal(await page.getByLabel("Length").inputValue(), "brief");
   await page.getByText("This conversation", { exact: true }).waitFor();
@@ -793,6 +867,7 @@ try {
   await page.getByLabel("Message Ellie").fill("from now on, be playful");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/personal tone preference/i).waitFor();
+  await openChatOptions();
   await page.getByLabel("Tone").selectOption("warm");
   await page.getByText(/keep this conversation warm/i).waitFor();
   await page.getByRole("button", { name: "Use saved preferences" }).click();
@@ -1791,6 +1866,13 @@ try {
     const mobileOrb = mobile.getByRole("button", { name: "Talk to Ellie", exact: true });
     const mobileOrbBounds = await mobileOrb.boundingBox();
     assert.ok(mobileOrbBounds && Math.abs(mobileOrbBounds.x + mobileOrbBounds.width / 2 - 195) < 2);
+    const mobileStatusBounds = await mobileOrb.locator(".orb-status").boundingBox();
+    assert.ok(
+      mobileStatusBounds &&
+        mobileStatusBounds.y >= 0 &&
+        mobileStatusBounds.y + mobileStatusBounds.height <= 844,
+      "mobile orb status stays within the viewport",
+    );
     await mobileOrb.click();
     await mobile.getByLabel("Message Ellie").waitFor();
     assert.equal(

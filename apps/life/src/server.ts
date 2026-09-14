@@ -20,6 +20,7 @@ import type {
 import { LifeAccessError, LifeConflictError } from "../../../packages/life-core/src/index.ts";
 import {
   eventPreparationWindow,
+  recordProactiveDismissal,
   type ContextSignal,
 } from "../../../packages/life-context/src/index.ts";
 import {
@@ -32,6 +33,7 @@ import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
 import { LifeAutoMemory } from "../../../packages/life-auto-memory/src/index.ts";
 import { LifePlanError, LifePlans, type LifePlan } from "../../../packages/life-plans/src/index.ts";
 import { PluginBuildError } from "../../../packages/life-harness/src/build.ts";
+import type { LifeModelProgress } from "../../../packages/life-harness/src/model.ts";
 import {
   ScheduledDeliveries,
   ScheduledDeliveryError,
@@ -94,6 +96,7 @@ export interface LifeHarnessLike {
     history?: Array<{ role: "user" | "assistant"; content: string }>;
     automaticMemory?: { markdown: string; revision: string; partial: boolean };
     automaticMemoryForgotten?: number;
+    onProgress?: (progress: LifeModelProgress) => void;
     isContextCurrent?: () => boolean;
     pendingIntent?: PendingLifeIntent;
     conversationPreferences?: ConversationPreferenceState;
@@ -388,6 +391,17 @@ export class LifeHttpServer {
     string,
     { expiresAt: number; life: number; tasks: number; plugins: number }
   >();
+  private readonly chatProgress = new Map<
+    string,
+    {
+      conversationId: string;
+      turnId: string;
+      revision: number;
+      phase: LifeModelProgress["phase"];
+      text?: string;
+      current: () => boolean;
+    }
+  >();
   private personalResetActive = false;
   private resetInFlight?: {
     operationId: string;
@@ -583,6 +597,7 @@ export class LifeHttpServer {
     this.options.preparationMonitor?.stop();
     for (const controller of this.extractionControllers) controller.abort();
     for (const controller of this.pluginBuildControllers) controller.abort();
+    this.chatProgress.clear();
     if (this.server) {
       const closing = this.server;
       await new Promise<void>((ok, fail) => {
@@ -1104,6 +1119,7 @@ export class LifeHttpServer {
   private async settleActorMutations(): Promise<boolean> {
     for (const controller of this.extractionControllers) controller.abort();
     for (const controller of this.pluginBuildControllers) controller.abort();
+    this.chatProgress.clear();
     if (!this.mutationRequests.size)
       return this.options.harness.improvements
         ? await this.options.harness.improvements.settleActive(5_000)
@@ -2268,7 +2284,12 @@ export class LifeHttpServer {
     }
     const controller = new AbortController();
     this.pluginBuildControllers.add(controller);
-    const memory = this.automaticMemory.context(this.actor, { scope, maxBytes: 16 * 1024 }),
+    const memory = this.automaticMemory.modelContext(this.actor, {
+        scope,
+        query: message,
+        excludeTurnId: begun.turn.id,
+        maxBytes: 6 * 1024,
+      }),
       conversationPreferences = this.options.store.getConversationPreferences(
         this.actor,
         begun.conversation.id,
@@ -2282,8 +2303,7 @@ export class LifeHttpServer {
               fingerprint &&
             this.options.store.getConversationPreferences(this.actor, begun.conversation.id)
               .revision === conversationPreferences.revision &&
-            this.automaticMemory.context(this.actor, { scope, maxBytes: 16 * 1024 }).revision ===
-              memory.revision
+            this.options.store.automaticPromptMemoryRevision(this.actor, scope) === memory.revision
           );
         } catch {
           return false;
@@ -2300,6 +2320,37 @@ export class LifeHttpServer {
         this.actor,
         begun.conversation.id,
       );
+    const progressEntry = {
+      conversationId: begun.conversation.id,
+      turnId: begun.turn.id,
+      revision: 0,
+      phase: "queued" as LifeModelProgress["phase"],
+      current: contextCurrent,
+    };
+    if (this.chatProgress.size < 16) this.chatProgress.set(requestId, progressEntry);
+    const onProgress = (progress: LifeModelProgress) => {
+      const entry = this.chatProgress.get(requestId);
+      if (entry !== progressEntry) return;
+      if (!contextCurrent()) {
+        this.chatProgress.delete(requestId);
+        return;
+      }
+      if (!progress || !["queued", "drafting", "validating"].includes(progress.phase)) return;
+      let text: string | undefined;
+      if (typeof progress.text === "string") {
+        let bytes = 0;
+        text = "";
+        for (const point of progress.text) {
+          bytes += Buffer.byteLength(point, "utf8");
+          if (bytes > 8192) break;
+          text += point;
+        }
+      }
+      if (entry.phase === progress.phase && entry.text === text) return;
+      entry.phase = progress.phase;
+      entry.text = text;
+      entry.revision++;
+    };
     let executingIntent: PendingLifeIntent | undefined, activeRescheduleId: string | undefined;
     const executePending = async (
       answered: PendingLifeIntent,
@@ -2393,7 +2444,7 @@ export class LifeHttpServer {
         conversationId: begun.conversation.id,
         history,
         automaticMemory: {
-          markdown: memory.summaryMarkdown,
+          markdown: memory.markdown,
           revision: memory.revision,
           partial: memory.partial,
         },
@@ -2403,6 +2454,7 @@ export class LifeHttpServer {
         ...(recentOperation ? { recentOperation } : {}),
         conversationPreferences,
         signal: controller.signal,
+        onProgress,
       });
       this.recheckOwner(owner(scope));
       const directive = result.continuation;
@@ -2489,6 +2541,7 @@ export class LifeHttpServer {
       } catch {}
       throw error;
     } finally {
+      this.chatProgress.delete(requestId);
       this.pluginBuildControllers.delete(controller);
     }
   }
@@ -2620,11 +2673,29 @@ export class LifeHttpServer {
     const requestId = identifier(decodeURIComponent(path.split("/").at(-1)!), "requestId"),
       found = this.options.store.getConversationRequest(this.actor, requestId);
     if (!found) throw new HttpError(404, "Chat request not found.");
-    this.send(
-      response,
-      200,
-      this.conversationChatEnvelope(found.conversation, found.turn, found.result),
-    );
+    this.send(response, 200, {
+      ...this.conversationChatEnvelope(found.conversation, found.turn, found.result),
+      ...(() => {
+        const entry = this.chatProgress.get(requestId);
+        if (!entry) return {};
+        if (
+          found.turn.status !== "pending" ||
+          entry.turnId !== found.turn.id ||
+          entry.conversationId !== found.conversation.id ||
+          !entry.current()
+        ) {
+          this.chatProgress.delete(requestId);
+          return {};
+        }
+        return {
+          progress: {
+            phase: entry.phase,
+            revision: entry.revision,
+            ...(entry.text === undefined ? {} : { text: entry.text }),
+          },
+        };
+      })(),
+    });
   }
   private conversationSummary(
     value: import("../../../packages/life-core/src/index.ts").ConversationSummary,
@@ -2717,6 +2788,8 @@ export class LifeHttpServer {
         action,
         this.now(),
       );
+    if (action === "dismiss")
+      recordProactiveDismissal(this.options.store, this.actor, result.notification, this.now());
     this.options.harness.invalidateContext?.(this.actor, result.notification.scope);
     if (result.linked) {
       const linkedIds = new Set([result.linked.id]);

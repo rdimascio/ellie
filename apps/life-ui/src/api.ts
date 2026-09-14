@@ -35,7 +35,14 @@ export type ChatResponse = {
   actions?: { label: string; status: string }[];
   pendingIntent: PendingIntent | null;
   conversationPreferences: ConversationPreferenceState;
+  progress?: {
+    phase: "queued" | "drafting" | "validating";
+    text?: string;
+    revision: number;
+  };
 };
+export const isNewerChatProgress = (currentRevision: number, nextRevision: number) =>
+  Number.isInteger(nextRevision) && nextRevision > currentRevision;
 export type PluginBridgeRequest = {
   id: string;
   method: "storage.get" | "storage.set" | "mlb.snapshot";

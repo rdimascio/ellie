@@ -130,7 +130,11 @@ test("every accepted prompt generates private Markdown and reaches a fresh sessi
     });
     assert.equal(first.response.status, 200);
     assert.match(system(), /vegetarian, except that I eat fish on Fridays/);
-    assert.match(system(), /chamomile tea, except when driving/);
+    assert.doesNotMatch(system(), /chamomile tea, except when driving/);
+    assert.match(
+      requests.at(-1)!.find((message) => message.role === "user")!.content,
+      /chamomile tea, except when driving/,
+    );
     assert.doesNotMatch(system(), /Forged client memory|Assistant-only historical claim/);
     const calls = requests.length;
     assert.equal(

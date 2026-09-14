@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { LifeActor, LifeRecord, LifeScope } from "../../life-core/src/index.ts";
 import { LifeStore } from "../../life-core/src/index.ts";
 import {
@@ -28,6 +29,138 @@ const open = (record: LifeRecord) =>
   record.data.cancelled !== true &&
   !record.provenance.some((item) => item.invalidatedAt !== undefined);
 const normalized = (value: string) => value.trim().toLocaleLowerCase();
+const DISMISSAL_TYPE = "proactive-dismissal-v1";
+const DISMISSAL_LOOKBACK_MS = 90 * 24 * 60 * 60_000;
+const BASE_SUGGESTION_COOLDOWN_MS = 12 * 60 * 60_000;
+const MAX_DISMISSAL_BACKOFF_MS = 30 * 24 * 60 * 60_000;
+const MAX_DISMISSALS_PER_SOURCE = 8;
+const MAX_RETAINED_DISMISSALS = 128;
+
+/** Actor-private evidence written by the service after an explicit suggestion dismissal. */
+export function proactiveDismissalData(input: {
+  sourceRecordId: string;
+  sourceScope: LifeScope;
+  category: string;
+  dismissedAt: number;
+}): Record<string, unknown> {
+  if (
+    !input.sourceRecordId ||
+    input.sourceRecordId.length > 200 ||
+    !input.category ||
+    input.category.length > 200 ||
+    !number(input.dismissedAt) ||
+    !input.sourceScope ||
+    !(["user", "group"] as string[]).includes(input.sourceScope.type) ||
+    !input.sourceScope.id ||
+    input.sourceScope.id.length > 200
+  )
+    throw new TypeError("Proactive dismissal provenance is invalid.");
+  return {
+    type: DISMISSAL_TYPE,
+    sourceRecordId: input.sourceRecordId,
+    sourceScope: { ...input.sourceScope },
+    category: input.category,
+    dismissedAt: input.dismissedAt,
+  };
+}
+
+/** Persist a dismissed proactive notification as bounded actor-private preference evidence. */
+export function recordProactiveDismissal(
+  store: LifeStore,
+  actor: LifeActor,
+  notification: LifeRecord,
+  now: number,
+): boolean {
+  try {
+    if (
+      notification.kind !== "feedback" ||
+      notification.data.notification !== true ||
+      notification.data.dismissed !== true ||
+      typeof notification.data.relatedRecordId !== "string" ||
+      typeof notification.data.category !== "string" ||
+      !number(now)
+    )
+      return false;
+    const source = store.getRecord(actor, notification.data.relatedRecordId);
+    if (
+      !source ||
+      source.scope.type !== notification.scope.type ||
+      source.scope.id !== notification.scope.id
+    )
+      return false;
+    const id = `pd-${createHash("sha256")
+      .update(`${actor.userId}\0${notification.id}`)
+      .digest("hex")
+      .slice(0, 32)}`;
+    const personalScope: LifeScope = { type: "user", id: actor.userId };
+    if (store.getRecord(actor, id)) return true;
+    const retained = store.listProactiveDismissalRecords(actor).reverse();
+    // The extra row detects an already-overfull imported store without treating
+    // a bounded page as the complete history or adding more retained evidence.
+    if (retained.length > MAX_RETAINED_DISMISSALS) return false;
+    while (retained.length >= MAX_RETAINED_DISMISSALS) {
+      const oldest = retained.shift()!;
+      try {
+        store.deleteRecord(actor, oldest.id, oldest.revision);
+      } catch {
+        return false;
+      }
+    }
+    store.createRecord(actor, {
+      id,
+      kind: "feedback",
+      scope: personalScope,
+      title: "Dismissed proactive suggestion",
+      data: proactiveDismissalData({
+        sourceRecordId: source.id,
+        sourceScope: source.scope,
+        category: notification.data.category,
+        dismissedAt: now,
+      }),
+    });
+    return true;
+  } catch {
+    // Dismissing the already-updated notification must not fail if preference retention is full.
+    return false;
+  }
+}
+
+function dismissalBackoffUntil(
+  records: LifeRecord[],
+  source: LifeRecord,
+  category: string,
+  now: number,
+): number | undefined {
+  const matches = records
+    .flatMap((record) => {
+      const data = record.data,
+        scope = data.sourceScope;
+      if (
+        record.kind !== "feedback" ||
+        data.type !== DISMISSAL_TYPE ||
+        data.sourceRecordId !== source.id ||
+        data.category !== category ||
+        !scope ||
+        typeof scope !== "object" ||
+        Array.isArray(scope) ||
+        (scope as Record<string, unknown>).type !== source.scope.type ||
+        (scope as Record<string, unknown>).id !== source.scope.id ||
+        !number(data.dismissedAt) ||
+        data.dismissedAt > now + 60_000 ||
+        now - data.dismissedAt > DISMISSAL_LOOKBACK_MS
+      )
+        return [];
+      return [data.dismissedAt];
+    })
+    .sort((a, b) => b - a)
+    .slice(0, MAX_DISMISSALS_PER_SOURCE);
+  if (!matches.length) return undefined;
+  const duration = Math.min(
+    MAX_DISMISSAL_BACKOFF_MS,
+    BASE_SUGGESTION_COOLDOWN_MS * 2 ** matches.length,
+  );
+  return matches[0]! + duration;
+}
 
 /** Interpret a current event without treating an all-day date as a UTC timestamp. */
 export function eventPreparationWindow(
@@ -139,6 +272,9 @@ export class ProactivityEngine {
       signal.type === "location"
         ? this.store.listRecords(actor, { scope, kinds: ["place"], limit: 500 })
         : [];
+    // Feedback is always actor-private. Source readability above is established before a match
+    // can use it, so a revoked group cannot reuse historical dismissal evidence.
+    const dismissals = this.store.listProactiveDismissalRecords(actor, MAX_RETAINED_DISMISSALS);
     const matches: Array<{
       record: LifeRecord;
       reason: string;
@@ -225,6 +361,8 @@ export class ProactivityEngine {
       if (number(last) && now - last < 12 * 60 * 60_000) continue;
       const current = this.store.getRecord(actor, match.record.id);
       if (!current || !open(current)) continue;
+      const backoffUntil = dismissalBackoffUntil(dismissals, current, match.category, now);
+      if (backoffUntil !== undefined && now < backoffUntil) continue;
       const item = this.store.createProactiveNotification(actor, {
         scope,
         recordId: current.id,
