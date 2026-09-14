@@ -6,6 +6,13 @@ import AppKit
 import UIKit
 #endif
 
+enum LifeWebTrustPolicy {
+  static func matchesEndpoint(_ space: URLProtectionSpace, origin: URL) -> Bool {
+    origin.scheme == "https" && space.protocol == "https"
+      && space.host == origin.host && space.port == (origin.port ?? 443)
+  }
+}
+
 @MainActor
 final class LifeWebViewModel: ObservableObject {
   enum Phase: Equatable { case loading, ready, grantRequired, revoked, expired, unavailable }
@@ -292,7 +299,7 @@ private final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate {
     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
   ) {
     guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-      challenge.protectionSpace.host == credential.origin.host,
+      LifeWebTrustPolicy.matchesEndpoint(challenge.protectionSpace, origin: credential.origin),
       let trust = challenge.protectionSpace.serverTrust,
       evaluateNativeServerTrust(
         trust, host: challenge.protectionSpace.host,
