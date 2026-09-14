@@ -552,6 +552,18 @@ export class BrowserAuth {
     return this.authenticate(browserSessionToken(header));
   }
 
+  /**
+   * Linearizes command admission behind authorization mutations that already entered the queue.
+   * A later revoke does not retroactively cancel an admitted native side effect.
+   */
+  async admitAppOpen(token: unknown, target: unknown): Promise<boolean> {
+    const checkedTarget = identifier(target);
+    return this.mutate(async () => {
+      const client = this.authenticate(token);
+      return client ? canGrantAppOpen(client, checkedTarget) : false;
+    });
+  }
+
   listClients(): BrowserClient[] {
     this.assertUsable();
     const now = this.now();
@@ -588,6 +600,15 @@ export class BrowserAuth {
       return true;
     });
   }
+}
+
+function canGrantAppOpen(client: BrowserClient, target: string): boolean {
+  return (
+    client.role === "phone_controller" &&
+    client.grants.some(
+      (grant) => grant.target === target && grant.capabilities.includes("app.open"),
+    )
+  );
 }
 
 function checkedSessionToken(value: unknown): string {
