@@ -34,14 +34,18 @@ export function parseNodeHardeningOptions(args) {
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index];
     const value = args[index + 1];
-    if (!value || (key !== "--node-archive" && key !== "--node-sha256") || key in values)
+    if (
+      !value ||
+      !["--node-archive", "--node-sha256", "--developer-id-sha1", "--team-id"].includes(key) ||
+      key in values
+    )
       throw new Error(
-        "Use: test-node-hardening.mjs --node-archive ABSOLUTE_TAR_XZ --node-sha256 LOWERCASE_SHA256",
+        "Use: test-node-hardening.mjs --node-archive ABSOLUTE_TAR_XZ --node-sha256 LOWERCASE_SHA256 [--developer-id-sha1 CERTIFICATE_SHA1 --team-id TEAM_ID]",
       );
     values[key] = value;
   }
   if (
-    args.length !== 4 ||
+    ![4, 8].includes(args.length) ||
     !values["--node-archive"]?.startsWith("/") ||
     !/^([a-f0-9]{64})$/.test(values["--node-sha256"] ?? "")
   )
@@ -49,7 +53,120 @@ export function parseNodeHardeningOptions(args) {
   const archive = resolve(values["--node-archive"]);
   if (!/^node-v24\.[0-9]+\.[0-9]+-darwin-arm64\.tar\.xz$/.test(basename(archive)))
     throw new Error("Node hardening archive name is invalid.");
+  const identitySha1 = values["--developer-id-sha1"];
+  const teamId = values["--team-id"];
+  validateDeveloperIdOptions({ identitySha1, teamId });
+  if (identitySha1 !== undefined) {
+    return { archive, sha256: values["--node-sha256"], identitySha1, teamId };
+  }
   return { archive, sha256: values["--node-sha256"] };
+}
+
+const validationIdentifier = "org.ellie.validation.node";
+
+export function validateDeveloperIdOptions(options) {
+  const identitySha1 = options?.identitySha1;
+  const teamId = options?.teamId;
+  if ((identitySha1 === undefined) !== (teamId === undefined))
+    throw new Error("Developer ID validation inputs are incomplete.");
+  if (
+    identitySha1 !== undefined &&
+    (typeof identitySha1 !== "string" ||
+      identitySha1.length !== 40 ||
+      !/^[A-F0-9]{40}$/.test(identitySha1) ||
+      typeof teamId !== "string" ||
+      teamId.length !== 10 ||
+      !/^[A-Z0-9]{10}$/.test(teamId))
+  )
+    throw new Error("Developer ID validation inputs are invalid.");
+}
+
+export function developerIdSigningEnvironment(options, isolatedEnvironment, callerHome) {
+  if (!options.identitySha1) return { ...isolatedEnvironment };
+  if (
+    typeof callerHome !== "string" ||
+    !callerHome.startsWith("/") ||
+    callerHome.length > 1_024 ||
+    callerHome.includes("\0") ||
+    resolve(callerHome) !== callerHome
+  )
+    throw new Error("Developer ID signing HOME is invalid.");
+  return { ...isolatedEnvironment, HOME: callerHome };
+}
+
+export function classifyDeveloperIdSigningFailure(stderr) {
+  if (typeof stderr !== "string") return "exit-status";
+  if (
+    /identity .{0,80}not found|no identity found|specified item could not be found in the keychain/i.test(
+      stderr,
+    )
+  )
+    return "signing-identity-unavailable";
+  if (/user interaction is not allowed|interaction not allowed/i.test(stderr))
+    return "signing-interaction-not-allowed";
+  if (/timestamp.{0,100}(?:unavailable|failed|could not|unable|timed out)/i.test(stderr))
+    return "signing-timestamp-unavailable";
+  if (/timed out/i.test(stderr)) return "signing-timeout";
+  return "exit-status";
+}
+
+export function nodeHardeningSigningArguments(options, node, entitlements) {
+  const identity = options.identitySha1 ?? "-";
+  return [
+    "--force",
+    "--sign",
+    identity,
+    "--identifier",
+    validationIdentifier,
+    "--options",
+    "runtime",
+    ...(options.identitySha1 ? ["--timestamp"] : []),
+    "--entitlements",
+    entitlements,
+    node,
+  ];
+}
+
+export function nodeHardeningVerificationArguments(options, node) {
+  const result = ["--verify", "--strict", "--all-architectures"];
+  if (options.identitySha1) {
+    result.push(
+      `-R=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${options.teamId}" and identifier "${validationIdentifier}"`,
+    );
+  }
+  result.push(node);
+  return result;
+}
+
+export function validateNodeSignatureMetadata(details, teamId) {
+  if (typeof details !== "string" || Buffer.byteLength(details) > maximumOutput)
+    throw new Error("Hardened Node signature metadata is invalid.");
+  const flags = /flags=0x([0-9a-f]+)\([^)]*runtime[^)]*\)/i.exec(details);
+  if (
+    !flags ||
+    (Number.parseInt(flags[1], 16) & 0x10000) === 0 ||
+    !new RegExp(`^Identifier=${validationIdentifier.replaceAll(".", "\\.")}$`, "m").test(details)
+  )
+    throw new Error("Hardened Node signature metadata is invalid.");
+  if (teamId === undefined) {
+    if (!/^Signature=adhoc$/m.test(details) || /^Timestamp=/m.test(details))
+      throw new Error("Hardened Node signature metadata is invalid.");
+    return;
+  }
+  const authorities = [...details.matchAll(/^Authority=(.+)$/gm)].map((match) => match[1]);
+  if (
+    typeof teamId !== "string" ||
+    teamId.length !== 10 ||
+    !/^[A-Z0-9]{10}$/.test(teamId) ||
+    !new RegExp(`^TeamIdentifier=${teamId}$`, "m").test(details) ||
+    !/^Timestamp=.+$/m.test(details) ||
+    /^Signature=adhoc$/m.test(details) ||
+    authorities.length !== 3 ||
+    !authorities[0].startsWith("Developer ID Application:") ||
+    authorities[1] !== "Developer ID Certification Authority" ||
+    authorities[2] !== "Apple Root CA"
+  )
+    throw new Error("Hardened Node Developer ID metadata is invalid.");
 }
 
 function groupAbsent(processGroup) {
@@ -89,6 +206,7 @@ function command(file, args, options, state) {
     env = state.environment,
     outputFile,
     maximumFile = 0,
+    failureClassifier,
     killAfter = 5_000,
     reapAfter = 7_000,
   } = options ?? {};
@@ -235,7 +353,7 @@ function command(file, args, options, state) {
       }
       if (failure) reject(failure);
       else if (code !== 0) {
-        state.commandOutcome = signal ? "signal" : "exit-status";
+        state.commandOutcome = signal ? "signal" : (failureClassifier?.(stderr) ?? "exit-status");
         reject(new Error(`Validation child exited with ${signal ? "a signal" : "an error"}.`));
       } else resolvePromise(capture ? { stdout, stderr } : undefined);
     });
@@ -434,6 +552,8 @@ console.log(JSON.stringify({ warmup: true, worker: true, crypto: true, dynamicIm
 }
 
 export async function runNodeHardeningValidation(options) {
+  validateDeveloperIdOptions(options);
+  const signingHome = developerIdSigningEnvironment(options, {}, process.env.HOME).HOME;
   const archiveName = /^node-(v24\.[0-9]+\.[0-9]+)-darwin-arm64\.tar\.xz$/.exec(
     basename(options.archive),
   );
@@ -549,32 +669,23 @@ export async function runNodeHardeningValidation(options) {
     writeFileSync(entitlements, entitlementPlist(), { mode: 0o600 });
     await command(
       "/usr/bin/codesign",
-      [
-        "--force",
-        "--sign",
-        "-",
-        "--identifier",
-        "org.ellie.validation.node",
-        "--options",
-        "runtime",
-        "--entitlements",
-        entitlements,
-        node,
-      ],
+      nodeHardeningSigningArguments(options, node, entitlements),
+      {
+        env: developerIdSigningEnvironment(options, state.environment, signingHome),
+        failureClassifier: options.identitySha1 ? classifyDeveloperIdSigningFailure : undefined,
+      },
+      state,
+    );
+    state.stage = "signature-verify";
+    await command(
+      "/usr/bin/codesign",
+      nodeHardeningVerificationArguments(options, node),
       {},
       state,
     );
-    await command("/usr/bin/codesign", ["--verify", "--strict", node], {}, state);
     state.stage = "signature-inspect";
     const details = await command("/usr/bin/codesign", ["-dvv", node], { capture: true }, state);
-    const flags = /flags=0x([0-9a-f]+)\([^)]*runtime[^)]*\)/i.exec(details.stderr);
-    if (
-      !flags ||
-      (Number.parseInt(flags[1], 16) & 0x10000) === 0 ||
-      !/^Signature=adhoc$/m.test(details.stderr) ||
-      !/^Identifier=org\.ellie\.validation\.node$/m.test(details.stderr)
-    )
-      throw new Error("Hardened Node signature metadata is invalid.");
+    validateNodeSignatureMetadata(details.stderr, options.teamId);
     const actual = await command(
       "/usr/bin/codesign",
       ["-d", "--entitlements", ":-", node],
@@ -673,7 +784,9 @@ export async function runNodeHardeningValidation(options) {
     if (JSON.stringify(JSON.parse(result.stdout)) !== JSON.stringify(expected))
       throw new Error("Hardened Node workload result is invalid.");
     succeeded = true;
-    console.log("PASS Hardened ad-hoc Node completed the isolated runtime workload.");
+    console.log(
+      `PASS Hardened ${options.identitySha1 ? "Developer ID" : "ad-hoc"} Node completed the isolated runtime workload.`,
+    );
   } catch {
     runFailure = new Error(
       `FAIL Node hardening validation stage=${state.stage} outcome=${state.signal ? "interrupted" : (state.commandOutcome ?? "failed")}.`,

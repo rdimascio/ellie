@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,10 +7,16 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 import {
   nodeHardeningEntitlements,
+  nodeHardeningSigningArguments,
+  nodeHardeningVerificationArguments,
   parseNodeHardeningOptions,
   runNodeHardeningCommandFixture,
   runNodeHardeningValidation,
   validateNodeEntitlements,
+  validateNodeSignatureMetadata,
+  validateDeveloperIdOptions,
+  developerIdSigningEnvironment,
+  classifyDeveloperIdSigningFailure,
 } from "../scripts/test-node-hardening.mjs";
 
 const archive = "/private/tmp/node-v24.21.0-darwin-arm64.tar.xz";
@@ -31,6 +37,210 @@ test("Node hardening inputs require one exact arm64 Node 24 archive and digest",
     assert.throws(() => parseNodeHardeningOptions(args));
   }
 });
+
+test("Developer ID mode requires one strict private selector and independent team ID", () => {
+  const sha1 = "A".repeat(40);
+  const teamId = "TESTTEAM01";
+  assert.deepEqual(
+    parseNodeHardeningOptions([
+      "--node-archive",
+      archive,
+      "--node-sha256",
+      digest,
+      "--developer-id-sha1",
+      sha1,
+      "--team-id",
+      teamId,
+    ]),
+    { archive, sha256: digest, identitySha1: sha1, teamId },
+  );
+  for (const extra of [
+    ["--developer-id-sha1", sha1],
+    ["--developer-id-sha1", "a".repeat(40), "--team-id", teamId],
+    ["--developer-id-sha1", sha1, "--team-id", "SHORT"],
+  ]) {
+    assert.throws(() =>
+      parseNodeHardeningOptions(["--node-archive", archive, "--node-sha256", digest, ...extra]),
+    );
+  }
+  assert.throws(() => validateDeveloperIdOptions({ identitySha1: sha1 }));
+  assert.throws(() => validateDeveloperIdOptions({ identitySha1: "a".repeat(40), teamId }));
+  assert.throws(() => validateDeveloperIdOptions({ identitySha1: `${sha1}\n`, teamId }));
+  assert.throws(() => validateDeveloperIdOptions({ identitySha1: sha1, teamId: `${teamId}\n` }));
+  assert.throws(() =>
+    validateDeveloperIdOptions({ identitySha1: [sha1] as unknown as string, teamId }),
+  );
+  assert.throws(() =>
+    validateDeveloperIdOptions({ identitySha1: sha1, teamId: [teamId] as unknown as string }),
+  );
+  assert.doesNotThrow(() => validateDeveloperIdOptions({ identitySha1: sha1, teamId }));
+});
+
+test("direct validation rejects malformed Developer ID options before creating owned state", async () => {
+  const guardRoot = await mkdtemp(join(tmpdir(), "ellie-node-option-test-"));
+  const previous = process.env.TMPDIR;
+  let safe = false;
+  try {
+    process.env.TMPDIR = guardRoot;
+    await assert.rejects(
+      runNodeHardeningValidation({
+        archive,
+        sha256: digest,
+        identitySha1: "A".repeat(40),
+        teamId: `TESTTEAM01" or true`,
+      }),
+      /Developer ID validation inputs are invalid/,
+    );
+    assert.deepEqual(await readdir(guardRoot), []);
+    safe = true;
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+    if (safe) await rm(guardRoot, { recursive: true });
+  }
+});
+
+test("Developer ID signing policy adds timestamp and verifies exact chain metadata", () => {
+  const sha1 = "A".repeat(40);
+  const teamId = "TESTTEAM01";
+  const signed = nodeHardeningSigningArguments(
+    { archive, sha256: digest, identitySha1: sha1, teamId },
+    "/owned/node",
+    "/owned/entitlements",
+  );
+  assert.deepEqual(signed, [
+    "--force",
+    "--sign",
+    sha1,
+    "--identifier",
+    "org.ellie.validation.node",
+    "--options",
+    "runtime",
+    "--timestamp",
+    "--entitlements",
+    "/owned/entitlements",
+    "/owned/node",
+  ]);
+  assert.deepEqual(nodeHardeningVerificationArguments({ archive, sha256: digest }, "/owned/node"), [
+    "--verify",
+    "--strict",
+    "--all-architectures",
+    "/owned/node",
+  ]);
+  assert.deepEqual(
+    nodeHardeningVerificationArguments(
+      { archive, sha256: digest, identitySha1: sha1, teamId },
+      "/owned/node",
+    ),
+    [
+      "--verify",
+      "--strict",
+      "--all-architectures",
+      `-R=anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${teamId}" and identifier "org.ellie.validation.node"`,
+      "/owned/node",
+    ],
+  );
+  const metadata = `Identifier=org.ellie.validation.node
+TeamIdentifier=${teamId}
+Format=Mach-O thin (arm64)
+CodeDirectory v=20500 size=1 flags=0x10000(runtime)
+Signature size=9000
+Authority=Developer ID Application: Example (${teamId})
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=Sep 14, 2026 at 1:00:00 PM`;
+  assert.doesNotThrow(() => validateNodeSignatureMetadata(metadata, teamId));
+  assert.throws(() =>
+    validateNodeSignatureMetadata(metadata.replace(/^Timestamp=.*$/m, ""), teamId),
+  );
+  assert.throws(() =>
+    validateNodeSignatureMetadata(metadata.replace("Apple Root CA", "Other"), teamId),
+  );
+  assert.throws(() =>
+    validateNodeSignatureMetadata(metadata.replace(teamId, "AAAAAAAAAA"), teamId),
+  );
+  assert.throws(() =>
+    validateNodeSignatureMetadata(metadata + "\nAuthority=Apple Root CA", teamId),
+  );
+  assert.throws(() => validateNodeSignatureMetadata(metadata, `${teamId}\n`));
+  assert.throws(() => validateNodeSignatureMetadata(metadata, [teamId] as unknown as string));
+
+  const adHoc = `Identifier=org.ellie.validation.node
+CodeDirectory v=20500 size=1 flags=0x10000(runtime)
+Signature=adhoc`;
+  assert.doesNotThrow(() => validateNodeSignatureMetadata(adHoc));
+  assert.throws(() => validateNodeSignatureMetadata(`${adHoc}\nTimestamp=now`));
+  assert.throws(() => validateNodeSignatureMetadata(adHoc, teamId));
+  assert.ok(
+    !nodeHardeningSigningArguments({ archive, sha256: digest }, "n", "e").includes("--timestamp"),
+  );
+});
+
+test("only Developer ID signing receives validated caller HOME and fixed failure classes", () => {
+  const isolated = {
+    HOME: "/private/tmp/owned/home",
+    TMPDIR: "/private/tmp/owned",
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    LANG: "C",
+    LC_ALL: "C",
+  };
+  const signed = { archive, sha256: digest, identitySha1: "A".repeat(40), teamId: "TESTTEAM01" };
+  assert.deepEqual(developerIdSigningEnvironment(signed, isolated, "/Users/synthetic"), {
+    ...isolated,
+    HOME: "/Users/synthetic",
+  });
+  assert.deepEqual(
+    developerIdSigningEnvironment({ archive, sha256: digest }, isolated, undefined),
+    {
+      ...isolated,
+    },
+  );
+  for (const home of [undefined, "relative", "/Users/a\0b", `/Users/${"x".repeat(1_025)}`])
+    assert.throws(() => developerIdSigningEnvironment(signed, isolated, home));
+  assert.equal(
+    classifyDeveloperIdSigningFailure("The specified item could not be found in the keychain."),
+    "signing-identity-unavailable",
+  );
+  assert.equal(
+    classifyDeveloperIdSigningFailure("no identity found"),
+    "signing-identity-unavailable",
+  );
+  assert.equal(
+    classifyDeveloperIdSigningFailure("User interaction is not allowed."),
+    "signing-interaction-not-allowed",
+  );
+  assert.equal(
+    classifyDeveloperIdSigningFailure("timestamp service is unavailable"),
+    "signing-timestamp-unavailable",
+  );
+  assert.equal(classifyDeveloperIdSigningFailure("The operation timed out."), "signing-timeout");
+});
+
+test(
+  "macOS codesign accepts the generated Developer ID requirement grammar",
+  { skip: process.platform !== "darwin" },
+  () => {
+    const options = {
+      archive,
+      sha256: digest,
+      identitySha1: "A".repeat(40),
+      teamId: "TESTTEAM01",
+    };
+    const requirement = nodeHardeningVerificationArguments(options, "/usr/bin/true").find(
+      (argument) => argument.startsWith("-R="),
+    );
+    assert.ok(requirement);
+    const checked = spawnSync(
+      "/usr/bin/codesign",
+      ["--verify", "--strict", "--all-architectures", requirement, "/usr/bin/true"],
+      { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1_024 },
+    );
+    assert.equal(checked.error, undefined);
+    assert.equal(checked.signal, null);
+    assert.equal(checked.status, 3);
+    assert.match(checked.stderr, /code failed to satisfy specified code requirement\(s\)/);
+  },
+);
 
 test("archive member is rejected before extraction when its declared size exceeds the bound", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-node-archive-test-"));
