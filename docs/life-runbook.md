@@ -38,6 +38,10 @@ The directory must be outside the source checkout, owned by the current OS user,
 - “Complete buy a garden gift.”
 - “Set a timer for 2 minutes.”
 - “Every Monday at 9 am remind me to plan the week.”
+- “Create a plan called Doctor visit: Confirm appointment; Gather forms; Prepare questions.”
+- “List plans.”
+- “Complete step 2 of plan Doctor visit.”
+- “Reopen step 2 of plan Doctor visit.”
 - “List routines.”
 - “Pause routine plan the week.”
 - “Resume routine plan the week.”
@@ -55,6 +59,8 @@ The directory must be outside the source checkout, owned by the current OS user,
 - “Review my feedback and suggest an improvement.” (Uses recent private corrected examples.)
 - “List improvements.”
 - “Adopt improvement Two dinner options.” (Use the exact name of a reviewed proposal.)
+
+Your world → Plans holds saved checklists and their progress. Complete or reopen a step there, or use the same commands in chat. Refresh plans to pick up changes made in another window. A stale checkbox update refreshes the current plan instead of overwriting it. These lists record your progress; their step text is not automatically executed.
 
 Use Your world to inspect and correct the resulting records, teach from files, or review a calendar/contact import. Source lists use compact previews; opening a record loads its full content. Your space holds playable and readable extensions with retained revision controls. Activity shows durable work, source-worker progress, cited summaries and feedback. Today shows current commitments and delivered notifications. Settings supports default, active group and user preferences; authority remains separate from those preferences.
 

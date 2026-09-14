@@ -14,6 +14,7 @@ import { selectModelWorld } from "../../life-context/src/model-world.ts";
 import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src/index.ts";
 import { builtInManifest, PluginError } from "../../life-plugins/src/index.ts";
 import { LifeTeaching } from "../../life-teaching/src/index.ts";
+import { LifePlanError, LifePlans } from "../../life-plans/src/index.ts";
 import {
   LifeImprovementEngine,
   LifeImprovementError,
@@ -48,6 +49,7 @@ export * from "./operations.ts";
 export * from "./continuation.ts";
 export * from "./build.ts";
 export * from "../../life-learning/src/improvement.ts";
+export * from "../../life-plans/src/index.ts";
 export * from "./schedules.ts";
 
 export interface LifeHarnessOptions {
@@ -60,6 +62,7 @@ export interface LifeHarnessOptions {
   context?: ProactivityEngine;
   teaching?: LifeTeaching;
   improvements?: LifeImprovementEngine;
+  plans?: LifePlans;
 }
 export interface ChatRequest {
   actor: LifeActor;
@@ -104,6 +107,7 @@ export interface ChatResponse {
 export interface LifeHarness {
   improvements: LifeImprovementEngine;
   deliveries: ScheduledDeliveries;
+  plans: LifePlans;
   chat(request: ChatRequest): Promise<ChatResponse>;
   continuePendingIntent(request: {
     actor: LifeActor;
@@ -399,6 +403,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       now,
     });
   const deliveries = new ScheduledDeliveries(options.store, options.tasks);
+  const plans = options.plans ?? new LifePlans(options.store);
   const sessions = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
   const contextGenerations = new Map<string, number>();
   const actorGenerations = new Map<string, number>();
@@ -479,6 +484,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     tasks: options.tasks,
     now,
     enqueueSummary: enqueueBackgroundSummary,
+    plans,
     deliveryStatus: (record) => {
       try {
         return deliveries.statusFor(record);
@@ -960,6 +966,79 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         );
       } catch (error) {
         if (error instanceof ScheduledDeliveryError) return finish(error.message);
+        throw error;
+      }
+    }
+    const createPlan =
+      /^(?:please\s+)?create\s+(?:a\s+)?plan\s+called\s+([^:]{1,200}):\s*(.+?)[.!]?$/i.exec(
+        message,
+      );
+    if (createPlan) {
+      const title = clean(createPlan[1]!);
+      const steps = createPlan[2]!.split(";").map(clean).filter(Boolean);
+      try {
+        const outcome = operations.execute(
+          request.actor,
+          request.scope,
+          { kind: "create_plan", title, steps },
+          "UTC",
+        );
+        records.push(...outcome.records);
+        actions.push({ label: `Create plan: ${title}`, status: "completed" });
+        return finish(outcome.reply);
+      } catch (error) {
+        if (error instanceof TypeError || error instanceof LifePlanError)
+          return finish(error.message);
+        throw error;
+      }
+    }
+    if (/^(?:please\s+)?list\s+plans[.!?]?$/i.test(message)) {
+      const page = plans.list(request.actor, { scope: request.scope });
+      return finish(
+        page.plans.length
+          ? `Plans: ${page.plans.map((plan) => `${plan.record.title} (${plan.completedSteps}/${plan.totalSteps} complete)`).join("; ")}.${page.hasMore ? " More plans are available in the full list." : ""}`
+          : "You don’t have any plans in this space.",
+      );
+    }
+    const showPlan = /^(?:please\s+)?show\s+plan\s+(.+?)[.!?]?$/i.exec(message);
+    if (showPlan) {
+      try {
+        const plan = plans.find(request.actor, request.scope, clean(showPlan[1]!));
+        return finish(
+          `Plan “${plan.record.title}” (${plan.completedSteps}/${plan.totalSteps} complete): ${plan.steps.map((step, index) => `${index + 1}. ${step.title}${step.completed ? " ✓" : ""}`).join("; ")}.`,
+        );
+      } catch (error) {
+        if (error instanceof LifePlanError) return finish(error.message);
+        throw error;
+      }
+    }
+    const planStep = /^(complete|reopen)\s+step\s+(\d{1,2})\s+of\s+plan\s+(.+?)[.!?]?$/i.exec(
+      message,
+    );
+    if (planStep) {
+      try {
+        const plan = plans.find(request.actor, request.scope, clean(planStep[3]!));
+        const number = Number(planStep[2]);
+        if (!Number.isSafeInteger(number) || number < 1 || number > plan.steps.length)
+          return finish(`Choose a step from 1 through ${plan.steps.length}.`);
+        const step = plan.steps[number - 1]!;
+        const completed = planStep[1]!.toLowerCase() === "complete";
+        const updated = plans.setStep(request.actor, {
+          id: plan.record.id,
+          stepId: step.id,
+          completed,
+          expectedRevision: plan.record.revision,
+        });
+        records.push(updated.record);
+        actions.push({
+          label: `${completed ? "Complete" : "Reopen"} plan step: ${step.title}`,
+          status: "completed",
+        });
+        return finish(
+          `${completed ? "Completed" : "Reopened"} step ${number}, “${step.title}”, in “${updated.record.title}” (${updated.completedSteps}/${updated.totalSteps} complete).`,
+        );
+      } catch (error) {
+        if (error instanceof LifePlanError) return finish(error.message);
         throw error;
       }
     }
@@ -2153,6 +2232,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   return {
     improvements,
     deliveries,
+    plans,
     chat,
     continuePendingIntent,
     invalidateContext,
@@ -2650,6 +2730,15 @@ function authorizesIntent(message: string, intent: LifeIntent): boolean {
           "i",
         ).test(requestText) && overlaps(intent.query)
       );
+    case "create_plan":
+      return (
+        (new RegExp(
+          `^(?:please\\s+)?${polite}(?:(?:create|make|start|add)\\s+(?:a\\s+)?(?:plan|checklist)|help me (?:plan|prepare)\\b)`,
+          "i",
+        ).test(requestText) ||
+          /^(?:please\s+)?(?:plan|prepare)\s+(?:for\s+)?/i.test(requestText)) &&
+        overlaps(intent.title)
+      );
   }
 }
 function operationLabel(intent: LifeIntent): string {
@@ -2668,6 +2757,8 @@ function operationLabel(intent: LifeIntent): string {
       return `Show ${intent.view}`;
     case "summarize_sources":
       return `Summarize ${intent.query}`;
+    case "create_plan":
+      return `Create plan: ${intent.title}`;
     case "clarify":
       return "Clarify request";
   }

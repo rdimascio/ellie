@@ -1695,6 +1695,92 @@ test("record DTO reports the authoritative bound delivery state", async () => {
   }
 });
 
+test("plan routes create scoped checklists and update steps with record CAS", async () => {
+  const f = await fixture();
+  try {
+    let running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const createdResponse = await fetch(`${running.url}/api/life/plans`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        title: "Prepare launch",
+        steps: ["Check weather", "Pack bag"],
+      }),
+    });
+    assert.equal(createdResponse.status, 201);
+    const created = (await createdResponse.json()) as {
+      record: { id: string; revision: number; data: { completed: boolean } };
+      steps: Array<{ id: string; completed: boolean }>;
+      completedSteps: number;
+      totalSteps: number;
+      completed: boolean;
+    };
+    assert.equal(created.totalSteps, 2);
+    assert.equal(created.completedSteps, 0);
+    const updatedResponse = await fetch(
+      `${running.url}/api/life/plans/${created.record.id}/steps/${created.steps[0]!.id}`,
+      {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({ completed: true, expectedRevision: 1 }),
+      },
+    );
+    assert.equal(updatedResponse.status, 200);
+    const updated = (await updatedResponse.json()) as {
+      record: { revision: number };
+      completedSteps: number;
+    };
+    assert.equal(updated.record.revision, 2);
+    assert.equal(updated.completedSteps, 1);
+    assert.equal(
+      (
+        await fetch(
+          `${running.url}/api/life/plans/${created.record.id}/steps/${created.steps[1]!.id}`,
+          {
+            method: "POST",
+            headers: jsonHeaders(running.url, cookie),
+            body: JSON.stringify({ completed: true, expectedRevision: 1 }),
+          },
+        )
+      ).status,
+      409,
+    );
+    assert.equal(
+      (
+        await fetch(
+          `${running.url}/api/life/plans/${created.record.id}/steps/${created.steps[1]!.id}`,
+          {
+            method: "POST",
+            headers: jsonHeaders(running.url, cookie),
+            body: JSON.stringify({ completed: true, expectedRevision: [2] }),
+          },
+        )
+      ).status,
+      400,
+    );
+    const list = (await (
+      await fetch(`${running.url}/api/life/plans?scope=user:local`, { headers: { cookie } })
+    ).json()) as { plans: unknown[]; hasMore: boolean };
+    assert.equal(list.plans.length, 1);
+    assert.equal(list.hasMore, false);
+    await running.server.close();
+    running = await f.start("b".repeat(43), "bob");
+    cookie = await authenticate(running.url, "b".repeat(43));
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/plans/${created.record.id}`, {
+          headers: { cookie },
+        })
+      ).status,
+      404,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 test("server close refuses to release stores while an HTTP handler remains active", async () => {
   const f = await fixture();
   let release!: () => void;

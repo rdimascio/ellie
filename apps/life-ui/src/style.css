@@ -1846,10 +1846,23 @@ main {
     margin-top: 8px;
   }
 }
-.guidance {
+.guidance,
+.plans {
   margin: 24px 0;
 }
+.plans > header > button {
+  flex-shrink: 0;
+  border: 1px solid var(--rule);
+  background: transparent;
+  border-radius: 18px;
+  padding: 7px 13px;
+  color: var(--ink);
+}
+.plan-steps input {
+  accent-color: var(--coral);
+}
 .guidance > header,
+.plans > header,
 .personal-data > header {
   display: flex;
   align-items: start;
@@ -1857,6 +1870,7 @@ main {
   gap: 24px;
 }
 .guidance h2,
+.plans h2,
 .personal-data h2 {
   font:
     400 24px Georgia,
@@ -1864,10 +1878,64 @@ main {
   margin: 0 0 6px;
 }
 .guidance p,
+.plans > header p,
 .personal-data > p {
   color: var(--muted);
   line-height: 1.5;
   margin-top: 0;
+}
+.plan-list {
+  border-top: 1px solid var(--rule);
+}
+.plan-list > button {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(110px, 28%);
+  align-items: center;
+  gap: 24px;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  background: transparent;
+  padding: 18px 4px;
+  text-align: left;
+}
+.plan-list strong,
+.plan-list small {
+  display: block;
+}
+.plan-list small,
+.plan-chat-help,
+.plan-limit {
+  color: var(--muted);
+  font-size: 12px;
+}
+.plan-list progress {
+  width: 100%;
+  height: 7px;
+  accent-color: var(--coral);
+}
+.plan-chat-help {
+  margin: 18px 0;
+  line-height: 1.7;
+}
+.plan-chat-help strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.plan-steps {
+  border-top: 1px solid var(--rule);
+  margin: 18px 0;
+}
+.plan-steps label.inline-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border-bottom: 1px solid var(--rule);
+  padding: 14px 2px;
+  cursor: pointer;
+}
+.plan-steps input {
+  margin-top: 3px;
 }
 .guide-list {
   border-top: 1px solid var(--rule);

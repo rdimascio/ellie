@@ -161,6 +161,15 @@ export function validateLifeIntent(value: unknown): LifeIntent {
         throw new Error("Invalid model action.");
       if (item.currency !== undefined) bounded(item.currency, 8);
       break;
+    case "create_plan":
+      keys(item, ["kind", "title", "steps"]);
+      bounded(item.title, 200);
+      if (!Array.isArray(item.steps) || item.steps.length < 1 || item.steps.length > 24)
+        throw new Error("Invalid model action.");
+      item.steps.forEach((step) => bounded(step, 500));
+      if (item.steps.reduce((total, step) => total + (step as string).length, 0) > 8000)
+        throw new Error("Invalid model action.");
+      break;
     case "resolve_need":
       keys(item, ["kind", "operation", "title"]);
       bounded(item.title, 500);

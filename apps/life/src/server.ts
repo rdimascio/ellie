@@ -29,6 +29,7 @@ import {
 } from "../../../packages/life-import/src/index.ts";
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
 import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
+import { LifePlanError, LifePlans, type LifePlan } from "../../../packages/life-plans/src/index.ts";
 import { PluginBuildError } from "../../../packages/life-harness/src/build.ts";
 import {
   ScheduledDeliveries,
@@ -397,6 +398,7 @@ export class LifeHttpServer {
   private readonly options: LifeServerOptions;
   private readonly learning: LifeLearning;
   private readonly teaching: LifeTeaching;
+  private readonly plans: LifePlans;
   private readonly deliveries: ScheduledDeliveries;
   constructor(options: LifeServerOptions) {
     this.options = options;
@@ -404,6 +406,7 @@ export class LifeHttpServer {
     this.actor = { userId: identifier(options.userId ?? "local", "userId") };
     this.learning = new LifeLearning(options.store);
     this.teaching = new LifeTeaching(options.store, this.now);
+    this.plans = new LifePlans(options.store);
     this.deliveries = new ScheduledDeliveries(options.store, options.tasks);
     this.recoverReminderReschedules();
     const pendingReset = options.store.getPersonalReset(this.actor);
@@ -811,6 +814,14 @@ export class LifeHttpServer {
       if (path === "/api/life/groups" && request.method === "GET") return this.groups(response);
       if (/^\/api\/life\/groups\/[^/]+$/.test(path) && request.method === "PATCH")
         return await this.renameGroup(request, response, path);
+      if (path === "/api/life/plans" && request.method === "GET")
+        return this.planList(url, response);
+      if (path === "/api/life/plans" && request.method === "POST")
+        return await this.planCreate(request, response);
+      if (/^\/api\/life\/plans\/[^/]+$/.test(path) && request.method === "GET")
+        return this.planDetail(path, response);
+      if (/^\/api\/life\/plans\/[^/]+\/steps\/[^/]+$/.test(path) && request.method === "POST")
+        return await this.planStep(request, path, response);
       if (path === "/api/life/records" && request.method === "POST")
         return await this.createRecord(request, response);
       if (path === "/api/life/records" && request.method === "GET")
@@ -1401,6 +1412,85 @@ export class LifeHttpServer {
       createdAt: new Date(group.createdAt).toISOString(),
       updatedAt: new Date(group.updatedAt).toISOString(),
     };
+  }
+  private planDto(value: LifePlan): Record<string, unknown> {
+    return { ...value, record: serializeRecord(value.record) };
+  }
+  private planList(url: URL, response: ServerResponse): void {
+    const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
+      page = this.plans.list(this.actor, {
+        scope,
+        ...(url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+      });
+    this.send(response, 200, {
+      plans: page.plans.map((value) => this.planDto(value)),
+      hasMore: page.hasMore,
+      unavailableCount: page.unavailableCount,
+    });
+  }
+  private planDetail(path: string, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!), "plan id");
+    try {
+      this.send(response, 200, this.planDto(this.plans.get(this.actor, id)));
+    } catch (error) {
+      if (error instanceof LifeAccessError) throw new HttpError(404, "Plan is unavailable.");
+      if (error instanceof LifePlanError && error.code === "invalid_plan")
+        throw new HttpError(422, "Plan data is invalid.");
+      throw error;
+    }
+  }
+  private async planCreate(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const body = jsonObject(await this.body(request));
+    if (Object.keys(body).some((key) => !["scope", "title", "steps"].includes(key)))
+      throw new HttpError(400, "Plan request contains an unknown field.");
+    if (!Array.isArray(body.steps)) throw new HttpError(400, "Plan steps are invalid.");
+    try {
+      const created = this.plans.create(this.actor, {
+        scope: this.scope(body.scope),
+        title: bounded(body.title, "title", 200),
+        steps: body.steps as string[],
+      });
+      this.options.harness.invalidateContext?.(this.actor, created.record.scope);
+      this.send(response, 201, this.planDto(created));
+    } catch (error) {
+      if (error instanceof LifePlanError && error.code === "capacity")
+        throw new HttpError(409, error.message);
+      throw error;
+    }
+  }
+  private async planStep(
+    request: IncomingMessage,
+    path: string,
+    response: ServerResponse,
+  ): Promise<void> {
+    const parts = path.split("/"),
+      id = identifier(decodeURIComponent(parts.at(-3)!), "plan id"),
+      stepId = identifier(decodeURIComponent(parts.at(-1)!), "step id"),
+      body = jsonObject(await this.body(request));
+    if (Object.keys(body).some((key) => key !== "completed" && key !== "expectedRevision"))
+      throw new HttpError(400, "Plan step request contains an unknown field.");
+    if (typeof body.completed !== "boolean") throw new HttpError(400, "completed is invalid.");
+    if (
+      typeof body.expectedRevision !== "number" ||
+      !Number.isSafeInteger(body.expectedRevision) ||
+      body.expectedRevision < 1
+    )
+      throw new HttpError(400, "expectedRevision is invalid.");
+    try {
+      const updated = this.plans.setStep(this.actor, {
+        id,
+        stepId,
+        completed: body.completed,
+        expectedRevision: body.expectedRevision,
+      });
+      this.options.harness.invalidateContext?.(this.actor, updated.record.scope);
+      this.send(response, 200, this.planDto(updated));
+    } catch (error) {
+      if (error instanceof LifeAccessError) throw new HttpError(404, "Plan is unavailable.");
+      if (error instanceof LifePlanError && error.code === "invalid_plan")
+        throw new HttpError(422, "Plan data is invalid.");
+      throw error;
+    }
   }
   private async createRecord(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = jsonObject(await this.body(request));

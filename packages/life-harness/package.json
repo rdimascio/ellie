@@ -10,6 +10,7 @@
   "dependencies": {
     "@ellie/life-context": "*",
     "@ellie/life-core": "*",
+    "@ellie/life-plans": "*",
     "@ellie/life-plugins": "*",
     "@ellie/life-teaching": "*",
     "@ellie/life-time": "*",

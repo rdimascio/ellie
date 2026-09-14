@@ -18,6 +18,7 @@ import {
 } from "../../life-time/src/index.ts";
 import type { PreparedTaskReplacement, TaskRecord } from "../../task-runtime/src/index.ts";
 import { TaskRuntime } from "../../task-runtime/src/index.ts";
+import { LifePlans } from "../../life-plans/src/index.ts";
 
 export type TemporalSpec =
   | { type: "instant"; at: number }
@@ -46,6 +47,7 @@ export type LifeIntent =
     }
   | { kind: "query"; view: "today" | "upcoming" | "birthdays" }
   | { kind: "summarize_sources"; query: string }
+  | { kind: "create_plan"; title: string; steps: string[] }
   | { kind: "clarify"; question: string; missing: string[] };
 
 export interface OperationOutcome {
@@ -62,6 +64,7 @@ export interface LifeOperationsOptions {
   deliveryStatus?: (
     record: Pick<LifeRecord, "id" | "kind" | "scope" | "data">,
   ) => { status: string; scheduleStatus: string } | undefined;
+  plans?: LifePlans;
 }
 export interface ReminderRescheduleJournal {
   prepared(value: { operationId: string; replacementTaskId: string; dueAt: number }): void;
@@ -459,6 +462,20 @@ export class LifeOperations {
       };
     }
     if (intent.kind === "query") return this.query(actor, scope, intent.view, effectiveZone);
+    if (intent.kind === "create_plan") {
+      if (!this.options.plans) return this.rejected("Plan storage is unavailable.");
+      const plan = this.options.plans.create(actor, {
+        scope,
+        title: intent.title,
+        steps: intent.steps,
+      });
+      return {
+        status: "completed",
+        reply: `Created plan “${plan.record.title}” with ${plan.totalSteps} ${plan.totalSteps === 1 ? "step" : "steps"}.`,
+        records: [plan.record],
+        tasks: [],
+      };
+    }
     const query = text(intent.query, 1000, "Summary query");
     const task = this.options.enqueueSummary?.(actor, scope, query);
     if (!task) return this.rejected(`I couldn't find a scoped source to summarize for “${query}”.`);

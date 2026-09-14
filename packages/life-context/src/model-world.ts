@@ -5,6 +5,7 @@ import type {
   LifeScope,
 } from "../../life-core/src/index.ts";
 import { LifeStore } from "../../life-core/src/index.ts";
+import { LifePlanError, planDetails } from "../../life-plans/src/index.ts";
 import { parseCalendarDate, parseInstant } from "../../life-time/src/index.ts";
 
 export interface ModelWorldRecord {
@@ -103,6 +104,27 @@ function project(
   )
     return;
   const facts: string[] = [];
+  if (record.data.type === "life-plan-v1") {
+    let plan;
+    try {
+      plan = planDetails(record);
+    } catch (error) {
+      if (error instanceof LifePlanError && error.code === "invalid_plan") return undefined;
+      throw error;
+    }
+    facts.push(`checklistProgress: ${plan.completedSteps}/${plan.totalSteps} steps completed`);
+    const selectedSteps = plan.steps
+      .map((step, index) => ({ step, number: index + 1 }))
+      .sort((a, b) => Number(a.step.completed) - Number(b.step.completed) || a.number - b.number)
+      .filter(({ step }) => step.title.length <= 300)
+      .slice(0, 8);
+    for (const { step, number } of selectedSteps)
+      facts.push(
+        `checklistStep ${number} (${step.completed ? "completed" : "unfinished"}): ${step.title}`,
+      );
+    if (selectedSteps.length < plan.totalSteps)
+      facts.push(`checklistStepsOmitted: ${plan.totalSteps - selectedSteps.length}`);
+  }
   for (const key of dataFields) {
     const value = record.data[key];
     if (typeof value === "string" && value.length <= 240) facts.push(`${key}: ${value}`);
@@ -171,6 +193,7 @@ export function selectModelWorld(
     preferred.add("routine");
   }
   if (mentions(/\b(near|where|restaurant|place|places)\b/i)) preferred.add("place");
+  if (mentions(/\b(plan|plans|checklist|checklists|steps)\b/i)) preferred.add("goal");
   if (mentions(/\b(timer|timers|reminder|reminders|routine|routines)\b/i)) {
     preferred.add("timer");
     preferred.add("reminder");

@@ -1409,6 +1409,115 @@ test("group creation refuses an ambiguous duplicate visible name", async () => {
   }
 });
 
+test("chat creates and updates a scoped plan with stable revisioned steps", async () => {
+  const f = await fixture();
+  try {
+    const group = f.store.createGroup(actor, { name: "Care" }),
+      groupScope = { type: "group", id: group.id } as const,
+      harness = f.make();
+    const created = await harness.chat({
+      actor,
+      scope: groupScope,
+      message:
+        "Create a plan called Doctor visit: Confirm appointment; Gather forms; Prepare questions",
+    });
+    assert.match(created.reply, /Created plan “Doctor visit” with 3 steps/i);
+    const plan = harness.plans.find(actor, groupScope, "Doctor visit");
+    assert.equal(plan.record.scope.id, group.id);
+    const ids = plan.steps.map((step) => step.id);
+    const completed = await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "Complete step 2 of plan Doctor visit.",
+    });
+    assert.match(completed.reply, /Completed step 2, “Gather forms”.*\(1\/3 complete\)/i);
+    const afterComplete = harness.plans.get(actor, plan.record.id);
+    assert.deepEqual(
+      afterComplete.steps.map((step) => step.id),
+      ids,
+    );
+    assert.equal(afterComplete.steps[1]?.completed, true);
+    const shown = await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "Show plan Doctor visit",
+    });
+    assert.match(shown.reply, /2\. Gather forms ✓/);
+    const reopened = await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "Reopen step 2 of plan Doctor visit",
+    });
+    assert.match(reopened.reply, /Reopened step 2.*\(0\/3 complete\)/i);
+    const listed = await harness.chat({ actor, scope: groupScope, message: "List plans." });
+    assert.match(listed.reply, /Doctor visit \(0\/3 complete\)/i);
+    assert.match(
+      (await harness.chat({ actor, scope, message: "List plans" })).reply,
+      /don’t have/i,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("modeled direct planning requests create content through the shared plan operation", async () => {
+  const f = await fixture();
+  const model: LifeModel = {
+    async plan() {
+      return {
+        reply: "Done.",
+        actions: [
+          {
+            type: "life_operation",
+            intent: {
+              kind: "create_plan",
+              title: "Moving house",
+              steps: ["Pack boxes", "Redirect mail"],
+            },
+          },
+        ],
+      };
+    },
+  };
+  try {
+    const response = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Help me plan for moving house",
+    });
+    assert.match(response.reply, /Created plan “Moving house” with 2 steps/i);
+    assert.equal(response.taskIds.length, 0);
+    assert.deepEqual(
+      f.store.listRecords(actor, { scope, kinds: ["goal"] }).map((record) => record.title),
+      ["Moving house"],
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("plan step commands fail closed when an exact scoped title is ambiguous", async () => {
+  const f = await fixture();
+  try {
+    const harness = f.make();
+    harness.plans.create(actor, { scope, title: "Trip", steps: ["Pack"] });
+    harness.plans.create(actor, { scope, title: "Trip", steps: ["Book"] });
+    const result = await harness.chat({
+      actor,
+      scope,
+      message: "Complete step 1 of plan Trip",
+    });
+    assert.match(result.reply, /more than one plan/i);
+    assert.equal(result.actions.length, 0);
+    assert.equal(
+      harness.plans.list(actor, { scope }).plans.every((plan) => plan.completedSteps === 0),
+      true,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 test("chat reviews private feedback and requires explicit adoption before guidance is active", async () => {
   const f = await fixture();
   let guidanceInstructions: string[] = [];

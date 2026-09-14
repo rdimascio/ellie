@@ -7,6 +7,7 @@ import type {
   ConversationTurn,
   Group,
   ImprovementProposal,
+  LifePlan,
   LifeRecord,
   ModelStatus,
   PendingIntent,
@@ -1664,7 +1665,7 @@ function World({
     setSearchResults(null);
     setEditing(null);
   }, [data.scope]);
-  const groups = ["all", "memory", "contact", "need", "source", "guidance"];
+  const groups = ["all", "memory", "contact", "need", "source", "plans", "guidance"];
   const records = [...data.records, ...extras].filter(
     (r) =>
       !(r.kind === "routine" && r.data.type === "teaching-guide-v1") &&
@@ -1742,6 +1743,8 @@ function World({
       )}
       {tab === "guidance" ? (
         <Guidance data={data} refresh={refresh} notify={notify} />
+      ) : tab === "plans" ? (
+        <Plans scope={data.scope} />
       ) : searchResults ? (
         searchResults.length ? (
           <div className="record-list search-results">
@@ -1790,7 +1793,7 @@ function World({
           body="You can teach Ellie in chat or add a source below."
         />
       )}
-      {tab !== "guidance" && !searchResults && page?.hasMore && (
+      {tab !== "guidance" && tab !== "plans" && !searchResults && page?.hasMore && (
         <button
           className="load-more"
           disabled={loadingRecords}
@@ -1825,7 +1828,7 @@ function World({
           {loadingRecords ? "Loading…" : "Load more"}
         </button>
       )}
-      {tab !== "guidance" && (
+      {tab !== "guidance" && tab !== "plans" && (
         <SourceUpload
           scope={data.scope}
           done={async () => {
@@ -1848,6 +1851,209 @@ function World({
     </Page>
   );
 }
+function Plans({ scope }: { scope: string }) {
+  const [plans, setPlans] = useState<LifePlan[]>([]),
+    [selected, setSelected] = useState<LifePlan | null>(null),
+    [loading, setLoading] = useState(true),
+    [hasMore, setHasMore] = useState(false),
+    [unavailableCount, setUnavailableCount] = useState(0),
+    [busy, setBusy] = useState(""),
+    [error, setError] = useState("");
+  const scopeRef = useRef(scope);
+  const generationRef = useRef(0);
+  const selectedRef = useRef<LifePlan | null>(null);
+  const requestRef = useRef<AbortController | null>(null);
+  scopeRef.current = scope;
+  const select = (plan: LifePlan | null) => {
+    selectedRef.current = plan;
+    setSelected(plan);
+  };
+  const load = async () => {
+    const requestedScope = scope;
+    const generation = generationRef.current;
+    requestRef.current?.abort();
+    const request = new AbortController();
+    requestRef.current = request;
+    setLoading(true);
+    try {
+      const result = await api.plans.list(requestedScope, request.signal);
+      if (
+        generationRef.current === generation &&
+        scopeRef.current === requestedScope &&
+        !request.signal.aborted
+      ) {
+        setPlans(result.plans);
+        setHasMore(result.hasMore);
+        setUnavailableCount(result.unavailableCount);
+        setError("");
+      }
+    } catch (cause) {
+      if (
+        generationRef.current === generation &&
+        scopeRef.current === requestedScope &&
+        !request.signal.aborted
+      )
+        setError(cause instanceof Error ? cause.message : "Plans could not load.");
+    } finally {
+      if (requestRef.current === request) requestRef.current = null;
+      if (
+        generationRef.current === generation &&
+        scopeRef.current === requestedScope &&
+        !request.signal.aborted
+      )
+        setLoading(false);
+    }
+  };
+  useEffect(() => {
+    generationRef.current++;
+    requestRef.current?.abort();
+    select(null);
+    setPlans([]);
+    setBusy("");
+    setUnavailableCount(0);
+    setError("");
+    void load();
+    return () => {
+      generationRef.current++;
+      requestRef.current?.abort();
+    };
+  }, [scope]);
+  const toggle = async (stepId: string, completed: boolean) => {
+    if (!selected || busy) return;
+    const requestedScope = scope;
+    const generation = generationRef.current;
+    const plan = selected;
+    const isCurrent = () =>
+      generationRef.current === generation && scopeRef.current === requestedScope;
+    setBusy(stepId);
+    setError("");
+    try {
+      const next = await api.plans.step(plan.record.id, stepId, completed, plan.record.revision);
+      if (!isCurrent()) return;
+      if (selectedRef.current?.record.id === plan.record.id) select(next);
+      setPlans((current) =>
+        current.map((plan) => (plan.record.id === next.record.id ? next : plan)),
+      );
+    } catch (cause) {
+      if (!isCurrent()) return;
+      if (cause instanceof ApiError && cause.status === 409) {
+        try {
+          const current = await api.plans.detail(plan.record.id);
+          if (isCurrent()) {
+            if (selectedRef.current?.record.id === plan.record.id) select(current);
+            setPlans((items) =>
+              items.map((plan) => (plan.record.id === current.record.id ? current : plan)),
+            );
+            setError("That checklist changed. Its current steps are shown.");
+          }
+        } catch (refreshError) {
+          if (isCurrent())
+            setError(
+              refreshError instanceof Error ? refreshError.message : "Plan could not refresh.",
+            );
+        }
+      } else setError(cause instanceof Error ? cause.message : "That step could not be updated.");
+    } finally {
+      if (isCurrent()) setBusy("");
+    }
+  };
+  if (loading) return <p className="history-loading">Opening saved plans…</p>;
+  return (
+    <section className="plans">
+      <header>
+        <div>
+          <h2>Plans</h2>
+          <p>
+            Saved checklists you complete yourself. Plans do not run actions or create reminders.
+          </p>
+        </div>
+        <button
+          disabled={Boolean(busy)}
+          onClick={() => {
+            select(null);
+            void load();
+          }}
+        >
+          Refresh plans
+        </button>
+      </header>
+      {plans.length ? (
+        <div className="plan-list">
+          {plans.map((plan) => (
+            <button key={plan.record.id} onClick={() => select(plan)}>
+              <span>
+                <strong>{plan.record.title}</strong>
+                <small>
+                  {plan.completedSteps} of {plan.totalSteps} complete
+                </small>
+              </span>
+              <progress
+                aria-label={`${plan.record.title} progress`}
+                max={plan.totalSteps}
+                value={plan.completedSteps}
+              />
+            </button>
+          ))}
+        </div>
+      ) : error ? null : (
+        <Empty
+          title={unavailableCount ? "Saved plans need review" : "No saved plans yet"}
+          body={
+            "In chat, try “Create a plan called Doctor visit: Confirm appointment; Gather forms; Prepare questions”."
+          }
+        />
+      )}
+      {unavailableCount > 0 && (
+        <p role="status">
+          {unavailableCount} saved {unavailableCount === 1 ? "plan has" : "plans have"} invalid
+          data. Find the original records under All to review or remove them.
+        </p>
+      )}
+      {hasMore && (
+        <p className="plan-limit" role="status">
+          Showing the 64 most recently updated plans in this space.
+        </p>
+      )}
+      <p className="plan-chat-help">
+        In chat, try <strong>List plans</strong>,{" "}
+        <strong>Complete step 2 of plan Doctor visit</strong>, or{" "}
+        <strong>Reopen step 2 of plan Doctor visit</strong>.
+      </p>
+      {error && !selected && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+      {selected && (
+        <Modal title={selected.record.title} close={() => select(null)}>
+          <p className="impact">
+            Saved checklist · {selected.completedSteps} of {selected.totalSteps} complete. Changing
+            a step does not execute it or schedule a reminder.
+          </p>
+          <div className="plan-steps">
+            {selected.steps.map((step) => (
+              <label key={step.id} className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={step.completed}
+                  disabled={Boolean(busy)}
+                  onChange={(event) => void toggle(step.id, event.target.checked)}
+                />
+                <span>{step.title}</span>
+              </label>
+            ))}
+          </div>
+          {error && (
+            <p className="settings-error" role="alert">
+              {error}
+            </p>
+          )}
+        </Modal>
+      )}
+    </section>
+  );
+}
+
 function Guidance({
   data,
   refresh,

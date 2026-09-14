@@ -273,3 +273,10 @@ export interface ImprovementProposal {
   }>;
   guideId?: string;
 }
+export interface LifePlan {
+  record: LifeRecord;
+  steps: Array<{ id: string; title: string; completed: boolean }>;
+  completedSteps: number;
+  totalSteps: number;
+  completed: boolean;
+}

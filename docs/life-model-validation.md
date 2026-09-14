@@ -58,6 +58,12 @@ The final complete engine run passed in 14.1 seconds. It verified no active guid
 
 The candidate unnecessarily conditioned its rule on a future request repeating the dietary/time constraints, and it embedded an illustrative preferred answer. Both the preview and later reply reused that wording. This establishes the functional loop and its effect on model input; it does not establish a general quality improvement or a held-out evaluation. Those limitations are why the product shows the actual candidate and keeps adoption explicit.
 
+## Saved-plan acceptance
+
+The eleventh slice added `scripts/verify-life-plan.mjs`, using the same endpoint/model arguments as the other verification scripts. Its first real-model attempt wrote a three-step camping checklist only in chat, so no plan was saved and the test failed. The prompt now explicitly requires a structured `create_plan` action for a direct checklist creation request and reserves read-only replies for existing-plan questions.
+
+The final run passed in 12.7 seconds using two model requests. It saved three unfinished camping preparation steps, completed the route-planning step through deterministic chat with no additional inference, and correctly explained that packing and checking the weather remained unfinished. The test verified no tasks or apps were created, no advisory mutations occurred, and the exact plan survived closing and reopening the private store. Output: `/tmp/ellie-life-model-acceptance/plan-final.log`. This is a functional sample with synthetic data, not a general planning-quality benchmark.
+
 ## Pinned inputs
 
 - Base model: [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507).

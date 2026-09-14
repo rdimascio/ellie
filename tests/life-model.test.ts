@@ -19,6 +19,58 @@ const improvementExample = {
   preferredResponse: "Vegetable tacos or lentil soup.",
 };
 
+test("plan generation is a bounded content mutation with no step authority fields", async () => {
+  const intent = {
+      kind: "create_plan",
+      title: "Prepare for moving house",
+      steps: ["Choose a moving date", "Label packed boxes"],
+    },
+    envelope = (candidate: unknown) => ({
+      reply: "I can save this checklist.",
+      actions: [{ type: "life_operation", intent: candidate }],
+    });
+  assert.deepEqual(validateModelPlan(envelope(intent)).actions[0], {
+    type: "life_operation",
+    intent,
+  });
+  for (const invalid of [
+    { ...intent, title: "A".repeat(201) },
+    { ...intent, steps: [] },
+    { ...intent, steps: Array.from({ length: 25 }, () => "A step") },
+    { ...intent, steps: [" "] },
+    { ...intent, steps: ["A".repeat(501)] },
+    { ...intent, steps: Array.from({ length: 17 }, () => "A".repeat(500)) },
+    { ...intent, steps: [{ title: "Mail a letter", completed: true }] },
+    { ...intent, scope: "group:family" },
+    { ...intent, execute: true },
+    { ...intent, taskId: "other-task" },
+  ])
+    assert.throws(() => validateModelPlan(envelope(invalid)));
+  assert.throws(() =>
+    validateModelPlan({
+      reply: "Two plans",
+      actions: [
+        { type: "life_operation", intent },
+        { type: "life_operation", intent },
+      ],
+    }),
+  );
+  let messages: Array<{ role: string; content: string }> = [];
+  const model = new LocalOpenAIModel(
+    "http://127.0.0.1:8080/v1",
+    "test-model",
+    async (_url, init) => {
+      messages = JSON.parse(String(init?.body)).messages;
+      return Response.json({
+        choices: [{ message: { content: JSON.stringify(envelope(intent)) } }],
+      });
+    },
+  );
+  await model.plan({ message: "Make a checklist for moving house", evidence: [], history: [] });
+  assert.match(messages[0]!.content, /does not execute the steps/);
+  assert.match(messages[0]!.content, /Never mark a step complete because you proposed it/);
+});
+
 test("improvement proposals use only explicit bounded examples and return a strict candidate", async () => {
   let sent: { messages: Array<{ role: string; content: string }> } | undefined;
   const candidate = {

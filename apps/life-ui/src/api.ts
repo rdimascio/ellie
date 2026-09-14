@@ -17,6 +17,7 @@ import type {
   PendingIntent,
   Group,
   ImprovementProposal,
+  LifePlan,
 } from "./types";
 export class ApiError extends Error {
   constructor(
@@ -380,6 +381,22 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ expectedRevision }),
       }),
+  },
+  plans: {
+    list: (scope: string, signal?: AbortSignal) =>
+      request<{ plans: LifePlan[]; hasMore: boolean; unavailableCount: number }>(
+        `/api/life/plans?scope=${encodeURIComponent(scope)}&limit=64`,
+        { signal },
+      ),
+    detail: (id: string, signal?: AbortSignal) =>
+      request<LifePlan>(`/api/life/plans/${encodeURIComponent(id)}`, { signal }),
+    create: (value: { scope: string; title: string; steps: string[] }) =>
+      request<LifePlan>("/api/life/plans", { method: "POST", body: JSON.stringify(value) }),
+    step: (id: string, stepId: string, completed: boolean, expectedRevision: number) =>
+      request<LifePlan>(
+        `/api/life/plans/${encodeURIComponent(id)}/steps/${encodeURIComponent(stepId)}`,
+        { method: "POST", body: JSON.stringify({ completed, expectedRevision }) },
+      ),
   },
   import: {
     preview: (

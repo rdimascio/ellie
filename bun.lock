@@ -112,6 +112,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/life-core": "workspace:*",
+        "@ellie/life-plans": "workspace:*",
         "@ellie/life-time": "workspace:*",
       },
     },
@@ -125,6 +126,7 @@
       "dependencies": {
         "@ellie/life-context": "*",
         "@ellie/life-core": "*",
+        "@ellie/life-plans": "*",
         "@ellie/life-plugins": "*",
         "@ellie/life-teaching": "*",
         "@ellie/life-time": "*",
@@ -145,6 +147,14 @@
     },
     "packages/life-learning": {
       "name": "@ellie/life-learning",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-core": "workspace:*",
+        "@ellie/life-teaching": "workspace:*",
+      },
+    },
+    "packages/life-plans": {
+      "name": "@ellie/life-plans",
       "version": "0.1.0",
       "dependencies": {
         "@ellie/life-core": "workspace:*",
@@ -250,6 +260,8 @@
     "@ellie/life-ingest": ["@ellie/life-ingest@workspace:packages/life-ingest"],
 
     "@ellie/life-learning": ["@ellie/life-learning@workspace:packages/life-learning"],
+
+    "@ellie/life-plans": ["@ellie/life-plans@workspace:packages/life-plans"],
 
     "@ellie/life-plugins": ["@ellie/life-plugins@workspace:packages/life-plugins"],
 

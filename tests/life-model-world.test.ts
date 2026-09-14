@@ -7,6 +7,7 @@ import { LifeAccessError, LifeStore } from "../packages/life-core/src/index.ts";
 import { selectModelWorld } from "../packages/life-context/src/model-world.ts";
 import { createLifeHarness } from "../packages/life-harness/src/index.ts";
 import { MLBAdapter, PluginStore } from "../packages/life-plugins/src/index.ts";
+import { LifePlans } from "../packages/life-plans/src/index.ts";
 import { TaskRuntime } from "../packages/task-runtime/src/index.ts";
 
 test("world context brings a linked person's interests without crossing the selected space", async () => {
@@ -303,6 +304,49 @@ test("modeled schedule advice receives current delivery state without rewriting 
   } finally {
     await tasks.close();
     plugins.close();
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("world context carries checklist progress and whole numbered steps with explicit omissions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-model-world-")),
+    store = new LifeStore(join(root, "life.sqlite")),
+    actor = { userId: "alice" },
+    scope = { type: "user" as const, id: actor.userId },
+    plans = new LifePlans(store);
+  try {
+    const longStep = "Keep this qualification intact. ".repeat(12) + "Only if you choose to do so.";
+    let plan = plans.create(actor, {
+      scope,
+      title: "Moving house checklist",
+      steps: [longStep, ...Array.from({ length: 11 }, (_, index) => `Moving step ${index + 2}`)],
+    });
+    for (const stepId of [plan.steps[1]!.id, plan.steps[2]!.id])
+      plan = plans.setStep(actor, {
+        id: plan.record.id,
+        stepId,
+        completed: true,
+        expectedRevision: plan.record.revision,
+      });
+    const world = selectModelWorld(store, actor, scope, "What remains on my Moving checklist?"),
+      projected = world.records.find((record) => record.id === plan.record.id)!;
+    assert.ok(projected.facts.includes("checklistProgress: 2/12 steps completed"));
+    assert.ok(projected.facts.includes("checklistStep 4 (unfinished): Moving step 4"));
+    assert.ok(projected.facts.includes("checklistStepsOmitted: 4"));
+    assert.equal(projected.facts.filter((fact) => /^checklistStep \d/.test(fact)).length, 8);
+    assert.equal(JSON.stringify(projected).includes("Keep this qualification"), false);
+    assert.equal(JSON.stringify(projected).includes(plan.steps[3]!.id), false);
+    const malformed = store.updateRecord(actor, plan.record.id, plan.record.revision, {
+      data: { ...plan.record.data, completed: true },
+    });
+    assert.equal(
+      selectModelWorld(store, actor, scope, "Moving checklist").records.some(
+        (record) => record.id === malformed.id,
+      ),
+      false,
+    );
+  } finally {
     store.close();
     await rm(root, { recursive: true, force: true });
   }

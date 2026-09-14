@@ -683,7 +683,91 @@ try {
   await page.getByText(/Saved preferences still apply/i).waitFor();
   assert.equal(await page.getByLabel("Tone").inputValue(), "");
   await page.getByText(/Saved user: playful/i).waitFor();
+  await page
+    .getByLabel("Message Ellie")
+    .fill("Create a plan called Family picnic: Pick a park; Pack lunch; Bring a blanket");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText("Created plan “Family picnic” with 3 steps.").waitFor();
+  await page.getByRole("button", { name: /Your world/ }).click();
+  await page.getByRole("button", { name: "plans", exact: true }).click();
+  await page.getByRole("button", { name: /Family picnic.*0 of 3 complete/ }).waitFor();
+  await page.getByText("Doctor visit", { exact: true }).waitFor({ state: "detached" });
   await page.getByLabel("Sharing with").selectOption("user:e2e-user");
+  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await page
+    .getByLabel("Message Ellie")
+    .fill(
+      "Create a plan called Doctor visit: Confirm appointment; Gather forms; Prepare questions",
+    );
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByText("Created plan “Doctor visit” with 3 steps.").waitFor();
+  await page.getByRole("button", { name: /Your world/ }).click();
+  await page.getByRole("button", { name: "plans", exact: true }).click();
+  const doctorPlanRow = page.getByRole("button", { name: /Doctor visit.*0 of 3 complete/ });
+  await doctorPlanRow.waitFor();
+  await page.getByText("Family picnic", { exact: true }).waitFor({ state: "detached" });
+  await doctorPlanRow.click();
+  const stalePlan = await page.evaluate(async () => {
+    const response = await fetch("/api/life/plans?scope=user:e2e-user&limit=64");
+    const body = (await response.json()) as {
+      plans: Array<{
+        record: { id: string; revision: number };
+        steps: Array<{ id: string; title: string }>;
+      }>;
+    };
+    const plan = body.plans.find((candidate) =>
+      candidate.steps.some((step) => step.title === "Confirm appointment"),
+    )!;
+    const step = plan.steps.find((candidate) => candidate.title === "Confirm appointment")!;
+    const changed = await fetch(`/api/life/plans/${plan.record.id}/steps/${step.id}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ completed: true, expectedRevision: plan.record.revision }),
+    });
+    if (!changed.ok) throw new Error(`Plan setup failed: ${changed.status}`);
+    return plan.record.id;
+  });
+  assert.ok(stalePlan);
+  await page.getByLabel("Gather forms").click();
+  await page.getByText("That checklist changed. Its current steps are shown.").waitFor();
+  assert.equal(await page.getByLabel("Confirm appointment").isChecked(), true);
+  assert.equal(await page.getByLabel("Gather forms").isChecked(), false);
+  const planResponseReady = Promise.withResolvers<void>();
+  const releasePlanResponse = Promise.withResolvers<void>();
+  const stepRoute = `**/api/life/plans/${stalePlan}/steps/*`;
+  await page.route(stepRoute, async (route) => {
+    const response = await route.fetch();
+    planResponseReady.resolve();
+    await releasePlanResponse.promise;
+    await route.fulfill({ response });
+  });
+  await page.getByLabel("Gather forms").click();
+  await planResponseReady.promise;
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  releasePlanResponse.resolve();
+  await page.getByRole("button", { name: /Doctor visit.*2 of 3 complete/ }).waitFor();
+  assert.equal(await page.getByRole("dialog").count(), 0);
+  await page.unroute(stepRoute);
+  await page.getByRole("button", { name: /Doctor visit.*2 of 3 complete/ }).click();
+  await page.getByText(/Saved checklist · 2 of 3 complete/).waitFor();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-plans.png"), fullPage: false });
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.reload();
+  await page.getByRole("button", { name: /Your world/ }).click();
+  await page.getByRole("button", { name: "plans", exact: true }).click();
+  await page.getByRole("button", { name: /Doctor visit.*2 of 3 complete/ }).waitFor();
+  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByLabel("Message Ellie").fill("Reopen step 2 of plan Doctor visit");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page
+    .getByText(/Reopened step 2, “Gather forms”, in “Doctor visit” \(1\/3 complete\)/)
+    .waitFor();
+  await page.getByRole("button", { name: /Your world/ }).click();
+  await page.getByRole("button", { name: "plans", exact: true }).click();
+  await page.getByRole("button", { name: /Doctor visit.*1 of 3 complete/ }).waitFor();
+  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
   await page.getByLabel("Message Ellie").fill("Every day at 9 am remind me to stretch");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/Scheduled “stretch” every day at 09:00/).waitFor();

@@ -906,6 +906,37 @@ export class LifeStore {
         .all(user, limitInput) as Record<string, unknown>[]
     ).map((row) => this.record(row));
   }
+  listPlanRecords(actor: LifeActor, input: { scope: LifeScope; limit?: number }): LifeRecord[] {
+    this.actor(actor);
+    const scope = this.scope(actor, input.scope),
+      limit = input.limit ?? 65;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 65)
+      throw new TypeError("plan record limit is invalid");
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM records WHERE kind='goal' AND scope_type=? AND scope_id=?
+           AND json_extract(data_json,'$.type')='life-plan-v1'
+           ORDER BY updated_at DESC,id DESC LIMIT ?`,
+        )
+        .all(scope.type, scope.id, limit) as Record<string, unknown>[]
+    ).map((row) => this.record(row));
+  }
+  findPlanRecordsByTitle(actor: LifeActor, scopeInput: LifeScope, title: string): LifeRecord[] {
+    this.actor(actor);
+    const scope = this.scope(actor, scopeInput);
+    if (typeof title !== "string" || !title.trim() || title.length > 200)
+      throw new TypeError("plan title is invalid");
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM records WHERE kind='goal' AND scope_type=? AND scope_id=?
+           AND json_extract(data_json,'$.type')='life-plan-v1' AND title=? COLLATE NOCASE
+           ORDER BY updated_at DESC,id DESC LIMIT 2`,
+        )
+        .all(scope.type, scope.id, title.trim()) as Record<string, unknown>[]
+    ).map((row) => this.record(row));
+  }
   listRecordSummaries(
     actor: LifeActor,
     query: { scope: LifeScope; kinds?: LifeRecordKind[]; limit?: number; cursor?: string },
