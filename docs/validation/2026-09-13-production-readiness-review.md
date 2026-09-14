@@ -2,6 +2,8 @@
 
 This record separates release engineering from acceptance of the installed household system. The owner requested the next development milestone to meet a production standard. The reviewed packaged candidate is still a development release; passing source tests alone does not establish that standard.
 
+The [September 14 release trust and CI checkpoint](2026-09-14-release-trust-and-ci.md) supersedes pending-state statements below and records subsequent passing and failing runs, exact checkout provenance and the next reviewed changes. Earlier evidence remains historical.
+
 ## iPhone runner diagnosis
 
 PR59 at `c88c58e354e4da2dd831c5cc11447f406c41e1ed` had two failed native jobs, `103862281617` and `103862286300`. The first retained run passed the repository gate, native builds, geometry checks and 158 Swift tests. Its iPhone UI runner reached testmanagerd session setup but no UI test began before the existing 600-second test deadline. Its diagnostic reported `stage=xcode-test outcome=timeout`; the transport stage was skipped. Do not treat earlier stages passing as a passing native job.
