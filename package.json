@@ -19,6 +19,7 @@
     "desktop:build": "node scripts/build-desktop.mjs",
     "desktop:package": "node scripts/package-desktop.mjs",
     "services:package": "node scripts/build-service-payload.mjs",
+    "services:test-packaged-runtime": "node scripts/test-packaged-runtime.mjs",
     "desktop:test": "node scripts/test-desktop.mjs",
     "ios:build": "xcodebuild -project apps/ios/EllieIOS.xcodeproj -scheme EllieIOS -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build",
     "ios:test": "node scripts/test-ios.mjs",
