@@ -2,8 +2,7 @@
 
 The first migration-switch draft, based on PR67
 `cec3248fa297f1b2ec97a5d5555788584b20ead2`, passed its existing local gate but did
-not pass coordinating and independent review. It remains unpublished while these findings
-are corrected.
+not pass coordinating and independent review. The findings below were corrected before the final reviewed candidate.
 
 Root independently reproduced two crash failures using a captured source copy and owned
 synthetic installer fixtures. The reviewed selection source had SHA-256
@@ -64,5 +63,27 @@ Final review of that follow-up found additional recovery boundaries requiring co
   metadata.
 
 These are source-review findings, not new hardware failures. The author is adding focused
-regressions before the next final review. No migration-switch implementation PR has been
-published and no installed service has been changed.
+regressions before the next final review. At that review stage, no migration-switch implementation PR had been
+published and no installed service had changed.
+
+The final reviewed source corrects these cases, including repeated interruptions while writing the
+completed record. That writer resumes a descriptor-validated private prefix in place; prior partial
+evidence remains preserved. Partial application modes cover owner-readable non-writable subsets of
+the expected mode, including normal `umask 027` and `077`. Verified application roots are made
+private and writable before exclusive evidence renames, preserving the established macOS 15
+filesystem requirement.
+
+Root and independent review cleared installer `bd8b7f38`, selection `dcc85fb1`, and test source
+`075b23fe`. Root then captured the exact tracked source and independently passed the focused
+synthetic migration test on macOS 26.6.2 in 9.631 seconds and on the physical macOS 15.1 MacBook in
+13.571 seconds. All six reviewed file hashes matched on the MacBook; its owned source and generated
+fixture were removed and absence verified. The first direct invocation in the author's dependency-free
+worktree failed module resolution before tests began; the captured-source runs installed frozen
+dependencies offline. These are synthetic app/filesystem tests with a fake launchctl adapter, not
+installed migration, permission continuity, or desktop control acceptance.
+
+The corrected slice is published in [PR69](https://github.com/rdimascio/ellie/pull/69) at
+`aeb65c8341a454727c12a558f4ac793f0912152d`. Root also independently verified its clean
+414-file artifact and shipping inspection. Its SHA-256 is
+`49668eed2a7fc3e5c957c61b1c31bbe7d0bcb9e1f411db0b673ed47f3c64636a`.
+CI and actual installed lifecycle acceptance remain separate gates.
