@@ -215,7 +215,14 @@ final class DashboardSyncTests: XCTestCase {
       credential: credential(), transport: transport, persistence: SyncPersistence())
 
     store.readServerCopy()
-    await readGate.waitUntilStarted()
+    let started = await readGate.waitUntilStarted()
+    guard started else {
+      let cancelled = store.enterBackground()
+      await readGate.release()
+      await cancelled?.value
+      XCTFail("The read did not enter the transport before the bounded deadline.")
+      return
+    }
     let cancelled = store.enterBackground()
     await readGate.release()
     await cancelled?.value
@@ -227,10 +234,12 @@ final class DashboardSyncTests: XCTestCase {
 
   func testCancelledOldReadCannotReplaceNewerRead() async {
     let transport = SyncTransport()
+    let oldRead = SyncReadGate()
+    let newerRead = SyncReadGate()
     transport.readDocuments = [
-      (40_000_000, HouseholdDashboardDocument(
+      (oldRead, HouseholdDashboardDocument(
         profile: .shared, revision: 3, value: DashboardModel.initialState)),
-      (0, HouseholdDashboardDocument(
+      (newerRead, HouseholdDashboardDocument(
         profile: .shared, revision: 9,
         value: DashboardState(dashboards: []))),
     ]
@@ -238,14 +247,52 @@ final class DashboardSyncTests: XCTestCase {
       credential: credential(), transport: transport, persistence: SyncPersistence())
 
     store.readServerCopy()
-    await Task.yield()
-    store.enterBackground()
+    let oldStarted = await oldRead.waitUntilStarted()
+    guard oldStarted else {
+      let cancelled = store.enterBackground()
+      await oldRead.release()
+      await cancelled?.value
+      XCTFail("The old read did not enter the transport before the bounded deadline.")
+      return
+    }
+    let cancelled = store.enterBackground()
     store.readServerCopy()
-    await settle(store)
-    try? await Task.sleep(nanoseconds: 60_000_000)
+    let newerStarted = await newerRead.waitUntilStarted()
+    guard newerStarted else {
+      let newerCancelled = store.enterBackground()
+      await newerRead.release()
+      await oldRead.release()
+      await newerCancelled?.value
+      await cancelled?.value
+      XCTFail("The newer read did not enter the transport before the bounded deadline.")
+      return
+    }
+    await newerRead.release()
+    let newerApplied = await waitForRemoteRevision(9, store: store)
+    guard newerApplied else {
+      let newerCancelled = store.enterBackground()
+      await newerRead.release()
+      await oldRead.release()
+      await newerCancelled?.value
+      await cancelled?.value
+      XCTFail("The newer read did not apply before the bounded deadline.")
+      return
+    }
+    await oldRead.release()
+    await cancelled?.value
 
     XCTAssertEqual(store.remote?.revision, 9)
     XCTAssertEqual(store.remote?.value, DashboardState(dashboards: []))
+    XCTAssertEqual(transport.calls, ["read", "read"])
+  }
+
+  private func waitForRemoteRevision(_ revision: Int64, store: DashboardSyncStore) async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while store.remote?.revision != revision && clock.now < deadline {
+      try? await Task.sleep(for: .milliseconds(5))
+    }
+    return store.remote?.revision == revision
   }
 
   private func settle(_ store: DashboardSyncStore) async {
@@ -282,7 +329,7 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
   var authorityFailure: DashboardSyncFailure?
   var readFailure: DashboardSyncFailure?
   var readDelayNanoseconds: UInt64 = 0
-  var readDocuments: [(UInt64, HouseholdDashboardDocument)] = []
+  var readDocuments: [(SyncReadGate, HouseholdDashboardDocument)] = []
   var readGate: SyncReadGate?
   func authority(_ credential: NativeEnrollmentCredential) async throws
     -> [HouseholdDashboardGrant]
@@ -298,7 +345,7 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
     if let readGate { await readGate.waitForRelease() }
     if !readDocuments.isEmpty {
       let next = readDocuments.removeFirst()
-      if next.0 > 0 { try? await Task.sleep(nanoseconds: next.0) }
+      await next.0.waitForRelease()
       return next.1
     }
     if readDelayNanoseconds > 0 { try? await Task.sleep(nanoseconds: readDelayNanoseconds) }
@@ -317,20 +364,21 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
 private actor SyncReadGate {
   private var didStart = false
   private var isReleased = false
-  private var startedWaiter: CheckedContinuation<Void, Never>?
   private var releaseWaiter: CheckedContinuation<Void, Never>?
 
   func waitForRelease() async {
     didStart = true
-    startedWaiter?.resume()
-    startedWaiter = nil
     guard !isReleased else { return }
     await withCheckedContinuation { releaseWaiter = $0 }
   }
 
-  func waitUntilStarted() async {
-    guard !didStart else { return }
-    await withCheckedContinuation { startedWaiter = $0 }
+  func waitUntilStarted() async -> Bool {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: .seconds(2))
+    while !didStart && clock.now < deadline {
+      try? await Task.sleep(for: .milliseconds(5))
+    }
+    return didStart
   }
 
   func release() {
