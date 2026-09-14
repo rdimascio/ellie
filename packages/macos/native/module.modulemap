@@ -1,0 +1,4 @@
+module EllieActivationPolicyBlob {
+  header "EllieActivationPolicyBlob.h"
+  export *
+}

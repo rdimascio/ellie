@@ -1107,13 +1107,11 @@ private func stage(
   }
 }
 
-@main
-private struct ServicePayloadInstaller {
+#if !ELLIE_POLICY_LIBRARY
+  @main
+  private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
-    #if ELLIE_POLICY_AUDIT_TESTING
-      if runCompiledActivationPolicyAudit(arguments) { return }
-    #endif
     if arguments.first == "inspect-authenticated-payload" {
       do { try runAuthenticatedPayloadInspection(arguments) } catch {
         failAuthenticatedPayloadInspection(error)
@@ -1223,4 +1221,5 @@ private struct ServicePayloadInstaller {
       }
     } catch { fail(error) }
   }
-}
+  }
+#endif
