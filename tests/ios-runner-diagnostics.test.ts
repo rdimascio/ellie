@@ -71,7 +71,7 @@ if [ "$1 $2 $3 $4" = "simctl list runtimes --json" ]; then
     exit 7
   fi
   if [ "$ELLIE_RUNNER_TEST_MODE" = "overflow" ]; then
-    awk 'BEGIN { for (i = 0; i < 1100000; i++) printf "x" }'
+    exec awk 'BEGIN { for (i = 0; i < 1100000; i++) printf "x" }'
   else
     printf '%s\\n' '{"runtimes":[{"isAvailable":true,"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-3","version":"18.3","supportedDeviceTypes":[{"productFamily":"iPhone","name":"iPhone","identifier":"test.iPhone"}]}]}'
   fi
