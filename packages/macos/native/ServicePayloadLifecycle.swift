@@ -18,6 +18,10 @@ private struct LaunchObservation {
 }
 
 private func lifecycleFail(_ error: Error) -> Never {
+  if error is MigrationSwitchPendingFailure {
+    FileHandle.standardError.write(Data((migrationSwitchRecovery + "\n").utf8))
+    exit(1)
+  }
   let message: String
   switch error as? LifecycleFailure {
   case .recoveryRequired:
@@ -479,7 +483,11 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
           } catch { throw LifecycleFailure.stopUnknown }
         }
       }
-    } catch let error as LifecycleFailure { throw error } catch is LifecycleSelectionBusy {
+    } catch let error as LifecycleFailure { throw error } catch let error
+      as MigrationSwitchPendingFailure
+    {
+      throw error
+    } catch is LifecycleSelectionBusy {
       throw LifecycleFailure.busy
     } catch {
       throw LifecycleFailure.recoveryRequired

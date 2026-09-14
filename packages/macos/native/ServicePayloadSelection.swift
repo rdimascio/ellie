@@ -159,6 +159,7 @@ func withLifecycleSelection<T>(
   guard fstat(services, &servicesInfo) == 0, (servicesInfo.st_mode & 0o7777) == 0o700 else {
     throw SelectionFailure.recoveryRequired
   }
+  if try migrationSwitchPending(services) { throw MigrationSwitchPendingFailure() }
   let lockInfo = try entry(services, "selection.lock")
   let receiptsInfo = try entry(services, "receipts")
   if lockInfo == nil && receiptsInfo == nil {
@@ -200,6 +201,7 @@ func withLifecycleSelection<T>(
     flock(lock, LOCK_UN)
     close(lock)
   }
+  if try migrationSwitchPending(services) { throw MigrationSwitchPendingFailure() }
   guard try entry(services, paths.journalName) == nil,
     let receiptData = try readPrivateAt(receipts, paths.receiptName, maximum: 32 * 1024)
   else { throw SelectionFailure.recoveryRequired }
@@ -213,6 +215,7 @@ func withLifecycleSelection<T>(
     else { throw SelectionFailure.recoveryRequired }
   }
   let revalidate = {
+    if try migrationSwitchPending(services) { throw MigrationSwitchPendingFailure() }
     let freshHome = try selectionOpenDirectory(paths.home, privateMode: false)
     defer { close(freshHome) }
     try sameDirectory(home, freshHome)
@@ -257,6 +260,10 @@ func withLifecycleSelection<T>(
 }
 
 func failSelectionCommand(_ error: Error) -> Never {
+  if error is MigrationSwitchPendingFailure {
+    FileHandle.standardError.write(Data((migrationSwitchRecovery + "\n").utf8))
+    exit(1)
+  }
   let message: String
   switch error as? SelectionFailure {
   case .recoveryRequired:
@@ -514,6 +521,38 @@ private func openSelectionDirectories(_ paths: SelectionPaths) throws -> Selecti
   }
   return SelectionDirectories(
     services: services, receipts: receipts, applications: applications, agents: agents)
+}
+
+private func revalidateSelectionDirectoriesReadOnly(
+  _ paths: SelectionPaths, _ directories: SelectionDirectories
+) throws {
+  func same(_ first: Int32, _ second: Int32) throws {
+    var left = stat()
+    var right = stat()
+    guard fstat(first, &left) == 0, fstat(second, &right) == 0, left.st_dev == right.st_dev,
+      left.st_ino == right.st_ino
+    else { throw MigrationSwitchPendingFailure() }
+  }
+  let home = try selectionOpenDirectory(paths.home, privateMode: false)
+  defer { close(home) }
+  let library = try selectionOpenOwnedDirectory(parent: home, name: "Library")
+  defer { close(library) }
+  let support = try selectionOpenOwnedDirectory(parent: library, name: "Application Support")
+  defer { close(support) }
+  let ellie = try selectionOpenOwnedDirectory(parent: support, name: "Ellie")
+  defer { close(ellie) }
+  let services = try selectionOpenOwnedDirectory(parent: ellie, name: "Services")
+  defer { close(services) }
+  let receipts = try selectionOpenOwnedDirectory(parent: services, name: "receipts")
+  defer { close(receipts) }
+  let applications = try selectionOpenOwnedDirectory(parent: home, name: "Applications")
+  defer { close(applications) }
+  let agents = try selectionOpenOwnedDirectory(parent: library, name: "LaunchAgents")
+  defer { close(agents) }
+  try same(directories.services, services)
+  try same(directories.receipts, receipts)
+  try same(directories.applications, applications)
+  try same(directories.agents, agents)
 }
 private func decodedReceipt(_ data: Data?) throws -> Receipt {
   guard let data else { return Receipt(version: 1, coordinator: nil, node: nil) }
@@ -785,6 +824,614 @@ private func recover(
   try sync(directories.services)
 }
 
+private struct MigrationSwitchJournal: Codable {
+  let version: Int
+  let transactionID: String
+  let snapshotID: String
+  let manifestSHA256: String
+  let releaseID: String
+  let roles: [SelectedRole]
+  let temporaryPaths: [String]
+  let newReceipt: Data
+}
+private struct CompletedMigrationSwitch: Codable {
+  let version: Int
+  let outcome: String
+  let journal: MigrationSwitchJournal
+}
+
+private func decodedMigrationSwitchJournal(_ data: Data) throws -> MigrationSwitchJournal {
+  let value = try JSONDecoder().decode(MigrationSwitchJournal.self, from: data)
+  let expectedTemporaryPaths =
+    value.roles.map {
+      "LaunchAgents/.ellie-write-\(value.transactionID)-migration-\($0.rawValue)"
+    } + ["receipts/.ellie-write-\(value.transactionID)-migration-receipt"]
+  guard value.version == 1,
+    UUID(uuidString: value.transactionID)?.uuidString.lowercased() == value.transactionID,
+    exact(value.snapshotID, "legacy-v1-[a-f0-9]{64}", count: 74),
+    exact(value.manifestSHA256, "[a-f0-9]{64}", count: 64),
+    exact(value.releaseID, "[A-Za-z0-9._-]+", count: 128),
+    value.snapshotID == "legacy-v1-" + value.manifestSHA256,
+    !value.roles.isEmpty, value.roles.count <= SelectedRole.allCases.count,
+    value.roles == SelectedRole.allCases.filter(value.roles.contains),
+    value.temporaryPaths == expectedTemporaryPaths,
+    try canonical(value) == data
+  else { throw MigrationSwitchPendingFailure() }
+  let receipt = try decodedReceipt(value.newReceipt)
+  for role in SelectedRole.allCases {
+    guard (receipt[role] != nil) == value.roles.contains(role),
+      receipt[role] == nil || receipt[role]?.releaseID == value.releaseID
+    else { throw MigrationSwitchPendingFailure() }
+  }
+  return value
+}
+
+private func switchBackupApp(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-migration-backup-\(transaction)-\(role.rawValue).app"
+}
+private func switchBackupPlist(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-migration-backup-\(transaction)-\(role.rawValue).plist"
+}
+private func switchStagedApp(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-migration-stage-\(transaction)-\(role.rawValue).app"
+}
+private func switchStagedPlist(_ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-migration-stage-\(transaction)-\(role.rawValue).plist"
+}
+private func switchEvidence(_ kind: String, _ role: SelectedRole, _ transaction: String) -> String {
+  ".ellie-migration-evidence-\(transaction)-\(kind)-\(role.rawValue)"
+}
+
+private func removeVerifiedSelectionAsset(
+  paths: SelectionPaths, directories: SelectionDirectories, role: SelectedRole,
+  record: RoleReceipt, asset: SelectionAsset, name: String, rootMode: mode_t = 0o555
+) throws {
+  try validateAsset(
+    paths: paths, directories: directories, role: role, record: record, asset: asset,
+    name: name, applicationRootMode: rootMode)
+  if asset == .application {
+    try selectionRemoveTree(parent: directories.applications, name: name)
+  } else {
+    guard unlinkat(directories.agents, name, 0) == 0 else { throw MigrationSwitchPendingFailure() }
+  }
+}
+
+private func validatePrivatePrefix(
+  _ parent: Int32, _ name: String, expected: Data
+) throws {
+  guard let data = try readPrivateAt(parent, name, maximum: expected.count),
+    data.count <= expected.count, data == expected.prefix(data.count)
+  else { throw MigrationSwitchPendingFailure() }
+}
+
+private func validatePrivatePrefixIfPresent(
+  _ parent: Int32, _ name: String, expected: Data
+) throws {
+  if try entry(parent, name) != nil { try validatePrivatePrefix(parent, name, expected: expected) }
+}
+
+private func finalizePrivatePrefix(
+  _ parent: Int32, source: String, target: String, expected: Data
+) throws {
+  let fd = openat(parent, source, O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+  guard fd >= 0 else { throw MigrationSwitchPendingFailure() }
+  defer { close(fd) }
+  var before = stat()
+  guard fstat(fd, &before) == 0, (before.st_mode & S_IFMT) == S_IFREG,
+    before.st_uid == getuid(), before.st_nlink == 1, (before.st_mode & 0o7777) == 0o600,
+    before.st_size >= 0, before.st_size <= expected.count
+  else { throw MigrationSwitchPendingFailure() }
+  var prefix = Data(count: Int(before.st_size))
+  let prefixLength = prefix.count
+  var offset = 0
+  while offset < prefixLength {
+    let count = prefix.withUnsafeMutableBytes {
+      read(fd, $0.baseAddress!.advanced(by: offset), prefixLength - offset)
+    }
+    guard count > 0 else { throw MigrationSwitchPendingFailure() }
+    offset += count
+  }
+  guard prefix == expected.prefix(prefix.count), lseek(fd, 0, SEEK_END) == before.st_size else {
+    throw MigrationSwitchPendingFailure()
+  }
+  while offset < expected.count {
+    let count = expected.withUnsafeBytes {
+      write(fd, $0.baseAddress!.advanced(by: offset), expected.count - offset)
+    }
+    guard count > 0 else { throw MigrationSwitchPendingFailure() }
+    offset += count
+  }
+  var after = stat()
+  guard fstat(fd, &after) == 0, after.st_dev == before.st_dev, after.st_ino == before.st_ino,
+    after.st_uid == before.st_uid, after.st_nlink == before.st_nlink,
+    after.st_size == expected.count, (after.st_mode & 0o7777) == 0o600, fsync(fd) == 0
+  else { throw MigrationSwitchPendingFailure() }
+  try renameExclusive(from: parent, source, to: parent, target)
+}
+
+private func preservePartialApplication(
+  release: SelectionRelease, parent: Int32, source: String, evidence: String,
+  afterUnseal: () -> Void = {}
+) throws {
+  if try entry(parent, source) != nil {
+    guard try entry(parent, evidence) == nil else { throw MigrationSwitchPendingFailure() }
+    do {
+      try selectionUnsealPartialApplication(source: release, parent: parent, name: source)
+    } catch { throw MigrationSwitchPendingFailure() }
+    afterUnseal()
+    try renameExclusive(from: parent, source, to: parent, evidence)
+  } else if try entry(parent, evidence) != nil {
+    do {
+      try selectionValidatePartialApplication(source: release, parent: parent, name: evidence)
+    } catch { throw MigrationSwitchPendingFailure() }
+  }
+}
+
+private func validatePartialApplicationIfPresent(
+  release: SelectionRelease, parent: Int32, name: String
+) throws {
+  guard try entry(parent, name) != nil else { return }
+  do { try selectionValidatePartialApplication(source: release, parent: parent, name: name) } catch
+  { throw MigrationSwitchPendingFailure() }
+}
+
+private func preservePrivatePrefix(
+  parent: Int32, source: String, evidence: String, expected: Data
+) throws {
+  if try entry(parent, source) != nil {
+    guard try entry(parent, evidence) == nil else { throw MigrationSwitchPendingFailure() }
+    try validatePrivatePrefix(parent, source, expected: expected)
+    try renameExclusive(from: parent, source, to: parent, evidence)
+  } else if try entry(parent, evidence) != nil {
+    try validatePrivatePrefix(parent, evidence, expected: expected)
+  }
+}
+
+private func validatePhasedApplication(
+  paths: SelectionPaths, directories: SelectionDirectories, role: SelectedRole,
+  record: RoleReceipt, name: String
+) throws {
+  guard let mode = try applicationMode(directories.applications, name),
+    mode == 0o700 || mode == 0o555
+  else { throw MigrationSwitchPendingFailure() }
+  try validateAsset(
+    paths: paths, directories: directories, role: role, record: record, asset: .application,
+    name: name, applicationRootMode: mode)
+}
+
+private func recoverMigrationSwitch(
+  paths: SelectionPaths, directories: SelectionDirectories, journal: MigrationSwitchJournal,
+  evidence: MigrationLegacyEvidence, testLoaded: Set<SelectedRole>,
+  beforeMutation: () throws -> Void = {}, fault: (String) -> Void = { _ in }
+) throws {
+  func requireUnloaded() throws {
+    for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+      throw SelectionFailure.loaded
+    }
+  }
+  try requireUnloaded()
+  guard try entry(directories.services, paths.journalName) == nil else {
+    throw MigrationSwitchPendingFailure()
+  }
+  if let migrations = try entry(directories.services, "migrations") {
+    guard (migrations.st_mode & S_IFMT) == S_IFDIR else { throw MigrationSwitchPendingFailure() }
+    let fd = try selectionOpenOwnedDirectory(parent: directories.services, name: "migrations")
+    defer { close(fd) }
+    guard try entry(fd, "migration-preparation.json") == nil else {
+      throw MigrationSwitchPendingFailure()
+    }
+  }
+  let receiptData = try readPrivateAt(
+    directories.receipts, paths.receiptName, maximum: 32 * 1024, missing: true)
+  let committed: Bool
+  if receiptData == nil {
+    committed = false
+  } else if receiptData == journal.newReceipt {
+    committed = true
+  } else {
+    throw MigrationSwitchPendingFailure()
+  }
+  let receipt = try decodedReceipt(journal.newReceipt)
+  for role in journal.roles {
+    guard let legacy = evidence.roleEvidence[role.rawValue], let record = receipt[role] else {
+      throw MigrationSwitchPendingFailure()
+    }
+    let backupApp = switchBackupApp(role, journal.transactionID)
+    let backupPlist = switchBackupPlist(role, journal.transactionID)
+    let stagedApp = switchStagedApp(role, journal.transactionID)
+    let stagedPlist = switchStagedPlist(role, journal.transactionID)
+    if committed {
+      try validateAsset(
+        paths: paths, directories: directories, role: role, record: record, asset: .application,
+        name: role.appName)
+      try validateAsset(
+        paths: paths, directories: directories, role: role, record: record, asset: .plist,
+        name: role.plistName)
+      if try entry(directories.applications, stagedApp) != nil {
+        let release = try verifiedSelectionRelease(
+          servicesRoot: paths.services, releaseID: record.releaseID, role: role.rawValue)
+        do {
+          try selectionValidatePartialApplication(
+            source: release, parent: directories.applications, name: stagedApp)
+        } catch { throw MigrationSwitchPendingFailure() }
+      }
+      if try entry(directories.agents, stagedPlist) != nil {
+        try validateAsset(
+          paths: paths, directories: directories, role: role, record: record, asset: .plist,
+          name: stagedPlist)
+      }
+      if try entry(directories.applications, backupApp) != nil {
+        try migrationValidateLegacyApplication(
+          legacy, applications: directories.applications, applicationName: backupApp)
+      }
+      if try entry(directories.agents, backupPlist) != nil {
+        try migrationValidateLegacyPlist(legacy, agents: directories.agents, plistName: backupPlist)
+      }
+    } else {
+      let hasBackupApp = try entry(directories.applications, backupApp) != nil
+      let hasBackupPlist = try entry(directories.agents, backupPlist) != nil
+      if hasBackupApp {
+        try migrationValidateLegacyApplication(
+          legacy, applications: directories.applications, applicationName: backupApp)
+        if try entry(directories.applications, role.appName) != nil {
+          try validatePhasedApplication(
+            paths: paths, directories: directories, role: role, record: record, name: role.appName)
+        }
+      } else {
+        try migrationValidateLegacyApplication(
+          legacy, applications: directories.applications, applicationName: role.appName)
+      }
+      if hasBackupPlist {
+        try migrationValidateLegacyPlist(legacy, agents: directories.agents, plistName: backupPlist)
+        if try entry(directories.agents, role.plistName) != nil {
+          try validateAsset(
+            paths: paths, directories: directories, role: role, record: record, asset: .plist,
+            name: role.plistName)
+        }
+      } else {
+        try migrationValidateLegacyPlist(
+          legacy, agents: directories.agents, plistName: role.plistName)
+      }
+      if try entry(directories.applications, stagedApp) != nil {
+        let release = try verifiedSelectionRelease(
+          servicesRoot: paths.services, releaseID: record.releaseID, role: role.rawValue)
+        do {
+          try selectionValidatePartialApplication(
+            source: release, parent: directories.applications, name: stagedApp)
+        } catch { throw MigrationSwitchPendingFailure() }
+      }
+      if try entry(directories.agents, stagedPlist) != nil {
+        try validateAsset(
+          paths: paths, directories: directories, role: role, record: record, asset: .plist,
+          name: stagedPlist)
+      }
+    }
+  }
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  try beforeMutation()
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  try requireUnloaded()
+  if committed {
+    try validateSelection(paths: paths, directories: directories, receipt: receipt)
+  } else {
+    for role in journal.roles {
+      guard let record = receipt[role], let legacy = evidence.roleEvidence[role.rawValue] else {
+        throw MigrationSwitchPendingFailure()
+      }
+      let release = try verifiedSelectionRelease(
+        servicesRoot: paths.services, releaseID: record.releaseID, role: role.rawValue)
+      let backupApp = switchBackupApp(role, journal.transactionID)
+      let backupPlist = switchBackupPlist(role, journal.transactionID)
+      let stagedApp = switchStagedApp(role, journal.transactionID)
+      let stagedPlist = switchStagedPlist(role, journal.transactionID)
+      try validatePartialApplicationIfPresent(
+        release: release, parent: directories.applications,
+        name: switchEvidence("abandoned-target.app", role, journal.transactionID))
+      try validatePrivatePrefixIfPresent(
+        directories.agents, switchEvidence("abandoned-target.plist", role, journal.transactionID),
+        expected: plistData(role: role, release: release, app: paths.app(role), home: paths.home))
+      if try entry(directories.applications, backupApp) != nil {
+        try preservePartialApplication(
+          release: release, parent: directories.applications, source: role.appName,
+          evidence: switchEvidence("abandoned-target.app", role, journal.transactionID),
+          afterUnseal: { fault("recovery-after-unseal-target-\(role.rawValue)") })
+        fault("recovery-after-evidence-app-\(role.rawValue)")
+        try renameExclusive(
+          from: directories.applications, backupApp, to: directories.applications, role.appName)
+        fault("recovery-after-restore-app-\(role.rawValue)")
+      }
+      if try entry(directories.agents, backupPlist) != nil {
+        try preservePrivatePrefix(
+          parent: directories.agents, source: role.plistName,
+          evidence: switchEvidence("abandoned-target.plist", role, journal.transactionID),
+          expected: plistData(role: role, release: release, app: paths.app(role), home: paths.home))
+        fault("recovery-after-evidence-plist-\(role.rawValue)")
+        try renameExclusive(
+          from: directories.agents, backupPlist, to: directories.agents, role.plistName)
+        fault("recovery-after-restore-plist-\(role.rawValue)")
+      }
+      try preservePartialApplication(
+        release: release, parent: directories.applications, source: stagedApp,
+        evidence: switchEvidence("abandoned-stage.app", role, journal.transactionID),
+        afterUnseal: { fault("recovery-after-unseal-stage-\(role.rawValue)") })
+      fault("recovery-after-stage-app-\(role.rawValue)")
+      try preservePrivatePrefix(
+        parent: directories.agents, source: stagedPlist,
+        evidence: switchEvidence("abandoned-stage.plist", role, journal.transactionID),
+        expected: plistData(role: role, release: release, app: paths.app(role), home: paths.home))
+      fault("recovery-after-stage-plist-\(role.rawValue)")
+      try preservePrivatePrefix(
+        parent: directories.agents,
+        source: ".ellie-write-\(journal.transactionID)-migration-\(role.rawValue)",
+        evidence: switchEvidence("partial-write.plist", role, journal.transactionID),
+        expected: plistData(role: role, release: release, app: paths.app(role), home: paths.home))
+      try migrationValidateLegacyRole(
+        legacy, applications: directories.applications, agents: directories.agents,
+        applicationName: role.appName, plistName: role.plistName)
+    }
+    try preservePrivatePrefix(
+      parent: directories.receipts,
+      source: ".ellie-write-\(journal.transactionID)-migration-receipt",
+      evidence: ".ellie-migration-evidence-\(journal.transactionID)-partial-write-receipt",
+      expected: journal.newReceipt)
+  }
+  try sync(directories.applications)
+  try sync(directories.agents)
+  try revalidateSelectionDirectoriesReadOnly(paths, directories)
+  try requireUnloaded()
+  let completed = try canonical(
+    CompletedMigrationSwitch(
+      version: 1, outcome: committed ? "committed" : "restored-legacy", journal: journal))
+  let completedName = ".migration-switch-evidence-\(journal.transactionID).json"
+  let completedTemporary = ".ellie-write-\(journal.transactionID)-completed-switch"
+  let partialCompleted = ".migration-switch-evidence-\(journal.transactionID)-partial-completed"
+  fault("recovery-before-completed")
+  try validatePrivatePrefixIfPresent(directories.services, partialCompleted, expected: completed)
+  if let existing = try readPrivateAt(
+    directories.services, completedName, maximum: 96 * 1024, missing: true)
+  {
+    guard existing == completed, try entry(directories.services, completedTemporary) == nil
+    else { throw MigrationSwitchPendingFailure() }
+  } else if try entry(directories.services, completedTemporary) != nil {
+    try finalizePrivatePrefix(
+      directories.services, source: completedTemporary, target: completedName,
+      expected: completed)
+  } else {
+    try writePrivateAt(
+      directories.services, name: completedName, data: completed, replace: false,
+      transaction: journal.transactionID + "-completed-switch")
+  }
+  fault("recovery-after-completed")
+  guard unlinkat(directories.services, "migration-switch-journal.json", 0) == 0 else {
+    throw MigrationSwitchPendingFailure()
+  }
+  try sync(directories.services)
+}
+
+func runMigrationSwitchCommand(_ input: [String]) throws -> Never {
+  var args = input
+  let command = args.removeFirst()
+  var testHome: String?
+  var testLoaded = Set<SelectedRole>()
+  var testFault: String?
+  var testLoadAfterPreflight = false
+  var testReplaceServices = false
+  #if ELLIE_INSTALLER_TESTING
+    if let index = args.firstIndex(of: "--test-home-root"), index + 1 < args.count {
+      testHome = args[index + 1]
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-loaded"), index + 1 < args.count {
+      testLoaded = Set(
+        args[index + 1].split(separator: ",").compactMap { SelectedRole(rawValue: String($0)) })
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-switch-fault"), index + 1 < args.count {
+      testFault = args[index + 1]
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-switch-load-after-preflight") {
+      testLoadAfterPreflight = true
+      args.remove(at: index)
+    }
+    if let index = args.firstIndex(of: "--test-switch-replace-services") {
+      testReplaceServices = true
+      args.remove(at: index)
+    }
+  #endif
+  func fault(_ point: String) {
+    #if ELLIE_INSTALLER_TESTING
+      if testFault == point { _exit(87) }
+    #endif
+  }
+  let requestedRoles: [SelectedRole]
+  if command == "recover-migration-switch" {
+    guard args.isEmpty else { throw MigrationSwitchPendingFailure() }
+    requestedRoles = []
+  } else {
+    guard command == "adopt-migration", args.count == 4, args[2] == "--roles",
+      exact(args[0], "legacy-v1-[a-f0-9]{64}", count: 74),
+      exact(args[1], "[A-Za-z0-9._-]+", count: 128)
+    else { throw MigrationSwitchPendingFailure() }
+    switch args[3] {
+    case "coordinator": requestedRoles = [.coordinator]
+    case "node": requestedRoles = [.node]
+    case "coordinator,node": requestedRoles = [.coordinator, .node]
+    default: throw MigrationSwitchPendingFailure()
+    }
+  }
+  let paths = try selectionPaths(testHome: testHome)
+  func replaceServices() throws {
+    #if ELLIE_INSTALLER_TESTING
+      guard testReplaceServices else { return }
+      let detached = paths.services + ".test-detached"
+      guard rename(paths.services, detached) == 0, mkdir(paths.services, 0o700) == 0 else {
+        throw MigrationSwitchPendingFailure()
+      }
+    #endif
+  }
+  let directories = try openSelectionDirectories(paths)
+  defer { directories.closeAll() }
+  var lock = openat(
+    directories.services, "selection.lock", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+    0o600)
+  if lock < 0 && errno == EEXIST {
+    lock = openat(directories.services, "selection.lock", O_RDWR | O_NOFOLLOW | O_CLOEXEC)
+  }
+  var lockInfo = stat()
+  guard lock >= 0, fstat(lock, &lockInfo) == 0, (lockInfo.st_mode & S_IFMT) == S_IFREG,
+    lockInfo.st_uid == getuid(), lockInfo.st_nlink == 1, (lockInfo.st_mode & 0o7777) == 0o600,
+    flock(lock, LOCK_EX | LOCK_NB) == 0
+  else {
+    if lock >= 0 { close(lock) }
+    throw MigrationSwitchPendingFailure()
+  }
+  defer {
+    flock(lock, LOCK_UN)
+    close(lock)
+  }
+  let journalData = try readPrivateAt(
+    directories.services, "migration-switch-journal.json", maximum: 64 * 1024, missing: true)
+  if command == "recover-migration-switch" {
+    guard args.isEmpty, let journalData else {
+      if args.isEmpty { exit(0) }
+      throw MigrationSwitchPendingFailure()
+    }
+    let journal = try decodedMigrationSwitchJournal(journalData)
+    let evidence = try migrationLegacyEvidence(
+      services: directories.services, snapshotID: journal.snapshotID,
+      requiredRoles: journal.roles.map(\.rawValue))
+    try recoverMigrationSwitch(
+      paths: paths, directories: directories, journal: journal, evidence: evidence,
+      testLoaded: testLoaded, beforeMutation: replaceServices, fault: fault)
+    print("Legacy migration switch recovery complete; managed LaunchAgents remain unloaded.")
+    exit(0)
+  }
+  guard journalData == nil,
+    try readPrivateAt(directories.receipts, paths.receiptName, maximum: 32 * 1024, missing: true)
+      == nil
+  else { throw MigrationSwitchPendingFailure() }
+  guard try entry(directories.services, paths.journalName) == nil else {
+    throw MigrationSwitchPendingFailure()
+  }
+  if try entry(directories.services, "migrations") != nil {
+    let migrations = try selectionOpenOwnedDirectory(
+      parent: directories.services, name: "migrations")
+    defer { close(migrations) }
+    guard try entry(migrations, "migration-preparation.json") == nil else {
+      throw MigrationSwitchPendingFailure()
+    }
+  }
+  var installedRoles: [SelectedRole] = []
+  for role in SelectedRole.allCases {
+    let app = try entry(directories.applications, role.appName) != nil
+    let plist = try entry(directories.agents, role.plistName) != nil
+    guard app == plist else { throw MigrationSwitchPendingFailure() }
+    if app { installedRoles.append(role) }
+  }
+  guard !installedRoles.isEmpty, installedRoles == requestedRoles else {
+    throw MigrationSwitchPendingFailure()
+  }
+  let roles = requestedRoles
+  for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+    throw SelectionFailure.loaded
+  }
+  let evidence = try migrationLegacyEvidence(
+    services: directories.services, snapshotID: args[0], requiredRoles: roles.map(\.rawValue))
+  for role in roles {
+    guard let legacy = evidence.roleEvidence[role.rawValue] else {
+      throw MigrationSwitchPendingFailure()
+    }
+    try migrationValidateLegacyRole(
+      legacy, applications: directories.applications, agents: directories.agents,
+      applicationName: role.appName, plistName: role.plistName)
+  }
+  var next = Receipt(version: 1, coordinator: nil, node: nil)
+  var releases: [SelectedRole: SelectionRelease] = [:]
+  for role in roles {
+    let release = try verifiedSelectionRelease(
+      servicesRoot: paths.services, releaseID: args[1], role: role.rawValue)
+    releases[role] = release
+    let plist = plistData(role: role, release: release, app: paths.app(role), home: paths.home)
+    next[role] = RoleReceipt(
+      releaseID: release.id, appSHA256: applicationManifestDigest(release.applicationFiles),
+      plistSHA256: hash(plist))
+  }
+  let nextData = try canonical(next)
+  let transaction = UUID().uuidString.lowercased()
+  let journal = MigrationSwitchJournal(
+    version: 1, transactionID: transaction, snapshotID: evidence.snapshotID,
+    manifestSHA256: evidence.manifestSHA256, releaseID: args[1], roles: roles,
+    temporaryPaths: roles.map {
+      "LaunchAgents/.ellie-write-\(transaction)-migration-\($0.rawValue)"
+    } + ["receipts/.ellie-write-\(transaction)-migration-receipt"],
+    newReceipt: nextData)
+  try writePrivateAt(
+    directories.services, name: "migration-switch-journal.json", data: try canonical(journal),
+    replace: false, transaction: transaction + "-migration-switch-journal")
+  fault("after-journal")
+  do {
+    for role in roles {
+      guard let release = releases[role] else { throw MigrationSwitchPendingFailure() }
+      let stagedApp = switchStagedApp(role, transaction)
+      let stagedPlist = switchStagedPlist(role, transaction)
+      _ = try selectionCopyApplication(
+        source: release, parent: directories.applications, name: stagedApp,
+        identifier: role.identifier)
+      try writePrivateAt(
+        directories.agents, name: stagedPlist,
+        data: plistData(role: role, release: release, app: paths.app(role), home: paths.home),
+        replace: false, transaction: transaction + "-migration-" + role.rawValue)
+    }
+    fault("after-staging")
+    if testLoadAfterPreflight { throw SelectionFailure.loaded }
+    for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+      throw SelectionFailure.loaded
+    }
+    try revalidateSelectionDirectoriesReadOnly(paths, directories)
+    for role in roles {
+      try renameExclusive(
+        from: directories.applications, role.appName, to: directories.applications,
+        switchBackupApp(role, transaction))
+      fault("after-app-backup-\(role.rawValue)")
+      try renameExclusive(
+        from: directories.applications, switchStagedApp(role, transaction),
+        to: directories.applications, role.appName)
+      fault("after-app-move-\(role.rawValue)")
+      guard let record = next[role] else { throw MigrationSwitchPendingFailure() }
+      try sealApplication(
+        paths: paths, directories: directories, role: role, record: record, name: role.appName)
+      fault("after-app-seal-\(role.rawValue)")
+      try renameExclusive(
+        from: directories.agents, role.plistName, to: directories.agents,
+        switchBackupPlist(role, transaction))
+      try renameExclusive(
+        from: directories.agents, switchStagedPlist(role, transaction),
+        to: directories.agents, role.plistName)
+      fault("after-role-\(role.rawValue)")
+    }
+    try revalidateSelectionDirectoriesReadOnly(paths, directories)
+    try replaceServices()
+    try revalidateSelectionDirectoriesReadOnly(paths, directories)
+    for role in SelectedRole.allCases where try roleLoaded(role, testLoaded: testLoaded) {
+      throw SelectionFailure.loaded
+    }
+    try writePrivateAt(
+      directories.receipts, name: paths.receiptName, data: nextData, replace: false,
+      transaction: transaction + "-migration-receipt")
+    fault("after-receipt")
+    try recoverMigrationSwitch(
+      paths: paths, directories: directories, journal: journal, evidence: evidence,
+      testLoaded: testLoaded, fault: fault)
+    print(
+      "Adopted packaged \(roles.map(\.rawValue).joined(separator: ",")) from legacy snapshot; managed LaunchAgents remain unloaded."
+    )
+    exit(0)
+  } catch {
+    throw MigrationSwitchPendingFailure()
+  }
+}
+
 func runSelectionCommand(_ input: [String]) throws -> Never {
   var args = input
   let command = args.removeFirst()
@@ -877,6 +1524,7 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     flock(lock, LOCK_UN)
     close(lock)
   }
+  if try migrationSwitchPending(directories.services) { throw MigrationSwitchPendingFailure() }
   #if ELLIE_INSTALLER_TESTING
     if testHoldLockMilliseconds > 0 {
       let ready = openat(
