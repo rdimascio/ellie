@@ -53,6 +53,11 @@ import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
 import { createLifeActivationGate, lifeConfigPath, loadLifeHostConfig } from "./life-config.ts";
 import { parseLifeAccessCommand, runLifeAccessCommand } from "./life-access.ts";
 import { EmbeddedLifeLifecycle } from "./life-lifecycle.ts";
+import {
+  clearAmbientServiceLifeConfig,
+  configureServiceLife,
+  selectedServiceLifeConfig,
+} from "./service-life-config.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
@@ -65,6 +70,24 @@ const browserEnvironment = {
 };
 let serviceLog: ServiceLog | undefined;
 let commandOutcomeMayBeUnknown = false;
+const lifeConfigGuidance =
+  "Life service configuration is unavailable. Review the private Life config or run service configure coordinator --disable-life.";
+function serviceLifeConfig(path: string) {
+  try {
+    return loadLifeHostConfig(path);
+  } catch {
+    throw new Error(lifeConfigGuidance);
+  }
+}
+async function selectedLifeConfigForService(): Promise<string | undefined> {
+  try {
+    const selected = await selectedServiceLifeConfig(stateDir);
+    if (selected) serviceLifeConfig(selected);
+    return selected;
+  } catch {
+    throw new Error(lifeConfigGuidance);
+  }
+}
 async function exists(name: string): Promise<boolean> {
   try {
     await access(join(stateDir, name));
@@ -233,6 +256,21 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (action === "configure") {
+      const role = serviceRole(args[2]);
+      if (role !== "coordinator") throw new Error("Life can only be configured for coordinator.");
+      let selection: string | undefined;
+      if (args.length === 5 && args[3] === "--life-config") selection = args[4];
+      else if (!(args.length === 4 && args[3] === "--disable-life"))
+        throw new Error(
+          "Use: bun run ellie service configure coordinator --life-config /absolute/private/config.json | --disable-life",
+        );
+      const result = await configureServiceLife(stateDir, selection, serviceLifeConfig);
+      console.log(
+        `Coordinator Life configuration ${result}; changes apply on the next explicit restart.`,
+      );
+      return;
+    }
     const role = serviceRole(args[2]);
     if (args.length !== 3)
       throw new Error(
@@ -244,10 +282,34 @@ async function main(): Promise<void> {
       serviceLog = await ServiceLog.open(stateDir, role);
       serviceLog.write("starting");
       await services.validate(role);
-      args.splice(0, args.length, role === "coordinator" ? "server" : "node", "start");
+      clearAmbientServiceLifeConfig(process.env);
+      const selectedLife =
+        role === "coordinator" ? await selectedLifeConfigForService() : undefined;
+      args.splice(
+        0,
+        args.length,
+        role === "coordinator" ? "server" : "node",
+        "start",
+        ...(selectedLife ? ["--life-config", selectedLife] : []),
+      );
     } else {
-      if (action === "status") console.log(JSON.stringify(await services.status(role), null, 2));
-      else if (action === "logs")
+      if (action === "status") {
+        const status = await services.status(role);
+        const selectedLife =
+          role === "coordinator" ? await selectedLifeConfigForService() : undefined;
+        console.log(
+          JSON.stringify(
+            role === "coordinator"
+              ? {
+                  ...status,
+                  lifeOnNextStart: selectedLife ? "enabled" : "disabled",
+                }
+              : status,
+            null,
+            2,
+          ),
+        );
+      } else if (action === "logs")
         console.log(JSON.stringify(await serviceLogs(stateDir, role), null, 2));
       else if (
         action === "install" ||

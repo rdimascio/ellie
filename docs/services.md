@@ -39,6 +39,28 @@ bun run ellie service uninstall node
 
 `stop` disables future login starts and uses `bootout` to remove the running service. Sending a signal alone would let KeepAlive relaunch it. `start` explicitly enables it again. `uninstall` removes only that role's managed plist and app bundle after stopping it. Identities, certificates, pairing, the helper, job metadata, logs, and Keychain credentials remain intact. Repeated install and uninstall are safe; existing unmanaged plists and application bundles are preserved. The coordinator and node have separate app identities and can be managed independently. To change an installed checkout/runtime path, stop, install from the intended checkout, then start.
 
+## Optional Life configuration
+
+Life is opt-in for the coordinator. Prepare the private host configuration described in [Life on paired devices](life-device-release.md), then select its canonical absolute path:
+
+```sh
+bun run ellie service configure coordinator --life-config "/absolute/private/life-host.json"
+```
+
+Replace that example with the actual existing file. The configuration must be an owned `0600` regular file outside both the checkout and `~/.ellie`, with its Life state in a separate private directory. Selection validates the configuration and saves only a versioned path pointer in `~/.ellie/service-life-config.json`. The configuration contents, model settings and OAuth registration never enter the LaunchAgent plist or service log. Existing identities, certificates and Keychain entries remain unchanged.
+
+Changes take effect on the next explicit coordinator restart; selecting a path does not stop or start a service. `service status coordinator` validates the selected file and reports only `lifeOnNextStart: enabled` or `disabled`, alongside the ordinary service state. This field describes the next start, not whether a currently running Life request is ready. Each service start validates the selection again. A missing or invalid selected target fails with guidance instead of silently starting without the requested Life account.
+
+To disable Life on the next start, including when the formerly selected target has been removed:
+
+```sh
+bun run ellie service configure coordinator --disable-life
+```
+
+Disabling removes only the path pointer. It does not delete Life data or revoke a device's enrollment. Malformed or unsafe pointer files are preserved and require local diagnosis; the command does not overwrite foreign evidence. Concurrent updates fail promptly through a private configuration lock. After a forcibly interrupted update, confirm that no configuration command is active before removing only its stale `service-life-config.lock` file.
+
+The fixed `service run coordinator` path and both native launchers ignore inherited `ELLIE_LIFE_CONFIG`; login shell settings cannot enable Life. Foreground development with `server start --life-config PATH` or `ELLIE_LIFE_CONFIG` remains supported, with the two forms mutually exclusive. Execution nodes cannot select a Life configuration. Native devices still need the separate Life account grant; configuration does not grant access by itself.
+
 ## Diagnostics and logs
 
 `doctor` retains the original native-tool check. `doctor coordinator` and `doctor node` additionally check private configuration permissions, certificate dates, existing Keychain access, helper signature, GUI and LaunchAgent state, pinned authenticated reachability, and the node's registration freshness. Optional local model availability is a warning and does not fail a working desktop node. Unlock the login Keychain and allow the existing helper if macOS requests access. A terminal's successful Accessibility check does not establish permission for launchd: verify a harmless desktop command through the running service on each execution Mac and grant the service's responsible executable if System Settings requires it.
