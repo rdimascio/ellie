@@ -71,11 +71,19 @@ Command (paths are explicit build artifacts, not repository inputs):
   1934afbb8b0085f34f64f9962e84009b9b867ad6
 ```
 
+The cleanup/error-control refactor was validated again against the same exact archive.
 Result: exit 0. The runner reported two effects, no replay, both roles, and the exact
 source revision and hashes above, including `cleanupCertain: true`. The focused archive,
 direct-process, and helper-release regressions passed 5/5. `bun run check` passed 275 tests
 with one platform smoke test skipped; lint, formatting,
 contract generation, TypeScript checks, and the Vite production build also passed.
+
+A separate bounded negative invocation supplied a different, canonical 40-character expected
+revision. It failed on the manifest revision assertion before any role launch, exited nonzero,
+emitted no success report, and left no new acceptance root. This confirms that an operation error
+survives the cleanup path. Earlier reports did not establish a final-source full lint gate: the
+combined integration gate exposed `no-unsafe-finally`. The refactored source and the complete gate
+reported above are the authoritative evidence.
 
 This is derivative runtime acceptance. It does not execute the unchanged production
 helper, use Keychain or TCC, mutate launchd, install a release, test lifecycle selection,
