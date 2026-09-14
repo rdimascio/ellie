@@ -128,13 +128,14 @@ final class NativeEnrollmentTests: XCTestCase {
     let response =
       #"{"client":{"id":"native-1","role":"native_phone_controller","label":"Phone","grants":[{"target":"studio-mac","capabilities":["app.open"]}],"createdAt":\#(created),"expiresAt":\#(created + 90 * 24 * 60 * 60 * 1_000)}}"#
     let script = """
-      import socket, ssl, sys
+      import socket, ssl, sys, time
       socket.setdefaulttimeout(5)
       s=socket.socket(); s.bind(('127.0.0.1',0)); s.listen(1); print(s.getsockname()[1],flush=True)
       c,_=s.accept(); ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(sys.argv[1],sys.argv[2]); c=ctx.wrap_socket(c,server_side=True)
       d=b''
       while b'\\r\\n\\r\\n' not in d: d += c.recv(1024)
       open(sys.argv[3],'wb').write(d)
+      time.sleep(4)
       b=sys.argv[4].encode(); c.sendall(b'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\nContent-Length: '+str(len(b)).encode()+b'\\r\\nConnection: close\\r\\n\\r\\n'+b); c.close(); s.close()
       """
     try script.write(to: scriptURL, atomically: true, encoding: .utf8)
@@ -159,7 +160,7 @@ final class NativeEnrollmentTests: XCTestCase {
         origin: URL(string: "https://127.0.0.1:\(port)")!, certificateSha256: pin, label: "Phone",
         grants: [NativeGrant(target: "studio-mac", capabilities: ["app.open"])],
         candidateToken: String(repeating: "c", count: 64))
-      let client = try await NativeEnrollmentTransport(timeout: 3).recover(pending)
+      let client = try await NativeEnrollmentTransport().recover(pending)
       XCTAssertEqual(client?.id, "native-1")
       guard await processExits(process) else {
         await stopProcess(process)

@@ -21,7 +21,6 @@ final class NativeEnrollmentATSTests: XCTestCase {
       candidateToken: String(repeating: "c", count: 64)
     )
     let enrollmentTransport = NativeEnrollmentTransport(
-      timeout: 3,
       diagnostic: {
         diagnostics.record($0)
       })

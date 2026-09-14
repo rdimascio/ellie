@@ -23,6 +23,34 @@ function certificateFailure(error: unknown): Error {
   return new Error("Certificate creation failed: openssl exited unsuccessfully.");
 }
 
+type BrowserIdentityFailureCategory =
+  | "parse"
+  | "root-profile"
+  | "root-key"
+  | "root-signature"
+  | "leaf-profile"
+  | "leaf-key"
+  | "leaf-signature"
+  | "validity";
+
+function browserIdentityFailure(category: BrowserIdentityFailureCategory): Error {
+  return new Error(
+    `Certificate creation failed: openssl produced an invalid browser TLS identity (${category}).`,
+  );
+}
+
+function requireBrowserIdentity(
+  category: BrowserIdentityFailureCategory,
+  check: () => boolean,
+): void {
+  try {
+    if (check()) return;
+  } catch {
+    // Fixed category below; never expose certificate or key parser details.
+  }
+  throw browserIdentityFailure(category);
+}
+
 export function validateLocalHostname(hostname: string): string {
   if (hostname.length > 69 || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.local$/.test(hostname)) {
     throw new Error("Browser TLS hostname must be a canonical single-label .local DNS name.");
@@ -139,32 +167,43 @@ export async function generateBrowserTlsIdentity(
       readFile(paths.leafKey, "utf8"),
       readFile(paths.leafCert, "utf8"),
     ]);
+    let root: X509Certificate;
+    let leaf: X509Certificate;
+    let rootPrivateKey;
+    let leafPrivateKey;
     try {
-      const root = new X509Certificate(rootCert);
-      const leaf = new X509Certificate(leafCert);
+      root = new X509Certificate(rootCert);
+      leaf = new X509Certificate(leafCert);
+      rootPrivateKey = createPrivateKey(rootKey);
+      leafPrivateKey = createPrivateKey(leafKey);
+    } catch {
+      throw browserIdentityFailure("parse");
+    }
+    requireBrowserIdentity("root-profile", () => root.ca);
+    requireBrowserIdentity("root-key", () => root.checkPrivateKey(rootPrivateKey));
+    requireBrowserIdentity("root-signature", () => root.verify(root.publicKey));
+    requireBrowserIdentity(
+      "leaf-profile",
+      () =>
+        !leaf.ca &&
+        leaf.subjectAltName === `DNS:${canonicalHostname}` &&
+        leaf.checkHost(canonicalHostname) === canonicalHostname &&
+        Boolean(leaf.keyUsage?.includes("1.3.6.1.5.5.7.3.1")),
+    );
+    requireBrowserIdentity("leaf-key", () => leaf.checkPrivateKey(leafPrivateKey));
+    requireBrowserIdentity("leaf-signature", () => leaf.verify(root.publicKey));
+    requireBrowserIdentity("validity", () => {
       const now = Date.now();
       const leafStart = leaf.validFromDate.getTime();
       const leafEnd = leaf.validToDate.getTime();
-      if (
-        !root.ca ||
-        !root.checkPrivateKey(createPrivateKey(rootKey)) ||
-        !root.verify(root.publicKey) ||
-        leaf.ca ||
-        !leaf.checkPrivateKey(createPrivateKey(leafKey)) ||
-        !leaf.verify(root.publicKey) ||
-        leaf.subjectAltName !== `DNS:${canonicalHostname}` ||
-        leaf.checkHost(canonicalHostname) !== canonicalHostname ||
-        !leaf.keyUsage?.includes("1.3.6.1.5.5.7.3.1") ||
-        leafStart > now + 5 * 60_000 ||
-        leafEnd <= now ||
-        leafEnd - leafStart > 397 * 86_400_000
-      )
-        throw new Error();
-    } catch {
-      throw new Error(
-        "Certificate creation failed: openssl produced an invalid browser TLS identity.",
+      return (
+        Number.isFinite(leafStart) &&
+        Number.isFinite(leafEnd) &&
+        leafStart <= now + 5 * 60_000 &&
+        leafEnd > now &&
+        leafEnd - leafStart <= 397 * 86_400_000
       );
-    }
+    });
     return { hostname: canonicalHostname, rootKey, rootCert, leafKey, leafCert };
   } finally {
     await rm(dir, { recursive: true, force: true });
