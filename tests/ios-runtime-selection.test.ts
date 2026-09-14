@@ -24,6 +24,15 @@ test("selects the highest installed runtime compatible with the selected SDK", (
     selectCompatibleIOSRuntime([runtime("17.5"), runtime("18.5")], "18.4").version,
     "17.5",
   );
+  assert.equal(
+    selectCompatibleIOSRuntime([runtime("18.3.1"), runtime("26.2")], "18.2").version,
+    "18.3.1",
+  );
+  assert.equal(
+    selectCompatibleIOSRuntime([runtime("17.5"), runtime("18.3.1"), runtime("26.2")], "18.2")
+      .version,
+    "17.5",
+  );
 });
 
 test("rejects malformed versions and an unavailable compatible inventory", () => {

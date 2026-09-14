@@ -23,7 +23,8 @@ export function selectCompatibleIOSRuntime(runtimes, sdkVersion) {
     throw new Error("Simulator runtime inventory is invalid.");
   }
   const sdk = parseAppleVersion(sdkVersion);
-  const compatible = [];
+  const atOrBelowSDK = [];
+  const sameGeneration = [];
   for (const runtime of runtimes) {
     if (
       !runtime ||
@@ -35,15 +36,17 @@ export function selectCompatibleIOSRuntime(runtimes, sdkVersion) {
     }
     if (runtime.isAvailable !== true) continue;
     const version = parseAppleVersion(runtime.version);
-    if (version[0] >= 17 && compareVersions(version, sdk) <= 0) {
-      compatible.push({ runtime, version });
-    }
+    if (version[0] < 17) continue;
+    if (compareVersions(version, sdk) <= 0) atOrBelowSDK.push({ runtime, version });
+    else if (version[0] === sdk[0]) sameGeneration.push({ runtime, version });
   }
-  compatible.sort((left, right) => compareVersions(right.version, left.version));
-  if (!compatible[0]) {
+  atOrBelowSDK.sort((left, right) => compareVersions(right.version, left.version));
+  sameGeneration.sort((left, right) => compareVersions(right.version, left.version));
+  const selected = atOrBelowSDK[0] ?? sameGeneration[0];
+  if (!selected) {
     throw new Error(
       "No installed iOS Simulator runtime is compatible with the selected Xcode SDK.",
     );
   }
-  return compatible[0].runtime;
+  return selected.runtime;
 }
