@@ -798,6 +798,7 @@ export async function buildServicePayload(options) {
         "-target",
         `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
         join(buildSource, "packages/macos/native/ServicePayloadSelection.swift"),
+        join(buildSource, "packages/macos/native/ServicePayloadLifecycle.swift"),
         join(buildSource, "packages/macos/native/ServicePayloadInstaller.swift"),
         "-o",
         installer,

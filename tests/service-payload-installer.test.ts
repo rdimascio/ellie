@@ -10,6 +10,7 @@ import {
   mkdtemp,
   readFile,
   realpath,
+  rename,
   readdir,
   rm,
   symlink,
@@ -24,6 +25,10 @@ const source = new URL("../packages/macos/native/ServicePayloadInstaller.swift",
   .pathname;
 const selectionSource = new URL(
   "../packages/macos/native/ServicePayloadSelection.swift",
+  import.meta.url,
+).pathname;
+const lifecycleSource = new URL(
+  "../packages/macos/native/ServicePayloadLifecycle.swift",
   import.meta.url,
 ).pathname;
 const launcherSource = new URL(
@@ -198,6 +203,7 @@ async function withFixture(
     "-D",
     "ELLIE_INSTALLER_TESTING",
     selectionSource,
+    lifecycleSource,
     source,
     "-o",
     installer,
@@ -231,6 +237,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-D",
     "ELLIE_INSTALLER_TESTING",
     selectionSource,
+    lifecycleSource,
     source,
     "-o",
     testing,
@@ -241,6 +248,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "5",
     "-parse-as-library",
     selectionSource,
+    lifecycleSource,
     source,
     "-o",
     production,
@@ -906,6 +914,332 @@ test(
         0,
       );
       assert.deepEqual(await readFile(join(developerApp, "ellie-build.json")), developerBytes);
+    });
+  },
+);
+
+test(
+  "native lifecycle validates selection and sends only fixed bounded launchctl operations",
+  { ...options, timeout: 20_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const fresh = join(root, "fresh-lifecycle-home");
+      await mkdir(fresh, { mode: 0o700 });
+      const freshStatus = run(installer, [
+        "status",
+        "coordinator",
+        "--test-home-root",
+        fresh,
+        "--test-launchctl",
+        join(root, "unused-launchctl"),
+      ]);
+      assert.equal(freshStatus.status, 0, freshStatus.stderr);
+      assert.deepEqual(JSON.parse(freshStatus.stdout), {
+        role: "coordinator",
+        selected: false,
+        state: "unselected",
+      });
+      assert.equal(
+        await lstat(join(fresh, "Library"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const home = join(root, "lifecycle-home");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(services, { recursive: true, mode: 0o700 });
+      await chmod(join(home, "Library"), 0o700);
+      await chmod(join(home, "Library/Application Support"), 0o700);
+      await chmod(join(home, "Library/Application Support/Ellie"), 0o700);
+      await mkdir(join(home, "Applications"), { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      assert.equal(
+        run(installer, ["select", id, "--roles", "coordinator", "--test-home-root", home]).status,
+        0,
+      );
+
+      const launchctl = join(root, "fake-launchctl.sh");
+      const state = join(root, "fake-launchctl-state");
+      const enabled = join(root, "fake-launchctl-enabled");
+      const foreign = join(root, "fake-launchctl-foreign");
+      const malformed = join(root, "fake-launchctl-malformed");
+      const nestedSpoof = join(root, "fake-launchctl-nested-spoof");
+      const duplicateBlock = join(root, "fake-launchctl-duplicate-block");
+      const oversized = join(root, "fake-launchctl-oversized");
+      const unknownDisabled = join(root, "fake-launchctl-unknown-disabled");
+      const disabledValue = join(root, "fake-launchctl-disabled-value");
+      const guiUnavailable = join(root, "fake-launchctl-gui-unavailable");
+      const failAfterMutation = join(root, "fake-launchctl-fail-after-mutation");
+      const failAfterBootout = join(root, "fake-launchctl-fail-after-bootout");
+      const disableLeavesEnabledUnloads = join(root, "fake-launchctl-disable-leaves-enabled");
+      const queryFailed = join(root, "fake-launchctl-query-failed");
+      const swapAncestor = join(root, "fake-launchctl-swap-ancestor");
+      const swapCount = join(root, "fake-launchctl-swap-count");
+      const launchAgents = join(home, "Library/LaunchAgents");
+      const launchAgentsBackup = join(home, "Library/LaunchAgents.acceptance-backup");
+      const slow = join(root, "fake-launchctl-slow");
+      const log = join(root, "fake-launchctl.log");
+      const uid = process.getuid!();
+      const label = "org.ellie.assistant.coordinator";
+      const target = `gui/${uid}/${label}`;
+      const plist = join(home, `Library/LaunchAgents/${label}.plist`);
+      const executable = join(
+        home,
+        "Applications/Ellie Coordinator.app/Contents/MacOS/EllieService",
+      );
+      const shell = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+      await writeFile(
+        launchctl,
+        `#!/bin/sh\n{ printf 'CALL\\n'; for arg in "$@"; do printf 'ARG:%s\\n' "$arg"; done; printf 'END\\n'; } >> ${shell(log)}\nif [ "$1" = print ] && [ "$2" = gui/${uid} ] && [ "$#" = 2 ]; then [ -f ${shell(guiUnavailable)} ] && exit 64; exit 0; fi\nif [ "$1" = print-disabled ] && [ "$2" = gui/${uid} ] && [ "$#" = 2 ]; then\n  if [ -f ${shell(unknownDisabled)} ]; then value=mystery; elif [ -f ${shell(disabledValue)} ]; then value=$(/bin/cat ${shell(disabledValue)}); elif [ -f ${shell(enabled)} ]; then value=enabled; else value=disabled; fi\n  printf '\\ndisabled services = {\\n\\t\\t"${label}" => %s\\n}\\n' "$value"; exit 0\nfi\nif [ "$1" = print ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then\n  [ -f ${shell(queryFailed)} ] && exit 64\n  if [ -f ${shell(swapAncestor)} ]; then count=0; [ -f ${shell(swapCount)} ] && count=$(/bin/cat ${shell(swapCount)}); count=$((count + 1)); printf '%s\\n' "$count" > ${shell(swapCount)}; if [ "$count" = 2 ]; then /bin/mv ${shell(launchAgents)} ${shell(launchAgentsBackup)}; /bin/mkdir -m 700 ${shell(launchAgents)}; /bin/cp ${shell(join(home, `Library/LaunchAgents/${label}.plist`))} 2>/dev/null || /bin/cp ${shell(join(home, `Library/LaunchAgents.acceptance-backup/${label}.plist`))} ${shell(plist)}; fi; fi\n  [ -f ${shell(state)} ] || exit 113\n  if [ -f ${shell(slow)} ]; then /bin/sleep 3; fi\n  if [ -f ${shell(oversized)} ]; then i=0; while [ "$i" -lt 70000 ]; do printf x; i=$((i + 1)); done; exit 0; fi\n  if [ -f ${shell(malformed)} ]; then printf '${target} = {\\n\\tpath = ${plist}\\n\\tpath = /tmp/duplicate.plist\\n}\\n'; exit 0; fi\n  if [ -f ${shell(nestedSpoof)} ]; then printf '${target} = {\\n\\tpath = ${plist}\\n\\targuments = {\\n\\t\\tpath = /tmp/spoof\\n\\t}\\n}\\n'; exit 0; fi\n  if [ -f ${shell(duplicateBlock)} ]; then printf '${target} = {\\n\\targuments = {\\n\\t}\\n\\targuments = {\\n\\t}\\n}\\n'; exit 0; fi\n  if [ -f ${shell(foreign)} ]; then path=/tmp/unmanaged.plist; else path=${shell(plist)}; fi\n  printf '${target} = {\\n\\tactive count = 1\\n\\tpath = %s\\n\\ttype = LaunchAgent\\n\\tstate = running\\n\\tprogram = ${executable}\\n\\targuments = {\\n\\t\\t${executable}\\n\\t\\t--launch-agent\\n\\t}\\n\\tenvironment = {\\n\\t\\tHOME => /redacted\\n\\t}\\n\\tpid = 123\\n}\\n' "$path"; exit 0\nfi\nif [ "$1" = enable ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then /usr/bin/touch ${shell(enabled)}; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = disable ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then if [ -f ${shell(disableLeavesEnabledUnloads)} ]; then /bin/rm -f ${shell(state)}; else /bin/rm -f ${shell(enabled)}; fi; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = bootstrap ] && [ "$2" = gui/${uid} ] && [ "$3" = ${shell(plist)} ] && [ "$#" = 3 ]; then /usr/bin/touch ${shell(state)}; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = bootout ] && [ "$2" = gui/${uid} ] && [ "$3" = ${shell(plist)} ] && [ "$#" = 3 ]; then /bin/rm -f ${shell(state)}; [ -f ${shell(failAfterBootout)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nexit 64\n`,
+        { mode: 0o700 },
+      );
+      await chmod(launchctl, 0o700);
+      const lifecycle = (command: string) =>
+        run(installer, [
+          command,
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          launchctl,
+        ]);
+
+      const start = lifecycle("start");
+      assert.equal(start.status, 0, start.stderr);
+      assert.equal(JSON.parse(start.stdout).state, "running");
+      const running = lifecycle("status");
+      assert.equal(running.status, 0, running.stderr);
+      assert.deepEqual(JSON.parse(running.stdout), {
+        enabled: true,
+        loadedFromSelectedPlist: true,
+        releaseID: id,
+        role: "coordinator",
+        selected: true,
+        state: "running",
+      });
+      const stop = lifecycle("stop");
+      assert.equal(stop.status, 0, stop.stderr);
+      assert.deepEqual(JSON.parse(stop.stdout), {
+        enabled: false,
+        loadedFromSelectedPlist: false,
+        releaseID: id,
+        role: "coordinator",
+        selected: true,
+        state: "stopped",
+      });
+      const invocations = (await readFile(log, "utf8"))
+        .split("CALL\n")
+        .slice(1)
+        .map((block) =>
+          block
+            .split("END\n")[0]!
+            .split("\n")
+            .filter(Boolean)
+            .map((line) => line.replace(/^ARG:/, "")),
+        );
+      assert.equal(
+        invocations.some((args) => args.join("\0") === ["enable", target].join("\0")),
+        true,
+      );
+      assert.equal(
+        invocations.some(
+          (args) => args.join("\0") === ["bootstrap", `gui/${uid}`, plist].join("\0"),
+        ),
+        true,
+      );
+      assert.equal(
+        invocations.some((args) => args.join("\0") === ["disable", target].join("\0")),
+        true,
+      );
+      assert.equal(
+        invocations.some((args) => args.join("\0") === ["bootout", `gui/${uid}`, plist].join("\0")),
+        true,
+      );
+      assert.equal(
+        invocations.some((args) => args.includes("kickstart")),
+        false,
+      );
+
+      await writeFile(failAfterMutation, "fail after enable\n");
+      const enableCallCount = (await readFile(log, "utf8")).split("CALL\n").length;
+      const enablePartial = lifecycle("start");
+      assert.notEqual(enablePartial.status, 0);
+      assert.match(enablePartial.stderr, /enabled, but start was not confirmed/);
+      const enableTail = (await readFile(log, "utf8")).split("CALL\n").slice(enableCallCount);
+      assert.equal(
+        enableTail.some((value) => value.includes("ARG:bootstrap\n")),
+        false,
+      );
+      await rm(failAfterMutation);
+      await rm(queryFailed);
+      await rm(enabled);
+
+      await writeFile(enabled, "enabled\n");
+      await writeFile(failAfterMutation, "fail after bootstrap\n");
+      const bootstrapUnknown = lifecycle("start");
+      assert.notEqual(bootstrapUnknown.status, 0);
+      assert.match(bootstrapUnknown.stderr, /start request may have taken effect/);
+      await rm(failAfterMutation);
+      await rm(queryFailed);
+      await rm(state);
+
+      await writeFile(state, "loaded\n");
+      await writeFile(enabled, "enabled\n");
+      await writeFile(failAfterMutation, "fail after disable\n");
+      const disablePartial = lifecycle("stop");
+      assert.notEqual(disablePartial.status, 0);
+      assert.match(disablePartial.stderr, /disabled, but stop was not confirmed/);
+      await rm(failAfterMutation);
+      await rm(queryFailed);
+      await writeFile(enabled, "enabled\n");
+
+      await writeFile(disableLeavesEnabledUnloads, "race\n");
+      const falseDisable = lifecycle("stop");
+      assert.notEqual(falseDisable.status, 0);
+      assert.match(falseDisable.stderr, /disabled, but stop was not confirmed/);
+      await rm(disableLeavesEnabledUnloads);
+
+      await writeFile(state, "loaded\n");
+      await writeFile(failAfterBootout, "fail after bootout\n");
+      const bootoutUnknown = lifecycle("stop");
+      assert.notEqual(bootoutUnknown.status, 0);
+      assert.match(bootoutUnknown.stderr, /stop request may have taken effect/);
+      await rm(failAfterBootout);
+      await rm(queryFailed);
+
+      await writeFile(swapAncestor, "swap\n");
+      const callsBeforeSwap = (await readFile(log, "utf8")).split("CALL\n").length;
+      const swappedAncestor = lifecycle("start");
+      assert.notEqual(swappedAncestor.status, 0);
+      assert.match(swappedAncestor.stderr, /enabled, but start was not confirmed/);
+      const swapCalls = (await readFile(log, "utf8")).split("CALL\n").slice(callsBeforeSwap);
+      assert.equal(
+        swapCalls.some((value) => value.includes("ARG:bootstrap\n")),
+        false,
+      );
+      await rm(launchAgents, { recursive: true });
+      await rename(launchAgentsBackup, launchAgents);
+      await rm(swapAncestor);
+      await rm(swapCount);
+      await rm(enabled);
+
+      await writeFile(state, "loaded\n");
+      await writeFile(foreign, "foreign\n");
+      const beforeForeign = (await readFile(log, "utf8")).split("CALL\n").length;
+      const unmanaged = lifecycle("stop");
+      assert.notEqual(unmanaged.status, 0);
+      assert.match(unmanaged.stderr, /not the selected managed service/);
+      const foreignCalls = (await readFile(log, "utf8")).split("CALL\n").slice(beforeForeign);
+      assert.equal(
+        foreignCalls.some((value) => value.includes("ARG:disable\n")),
+        false,
+      );
+      assert.equal(
+        foreignCalls.some((value) => value.includes("ARG:bootout\n")),
+        false,
+      );
+
+      await rm(foreign);
+      await writeFile(malformed, "malformed\n");
+      const malformedStatus = lifecycle("status");
+      assert.notEqual(malformedStatus.status, 0);
+      assert.match(malformedStatus.stderr, /could not verify/);
+      await rm(malformed);
+      await writeFile(nestedSpoof, "nested\n");
+      const spoofedStatus = lifecycle("status");
+      assert.notEqual(spoofedStatus.status, 0);
+      assert.match(spoofedStatus.stderr, /could not verify/);
+      await rm(nestedSpoof);
+      await writeFile(duplicateBlock, "duplicate\n");
+      const duplicateBlockStatus = lifecycle("status");
+      assert.notEqual(duplicateBlockStatus.status, 0);
+      assert.match(duplicateBlockStatus.stderr, /could not verify/);
+      await rm(duplicateBlock);
+      await writeFile(unknownDisabled, "unknown\n");
+      const unknownDisabledStatus = lifecycle("status");
+      assert.notEqual(unknownDisabledStatus.status, 0);
+      assert.match(unknownDisabledStatus.stderr, /could not verify/);
+      await rm(unknownDisabled);
+      for (const legacyValue of ["true", "false"]) {
+        await writeFile(disabledValue, `${legacyValue}\n`);
+        const legacyStatus = lifecycle("status");
+        assert.equal(legacyStatus.status, 0, legacyStatus.stderr);
+        assert.equal(JSON.parse(legacyStatus.stdout).enabled, legacyValue === "false");
+      }
+      await rm(disabledValue);
+      await writeFile(guiUnavailable, "unavailable\n");
+      const unavailableStatus = lifecycle("status");
+      assert.notEqual(unavailableStatus.status, 0);
+      assert.match(unavailableStatus.stderr, /could not verify/);
+      await rm(guiUnavailable);
+      await writeFile(oversized, "oversized\n");
+      const oversizedStatus = lifecycle("status");
+      assert.notEqual(oversizedStatus.status, 0);
+      assert.match(oversizedStatus.stderr, /could not verify/);
+      await rm(oversized);
+      await writeFile(slow, "slow\n");
+      const slowStarted = performance.now();
+      const slowStatus = lifecycle("status");
+      assert.notEqual(slowStatus.status, 0);
+      assert.match(slowStatus.stderr, /could not verify/);
+      assert.ok(performance.now() - slowStarted < 3_000);
+      await rm(slow);
+
+      const holder = spawn(
+        installer,
+        ["recover", "--test-home-root", home, "--test-hold-lock-ms", "500"],
+        { stdio: "ignore" },
+      );
+      const holderExit = new Promise<number | null>((resolve) => holder.once("exit", resolve));
+      const ready = join(services, ".test-selection-lock-ready");
+      const readyDeadline = performance.now() + 2_000;
+      while (
+        !(await lstat(ready)
+          .then(() => true)
+          .catch(() => false))
+      ) {
+        assert.ok(performance.now() < readyDeadline);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const busy = lifecycle("status");
+      assert.notEqual(busy.status, 0);
+      assert.match(busy.stderr, /command is running/);
+      assert.equal(await holderExit, 0);
+
+      const receiptPath = join(services, "receipts/installed.json");
+      const receiptBytes = await readFile(receiptPath);
+      await rm(receiptPath);
+      const missingReceipt = lifecycle("status");
+      assert.notEqual(missingReceipt.status, 0);
+      assert.match(missingReceipt.stderr, /requires selection recovery/);
+      await writeFile(receiptPath, receiptBytes, { mode: 0o600 });
+
+      const plistBytes = await readFile(plist);
+      await rm(plist);
+      const missingArtifact = lifecycle("status");
+      assert.notEqual(missingArtifact.status, 0);
+      assert.match(missingArtifact.stderr, /requires selection recovery/);
+      await writeFile(plist, plistBytes, { mode: 0o444 });
+
+      await writeFile(join(services, "selection-journal.json"), "unsafe\n", {
+        mode: 0o600,
+      });
+      const pending = lifecycle("status");
+      assert.notEqual(pending.status, 0);
+      assert.match(pending.stderr, /requires selection recovery/);
+      await rm(join(services, "selection-journal.json"));
+      await rm(join(services, "selection.lock"));
+      const missingLock = lifecycle("status");
+      assert.notEqual(missingLock.status, 0);
+      assert.match(missingLock.stderr, /requires selection recovery/);
+      execFileSync("/usr/bin/mkfifo", [join(services, "selection.lock")]);
+      const fifoStarted = performance.now();
+      const fifoLock = lifecycle("status");
+      assert.notEqual(fifoLock.status, 0);
+      assert.match(fifoLock.stderr, /requires selection recovery/);
+      assert.ok(performance.now() - fifoStarted < 1_000);
     });
   },
 );

@@ -559,6 +559,20 @@ func selectionOpenOwnedDirectory(parent: Int32, name: String) throws -> Int32 {
   }
   return fd
 }
+func selectionOpenOwnedDirectoryIfPresent(parent: Int32, name: String) throws -> Int32? {
+  let fd = openat(
+    parent, try checkedComponent(name), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+  if fd < 0 {
+    if errno == ENOENT { return nil }
+    throw InstallerFailure.rejected
+  }
+  var info = stat()
+  guard fstat(fd, &info) == 0, info.st_uid == getuid(), (info.st_mode & 0o022) == 0 else {
+    closeFD(fd)
+    throw InstallerFailure.rejected
+  }
+  return fd
+}
 func selectionEnsureOwnedDirectory(parent: Int32, name: String) throws -> Int32 {
   let component = try checkedComponent(name)
   let created = mkdirat(parent, component, 0o700) == 0
@@ -983,6 +997,13 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "status" || arguments.first == "start" || arguments.first == "stop" {
+      do {
+        try runLifecycleCommand(arguments)
+      } catch {
+        failLifecycleCommand(error)
+      }
+    }
     if arguments.first == "select" || arguments.first == "recover" {
       do {
         try runSelectionCommand(arguments)
