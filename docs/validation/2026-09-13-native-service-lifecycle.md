@@ -33,6 +33,9 @@ independently verified its checksum, exact source revision, `sourceModified: fal
 413-file manifest and successful shipping read-only inspection. The official Node 24.21.0
 input and explicit offline Bun cache were used. This artifact was not installed or selected.
 
+All ten current PR64 CI checks passed: three TypeScript, three native, three command-center
+jobs and the security check. The combined PR59 head has its own independent CI results.
+
 Read-only observations on the physical mini running macOS 26 and MacBook running macOS
 15.1 established the actual launchctl text forms used by the parser. Apple documents this
 output as diagnostic text rather than a stable API. Strict parsing and final revalidation
