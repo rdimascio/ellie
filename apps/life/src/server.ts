@@ -18,6 +18,7 @@ import type {
   TextSourceFormat,
 } from "../../../packages/life-core/src/index.ts";
 import { LifeAccessError, LifeConflictError } from "../../../packages/life-core/src/index.ts";
+import type { ConnectorBroker } from "../../../packages/life-connectors/src/broker.ts";
 import {
   eventPreparationWindow,
   recordProactiveDismissal,
@@ -219,6 +220,8 @@ export interface LifeServerOptions {
   mlb?: MlbLike;
   context?: ContextLike;
   preparationMonitor?: { start(): void; stop(): void };
+  connectors?: ConnectorBroker;
+  openAuthorizationUrl?: (url: string) => Promise<boolean>;
   modelStatus?: () => Promise<ModelStatus>;
   host?: "127.0.0.1";
   port?: number;
@@ -389,7 +392,7 @@ export class LifeHttpServer {
   private readonly mutationRequests = new Set<Promise<void>>();
   private readonly personalReviews = new Map<
     string,
-    { expiresAt: number; life: number; tasks: number; plugins: number }
+    { expiresAt: number; life: number; tasks: number; plugins: number; connectors?: number }
   >();
   private readonly chatProgress = new Map<
     string,
@@ -558,8 +561,8 @@ export class LifeHttpServer {
       this.activeRequests.add(active);
       const path = (request.url ?? "").split("?", 1)[0] ?? "";
       if (
-        request.method !== "GET" &&
-        request.method !== "HEAD" &&
+        ((request.method !== "GET" && request.method !== "HEAD") ||
+          path === "/api/connections/callback") &&
         !path.startsWith("/api/life/personal-data/reset")
       )
         this.mutationRequests.add(active);
@@ -813,11 +816,66 @@ export class LifeHttpServer {
       this.validateOrigin(request, origin);
       const url = new URL(request.url ?? "/", origin),
         path = url.pathname;
+      if (
+        request.method === "GET" &&
+        (path === "/connections/complete" || path === "/connections/cancelled")
+      ) {
+        const cancelled = path === "/connections/cancelled";
+        response.writeHead(200, {
+          ...BASE_HEADERS,
+          "content-type": "text/html; charset=utf-8",
+          "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'",
+        });
+        response.end(
+          `<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><title>Return to Ellie</title><style>body{font:20px system-ui;background:#eef5f5;color:#173c42;max-width:32rem;margin:15vh auto;padding:2rem}h1{font-size:32px}</style><h1>${cancelled ? "Connection canceled." : "Return to Ellie."}</h1><p>${cancelled ? "You can try connecting again from Settings." : "Your connection status will update there automatically. You can close this tab."}</p>`,
+        );
+        return;
+      }
+      if (path === "/api/connections/callback" && request.method === "GET") {
+        if (this.personalResetActive || !this.options.connectors)
+          throw new HttpError(423, "Connected work is unavailable.");
+        if (url.searchParams.has("error")) {
+          try {
+            await this.options.connectors.cancelAuthorization(
+              bounded(url.searchParams.get("state"), "OAuth state", 256),
+            );
+          } catch {
+            throw new HttpError(400, "Connection authorization is unavailable.");
+          }
+          response.writeHead(303, { ...BASE_HEADERS, location: "/connections/cancelled" });
+          response.end();
+          return;
+        }
+        try {
+          await this.options.connectors.callback(
+            bounded(url.searchParams.get("state"), "OAuth state", 256),
+            bounded(url.searchParams.get("code"), "OAuth code", 4096),
+            `${origin}/api/connections/callback`,
+            AbortSignal.timeout(30_000),
+          );
+        } catch {
+          throw new HttpError(
+            400,
+            "Account connection did not finish. Return to Settings and try again.",
+          );
+        }
+        if (this.options.openAuthorizationUrl) {
+          response.writeHead(303, { ...BASE_HEADERS, location: "/connections/complete" });
+          response.end();
+        } else {
+          response.writeHead(303, { ...BASE_HEADERS, location: "/?connected=1" });
+          response.end();
+        }
+        return;
+      }
       if (path === "/api/life/session" && request.method === "POST") {
         await this.session(request, response);
         return;
       }
-      if (path.startsWith("/api/life/") && !this.authenticated(request))
+      if (
+        (path.startsWith("/api/life/") || path.startsWith("/api/connections")) &&
+        !this.authenticated(request)
+      )
         throw new HttpError(401, "Authentication required.");
       if (
         this.personalResetActive &&
@@ -825,6 +883,58 @@ export class LifeHttpServer {
         !path.startsWith("/api/life/personal-data/reset")
       )
         throw new HttpError(423, "Personal reset is in progress.");
+      if (path === "/api/connections" && request.method === "GET") {
+        this.send(
+          response,
+          200,
+          this.options.connectors?.list(this.actor.userId) ?? { connections: [], providers: [] },
+        );
+        return;
+      }
+      if (path.startsWith("/api/connections/") && request.method === "POST") {
+        const connectors = this.options.connectors;
+        if (!connectors) throw new HttpError(503, "Connected accounts are unavailable.");
+        const body = jsonObject(await this.body(request));
+        const mode = () => {
+          if (body.mode !== "observe" && body.mode !== "prepare")
+            throw new HttpError(400, "Connection mode is invalid.");
+          return body.mode;
+        };
+        if (path === "/api/connections/start") {
+          if (body.provider !== "google-calendar" && body.provider !== "gmail")
+            throw new HttpError(400, "Provider requires host setup.");
+          if (
+            !connectors.list(this.actor.userId).providers.find((p) => p.id === body.provider)
+              ?.configured
+          )
+            throw new HttpError(
+              409,
+              "Register a Google desktop OAuth client in host configuration first.",
+            );
+          const started = await connectors.start(
+            this.actor.userId,
+            body.provider,
+            mode(),
+            `${origin}/api/connections/callback`,
+          );
+          const openedExternally = this.options.openAuthorizationUrl
+            ? await this.options.openAuthorizationUrl(started.authorizationUrl).catch(() => false)
+            : false;
+          this.send(response, 200, { ...started, openedExternally });
+          return;
+        }
+        const match = /^\/api\/connections\/([^/]+)\/(refresh|revoke|mode)$/.exec(path);
+        if (!match) throw new HttpError(404, "Connection route is unavailable.");
+        const id = identifier(decodeURIComponent(match[1]!));
+        if (!connectors.store.get(this.actor.userId, id))
+          throw new HttpError(404, "Connection is unavailable.");
+        if (match[2] === "refresh") await connectors.refresh(this.actor.userId, id);
+        else if (match[2] === "revoke") await connectors.revoke(this.actor.userId, id);
+        else await connectors.setMode(this.actor.userId, id, mode());
+        this.options.harness.invalidateActorContext?.(this.actor);
+        this.send(response, 200, { ok: true });
+        return;
+      }
       if (path === "/api/life/personal-data/review" && request.method === "GET")
         return this.personalDataReview(response);
       if (path === "/api/life/personal-data/export" && request.method === "GET")
@@ -1024,17 +1134,24 @@ export class LifeHttpServer {
       plugins = this.options.plugins.personalSummary(this.actor.userId),
       token = randomBytes(32).toString("base64url"),
       expiresAt = this.now() + 600_000;
+    const connectors = this.options.connectors?.store.summary(this.actor.userId);
     this.personalReviews.clear();
     this.personalReviews.set(digest(token).toString("hex"), {
       expiresAt,
       life: life.generation,
       tasks: tasks.generation,
       plugins: plugins.generation,
+      ...(connectors ? { connectors: connectors.generation } : {}),
     });
     this.send(response, 200, {
       reviewToken: token,
       expiresAt: new Date(expiresAt).toISOString(),
-      generations: { life: life.generation, tasks: tasks.generation, plugins: plugins.generation },
+      generations: {
+        life: life.generation,
+        tasks: tasks.generation,
+        plugins: plugins.generation,
+        ...(connectors ? { connectors: connectors.generation } : {}),
+      },
       counts: {
         privateRecords: life.records,
         sources: life.sources,
@@ -1053,8 +1170,11 @@ export class LifeHttpServer {
         pluginVersions: plugins.versions,
         pluginStorageKeys: plugins.storageKeys,
         sharedPluginStorageKeys: plugins.sharedStorageKeys,
+        ...(connectors
+          ? { connections: connectors.connections, connectedEvidence: connectors.evidence }
+          : {}),
       },
-      bytes: life.bytes + tasks.bytes + plugins.bytes,
+      bytes: life.bytes + tasks.bytes + plugins.bytes + (connectors?.bytes ?? 0),
       truncated: tasks.truncated,
       preserves: ["group memberships", "shared records", "shared apps", "shared tasks"],
     });
@@ -1064,6 +1184,7 @@ export class LifeHttpServer {
     life: number;
     tasks: number;
     plugins: number;
+    connectors?: number;
   } {
     if (typeof token !== "string" || token.length > 256)
       throw new HttpError(403, "A fresh personal-data review is required.");
@@ -1100,7 +1221,15 @@ export class LifeHttpServer {
         limit,
         expectedGeneration: review.plugins,
       });
-    else throw new HttpError(400, "Export store must be life, tasks, or plugins.");
+    else if (store === "connectors" && this.options.connectors && review.connectors !== undefined) {
+      if (this.options.connectors.store.generation(this.actor.userId) !== review.connectors)
+        throw new HttpError(409, "Connected data changed; review again before exporting.");
+      page = this.options.connectors.store.exportPage(this.actor.userId, {
+        expectedGeneration: review.connectors,
+        cursor,
+        limit,
+      });
+    } else throw new HttpError(400, "Export store must be life, tasks, plugins, or connectors.");
     this.send(response, 200, page);
   }
   private resetStatus(
@@ -1168,6 +1297,7 @@ export class LifeHttpServer {
     }
     this.personalResetActive = true;
     this.options.preparationMonitor?.stop();
+    this.options.connectors?.block(this.actor.userId);
     this.options.harness.invalidateActorContext?.(this.actor);
     const runtimeDeletion = this.options.tasks.getPersonalDeletion(ownerId);
     this.options.tasks.beginPersonalDeletion(
@@ -1186,6 +1316,7 @@ export class LifeHttpServer {
       journal = this.options.store.advancePersonalReset(this.actor, operationId, "tasks-deleted");
     }
     if (journal.state === "tasks-deleted") {
+      await this.options.connectors?.deletePersonal(this.actor.userId);
       this.options.plugins.deletePersonal(this.actor.userId);
       journal = this.options.store.advancePersonalReset(this.actor, operationId, "plugins-deleted");
     }
@@ -1199,6 +1330,7 @@ export class LifeHttpServer {
       this.options.tasks.completePersonalDeletion(ownerId, operationId);
       journal = this.options.store.advancePersonalReset(this.actor, operationId, "completed");
       this.personalResetActive = false;
+      this.options.connectors?.unblock(this.actor.userId);
       if (this.bound) this.options.preparationMonitor?.start();
       this.personalReviews.clear();
     }
@@ -1220,9 +1352,11 @@ export class LifeHttpServer {
       );
     this.personalResetActive = true;
     this.options.preparationMonitor?.stop();
+    this.options.connectors?.block(this.actor.userId);
     this.options.harness.invalidateActorContext?.(this.actor);
     if (!(await this.settleActorMutations())) {
       this.personalResetActive = false;
+      this.options.connectors?.unblock(this.actor.userId);
       if (this.bound) this.options.preparationMonitor?.start();
       throw new HttpError(409, "Active personal work did not settle; review reset again.");
     }
@@ -1237,6 +1371,11 @@ export class LifeHttpServer {
         limit: 1,
         expectedGeneration: review.plugins,
       });
+      if (
+        this.options.connectors &&
+        this.options.connectors.store.generation(this.actor.userId) !== review.connectors
+      )
+        throw new HttpError(409, "Connected data changed; review reset again.");
       this.options.store.beginPersonalReset(this.actor, {
         operationId,
         reviewTokenHash: digest(String(body.reviewToken)).toString("hex"),
@@ -1246,6 +1385,7 @@ export class LifeHttpServer {
       });
     } catch (error) {
       this.personalResetActive = false;
+      this.options.connectors?.unblock(this.actor.userId);
       if (this.bound) this.options.preparationMonitor?.start();
       throw error;
     }

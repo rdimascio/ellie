@@ -171,7 +171,7 @@ export interface TeachingGuide {
 export interface PersonalDataReview {
   reviewToken: string;
   expiresAt: string | number;
-  generations: { life: number; tasks: number; plugins: number };
+  generations: { life: number; tasks: number; plugins: number; connectors?: number };
   counts: {
     privateRecords: number;
     sources: number;
@@ -187,6 +187,8 @@ export interface PersonalDataReview {
     sharedPluginStorageKeys: number;
     conversations?: number;
     conversationTurns?: number;
+    connections?: number;
+    connectedEvidence?: number;
   };
   bytes: number;
   truncated?: boolean;

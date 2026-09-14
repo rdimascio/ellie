@@ -60,7 +60,11 @@ const matchesRecord = (
   record: DeliveryRecord,
   expectedOwner: OwnerScope,
 ): boolean => {
-  if (task.owner !== expectedOwner || task.handler !== "reminder.notify") return false;
+  if (
+    task.owner !== expectedOwner ||
+    !["reminder.notify", "life.connected.notify"].includes(task.handler)
+  )
+    return false;
   if (!task.input || typeof task.input !== "object" || Array.isArray(task.input)) return false;
   const input = task.input as Record<string, unknown>;
   if (input.recordId !== record.id) return false;

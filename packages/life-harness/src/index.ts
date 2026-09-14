@@ -195,6 +195,15 @@ function modelContext(
   const memories = store
     .listRecords(actor, { scope, kinds: ["memory"], limit: 100 })
     .filter((record) => record.provenance.every((item) => item.invalidatedAt === undefined))
+    .filter((record) => {
+      const connected = record.data.connected;
+      return (
+        !connected ||
+        typeof connected !== "object" ||
+        typeof (connected as Record<string, unknown>).expiresAt !== "number" ||
+        Number((connected as Record<string, unknown>).expiresAt) > Date.now()
+      );
+    })
     .map((record) => {
       const text = record.body ?? record.title;
       const score = (text.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []).reduce(
