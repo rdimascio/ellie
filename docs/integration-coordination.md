@@ -20,3 +20,9 @@ Reserve expensive native builds, Simulator jobs and physical Mac acceptance thro
 Life packaging follows the authenticated API boundary. Paired clients reuse coordinator enrollment and scoped grants; the existing loopback-only Life server is not exposed remotely as a shortcut. The release coordinator adds the reviewed runtime/UI closure to packages and updates trusted inventory definitions when required.
 
 Development artifact preparation does not establish installed-service acceptance. Keep exact source and artifact identities, synthetic tests, physical execution, owner-reported acceptance and deployment evidence distinct. A live migration requires a concrete reviewed rollout with identity preservation, health checks and recovery. Existing identities, credentials, permissions and user work remain preserved.
+
+## Owner progress and milestone QA
+
+The owner requested a consolidated report on every 30-minute coordinator run, including when work is waiting. State the current milestone and acceptance stage, changes since the last report, active work across both lanes, concrete blockers and the next testable handoff. Use observed progress rather than invented overall percentages. Routine peer-task messages remain limited to actionable handoffs.
+
+Each milestone needs a runnable candidate and an owner manual QA pass before acceptance for daily use. The [manual QA catalogue](manual-qa.md) groups current features into short sessions with stable case IDs, actions, expected results and prerequisites. Each handoff identifies its exact build and supplies current fixtures and access instructions privately. Record pass, fail or blocked against that build. Fix failures and retest affected cases; independent work may continue while owner QA is pending. Automated tests and earlier-artifact acceptance do not replace the new milestone's manual check.

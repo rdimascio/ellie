@@ -106,7 +106,7 @@ function auditOpcode(binary: string) {
 }
 
 test(
-  "configured and unavailable blobs are the sole policy representation in three optimized binaries",
+  "configured blob is the sole policy representation in three optimized binaries",
   { skip: !mac, timeout: 180_000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-policy-blob-"));
@@ -186,6 +186,19 @@ test(
       ["ELLIE_POLICY_LIBRARY"],
     );
     await assert.rejects(() => runActivationPolicyBuildCommand(tamperedLoader, [], { cwd: root }));
+    completed = true;
+  },
+);
+
+test(
+  "unavailable blob is retained and refused by ordinary optimized binaries",
+  { skip: !mac, timeout: 120_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "ellie-policy-unavailable-"));
+    let completed = false;
+    t.after(async () => {
+      if (completed) await rm(root, { recursive: true });
+    });
     const unavailableSource = join(root, "unavailable.c");
     await writeFile(unavailableSource, unavailableActivationPolicySource(), { mode: 0o600 });
     const unavailableObject = join(root, "unavailable.o");
@@ -202,6 +215,8 @@ test(
       unavailableBytes,
     );
     const unavailableProbe = join(root, "unavailable-probe");
+    const loaderMain = join(root, "LoaderMain.swift");
+    await writeFile(loaderMain, loaderProbeSource);
     await compile(
       unavailableProbe,
       [unavailableObject, ...installerSources, loader, loaderMain],
