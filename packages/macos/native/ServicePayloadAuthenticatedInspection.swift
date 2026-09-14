@@ -16,11 +16,20 @@ struct VerifiedPayloadInventory {
   let releaseID: String
   let payloadPolicyDigest: String
   let manifestSHA256: String
+  let entries: [Entry]
 }
 
 struct AuthenticatedPayloadInspection {
   let envelope: AuthenticatedEnvelope
   let inventory: VerifiedPayloadInventory
+  let sourceIdentity: AuthenticatedPayloadSourceIdentity
+}
+
+struct AuthenticatedPayloadSourceIdentity {
+  let rootDevice: dev_t
+  let rootInode: ino_t
+  let payloadDevice: dev_t
+  let payloadInode: ino_t
 }
 
 private struct ProductionSignedComponent: Decodable {
@@ -481,7 +490,7 @@ private func validateMachO(_ fd: Int32, size: UInt64, architecture: String) thro
 }
 
 private func nativeFileInventory(
-  _ payload: Int32, entries: [Entry], architecture: String
+  _ payload: Int32, entries: [Entry], architecture: String, layout: AuthenticatedPayloadLayout
 ) throws -> Set<String> {
   var result = Set<String>()
   for entry in entries {
@@ -491,7 +500,8 @@ private func nativeFileInventory(
     guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG,
       info.st_uid == getuid(), info.st_nlink == 1, info.st_size >= 0,
       UInt64(info.st_size) == entry.size, entry.size <= maximumFileBytes,
-      Int(info.st_mode & 0o7777) == entry.mode
+      Int(info.st_mode & 0o7777)
+        == (layout == .captured ? (entry.mode == 0o755 ? 0o555 : 0o444) : entry.mode)
     else { throw InstallerFailure.rejected }
     if try validateMachO(fd, size: UInt64(info.st_size), architecture: architecture) {
       result.insert(entry.path)
@@ -560,20 +570,51 @@ private func validateProductionSignature(
   else { throw InstallerFailure.rejected }
 }
 
+enum AuthenticatedPayloadLayout { case external, captured }
+
+private func authenticatedSourceIdentity(_ path: String, layout: AuthenticatedPayloadLayout)
+  throws -> AuthenticatedPayloadSourceIdentity
+{
+  let root = try openAbsoluteDirectory(path); defer { closeFD(root) }
+  let payload = try openDirectory(at: root, "payload"); defer { closeFD(payload) }
+  var rootInfo = stat(), payloadInfo = stat()
+  let mode: mode_t = layout == .captured ? 0o555 : 0o755
+  guard fstat(root, &rootInfo) == 0, fstat(payload, &payloadInfo) == 0,
+    rootInfo.st_uid == getuid(), payloadInfo.st_uid == getuid(),
+    (rootInfo.st_mode & 0o7777) == mode, (payloadInfo.st_mode & 0o7777) == mode
+  else { throw InstallerFailure.rejected }
+  return AuthenticatedPayloadSourceIdentity(
+    rootDevice: rootInfo.st_dev, rootInode: rootInfo.st_ino,
+    payloadDevice: payloadInfo.st_dev, payloadInode: payloadInfo.st_ino)
+}
+
+func rebindAuthenticatedPayloadSource(_ inspection: AuthenticatedPayloadInspection, path: String)
+  throws
+{
+  let current = try authenticatedSourceIdentity(path, layout: .external)
+  guard current.rootDevice == inspection.sourceIdentity.rootDevice,
+    current.rootInode == inspection.sourceIdentity.rootInode,
+    current.payloadDevice == inspection.sourceIdentity.payloadDevice,
+    current.payloadInode == inspection.sourceIdentity.payloadInode
+  else { throw InstallerFailure.rejected }
+}
+
 private func inspectProductionPayload(
   source: String, envelope: AuthenticatedEnvelope, teamID: String, testAllowAdHoc: Bool,
-  testRebindPath: String? = nil
+  testRebindPath: String? = nil, layout: AuthenticatedPayloadLayout = .external
 ) throws -> VerifiedPayloadInventory {
   let root = try openAbsoluteDirectory(source)
   defer { closeFD(root) }
   try statSafeDirectory(root, privateMode: false)
   var held = stat()
-  guard fstat(root, &held) == 0, (held.st_mode & 0o7777) == 0o755,
+  let directoryMode: mode_t = layout == .captured ? 0o555 : 0o755
+  let metadataMode: mode_t = layout == .captured ? 0o444 : 0o644
+  guard fstat(root, &held) == 0, (held.st_mode & 0o7777) == directoryMode,
     try directoryNames(root) == ["SOURCE.txt", "manifest.json", "payload"]
   else { throw InstallerFailure.rejected }
   let manifestData = try readFile(
-    at: root, "manifest.json", mode: 0o644, maximum: maximumManifestBytes)
-  let sourceData = try readFile(at: root, "SOURCE.txt", mode: 0o644, maximum: maximumSourceBytes)
+    at: root, "manifest.json", mode: metadataMode, maximum: maximumManifestBytes)
+  let sourceData = try readFile(at: root, "SOURCE.txt", mode: metadataMode, maximum: maximumSourceBytes)
   guard manifestData == envelope.manifestData, sourceData == envelope.sourceData else {
     throw InstallerFailure.rejected
   }
@@ -629,7 +670,7 @@ private func inspectProductionPayload(
   defer { closeFD(payload) }
   var payloadInfo = stat()
   guard fstat(payload, &payloadInfo) == 0, payloadInfo.st_uid == getuid(),
-    (payloadInfo.st_mode & 0o7777) == 0o755
+    (payloadInfo.st_mode & 0o7777) == directoryMode
   else { throw InstallerFailure.rejected }
   var total: UInt64 = 0
   var declared = Set<String>()
@@ -638,7 +679,7 @@ private func inspectProductionPayload(
       throw InstallerFailure.rejected
     }
     total += entry.size
-    try hashAndValidate(root: payload, entry: entry, installed: false)
+    try hashAndValidate(root: payload, entry: entry, installed: layout == .captured)
   }
   let modes = Dictionary(uniqueKeysWithValues: manifest.files.map { ($0.path, $0.mode) })
   guard modes["bin/node"] == 0o755, modes["bin/ellie-service-installer"] == 0o755,
@@ -657,12 +698,12 @@ private func inspectProductionPayload(
   }
   var count = 0
   let actual = try listedFiles(
-    payload, installed: false, allowedDirectories: directories, count: &count)
+    payload, installed: layout == .captured, allowedDirectories: directories, count: &count)
   guard Set(actual) == declared, actual.count == declared.count else {
     throw InstallerFailure.rejected
   }
   let discovered = try nativeFileInventory(
-    payload, entries: manifest.files, architecture: manifest.architecture)
+    payload, entries: manifest.files, architecture: manifest.architecture, layout: layout)
   let expectedMachO = Set(native.flatMap(\.machOPaths))
   guard discovered == expectedMachO else { throw InstallerFailure.rejected }
   let base = try pathFromFD(payload)
@@ -682,7 +723,7 @@ private func inspectProductionPayload(
   var finalPayloadInfo = stat()
   guard fstat(payload, &finalPayloadInfo) == 0,
     (finalPayloadInfo.st_mode & S_IFMT) == S_IFDIR, finalPayloadInfo.st_uid == getuid(),
-    (finalPayloadInfo.st_mode & 0o7777) == 0o755,
+    (finalPayloadInfo.st_mode & 0o7777) == directoryMode,
     finalPayloadInfo.st_dev == payloadInfo.st_dev, finalPayloadInfo.st_ino == payloadInfo.st_ino
   else { throw InstallerFailure.rejected }
   #if !ELLIE_AUTHENTICATED_PAYLOAD_TESTING
@@ -692,7 +733,7 @@ private func inspectProductionPayload(
   defer { closeFD(rebound) }
   var reboundInfo = stat()
   guard fstat(rebound, &reboundInfo) == 0, (reboundInfo.st_mode & S_IFMT) == S_IFDIR,
-    reboundInfo.st_uid == getuid(), (reboundInfo.st_mode & 0o7777) == 0o755,
+    reboundInfo.st_uid == getuid(), (reboundInfo.st_mode & 0o7777) == directoryMode,
     reboundInfo.st_dev == held.st_dev, reboundInfo.st_ino == held.st_ino
   else { throw InstallerFailure.rejected }
   let reboundPayload = try openDirectory(at: rebound, "payload")
@@ -710,7 +751,22 @@ private func inspectProductionPayload(
     architecture: manifest.architecture)
   return VerifiedPayloadInventory(
     releaseID: "\(manifest.productVersion)-\(manifest.sourceRevision)-\(manifest.architecture)",
-    payloadPolicyDigest: policy, manifestSHA256: payloadHash(manifestData))
+    payloadPolicyDigest: policy, manifestSHA256: payloadHash(manifestData), entries: manifest.files)
+}
+
+func verifyCapturedAuthenticatedPayload(
+  releasePath: String, authorizationPath: String, publisherTeamID: String,
+  testAllowAdHoc: Bool = false
+) throws -> AuthenticatedPayloadInspection {
+  let envelope = try verifyAuthenticatedManifestEnvelope(
+    releasePath: releasePath, authorizationPath: authorizationPath,
+    publisherTeamID: publisherTeamID, testAllowAdHoc: testAllowAdHoc)
+  let inventory = try inspectProductionPayload(
+    source: releasePath, envelope: envelope, teamID: publisherTeamID,
+    testAllowAdHoc: testAllowAdHoc, layout: .captured)
+  return AuthenticatedPayloadInspection(
+    envelope: envelope, inventory: inventory,
+    sourceIdentity: try authenticatedSourceIdentity(releasePath, layout: .captured))
 }
 
 func verifyAuthenticatedPayload(
@@ -723,7 +779,9 @@ func verifyAuthenticatedPayload(
   let inventory = try inspectProductionPayload(
     source: releasePath, envelope: envelope, teamID: publisherTeamID,
     testAllowAdHoc: testAllowAdHoc, testRebindPath: testRebindPath)
-  return AuthenticatedPayloadInspection(envelope: envelope, inventory: inventory)
+  return AuthenticatedPayloadInspection(
+    envelope: envelope, inventory: inventory,
+    sourceIdentity: try authenticatedSourceIdentity(releasePath, layout: .external))
 }
 
 func runAuthenticatedPayloadInspection(_ arguments: [String]) throws -> Never {

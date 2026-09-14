@@ -808,7 +808,7 @@ func directoryNames(_ fd: Int32, maximum: Int = maximumPayloadEntries) throws ->
   }
   return names.sorted()
 }
-private func ensureDirectory(parent: Int32, name: String, mode: mode_t) throws -> Int32 {
+func ensureDirectory(parent: Int32, name: String, mode: mode_t) throws -> Int32 {
   if mkdirat(parent, try checkedComponent(name), mode) != 0 && errno != EEXIST {
     throw InstallerFailure.rejected
   }
@@ -820,7 +820,7 @@ private func ensureDirectory(parent: Int32, name: String, mode: mode_t) throws -
   }
   return result
 }
-private func removeTree(parent: Int32, name: String) throws {
+func removeTree(parent: Int32, name: String) throws {
   var info = stat()
   guard fstatat(parent, try checkedComponent(name), &info, AT_SYMLINK_NOFOLLOW) == 0 else {
     if errno == ENOENT { return }
@@ -841,7 +841,7 @@ private func removeTree(parent: Int32, name: String) throws {
     }
   }
 }
-private func productionServicesRoot() throws -> String {
+func productionServicesRoot() throws -> String {
   let home = try openAbsoluteDirectory(FileManager.default.homeDirectoryForCurrentUser.path)
   defer { closeFD(home) }
   try statSafeDirectory(home, privateMode: false)
@@ -906,13 +906,14 @@ private func copyFile(
   let hash = digest.finalize().map { String(format: "%02x", $0) }.joined()
   guard total == expected.size, hash == expected.sha256 else { throw InstallerFailure.rejected }
 }
-private func writeCapturedFile(
-  destination: Int32, name: String, data: Data, counter: inout Int, failAfter: Int?
+func writeCapturedFile(
+  destination: Int32, name: String, data: Data, mode: mode_t = 0o444,
+  counter: inout Int, failAfter: Int?
 ) throws {
   if let failAfter, counter == failAfter { throw InstallerFailure.rejected }
   counter += 1
   let output = openat(
-    destination, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o444)
+    destination, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, mode)
   guard output >= 0 else { throw InstallerFailure.rejected }
   defer { closeFD(output) }
   var offset = 0
@@ -923,11 +924,11 @@ private func writeCapturedFile(
     guard count > 0 else { throw InstallerFailure.rejected }
     offset += count
   }
-  guard fchmod(output, 0o444) == 0, fsync(output) == 0 else {
+  guard fchmod(output, mode) == 0, fsync(output) == 0 else {
     throw InstallerFailure.rejected
   }
 }
-private func copyPayload(
+func copyPayload(
   source: Int32, destination: Int32, entries: [Entry], counter: inout Int, failAfter: Int?,
   sourceInstalled: Bool = false
 ) throws {
@@ -955,7 +956,7 @@ private func copyPayload(
       counter: &counter, failAfter: failAfter, sourceInstalled: sourceInstalled)
   }
 }
-private func makeImmutable(_ fd: Int32) throws {
+func makeImmutable(_ fd: Int32) throws {
   for name in try directoryNames(fd) {
     var info = stat()
     guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
@@ -1113,6 +1114,13 @@ private struct ServicePayloadInstaller {
     if arguments.first == "inspect-authenticated-payload" {
       do { try runAuthenticatedPayloadInspection(arguments) } catch {
         failAuthenticatedPayloadInspection(error)
+      }
+    }
+    if arguments.first == "capture-authenticated-payload"
+      || arguments.first == "recover-authenticated-capture"
+    {
+      do { try runAuthenticatedCaptureCommand(arguments) } catch {
+        failAuthenticatedCapture(error)
       }
     }
     if arguments.first == "inspect-authorization" {
