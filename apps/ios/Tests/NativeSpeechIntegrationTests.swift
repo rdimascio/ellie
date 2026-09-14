@@ -4,6 +4,22 @@ import XCTest
 @testable import Ellie
 
 final class NativeSpeechIntegrationTests: XCTestCase {
+  private enum FixtureCheckpoint: String {
+    case cancelStarted = "cancel/started"
+    case cancelSettled = "cancel/settled"
+    case disconnectStarted = "disconnect/started"
+    case disconnectSettled = "disconnect/settled"
+
+    var failureMessage: String {
+      switch self {
+      case .cancelStarted: "The cancellation fixture did not observe the upload starting."
+      case .cancelSettled: "The cancellation fixture did not observe the upload settling."
+      case .disconnectStarted: "The disconnect fixture did not observe the upload starting."
+      case .disconnectSettled: "The disconnect fixture did not observe the upload settling."
+      }
+    }
+  }
+
   private let originKey = "EllieATSTestOrigin"
   private let pinKey = "EllieATSTestPin"
 
@@ -44,10 +60,20 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     await eventually { store.phase == .recording }
     store.stop()
     await eventually { store.phase == .uploading }
-    try await fixtureStatus("cancel/started", credential: granted)
+    do {
+      try await fixtureStatus(.cancelStarted, credential: granted)
+    } catch let probeFailure {
+      await settleAfterFixtureFailure(store)
+      throw probeFailure
+    }
     store.cancelAndDiscard()
     await eventually(timeout: .seconds(5)) { store.phase == .idle }
-    try await fixtureStatus("cancel/settled", credential: granted)
+    do {
+      try await fixtureStatus(.cancelSettled, credential: granted)
+    } catch let probeFailure {
+      await settleAfterFixtureFailure(store)
+      throw probeFailure
+    }
 
     XCTAssertEqual(store.transcript, "")
     let hasArtifact = await recorder.hasOwnedArtifact
@@ -85,14 +111,22 @@ final class NativeSpeechIntegrationTests: XCTestCase {
         artifact, turnID: UUID(),
         credential: granted)
     }
-    try await fixtureStatus("disconnect/started", credential: granted)
-    operation.cancel()
     do {
-      _ = try await operation.value
-      XCTFail("Cancelled upload returned a transcript")
-    } catch { XCTAssertEqual(error as? SpeechTurnFailure, .cancelled) }
-    try await fixtureStatus("disconnect/settled", credential: granted)
-    try await recorder.dispose(artifact)
+      try await fixtureStatus(.disconnectStarted, credential: granted)
+      operation.cancel()
+      do {
+        _ = try await operation.value
+        XCTFail("Cancelled upload returned a transcript")
+      } catch { XCTAssertEqual(error as? SpeechTurnFailure, .cancelled) }
+      try await fixtureStatus(.disconnectSettled, credential: granted)
+      try await recorder.dispose(artifact)
+    } catch let probeFailure {
+      operation.cancel()
+      _ = await operation.result
+      do { try await recorder.dispose(artifact) }
+      catch { XCTFail("The disconnect fixture could not remove its owned recording.") }
+      throw probeFailure
+    }
   }
 
   func testLostCommittedTranscriptResponseIsFixedFailureAndNeverReplayed() async throws {
@@ -146,9 +180,10 @@ final class NativeSpeechIntegrationTests: XCTestCase {
       token: String(repeating: token, count: 64 / token.count))
   }
 
-  private func fixtureStatus(_ status: String, credential: NativeEnrollmentCredential) async throws
-  {
-    let url = credential.origin.appending(path: "/__ellie-test/speech/\(status)")
+  private func fixtureStatus(
+    _ checkpoint: FixtureCheckpoint, credential: NativeEnrollmentCredential
+  ) async throws {
+    let url = credential.origin.appending(path: "/__ellie-test/speech/\(checkpoint.rawValue)")
     var request = URLRequest(url: url)
     request.setValue("Bearer \(credential.token)", forHTTPHeaderField: "Authorization")
     request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
@@ -162,8 +197,21 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     let session = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     defer { session.finishTasksAndInvalidate() }
     let (body, response) = try await session.data(for: request)
-    XCTAssertEqual(try XCTUnwrap(response as? HTTPURLResponse).statusCode, 200)
-    XCTAssertEqual(body, Data(#"{"ok":true}"#.utf8))
+    let responseIsExpected =
+      (response as? HTTPURLResponse)?.statusCode == 200
+      && body == Data(#"{"ok":true}"#.utf8)
+    _ = try XCTUnwrap(responseIsExpected ? true : nil, checkpoint.failureMessage)
+  }
+
+  @MainActor
+  private func settleAfterFixtureFailure(_ store: SpeechTurnStore) async {
+    store.cancelAndDiscard()
+    let deadline = ContinuousClock.now + .seconds(40)
+    while ContinuousClock.now < deadline {
+      if store.phase == .idle { return }
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+    XCTFail("The cancellation fixture's owned turn did not settle after its probe failed.")
   }
 
   @MainActor
