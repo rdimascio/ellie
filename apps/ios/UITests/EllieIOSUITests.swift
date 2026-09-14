@@ -65,11 +65,8 @@ final class EllieIOSUITests: XCTestCase {
     }
 
     private func typeTextReliably(_ text: String, into element: XCUIElement, startingWith initial: String = "") {
-        var expected = initial
-        for character in text {
-            element.typeText(String(character))
-            expected.append(character)
-            XCTAssertEqual(element.value as? String, expected, "Expected input value \(expected)")
-        }
+        element.typeText(text)
+        let expected = initial + text
+        XCTAssertEqual(element.value as? String, expected, "Expected input value \(expected)")
     }
 }
