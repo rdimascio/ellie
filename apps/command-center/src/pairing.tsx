@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ellieIcon from "../../../packages/macos/assets/Ellie.png";
 import { QrScanner } from "./qr-scanner.tsx";
+import { PhoneRemote } from "./phone-remote.tsx";
 import "./tokens.css";
 import "./pairing.css";
 
@@ -318,9 +319,13 @@ function Pairing() {
                 </dd>
               </div>
             </dl>
-            <p className="version-note">
-              Connection is ready. Household controls aren’t available in this version.
-            </p>
+            {client.role === "phone_controller" ? (
+              <PhoneRemote />
+            ) : (
+              <p className="version-note">
+                Connection is ready. Household controls aren’t available in this version.
+              </p>
+            )}
             <button className="pairing-button secondary" onClick={() => void disconnect()}>
               Disconnect this device
             </button>

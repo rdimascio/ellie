@@ -39,6 +39,8 @@ async function connection(
         status: state.paired ? 200 : 401,
         json: state.paired ? { client: identity } : { error: "Not paired" },
       });
+    } else if (operation === "nodes") {
+      await route.fulfill({ json: { nodes: [] } });
     } else if (operation === "pair") {
       expect(route.request().postDataJSON()).toEqual({ code });
       state.paired = true;
@@ -69,7 +71,7 @@ test("pairing sends a code once without placing it in URLs or browser storage", 
   await page.getByRole("button", { name: "Connect to Ellie", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Connected to Ellie" })).toBeVisible();
   await expect(page.getByText("Kitchen phone", { exact: true })).toBeVisible();
-  await expect(page.getByText(/Household controls aren’t available/)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Control a Mac" })).toBeVisible();
   expect(state.mutations).toEqual(["pair"]);
   expect(
     urls.every((url) => !url.includes(code) && new URL(url).origin === "http://127.0.0.1:4173"),
@@ -102,7 +104,7 @@ for (const logout of ["lost", "malformed"] as const) {
     const state = await connection(page, { paired: true, logout });
     await page.goto("/pair/");
     await page.getByRole("button", { name: "Disconnect this device" }).click();
-    await expect(page.getByRole("status")).toContainText("This device is still connected.");
+    await expect(page.locator(".pairing-status")).toContainText("This device is still connected.");
     await expect(page.getByRole("button", { name: "Disconnect this device" })).toBeEnabled();
     expect(state.mutations).toEqual(["logout"]);
   });

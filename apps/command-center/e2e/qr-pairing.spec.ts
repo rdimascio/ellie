@@ -146,6 +146,10 @@ async function browserConnection(
       else await route.fulfill({ json: { client } });
       return;
     }
+    if (operation === "nodes") {
+      await route.fulfill({ json: { nodes: [] } });
+      return;
+    }
     throw new Error(`Unexpected synthetic browser route: ${operation}`);
   });
   return state;
