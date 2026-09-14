@@ -271,7 +271,8 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
           (method === "GET" && path === "/browser/v1/nodes") ||
           (method === "POST" && path === "/browser/v1/commands")
         ) {
-          const client = options.auth.authenticateCookie(request.headers.cookie);
+          const token = browserSessionToken(request.headers.cookie);
+          const client = options.auth.authenticate(token);
           if (!client) {
             send(response, 401, { error: "Browser session required." }, {}, true);
             return;
@@ -328,19 +329,15 @@ export function createBrowserServer(options: BrowserServerOptions): BrowserServe
           busyNodes.add(command.nodeId);
           try {
             const nodes = publicNodes(await options.remote.nodes());
-            const current = options.auth.authenticateCookie(request.headers.cookie);
-            if (!current) {
-              send(response, 401, { error: "Browser session required." }, {}, true);
+            let admitted: boolean;
+            try {
+              admitted = await options.auth.admitAppOpen(token, command.nodeId);
+            } catch {
+              send(response, 503, { error: "Browser service unavailable." }, {}, true);
               return;
             }
-            if (!canOpenApps(current, command.nodeId)) {
-              send(
-                response,
-                403,
-                { error: "App opening is not allowed on this device." },
-                {},
-                true,
-              );
+            if (!admitted) {
+              send(response, 401, { error: "Browser session required." }, {}, true);
               return;
             }
             const target = nodes.find((node) => node.id === command.nodeId);
