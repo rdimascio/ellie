@@ -83,14 +83,25 @@ final class EllieIOSUITests: XCTestCase {
             let chunk = String(characters[start ..< min(start + 4, characters.count)])
             element.typeText(chunk)
             expected += chunk
-            let exactValue = NSPredicate(format: "value == %@", expected)
+            let observation = PredicateObservation()
+            let exactValue = NSPredicate { object, _ in
+                guard let candidate = object as? XCUIElement else { return false }
+                observation.count += 1
+                observation.lastValue = candidate.value as? String
+                return observation.lastValue == expected
+            }
             let result = XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: exactValue, object: element)], timeout: 2)
             guard result == .completed else {
-                XCTFail("Expected input value \(expected); observed \(String(describing: element.value))")
+                XCTFail("Expected input value \(expected); predicate observed \(String(describing: observation.lastValue)) across \(observation.count) evaluations; later element value \(String(describing: element.value))")
                 throw InputFailure.valueMismatch
             }
         }
     }
 
     private enum InputFailure: Error { case notReady, valueMismatch }
+
+    private final class PredicateObservation {
+        var lastValue: String?
+        var count = 0
+    }
 }
