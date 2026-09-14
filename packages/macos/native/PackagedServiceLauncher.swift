@@ -283,6 +283,7 @@ enum ElliePackagedService {
                 "NODE_OPTIONS", "NODE_PATH", "NODE_EXTRA_CA_CERTS", "NODE_ICU_DATA",
                 "NODE_COMPILE_CACHE", "NODE_V8_COVERAGE", "NODE_TLS_REJECT_UNAUTHORIZED",
                 "OPENSSL_CONF", "SSL_CERT_FILE", "SSL_CERT_DIR",
+                "ELLIE_LIFE_CONFIG",
             ] {
                 unsetenv(name)
             }

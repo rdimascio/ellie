@@ -21,6 +21,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/config": "*",
+        "@ellie/life": "*",
         "@ellie/macos": "*",
         "@ellie/protocol": "*",
         "@ellie/speech": "*",
@@ -43,12 +44,14 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/life-auto-memory": "workspace:*",
+        "@ellie/life-connectors": "workspace:*",
         "@ellie/life-context": "workspace:*",
         "@ellie/life-core": "workspace:*",
         "@ellie/life-harness": "workspace:*",
         "@ellie/life-import": "workspace:*",
         "@ellie/life-ingest": "workspace:*",
         "@ellie/life-learning": "workspace:*",
+        "@ellie/life-plans": "workspace:*",
         "@ellie/life-plugins": "workspace:*",
         "@ellie/life-teaching": "workspace:*",
         "@ellie/task-runtime": "workspace:*",
@@ -122,6 +125,11 @@
     "packages/life-connectors": {
       "name": "@ellie/life-connectors",
       "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-anticipation": "workspace:*",
+        "@ellie/life-core": "workspace:*",
+        "@ellie/task-runtime": "workspace:*",
+      },
     },
     "packages/life-context": {
       "name": "@ellie/life-context",

@@ -30,6 +30,8 @@ export function stageApplication(
 
 export function verifyManifest(release: string): Promise<Record<string, unknown>>;
 
+export function verifyStagedLifeRuntime(payload: string, environmentRoot: string): Promise<void>;
+
 export function targetArchitecture(
   requested?: "arm64" | "x64",
   platform?: string,

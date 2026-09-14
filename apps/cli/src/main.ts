@@ -50,6 +50,14 @@ import {
   serviceTestOptions,
 } from "./self-test.ts";
 import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
+import { createLifeActivationGate, lifeConfigPath, loadLifeHostConfig } from "./life-config.ts";
+import { parseLifeAccessCommand, runLifeAccessCommand } from "./life-access.ts";
+import { EmbeddedLifeLifecycle } from "./life-lifecycle.ts";
+import {
+  clearAmbientServiceLifeConfig,
+  configureServiceLife,
+  selectedServiceLifeConfig,
+} from "./service-life-config.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
@@ -62,6 +70,24 @@ const browserEnvironment = {
 };
 let serviceLog: ServiceLog | undefined;
 let commandOutcomeMayBeUnknown = false;
+const lifeConfigGuidance =
+  "Life service configuration is unavailable. Review the private Life config or run service configure coordinator --disable-life.";
+function serviceLifeConfig(path: string) {
+  try {
+    return loadLifeHostConfig(path);
+  } catch {
+    throw new Error(lifeConfigGuidance);
+  }
+}
+async function selectedLifeConfigForService(): Promise<string | undefined> {
+  try {
+    const selected = await selectedServiceLifeConfig(stateDir);
+    if (selected) serviceLifeConfig(selected);
+    return selected;
+  } catch {
+    throw new Error(lifeConfigGuidance);
+  }
+}
 async function exists(name: string): Promise<boolean> {
   try {
     await access(join(stateDir, name));
@@ -159,6 +185,13 @@ async function main(): Promise<void> {
     });
     return;
   }
+  if (args[0] === "life-access") {
+    const command = parseLifeAccessCommand(args.slice(1));
+    await withController(async (client) =>
+      console.log(await runLifeAccessCommand(client, command)),
+    );
+    return;
+  }
   if (args[0] === "household") {
     const command = parseHouseholdCommand(args.slice(1));
     await withController(async (client) => console.log(await runHouseholdCommand(client, command)));
@@ -223,6 +256,21 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (action === "configure") {
+      const role = serviceRole(args[2]);
+      if (role !== "coordinator") throw new Error("Life can only be configured for coordinator.");
+      let selection: string | undefined;
+      if (args.length === 5 && args[3] === "--life-config") selection = args[4];
+      else if (!(args.length === 4 && args[3] === "--disable-life"))
+        throw new Error(
+          "Use: bun run ellie service configure coordinator --life-config /absolute/private/config.json | --disable-life",
+        );
+      const result = await configureServiceLife(stateDir, selection, serviceLifeConfig);
+      console.log(
+        `Coordinator Life configuration ${result}; changes apply on the next explicit restart.`,
+      );
+      return;
+    }
     const role = serviceRole(args[2]);
     if (args.length !== 3)
       throw new Error(
@@ -234,10 +282,34 @@ async function main(): Promise<void> {
       serviceLog = await ServiceLog.open(stateDir, role);
       serviceLog.write("starting");
       await services.validate(role);
-      args.splice(0, args.length, role === "coordinator" ? "server" : "node", "start");
+      clearAmbientServiceLifeConfig(process.env);
+      const selectedLife =
+        role === "coordinator" ? await selectedLifeConfigForService() : undefined;
+      args.splice(
+        0,
+        args.length,
+        role === "coordinator" ? "server" : "node",
+        "start",
+        ...(selectedLife ? ["--life-config", selectedLife] : []),
+      );
     } else {
-      if (action === "status") console.log(JSON.stringify(await services.status(role), null, 2));
-      else if (action === "logs")
+      if (action === "status") {
+        const status = await services.status(role);
+        const selectedLife =
+          role === "coordinator" ? await selectedLifeConfigForService() : undefined;
+        console.log(
+          JSON.stringify(
+            role === "coordinator"
+              ? {
+                  ...status,
+                  lifeOnNextStart: selectedLife ? "enabled" : "disabled",
+                }
+              : status,
+            null,
+            2,
+          ),
+        );
+      } else if (action === "logs")
         console.log(JSON.stringify(await serviceLogs(stateDir, role), null, 2));
       else if (
         action === "install" ||
@@ -283,9 +355,16 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "server" && args[1] === "start") {
+    const configuredLifePath = lifeConfigPath(args.slice(2), process.env);
+    const lifeConfig = configuredLifePath ? loadLifeHostConfig(configuredLifePath) : undefined;
     const config = serverConfig(await privateConfig("server.json"));
     const cert = await readFile(join(stateDir, "server-cert.pem"), "utf8");
     const jobStore = new JobStore(join(stateDir, "jobs.sqlite"));
+    let embeddedLife:
+      | Awaited<ReturnType<(typeof import("../../life/src/embedded.ts"))["createLifeApplication"]>>
+      | undefined;
+    const lifeLifecycle = new EmbeddedLifeLifecycle<NonNullable<typeof embeddedLife>>();
+    const lifeGate = lifeConfig ? createLifeActivationGate() : undefined;
     // The coordinator lifetime lock also owns the single browser authorization writer.
     const browser = createBrowserRuntime({
       setup: browserEnvironment,
@@ -299,6 +378,9 @@ async function main(): Promise<void> {
         );
         return { remote: createBrowserRemote(upstream), close: () => upstream.close() };
       },
+      ...(lifeGate && lifeConfig
+        ? { life: { application: lifeGate.application, actorIds: [lifeConfig.actorId] } }
+        : {}),
     });
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
@@ -317,28 +399,23 @@ async function main(): Promise<void> {
       });
     } catch (error) {
       await browser.shutdown();
-      if (app) app.shutdown();
-      else jobStore.close();
+      await lifeLifecycle.shutdown(() => {
+        if (app) app.shutdown();
+        else jobStore.close();
+      });
       throw error;
     }
     if (!app) throw new Error("Coordinator failed to initialize.");
-    console.log(`Ellie server ready on port ${config.port}. No model or cloud API is required.`);
-    serviceLog?.write("ready");
-    let stopping = false;
-    const stop = async () => {
-      if (stopping) return;
-      stopping = true;
-      try {
-        serviceLog?.write("stopping");
-      } finally {
-        // Stop accepting browser mutations and drain persistence before releasing the lock.
+    let stopPromise: Promise<void> | undefined;
+    const stop = () =>
+      (stopPromise ??= (async () => {
         try {
-          await browser.shutdown();
+          serviceLog?.write("stopping");
         } finally {
-          app!.shutdown();
+          await browser.shutdown();
+          await lifeLifecycle.shutdown(() => app!.shutdown());
         }
-      }
-    };
+      })());
     for (const signal of ["SIGINT", "SIGTERM"] as const)
       process.once(signal, () => {
         void stop().catch(() => {
@@ -347,11 +424,43 @@ async function main(): Promise<void> {
       });
     // Agent readiness and signal handlers precede optional browser Keychain access.
     await browser.start();
-    if (!stopping) {
-      const status = browser.current().status;
-      if (status === "ready") serviceLog?.write("browser_ready");
-      else if (status === "unavailable") serviceLog?.write("browser_unavailable");
+    if (lifeConfig) {
+      const current = browser.current();
+      if (current.status !== "ready" || !current.nativeLife) {
+        await stop();
+        throw new Error(
+          "Configured Ellie Life could not start because native Life authority is not ready.",
+        );
+      }
+      try {
+        await lifeLifecycle.start(
+          async () =>
+            (embeddedLife = await (
+              await import("../../life/src/embedded.ts")
+            ).createLifeApplication({
+              stateDir: lifeConfig.stateDir,
+              userId: lifeConfig.actorId,
+              ...(lifeConfig.modelUrl
+                ? { modelUrl: lifeConfig.modelUrl, model: lifeConfig.model }
+                : {}),
+              ...(lifeConfig.googleOAuth ? { googleOAuth: lifeConfig.googleOAuth } : {}),
+            })),
+          async (application) => {
+            await application.prepareEmbedded();
+            if (!stopPromise) lifeGate!.activate(application);
+          },
+        );
+      } catch (error) {
+        await stop();
+        throw error;
+      }
     }
+    if (stopPromise) return;
+    console.log(`Ellie server ready on port ${config.port}. No model or cloud API is required.`);
+    serviceLog?.write("ready");
+    const status = browser.current().status;
+    if (status === "ready") serviceLog?.write("browser_ready");
+    else if (status === "unavailable") serviceLog?.write("browser_unavailable");
     return;
   }
   if (args[0] === "server" && args[1] === "pair") {
@@ -529,7 +638,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  server init [--lan]   Generate private config and Keychain identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
   console.log(
     "  transcribe --audio WAV --model PATH --executable PATH\n" +

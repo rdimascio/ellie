@@ -16,6 +16,8 @@ import type {
   BrowserServerOptions,
 } from "../../server/src/browser-server.ts";
 import type { BrowserRemote } from "../../server/src/browser-remote.ts";
+import { NativeLifeAuthority } from "../../server/src/native-life.ts";
+import type { NativeLifeApplication } from "../../server/src/native-life.ts";
 
 export interface ManagedBrowserRemote {
   remote: BrowserRemote;
@@ -33,6 +35,7 @@ export interface BrowserRuntimeOptions {
   loadAssets: () => Promise<BrowserAssets>;
   createRemote?: () => Promise<ManagedBrowserRemote>;
   createServer?: (options: BrowserServerOptions) => BrowserServer;
+  life?: { application: NativeLifeApplication; actorIds: readonly string[] };
 }
 
 export interface BrowserRuntime extends BrowserControl {
@@ -83,6 +86,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   let nativeAuth: NativeAuth | undefined;
   let household: HouseholdState | undefined;
   let speech: NativeSpeech | undefined;
+  let nativeLife: NativeLifeAuthority | undefined;
   let managedRemote: ManagedBrowserRemote | undefined;
   let stopped = false;
   let started: Promise<void> | undefined;
@@ -107,6 +111,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
     if (target === managedRemote) managedRemote = undefined;
   };
   const closeAuthorities = async (): Promise<void> => {
+    await nativeLife?.close();
     await speech?.close();
     await household?.close();
     await auth?.close();
@@ -173,6 +178,16 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
     } catch {
       speech = undefined;
     }
+    try {
+      if (nativeAuth && options.life)
+        nativeLife = await NativeLifeAuthority.open(
+          nativeAuth,
+          options.life.actorIds,
+          options.setup.stateDir,
+        );
+    } catch {
+      nativeLife = undefined;
+    }
 
     if (stopped) {
       await closeAuthorities();
@@ -209,6 +224,8 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         nativeAuth,
         household,
         speech,
+        nativeLife,
+        lifeApplication: nativeLife ? options.life?.application : undefined,
         assets,
         remote: managedRemote?.remote,
       });
@@ -234,6 +251,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         nativeAuth,
         household,
         speech,
+        nativeLife,
         certificateSha256,
       };
     } catch {

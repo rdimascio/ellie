@@ -77,7 +77,7 @@ test("shipping launchers validate a complete installed payload and exec one fixe
   await mkdir(join(payload, "helpers"), { recursive: true });
   await writeFile(
     join(payload, "bin/node"),
-    `#!/bin/sh\nprintf 'argv=%s\\nhelper=%s\\noptions=%s\\npath=%s\\n' "$*" "$ELLIE_MACOS_HELPER" "$NODE_OPTIONS" "$PATH" > "$ELLIE_LAUNCHER_TEST_OUTPUT"\n`,
+    `#!/bin/sh\nprintf 'argv=%s\\nhelper=%s\\noptions=%s\\nlife=%s\\npath=%s\\n' "$*" "$ELLIE_MACOS_HELPER" "$NODE_OPTIONS" "$ELLIE_LIFE_CONFIG" "$PATH" > "$ELLIE_LAUNCHER_TEST_OUTPUT"\n`,
     { mode: 0o755 },
   );
   await writeFile(join(payload, "lib/ellie/apps/cli/src/main.ts"), "// synthetic fixture\n");
@@ -110,6 +110,7 @@ test("shipping launchers validate a complete installed payload and exec one fixe
         HOME: join(directory, "home"),
         ELLIE_LAUNCHER_TEST_OUTPUT: output,
         NODE_OPTIONS: "--synthetic-preload-must-be-removed",
+        ELLIE_LIFE_CONFIG: "/private/ambient-life-must-be-removed.json",
       },
       encoding: "utf8",
       timeout: 10_000,
@@ -119,6 +120,7 @@ test("shipping launchers validate a complete installed payload and exec one fixe
     assert.match(observed, new RegExp(`argv=.*main\\.ts service run ${role}`));
     assert.match(observed, new RegExp(`helper=${canonicalPayload}/helpers/ellie-macos`));
     assert.match(observed, /options=\n/);
+    assert.match(observed, /life=\n/);
     assert.match(
       observed,
       new RegExp(`path=${canonicalPayload}/bin:/usr/bin:/bin:/usr/sbin:/sbin`),

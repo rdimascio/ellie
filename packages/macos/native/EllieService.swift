@@ -24,6 +24,7 @@ enum EllieService {
               let runtime = try? JSONDecoder().decode(Runtime.self, from: data),
               ["node", "coordinator"].contains(runtime.role),
               runtime.node.hasPrefix("/"), runtime.entrypoint.hasPrefix("/") else { exit(78) }
+        unsetenv("ELLIE_LIFE_CONFIG")
         let arguments = [runtime.node, runtime.entrypoint, "service", "run", runtime.role]
         let strings = arguments.map { strdup($0) }
         defer { strings.forEach { free($0) } }

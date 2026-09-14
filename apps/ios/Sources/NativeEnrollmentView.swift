@@ -44,6 +44,10 @@ struct NativeEnrollmentView: View {
           NavigationLink("Sync Dashboards") {
             DashboardSyncView(credential: credential, dashboards: dashboards)
           }
+          NavigationLink("Open Ellie Life") {
+            LifeWebView(credential: LifeWebCredential(enrollment: credential))
+              .id(credential.client.id)
+          }
         }
         Section {
           Button("Log out from coordinator", role: .destructive) {

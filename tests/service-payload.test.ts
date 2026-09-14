@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,6 +21,7 @@ import {
   stageApplication,
   targetArchitecture,
   verifyManifest,
+  verifyStagedLifeRuntime,
 } from "../scripts/build-service-payload.mjs";
 
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
@@ -131,7 +141,9 @@ test("materializes the finite production workspace closure and complete license 
       version: "1.0.0",
       exports: "./index.ts",
       dependencies:
-        name === "cli" ? { "@ellie/protocol": "*", qrcode: "1.0.0" } : { "@ellie/protocol": "*" },
+        name === "cli"
+          ? { "@ellie/protocol": "*", "@ellie/life": "*", qrcode: "1.0.0" }
+          : { "@ellie/protocol": "*" },
     });
   }
   await packageFile(join(source, "packages/protocol"), {
@@ -139,8 +151,22 @@ test("materializes the finite production workspace closure and complete license 
     version: "1.0.0",
     exports: "./index.ts",
   });
+  await packageFile(join(source, "apps/life"), {
+    name: "@ellie/life",
+    version: "1.0.0",
+    exports: { "./embedded": "./index.ts" },
+    dependencies: { "@ellie/life-core": "*" },
+  });
+  await packageFile(join(source, "packages/life-core"), {
+    name: "@ellie/life-core",
+    version: "1.0.0",
+    exports: "./index.ts",
+  });
   await mkdir(join(source, "apps/command-center/dist"), { recursive: true });
   await writeFile(join(source, "apps/command-center/dist/index.html"), "fixture\n");
+  await mkdir(join(source, "apps/life-ui/dist/assets"), { recursive: true });
+  await writeFile(join(source, "apps/life-ui/dist/index.html"), "Life fixture\n");
+  await writeFile(join(source, "apps/life-ui/dist/assets/main.js"), "export {};\n");
   await packageFile(join(source, "node_modules/qrcode"), {
     name: "qrcode",
     version: "1.0.0",
@@ -171,9 +197,31 @@ test("materializes the finite production workspace closure and complete license 
     "export {};",
   );
   assert.match(
+    await readFile(join(payload, "lib/ellie/node_modules/@ellie/life/embedded.js"), "utf8"),
+    /apps\/life\/index\.ts/,
+  );
+  assert.equal(
+    await readFile(join(payload, "lib/ellie/packages/life-core/index.ts"), "utf8"),
+    "export {};\n",
+  );
+  assert.equal(
+    await readFile(join(payload, "lib/ellie/apps/life-ui/dist/index.html"), "utf8"),
+    "Life fixture\n",
+  );
+  assert.equal(
+    await readFile(join(payload, "lib/ellie/apps/life-ui/dist/assets/main.js"), "utf8"),
+    "export {};\n",
+  );
+  assert.match(
     await readFile(join(payload, "LICENSES/THIRD-PARTY-NOTICES.txt"), "utf8"),
     /helper@1\.0\.0/,
   );
+
+  await rm(join(source, "apps/life-ui/dist"), { recursive: true });
+  await assert.rejects(stageApplication(source, join(directory, "missing-life-assets")), {
+    code: "ENOENT",
+  });
+  await mkdir(join(source, "apps/life-ui/dist"), { recursive: true });
 
   await writeFile(
     join(source, "packages/protocol/package.json"),
@@ -198,6 +246,28 @@ test("restricts payload architecture to the current supported Mac host", () => {
   assert.throws(() => targetArchitecture(undefined, "linux", "arm64"), /current supported/);
   assert.equal(nativeArchitecture("arm64"), "arm64");
   assert.equal(nativeArchitecture("x64"), "x86_64");
+});
+
+test("staged bundled Node resolves Life imports without starting the application", async (t) => {
+  const directory = await temporary(t, "ellie-payload-life-import-");
+  const payload = join(directory, "payload"),
+    runtime = join(payload, "lib/ellie"),
+    entry = join(runtime, "apps/life/src/embedded.ts"),
+    dependency = join(runtime, "packages/life-dependency/index.ts");
+  await mkdir(join(payload, "bin"), { recursive: true });
+  await copyFile(process.execPath, join(payload, "bin/node"));
+  await chmod(join(payload, "bin/node"), 0o755);
+  await mkdir(join(runtime, "apps/life/src"), { recursive: true });
+  await mkdir(join(runtime, "packages/life-dependency"), { recursive: true });
+  await writeFile(join(runtime, "package.json"), '{"type":"module"}\n');
+  await writeFile(dependency, "export const ready = true;\n");
+  await writeFile(
+    entry,
+    'import { ready } from "../../../packages/life-dependency/index.ts"; if (!ready) throw new Error("Missing dependency."); export function createLifeApplication() { throw new Error("Must not start Life."); } export const createEmbeddedLifeApplication = createLifeApplication;\n',
+  );
+  await verifyStagedLifeRuntime(payload, join(directory, "environment"));
+  await rm(dependency);
+  await assert.rejects(verifyStagedLifeRuntime(payload, join(directory, "environment")));
 });
 
 test("dependency preparation ignores lifecycle scripts and inherited private state", async (t) => {
