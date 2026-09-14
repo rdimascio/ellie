@@ -1974,6 +1974,341 @@ test("chat requests persist once, recover by request id, page privately, and exp
   }
 });
 
+test("a reminder clarification survives restart, executes once, and reschedules its exact receipt", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-life-continuation-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets"),
+    state = join(root, "state");
+  await mkdir(assets, { mode: 0o700 });
+  await mkdir(state, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "<!doctype html><title>Continuation</title>", {
+    mode: 0o600,
+  });
+  let application = await createLifeApplication({ stateDir: state, assetsDir: assets, port: 0 });
+  try {
+    let ready = await application.listen(),
+      cookie = await authenticate(
+        ready.url,
+        decodeURIComponent(ready.launchUrl.split("#token=")[1]!),
+      );
+    const first = await fetch(`${ready.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(ready.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        message: "Remind me to call Mum",
+        requestId: "clarification-origin",
+        chatEpoch: 1,
+      }),
+    });
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as {
+      conversationId: string;
+      pendingIntent: { kind: string; title: string; missing: string[]; revision: number };
+    };
+    assert.equal(firstBody.pendingIntent.kind, "reminder");
+    assert.equal(firstBody.pendingIntent.title, "call Mum");
+    assert.deepEqual(firstBody.pendingIntent.missing, ["when"]);
+    await application.close();
+
+    application = await createLifeApplication({ stateDir: state, assetsDir: assets, port: 0 });
+    ready = await application.listen();
+    cookie = await authenticate(
+      ready.url,
+      decodeURIComponent(ready.launchUrl.split("#token=")[1]!),
+    );
+    const restored = (await (
+      await fetch(
+        `${ready.url}/api/life/conversations/${firstBody.conversationId}/pending-intent`,
+        { headers: { cookie } },
+      )
+    ).json()) as { pendingIntent: { state: string } };
+    assert.equal(restored.pendingIntent.state, "awaiting-fields");
+    const pastAnswer = await fetch(`${ready.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(ready.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        conversationId: firstBody.conversationId,
+        message: "Yesterday at 10",
+        requestId: "clarification-past-answer",
+        chatEpoch: 1,
+      }),
+    });
+    assert.equal(pastAnswer.status, 200);
+    const pastBody = (await pastAnswer.json()) as {
+      pendingIntent: { state: string; missing: string[] };
+      actions: Array<{ status: string }>;
+      records: unknown[];
+      taskIds: string[];
+    };
+    assert.equal(pastBody.pendingIntent.state, "awaiting-fields");
+    assert.deepEqual(pastBody.pendingIntent.missing, ["when"]);
+    assert.equal(
+      pastBody.actions.some((action) => action.status === "completed"),
+      false,
+    );
+    assert.deepEqual(pastBody.records, []);
+    assert.deepEqual(pastBody.taskIds, []);
+    const answerPayload = {
+      scope: "user:local",
+      conversationId: firstBody.conversationId,
+      message: "Tomorrow at 10",
+      requestId: "clarification-answer",
+      chatEpoch: 1,
+    };
+    const answer = await fetch(`${ready.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(ready.url, cookie),
+      body: JSON.stringify(answerPayload),
+    });
+    assert.equal(answer.status, 200);
+    const answerBody = (await answer.json()) as {
+      pendingIntent: null;
+      records: Array<{ id: string; revision: number; data: { dueAt: number; taskId: string } }>;
+    };
+    assert.equal(answerBody.pendingIntent, null);
+    const reminder = answerBody.records.at(-1)!;
+    assert.ok(reminder.data.taskId);
+    const duplicate = await fetch(`${ready.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(ready.url, cookie),
+      body: JSON.stringify(answerPayload),
+    });
+    assert.equal(duplicate.status, 200);
+    const listed = (await (
+      await fetch(`${ready.url}/api/life/records?scope=user:local&kinds=reminder`, {
+        headers: { cookie },
+      })
+    ).json()) as { records: Array<{ id: string }> };
+    assert.deepEqual(
+      listed.records.map((record) => record.id),
+      [reminder.id],
+    );
+
+    const correction = await fetch(`${ready.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(ready.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        conversationId: firstBody.conversationId,
+        message: "Actually make it 11",
+        requestId: "clarification-correction",
+        chatEpoch: 1,
+      }),
+    });
+    assert.equal(correction.status, 200);
+    const corrected = (await correction.json()) as {
+      pendingIntent: null;
+      actions: Array<{ label: string; status: string }>;
+      records: Array<{ id: string; revision: number; data: { dueAt: number; taskId: string } }>;
+    };
+    assert.equal(corrected.pendingIntent, null);
+    assert.equal(corrected.records.at(-1)?.id, reminder.id);
+    assert.ok((corrected.records.at(-1)?.revision ?? 0) > reminder.revision);
+    assert.notEqual(corrected.records.at(-1)?.data.taskId, reminder.data.taskId);
+    assert.equal(corrected.actions[0]?.status, "scheduled");
+    assert.match(corrected.actions[0]?.label ?? "", /call Mum/i);
+
+    const internals = application.server as unknown as {
+        options: { store: LifeStore; tasks: TaskRuntime };
+      },
+      originalMark = internals.options.store.markReminderRescheduleRecordUpdated.bind(
+        internals.options.store,
+      );
+    let failMarkOnce = true;
+    internals.options.store.markReminderRescheduleRecordUpdated = (...args) => {
+      if (failMarkOnce) {
+        failMarkOnce = false;
+        throw new Error("injected callback failure before journal transition");
+      }
+      return originalMark(...args);
+    };
+    const beforeFault = corrected.records.at(-1)!;
+    const faulted = await fetch(`${ready.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(ready.url, cookie),
+      body: JSON.stringify({
+        scope: "user:local",
+        conversationId: firstBody.conversationId,
+        message: "Actually make it 12",
+        requestId: "clarification-faulted-correction",
+        chatEpoch: 1,
+      }),
+    });
+    assert.equal(faulted.status, 500);
+    internals.options.store.markReminderRescheduleRecordUpdated = originalMark;
+    const afterFault = internals.options.store.getRecord({ userId: "local" }, reminder.id)!;
+    assert.notEqual(afterFault.data.taskId, beforeFault.data.taskId);
+    assert.equal(
+      internals.options.tasks.get(String(beforeFault.data.taskId), "user:local")?.state,
+      "cancelled",
+    );
+    assert.equal(
+      internals.options.tasks.get(String(afterFault.data.taskId), "user:local")?.state,
+      "scheduled",
+    );
+    assert.equal(
+      internals.options.store
+        .listReminderReschedules({ userId: "local" })
+        .find((journal) => journal.replacementTaskId === afterFault.data.taskId)?.state,
+      "completed",
+    );
+  } finally {
+    await application.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("startup activates a prepared reminder replacement only after the record pointer is durable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-life-replacement-recovery-"));
+  await chmod(root, 0o700);
+  const assets = join(root, "assets");
+  await mkdir(assets, { mode: 0o700 });
+  await writeFile(join(assets, "index.html"), "<!doctype html><title>Recovery</title>", {
+    mode: 0o600,
+  });
+  const actor = { userId: "local" },
+    lifePath = join(root, "life.sqlite"),
+    pluginPath = join(root, "plugins.sqlite"),
+    taskPath = join(root, "tasks");
+  let life = new LifeStore(lifePath, { now: 1_800_000_000_000 }),
+    plugins = new PluginStore(pluginPath, () => 1_800_000_000_000),
+    tasks = new TaskRuntime({ directory: taskPath, now: () => 1_800_000_000_000 });
+  tasks.registerHandler({ name: "reminder.notify", async run() {} });
+  const initial = life.createRecord(actor, {
+      kind: "reminder",
+      title: "Call Mum",
+      scope: { type: "user", id: "local" },
+      data: { dueAt: 1_800_100_000_000, completed: false, timeZone: "UTC" },
+    }),
+    oldTask = tasks.schedule({
+      owner: "user:local",
+      handler: "reminder.notify",
+      input: { recordId: initial.id },
+      schedule: { kind: "once", at: 1_800_100_000_000 },
+    }),
+    reminder = life.updateRecord(actor, initial.id, initial.revision, {
+      data: { ...initial.data, taskId: oldTask.id },
+    }),
+    operationId = "replacement-recovery";
+  life.beginReminderReschedule(actor, {
+    operationId,
+    scope: reminder.scope,
+    recordId: reminder.id,
+    expectedRevision: reminder.revision,
+    replacesTaskId: oldTask.id,
+  });
+  const replacement = tasks.prepareReplacement({
+    operationId,
+    owner: "user:local",
+    replacesTaskId: oldTask.id,
+    task: {
+      owner: "user:local",
+      handler: "reminder.notify",
+      input: { recordId: reminder.id },
+      schedule: { kind: "once", at: 1_800_200_000_000 },
+    },
+  });
+  life.markReminderReschedulePrepared(actor, operationId, {
+    replacementTaskId: replacement.replacementTaskId,
+    dueAt: 1_800_200_000_000,
+  });
+  life.updateRecord(actor, reminder.id, reminder.revision, {
+    data: {
+      ...reminder.data,
+      dueAt: 1_800_200_000_000,
+      taskId: replacement.replacementTaskId,
+      rescheduleOperationId: operationId,
+    },
+  });
+  assert.equal(life.getReminderReschedule(actor, operationId)?.state, "prepared");
+
+  const heldRecord = life.createRecord(actor, {
+      kind: "reminder",
+      title: "Held cleanup",
+      scope: { type: "user", id: "local" },
+      data: { dueAt: 1_800_300_000_000, completed: false, timeZone: "UTC" },
+    }),
+    heldOldTask = tasks.schedule({
+      owner: "user:local",
+      handler: "reminder.notify",
+      input: { recordId: heldRecord.id },
+      schedule: { kind: "once", at: 1_800_300_000_000 },
+    }),
+    held = life.updateRecord(actor, heldRecord.id, heldRecord.revision, {
+      data: { ...heldRecord.data, taskId: heldOldTask.id },
+    }),
+    heldOperationId = "replacement-discard-failure";
+  life.beginReminderReschedule(actor, {
+    operationId: heldOperationId,
+    scope: held.scope,
+    recordId: held.id,
+    expectedRevision: held.revision,
+    replacesTaskId: heldOldTask.id,
+  });
+  const heldReplacement = tasks.prepareReplacement({
+    operationId: heldOperationId,
+    owner: "user:local",
+    replacesTaskId: heldOldTask.id,
+    task: {
+      owner: "user:local",
+      handler: "reminder.notify",
+      input: { recordId: held.id },
+      schedule: { kind: "once", at: 1_800_400_000_000 },
+    },
+  });
+  life.markReminderReschedulePrepared(actor, heldOperationId, {
+    replacementTaskId: heldReplacement.replacementTaskId,
+    dueAt: 1_800_400_000_000,
+  });
+  await tasks.close();
+  plugins.close();
+  life.close();
+
+  life = new LifeStore(lifePath, { now: 1_800_000_000_001 });
+  plugins = new PluginStore(pluginPath, () => 1_800_000_000_001);
+  tasks = new TaskRuntime({ directory: taskPath, now: () => 1_800_000_000_001 });
+  const discardReplacement = tasks.discardReplacement.bind(tasks);
+  tasks.discardReplacement = (id, taskOwner) => {
+    if (id === heldOperationId) throw new Error("injected discard failure");
+    return discardReplacement(id, taskOwner);
+  };
+  const server = createLifeServer({
+    stateDir: root,
+    assetsDir: assets,
+    store: life,
+    plugins,
+    tasks,
+    harness: {
+      async chat() {
+        throw new Error("unused");
+      },
+    },
+    port: 0,
+    token: "r".repeat(43),
+    now: () => 1_800_000_000_001,
+  });
+  try {
+    assert.equal(life.getReminderReschedule(actor, operationId)?.state, "completed");
+    assert.equal(tasks.get(oldTask.id, "user:local")?.state, "cancelled");
+    assert.equal(tasks.get(replacement.replacementTaskId, "user:local")?.state, "scheduled");
+    assert.equal(life.getReminderReschedule(actor, heldOperationId)?.state, "prepared");
+    assert.equal(tasks.get(heldOldTask.id, "user:local")?.state, "paused");
+    assert.equal(tasks.get(heldReplacement.replacementTaskId, "user:local")?.state, "paused");
+    assert.throws(
+      () => life.deletePersonal(actor, { preserveMemberships: true }),
+      /reschedules must be recovered/,
+    );
+  } finally {
+    await server.close();
+    await tasks.close();
+    plugins.close();
+    life.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("reviewed personal export and reset preserve shared data and memberships", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-personal-reset-"));
   await chmod(root, 0o700);

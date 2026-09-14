@@ -105,6 +105,17 @@ const harness = createLifeHarness({
   mlb,
   model: {
     async plan(input) {
+      const missingReminder = /^Remind me to (.+)$/i.exec(input.message);
+      if (missingReminder)
+        return {
+          reply: "I can prepare that reminder.",
+          actions: [
+            {
+              type: "draft_life_operation" as const,
+              intent: { kind: "schedule_reminder" as const, title: missingReminder[1]! },
+            },
+          ],
+        };
       if (/hold this reply/i.test(input.message)) {
         markSlowChatStarted?.();
         await new Promise<void>((resolve) => {
@@ -220,6 +231,147 @@ try {
   if (artifactDir)
     await page.screenshot({ path: join(artifactDir, "life-chat-history.png"), fullPage: false });
   await page.getByRole("button", { name: "Close conversation history" }).click();
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByLabel("Message Ellie").fill("Remind me to call Mum");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
+  const mumConversation = new URL(page.url()).searchParams.get("conversation");
+  assert.ok(mumConversation);
+  const storedMumDraft = await page.evaluate(async (conversationId) => {
+    const response = await fetch(`/api/life/conversations/${conversationId}/pending-intent`);
+    return { status: response.status, body: await response.json() };
+  }, mumConversation);
+  assert.equal(storedMumDraft.status, 200);
+  const storedIntent = (
+    storedMumDraft.body as {
+      pendingIntent: { kind: string; title: string; missing: string[] };
+    }
+  ).pendingIntent;
+  assert.equal(storedIntent.kind, "reminder");
+  assert.equal(storedIntent.title, "call Mum");
+  assert.deepEqual(storedIntent.missing, ["when"]);
+  const mumDraft = page.locator(".intent-strip").filter({ hasText: /Draft reminder · call Mum/i });
+  await mumDraft.getByText(/When should I remind you/i).waitFor();
+  assert.equal(
+    store
+      .listRecords(
+        { userId: "e2e-user" },
+        { scope: { type: "user", id: "e2e-user" }, kinds: ["reminder"] },
+      )
+      .some((record) => /call Mum/i.test(record.title)),
+    false,
+    "a clarification draft does not create a reminder",
+  );
+  await page.reload();
+  await page
+    .locator(".intent-strip")
+    .filter({ hasText: /Draft reminder · call Mum/i })
+    .waitFor();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-pending-draft.png"), fullPage: false });
+  await page.getByLabel("Message Ellie").fill("Today at 12:01 AM");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page
+    .locator(".messages article.ellie")
+    .last()
+    .getByText(/past|future time/i)
+    .waitFor();
+  await page
+    .locator(".intent-strip")
+    .filter({ hasText: /Draft reminder · call Mum/i })
+    .waitFor();
+  assert.equal(
+    await page
+      .locator(".messages article.ellie")
+      .last()
+      .getByText(/scheduled/i)
+      .count(),
+    0,
+    "an invalid past answer does not show a completion receipt",
+  );
+  await page.getByLabel("Message Ellie").fill("Tomorrow at 10");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.locator(".intent-strip").waitFor({ state: "detached" });
+  await page
+    .locator(".messages article.ellie")
+    .getByText(/Schedule reminder: call Mum: scheduled/i)
+    .waitFor();
+  const mumReminder = store
+    .listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["reminder"] },
+    )
+    .find((record) => /call Mum/i.test(record.title));
+  assert.ok(mumReminder);
+  assert.equal(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour: "numeric",
+      hour12: false,
+    }).format(new Date(Number(mumReminder.data.dueAt))),
+    "10",
+  );
+  const originalMumTaskId = String(mumReminder.data.taskId);
+  await page.getByLabel("Message Ellie").fill("Actually make it 11");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const rescheduleReceipt = page
+    .locator(".messages article.ellie")
+    .getByText(/Reschedule reminder: call Mum: scheduled/i);
+  await rescheduleReceipt.waitFor();
+  await rescheduleReceipt.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(150);
+  if (artifactDir)
+    await page.screenshot({
+      path: join(artifactDir, "life-reschedule-receipt.png"),
+      fullPage: false,
+    });
+  const rescheduledMum = store.getRecord({ userId: "e2e-user" }, mumReminder.id);
+  assert.ok(rescheduledMum);
+  assert.equal(rescheduledMum.revision, mumReminder.revision + 1);
+  assert.notEqual(rescheduledMum.data.taskId, originalMumTaskId);
+  assert.equal(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Los_Angeles",
+      hour: "numeric",
+      hour12: false,
+    }).format(new Date(Number(rescheduledMum.data.dueAt))),
+    "11",
+  );
+  assert.equal(tasks.get(originalMumTaskId, "user:e2e-user")?.state, "cancelled");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByLabel("Message Ellie").fill("Remind me to water the fern");
+  await page.getByRole("button", { name: "Send message" }).click();
+  const fernDraft = page.locator(".intent-strip").filter({ hasText: /water the fern/i });
+  await fernDraft.waitFor();
+  const fernConversation = new URL(page.url()).searchParams.get("conversation");
+  assert.ok(fernConversation);
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("button", { name: "History" }).click();
+  await page
+    .locator(`.history-list article[data-conversation-id="${fernConversation}"] .history-open`)
+    .click();
+  await page
+    .locator(".intent-strip")
+    .filter({ hasText: /water the fern/i })
+    .waitFor();
+  await page.getByLabel("Message Ellie").fill("sometime later");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page
+    .locator(".intent-strip")
+    .filter({ hasText: /water the fern/i })
+    .waitFor();
+  await page.getByRole("button", { name: /Clear draft reminder: water the fern/i }).click();
+  await page.getByText("Draft cleared").waitFor();
+  await page.locator(".intent-strip").waitFor({ state: "detached" });
+  assert.equal(
+    store
+      .listRecords(
+        { userId: "e2e-user" },
+        { scope: { type: "user", id: "e2e-user" }, kinds: ["reminder"] },
+      )
+      .some((record) => /water the fern/i.test(record.title)),
+    false,
+  );
   const slowStarted = new Promise<void>((resolve) => {
     markSlowChatStarted = resolve;
   });
@@ -241,6 +393,7 @@ try {
   await page
     .locator(".messages article.ellie p")
     .getByText("Fixture summary of the cited source.", { exact: true })
+    .last()
     .waitFor();
   assert.match(page.url(), /conversation=/);
   const recoveredConversation = new URL(page.url()).searchParams.get("conversation");

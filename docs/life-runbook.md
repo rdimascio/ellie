@@ -73,6 +73,8 @@ Use your runner's literal loopback address and exact model ID. The launcher does
 
 The [model readiness check](life-model-status.md) reports whether the configured local runner lists that exact model. It makes a bounded inventory request without sending a prompt and distinguishes a missing model from an unavailable runner or an unsupported inventory endpoint.
 
+The [model contract](life-model-contract.md) describes supported action formats, bounded context, missing-field drafts and inference deadlines.
+
 ## Verify
 
 ```sh

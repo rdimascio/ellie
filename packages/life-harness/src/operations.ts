@@ -16,7 +16,7 @@ import {
   startOfLocalDay,
   validateCalendarDate,
 } from "../../life-time/src/index.ts";
-import type { TaskRecord } from "../../task-runtime/src/index.ts";
+import type { PreparedTaskReplacement, TaskRecord } from "../../task-runtime/src/index.ts";
 import { TaskRuntime } from "../../task-runtime/src/index.ts";
 
 export type TemporalSpec =
@@ -60,6 +60,10 @@ export interface LifeOperationsOptions {
   now: () => number;
   enqueueSummary?: (actor: LifeActor, scope: LifeScope, query: string) => TaskRecord | undefined;
 }
+export interface ReminderRescheduleJournal {
+  prepared(value: { operationId: string; replacementTaskId: string; dueAt: number }): void;
+  recordUpdated(value: { recordId: string; revision: number; replacementTaskId: string }): void;
+}
 export class LifeOperationInputError extends TypeError {
   constructor(message: string) {
     super(message);
@@ -81,6 +85,152 @@ export class LifeOperations {
   private readonly options: LifeOperationsOptions;
   constructor(options: LifeOperationsOptions) {
     this.options = options;
+  }
+
+  rescheduleReminder(
+    actor: LifeActor,
+    scope: LifeScope,
+    input: {
+      operationId: string;
+      recordId: string;
+      expectedRevision: number;
+      replacesTaskId: string;
+      when: TemporalSpec;
+    },
+    effectiveZone: string,
+    journal: ReminderRescheduleJournal,
+  ): OperationOutcome {
+    const reminder = this.options.store.getRecord(actor, input.recordId);
+    if (
+      !reminder ||
+      reminder.kind !== "reminder" ||
+      reminder.scope.type !== scope.type ||
+      reminder.scope.id !== scope.id ||
+      reminder.revision !== input.expectedRevision ||
+      reminder.data.taskId !== input.replacesTaskId ||
+      !current(reminder)
+    )
+      return this.rejected("That reminder changed. Please review it before rescheduling.");
+    const dueAt = this.when(input.when, effectiveZone);
+    if (dueAt <= this.options.now())
+      return this.rejected("That reminder time is in the past. Please choose a future time.");
+    const replacement = this.options.tasks.prepareReplacement({
+      operationId: input.operationId,
+      owner: owner(scope),
+      replacesTaskId: input.replacesTaskId,
+      task: {
+        owner: owner(scope),
+        handler: "reminder.notify",
+        input: { recordId: reminder.id, scope, userId: actor.userId },
+        schedule: { kind: "once", at: dueAt },
+      },
+    });
+    journal.prepared({
+      operationId: input.operationId,
+      replacementTaskId: replacement.replacementTaskId,
+      dueAt,
+    });
+    let updated: LifeRecord;
+    try {
+      updated = this.options.store.updateRecord(actor, reminder.id, reminder.revision, {
+        data: {
+          ...reminder.data,
+          dueAt,
+          taskId: replacement.replacementTaskId,
+          rescheduleOperationId: input.operationId,
+          timeZone: effectiveZone,
+        },
+      });
+    } catch (error) {
+      this.options.tasks.discardReplacement(input.operationId, owner(scope));
+      throw error;
+    }
+    journal.recordUpdated({
+      recordId: updated.id,
+      revision: updated.revision,
+      replacementTaskId: replacement.replacementTaskId,
+    });
+    const activated = this.options.tasks.activateReplacement(input.operationId, owner(scope));
+    return {
+      status: "scheduled",
+      reply: `Moved “${updated.title}” to ${new Date(dueAt).toLocaleString("en-US", { timeZone: effectiveZone })}.`,
+      records: [updated],
+      tasks: activated.task ? [activated.task] : [],
+    };
+  }
+
+  recoverReminderReschedule(
+    actor: LifeActor,
+    scope: LifeScope,
+    operationId: string,
+    recordId: string,
+  ): PreparedTaskReplacement {
+    const replacement = this.options.tasks.getReplacement(operationId, owner(scope));
+    if (!replacement) throw new Error("Prepared reminder replacement is unavailable.");
+    const reminder = this.options.store.getRecord(actor, recordId);
+    if (
+      !reminder ||
+      reminder.scope.type !== scope.type ||
+      reminder.scope.id !== scope.id ||
+      reminder.data.taskId !== replacement.replacementTaskId ||
+      reminder.data.rescheduleOperationId !== operationId
+    ) {
+      if (replacement.state === "prepared")
+        return this.options.tasks.discardReplacement(operationId, owner(scope));
+      throw new Error("Activated replacement no longer matches its reminder record.");
+    }
+    return replacement.state === "prepared"
+      ? this.options.tasks.activateReplacement(operationId, owner(scope))
+      : replacement;
+  }
+
+  rescheduleEvent(
+    actor: LifeActor,
+    scope: LifeScope,
+    input: {
+      recordId: string;
+      expectedRevision: number;
+      start: TemporalSpec;
+      durationMinutes?: number;
+    },
+    effectiveZone: string,
+  ): OperationOutcome {
+    const event = this.options.store.getRecord(actor, input.recordId);
+    if (
+      !event ||
+      event.kind !== "event" ||
+      event.scope.type !== scope.type ||
+      event.scope.id !== scope.id ||
+      event.revision !== input.expectedRevision ||
+      !current(event)
+    )
+      return this.rejected("That event changed. Please review it before rescheduling.");
+    const startAt = this.when(input.start, effectiveZone);
+    if (startAt <= this.options.now())
+      return this.rejected("That event time is in the past. Please choose a future time.");
+    const existingStart = parseInstant(event.data.startAt);
+    const existingEnd = parseInstant(event.data.endAt);
+    const duration =
+      input.durationMinutes ??
+      (existingStart !== undefined && existingEnd !== undefined && existingEnd > existingStart
+        ? (existingEnd - existingStart) / 60_000
+        : 60);
+    if (!Number.isInteger(duration) || duration < 1 || duration > 7 * 24 * 60)
+      throw new LifeOperationInputError("Event duration is invalid.");
+    const updated = this.options.store.updateRecord(actor, event.id, event.revision, {
+      data: {
+        ...event.data,
+        startAt,
+        endAt: startAt + duration * 60_000,
+        timeZone: effectiveZone,
+      },
+    });
+    return {
+      status: "completed",
+      reply: `Moved “${updated.title}” to ${new Date(startAt).toLocaleString("en-US", { timeZone: effectiveZone })}.`,
+      records: [updated],
+      tasks: [],
+    };
   }
 
   execute(

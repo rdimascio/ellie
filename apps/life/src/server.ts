@@ -11,6 +11,8 @@ import type {
   LifeRecordSummary,
   LifeScope,
   LifeStore,
+  PendingLifeIntent,
+  PendingTemporalSpec,
   TextSourceFormat,
 } from "../../../packages/life-core/src/index.ts";
 import { LifeAccessError, LifeConflictError } from "../../../packages/life-core/src/index.ts";
@@ -64,6 +66,13 @@ export interface LifeHarnessLike {
     conversationId?: string;
     history?: Array<{ role: "user" | "assistant"; content: string }>;
     isContextCurrent?: () => boolean;
+    pendingIntent?: PendingLifeIntent;
+    recentOperation?: {
+      kind: "reminder" | "event";
+      recordId: string;
+      expectedRevision: number;
+      taskId?: string;
+    };
   }): Promise<{
     reply: string;
     conversationId: string;
@@ -71,6 +80,41 @@ export interface LifeHarnessLike {
     records?: LifeRecord[];
     taskIds?: string[];
     evidence?: Array<{ sourceId: string; title: string; reference?: string }>;
+    continuation?:
+      | {
+          action: "create" | "replace";
+          intent: PendingLifeIntent["intent"];
+          missing: PendingLifeIntent["missing"];
+          question: string;
+          target?: PendingLifeIntent["target"];
+          answer?: { when: PendingTemporalSpec } | { start: PendingTemporalSpec };
+        }
+      | {
+          action: "answer";
+          pendingIntentId: string;
+          expectedRevision: number;
+          answer: { when: PendingTemporalSpec } | { start: PendingTemporalSpec };
+        }
+      | { action: "cancel"; pendingIntentId: string; expectedRevision: number };
+  }>;
+  continuePendingIntent?(input: {
+    actor: LifeActor;
+    scope: LifeScope;
+    pendingIntent: PendingLifeIntent;
+    answer?: { when: PendingTemporalSpec } | { start: PendingTemporalSpec };
+    isContextCurrent?: () => boolean;
+    replacementJournal?: {
+      prepared(value: { operationId: string; replacementTaskId: string; dueAt: number }): void;
+      recordUpdated(value: { recordId: string; revision: number; replacementTaskId: string }): void;
+    };
+  }): Promise<{
+    reply: string;
+    conversationId: string;
+    actions?: Array<{ label: string; status: string }>;
+    records?: LifeRecord[];
+    taskIds?: string[];
+    evidence?: Array<{ sourceId: string; title: string; reference?: string }>;
+    operationOutcome?: "completed" | "scheduled" | "queued" | "clarify" | "rejected";
   }>;
   buildPlugin?(input: { actor: LifeActor; scope: LifeScope; request: string }): Promise<LifePlugin>;
   revisePlugin?(input: {
@@ -294,6 +338,7 @@ export class LifeHttpServer {
     this.actor = { userId: identifier(options.userId ?? "local", "userId") };
     this.learning = new LifeLearning(options.store);
     this.teaching = new LifeTeaching(options.store, this.now);
+    this.recoverReminderReschedules();
     const pendingReset = options.store.getPersonalReset(this.actor);
     this.personalResetActive = Boolean(pendingReset && pendingReset.state !== "completed");
     if (pendingReset && pendingReset.state !== "completed") {
@@ -306,6 +351,76 @@ export class LifeHttpServer {
     this.tokenHash = digest(this.token);
     this.tokenCreatedAt = this.now();
     this.assertStateRoot();
+  }
+  recoverReminderReschedules(): { recovered: number; blocked: number } {
+    let recovered = 0,
+      blocked = 0;
+    for (const initial of this.options.store.listReminderReschedules(this.actor, {
+      activeOnly: true,
+    })) {
+      try {
+        let journal = initial;
+        const replacement = this.options.tasks.getReplacement(
+          journal.operationId,
+          owner(journal.scope),
+        );
+        if (!replacement) {
+          if (journal.state === "begun") {
+            this.options.store.interruptReminderReschedule(this.actor, journal.operationId);
+            recovered += 1;
+          } else blocked += 1;
+          continue;
+        }
+        const replacementTask =
+            replacement.task ??
+            this.options.tasks.get(replacement.replacementTaskId, owner(journal.scope)),
+          record = this.options.store.getRecord(this.actor, journal.recordId),
+          pointsAtReplacement = Boolean(
+            record &&
+            record.scope.type === journal.scope.type &&
+            record.scope.id === journal.scope.id &&
+            record.data.taskId === replacement.replacementTaskId &&
+            record.data.rescheduleOperationId === journal.operationId,
+          );
+        if (!pointsAtReplacement) {
+          if (replacement.state === "prepared") {
+            this.options.tasks.discardReplacement(journal.operationId, owner(journal.scope));
+            this.options.store.interruptReminderReschedule(this.actor, journal.operationId);
+            recovered += 1;
+          } else blocked += 1;
+          continue;
+        }
+        if (journal.state === "begun") {
+          if (!replacementTask?.scheduledFor)
+            throw new Error("Replacement schedule is unavailable.");
+          journal = this.options.store.markReminderReschedulePrepared(
+            this.actor,
+            journal.operationId,
+            {
+              replacementTaskId: replacement.replacementTaskId,
+              dueAt: replacementTask.scheduledFor,
+            },
+          );
+        }
+        if (journal.state === "prepared")
+          journal = this.options.store.markReminderRescheduleRecordUpdated(
+            this.actor,
+            journal.operationId,
+            {
+              recordId: record!.id,
+              revision: record!.revision,
+              replacementTaskId: replacement.replacementTaskId,
+            },
+          );
+        if (replacement.state === "prepared")
+          this.options.tasks.activateReplacement(journal.operationId, owner(journal.scope));
+        this.options.store.completeReminderReschedule(this.actor, journal.operationId);
+        recovered += 1;
+      } catch {
+        blocked += 1;
+      }
+    }
+    return { recovered, blocked };
   }
   private assertStateRoot(): void {
     const state = resolve(this.options.stateDir);
@@ -670,6 +785,16 @@ export class LifeHttpServer {
         return this.chatRequest(path, response);
       if (path === "/api/life/conversations" && request.method === "GET")
         return this.conversations(url, response);
+      if (
+        /^\/api\/life\/conversations\/[^/]+\/pending-intent$/.test(path) &&
+        request.method === "GET"
+      )
+        return this.pendingIntentDetail(path, response);
+      if (
+        /^\/api\/life\/conversations\/[^/]+\/pending-intent$/.test(path) &&
+        request.method === "DELETE"
+      )
+        return this.pendingIntentDelete(path, url, response);
       if (/^\/api\/life\/conversations\/[^/]+$/.test(path) && request.method === "GET")
         return this.conversation(path, url, response);
       if (/^\/api\/life\/conversations\/[^/]+$/.test(path) && request.method === "DELETE")
@@ -774,6 +899,7 @@ export class LifeHttpServer {
         userSettings: life.settings,
         conversations: life.conversations,
         conversationTurns: life.conversationTurns,
+        pendingIntents: life.pendingIntents,
         tasks: tasks.tasks,
         watches: tasks.watches,
         watchEvents: tasks.watchEvents,
@@ -933,6 +1059,11 @@ export class LifeHttpServer {
       operationId = randomUUID();
     if (this.personalResetActive || this.resetInFlight)
       throw new HttpError(409, "A personal reset is already in progress.");
+    if (this.recoverReminderReschedules().blocked)
+      throw new HttpError(
+        409,
+        "A shared reminder reschedule needs authorized recovery before personal reset.",
+      );
     this.personalResetActive = true;
     this.options.preparationMonitor?.stop();
     this.options.harness.invalidateActorContext?.(this.actor);
@@ -1641,66 +1772,170 @@ export class LifeHttpServer {
       return;
     }
     const fingerprint = begun.contextFingerprint,
+      contextCurrent = () => {
+        try {
+          return (
+            this.options.store.conversationContextFingerprint(this.actor, begun.conversation.id) ===
+            fingerprint
+          );
+        } catch {
+          return false;
+        }
+      },
       history = this.options.store.conversationHistory(
         this.actor,
         begun.conversation.id,
         12,
         fingerprint,
+      ),
+      pendingIntent = this.options.store.getPendingIntent(this.actor, begun.conversation.id),
+      recentOperation = this.options.store.recentConversationOperation(
+        this.actor,
+        begun.conversation.id,
       );
+    let executingIntent: PendingLifeIntent | undefined, activeRescheduleId: string | undefined;
+    const executePending = async (
+      answered: PendingLifeIntent,
+    ): Promise<Awaited<ReturnType<LifeHarnessLike["chat"]>>> => {
+      if (!this.options.harness.continuePendingIntent)
+        throw new HttpError(503, "Pending reminder continuation is unavailable.");
+      executingIntent = this.options.store.claimPendingIntent(
+        this.actor,
+        answered.id,
+        answered.revision,
+      );
+      let replacementJournal:
+        | NonNullable<
+            Parameters<
+              NonNullable<LifeHarnessLike["continuePendingIntent"]>
+            >[0]["replacementJournal"]
+          >
+        | undefined;
+      if (executingIntent.intent.kind === "reschedule-reminder") {
+        const target = executingIntent.target;
+        if (!target?.taskId)
+          throw new LifeConflictError("The reminder task changed before rescheduling.");
+        activeRescheduleId = executingIntent.id;
+        this.options.store.beginReminderReschedule(this.actor, {
+          operationId: activeRescheduleId,
+          scope,
+          pendingIntentId: executingIntent.id,
+          recordId: target.recordId,
+          expectedRevision: target.expectedRevision,
+          replacesTaskId: target.taskId,
+        });
+        replacementJournal = {
+          prepared: (value) => {
+            this.options.store.markReminderReschedulePrepared(
+              this.actor,
+              activeRescheduleId!,
+              value,
+            );
+          },
+          recordUpdated: (value) => {
+            this.options.store.markReminderRescheduleRecordUpdated(
+              this.actor,
+              activeRescheduleId!,
+              value,
+            );
+          },
+        };
+      }
+      const continued = await this.options.harness.continuePendingIntent({
+        actor: this.actor,
+        scope,
+        pendingIntent: executingIntent,
+        isContextCurrent: contextCurrent,
+        ...(replacementJournal ? { replacementJournal } : {}),
+      });
+      this.recheckOwner(owner(scope));
+      if (continued.operationOutcome === "clarify" || continued.operationOutcome === "rejected") {
+        if (activeRescheduleId) {
+          this.recoverReminderReschedules();
+          activeRescheduleId = undefined;
+        }
+        this.options.store.interruptPendingIntent(
+          this.actor,
+          executingIntent.id,
+          executingIntent.revision,
+        );
+        executingIntent = undefined;
+        return continued;
+      }
+      if (activeRescheduleId) {
+        this.options.store.completeReminderReschedule(this.actor, activeRescheduleId);
+        activeRescheduleId = undefined;
+      }
+      this.options.store.finishPendingIntent(
+        this.actor,
+        executingIntent.id,
+        executingIntent.revision,
+        {
+          recordIds: (continued.records ?? []).slice(0, 100).map((record) => record.id),
+          taskIds: (continued.taskIds ?? []).slice(0, 100),
+        },
+      );
+      executingIntent = undefined;
+      return continued;
+    };
     try {
-      const result = await this.options.harness.chat({
+      let result = await this.options.harness.chat({
         actor: this.actor,
         scope,
         message,
         conversationId: begun.conversation.id,
         history,
-        isContextCurrent: () => {
-          try {
-            return (
-              this.options.store.conversationContextFingerprint(
-                this.actor,
-                begun.conversation.id,
-              ) === fingerprint
-            );
-          } catch {
-            return false;
-          }
-        },
+        isContextCurrent: contextCurrent,
+        ...(pendingIntent ? { pendingIntent } : {}),
+        ...(recentOperation ? { recentOperation } : {}),
       });
       this.recheckOwner(owner(scope));
-      const evidence =
-          result.evidence?.slice(0, 50).flatMap((item) => {
-            const source = this.options.store.currentSourceReference(
-              this.actor,
-              scope,
-              item.sourceId,
-            );
-            return source
-              ? [
-                  {
-                    ...source,
-                    title: presentation(source.title, 500, "Source"),
-                    ...(item.reference
-                      ? { reference: presentation(item.reference, 1000, "Reference") }
-                      : {}),
-                  },
-                ]
-              : [];
-          }) ?? [],
+      const directive = result.continuation;
+      if (directive?.action === "create" || directive?.action === "replace") {
+        const created = this.options.store.createPendingIntent(this.actor, {
+          conversationId: begun.conversation.id,
+          scope,
+          chatEpoch,
+          originTurnId: begun.turn.id,
+          originRequestId: requestId,
+          intent: directive.intent,
+          missing: directive.missing,
+          question: directive.question,
+          contextFingerprint: fingerprint,
+          ...(directive.target ? { target: directive.target } : {}),
+        });
+        if (directive.answer) {
+          const answered = this.options.store.answerPendingIntent(this.actor, {
+            id: created.id,
+            expectedRevision: created.revision,
+            answerTurnId: begun.turn.id,
+            answerRequestId: requestId,
+            answer: directive.answer,
+          });
+          result = await executePending(answered);
+        }
+      } else if (directive?.action === "cancel")
+        this.options.store.cancelPendingIntent(
+          this.actor,
+          directive.pendingIntentId,
+          directive.expectedRevision,
+        );
+      else if (directive?.action === "answer") {
+        const answered = this.options.store.answerPendingIntent(this.actor, {
+          id: directive.pendingIntentId,
+          expectedRevision: directive.expectedRevision,
+          answerTurnId: begun.turn.id,
+          answerRequestId: requestId,
+          answer: directive.answer,
+        });
+        result = await executePending(answered);
+      }
+      const normalized = this.conversationResult(scope, result),
         completed = this.options.store.completeConversationTurn(this.actor, {
           conversationId: begun.conversation.id,
           turnId: begun.turn.id,
           requestId,
-          result: {
-            reply: presentation(result.reply, 8000, "Done."),
-            actions: (result.actions ?? []).slice(0, 20).map((action) => ({
-              label: presentation(action.label, 500, "Completed"),
-              status: presentation(action.status, 50, "completed"),
-            })),
-            recordIds: (result.records ?? []).slice(0, 100).map((record) => record.id),
-            taskIds: (result.taskIds ?? []).slice(0, 100),
-            evidence,
-          },
+          result: normalized,
         });
       this.send(
         response,
@@ -1708,6 +1943,19 @@ export class LifeHttpServer {
         this.conversationChatEnvelope(completed.conversation, completed.turn, completed.result),
       );
     } catch (error) {
+      if (activeRescheduleId) {
+        // Reconcile the record pointer before deciding whether a prepared replacement may
+        // be discarded. A callback can fail after the record CAS has already succeeded.
+        this.recoverReminderReschedules();
+      }
+      if (executingIntent)
+        try {
+          this.options.store.interruptPendingIntent(
+            this.actor,
+            executingIntent.id,
+            executingIntent.revision,
+          );
+        } catch {}
       try {
         this.options.store.interruptConversationTurn(this.actor, {
           conversationId: begun.conversation.id,
@@ -1718,6 +1966,50 @@ export class LifeHttpServer {
       throw error;
     }
   }
+  private conversationResult(
+    scope: LifeScope,
+    result: Awaited<ReturnType<LifeHarnessLike["chat"]>>,
+  ): import("../../../packages/life-core/src/index.ts").ConversationResult {
+    const evidence =
+      result.evidence?.slice(0, 50).flatMap((item) => {
+        const source = this.options.store.currentSourceReference(this.actor, scope, item.sourceId);
+        return source
+          ? [
+              {
+                ...source,
+                title: presentation(source.title, 500, "Source"),
+                ...(item.reference
+                  ? { reference: presentation(item.reference, 1000, "Reference") }
+                  : {}),
+              },
+            ]
+          : [];
+      }) ?? [];
+    return {
+      reply: presentation(result.reply, 8000, "Done."),
+      actions: (result.actions ?? []).slice(0, 20).map((action) => ({
+        label: presentation(action.label, 500, "Completed"),
+        status: presentation(action.status, 50, "completed"),
+      })),
+      recordIds: (result.records ?? []).slice(0, 100).map((record) => record.id),
+      recordReceipts: [
+        ...new Map(
+          (result.records ?? [])
+            .filter((record) => record.kind === "reminder" || record.kind === "event")
+            .map((record) => [
+              record.id,
+              {
+                id: record.id,
+                kind: record.kind as "reminder" | "event",
+                revision: record.revision,
+              },
+            ]),
+        ).values(),
+      ].slice(0, 100),
+      taskIds: (result.taskIds ?? []).slice(0, 100),
+      evidence,
+    };
+  }
   private conversationChatEnvelope(
     conversation: import("../../../packages/life-core/src/index.ts").ConversationSummary,
     turn: import("../../../packages/life-core/src/index.ts").ConversationTurn,
@@ -1727,6 +2019,9 @@ export class LifeHttpServer {
       status: turn.status,
       conversationId: conversation.id,
       turnId: turn.id,
+      pendingIntent: this.pendingIntentProjection(
+        this.options.store.getPendingIntent(this.actor, conversation.id),
+      ),
       ...(result
         ? {
             reply: result.reply,
@@ -1740,6 +2035,47 @@ export class LifeHttpServer {
           }
         : {}),
     };
+  }
+  private pendingIntentProjection(value?: PendingLifeIntent): Record<string, unknown> | null {
+    if (!value || value.state === "completed" || value.state === "cancelled") return null;
+    const kind =
+        value.intent.kind === "schedule-reminder" || value.intent.kind === "reschedule-reminder"
+          ? "reminder"
+          : value.intent.kind === "create-event" || value.intent.kind === "reschedule-event"
+            ? "event"
+            : "need",
+      title =
+        "title" in value.intent
+          ? value.intent.title
+          : value.target
+            ? (this.options.store.getRecord(this.actor, value.target.recordId)?.title ?? kind)
+            : kind;
+    return {
+      id: value.id,
+      kind,
+      title: presentation(title, 240, kind),
+      state: value.state,
+      question: value.question,
+      missing: value.missing,
+      expiresAt: new Date(value.expiresAt).toISOString(),
+      revision: value.revision,
+    };
+  }
+  private pendingIntentDetail(path: string, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-2)!), "conversationId"),
+      pending = this.options.store.getPendingIntent(this.actor, id);
+    this.send(response, 200, { pendingIntent: this.pendingIntentProjection(pending) });
+  }
+  private pendingIntentDelete(path: string, url: URL, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-2)!), "conversationId"),
+      pending = this.options.store.getPendingIntent(this.actor, id);
+    if (!pending) throw new HttpError(404, "Pending intent not found.");
+    this.options.store.cancelPendingIntent(
+      this.actor,
+      pending.id,
+      Number(url.searchParams.get("revision")),
+    );
+    this.send(response, 204);
   }
   private chatRequest(path: string, response: ServerResponse): void {
     const requestId = identifier(decodeURIComponent(path.split("/").at(-1)!), "requestId"),

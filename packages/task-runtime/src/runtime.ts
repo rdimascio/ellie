@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, openSync, closeSync, lstatSync, constants } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -12,6 +12,8 @@ import type {
   PersonalDeletion,
   PersonalTaskExportPage,
   PersonalTaskSummary,
+  PrepareTaskReplacement,
+  PreparedTaskReplacement,
   ProgressRecord,
   RetryPolicy,
   RuntimeOptions,
@@ -30,6 +32,16 @@ type Row = Record<string, unknown>;
 const terminal = new Set<TaskState>(["succeeded", "failed", "cancelled", "expired", "unknown"]);
 const json = <T>(value: unknown, fallback: T): T =>
   value == null ? fallback : (JSON.parse(String(value)) as T);
+const canonical = (value: unknown): unknown =>
+  Array.isArray(value)
+    ? value.map(canonical)
+    : value && typeof value === "object"
+      ? Object.fromEntries(
+          Object.entries(value as Record<string, unknown>)
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([key, item]) => [key, canonical(item)]),
+        )
+      : value;
 
 export class TaskRuntime {
   readonly databasePath: string;
@@ -168,7 +180,7 @@ export class TaskRuntime {
 
   private migrate(): void {
     const version = Number((this.db.prepare("PRAGMA user_version").get() as Row).user_version);
-    if (version > 2)
+    if (version > 5)
       throw new Error("Unsupported task runtime schema; preserve the database and upgrade Ellie.");
     if (version === 0)
       this.db.exec(`
@@ -213,6 +225,35 @@ export class TaskRuntime {
       CREATE TRIGGER progress_generation_insert AFTER INSERT ON progress BEGIN INSERT INTO owner_generations SELECT owner_scope,1 FROM tasks WHERE id=NEW.task_id ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
       CREATE TRIGGER progress_generation_delete AFTER DELETE ON progress BEGIN INSERT INTO owner_generations SELECT owner_scope,1 FROM tasks WHERE id=OLD.task_id ON CONFLICT(owner_scope) DO UPDATE SET generation=generation+1; END;
       PRAGMA user_version = 2;
+      COMMIT;
+    `);
+    if (version <= 2)
+      this.db.exec(`
+      BEGIN;
+      CREATE TABLE IF NOT EXISTS task_replacements(operation_id TEXT NOT NULL,owner_scope TEXT NOT NULL,
+        replaces_task_id TEXT NOT NULL,replacement_task_id TEXT NOT NULL,state TEXT NOT NULL,
+        previous_state TEXT NOT NULL,request_hash TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+        PRIMARY KEY(operation_id,owner_scope),UNIQUE(replacement_task_id)) STRICT;
+      CREATE INDEX IF NOT EXISTS task_replacements_owner ON task_replacements(owner_scope,state,created_at);
+      CREATE UNIQUE INDEX IF NOT EXISTS task_replacements_one_prepared ON task_replacements(owner_scope,replaces_task_id) WHERE state='prepared';
+      PRAGMA user_version = 5;
+      COMMIT;
+    `);
+    if (version === 3)
+      this.db.exec(`
+      BEGIN;
+      ALTER TABLE task_replacements ADD COLUMN previous_state TEXT NOT NULL DEFAULT 'scheduled';
+      ALTER TABLE task_replacements ADD COLUMN request_hash TEXT NOT NULL DEFAULT '';
+      CREATE UNIQUE INDEX task_replacements_one_prepared ON task_replacements(owner_scope,replaces_task_id) WHERE state='prepared';
+      PRAGMA user_version = 5;
+      COMMIT;
+    `);
+    if (version === 4)
+      this.db.exec(`
+      BEGIN;
+      ALTER TABLE task_replacements ADD COLUMN request_hash TEXT NOT NULL DEFAULT '';
+      CREATE UNIQUE INDEX task_replacements_one_prepared ON task_replacements(owner_scope,replaces_task_id) WHERE state='prepared';
+      PRAGMA user_version = 5;
       COMMIT;
     `);
   }
@@ -285,6 +326,199 @@ export class TaskRuntime {
       request.schedule,
       request.missedRunPolicy ?? { kind: "latest" },
     );
+  }
+
+  prepareReplacement(request: PrepareTaskReplacement): PreparedTaskReplacement {
+    this.assertAdmission(request.owner);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(request.operationId))
+      throw new Error("Replacement operation id is invalid.");
+    if (request.task.owner !== request.owner)
+      throw new Error("Replacement task owner does not match the operation owner.");
+    if (request.task.parentId || request.task.dependsOn?.length)
+      throw new Error("A prepared replacement cannot have a parent or dependencies.");
+    if (request.task.schedule.kind !== "once")
+      throw new Error("Only one-shot tasks can be prepared as replacements.");
+    const requestHash = createHash("sha256")
+      .update(
+        JSON.stringify(
+          canonical({
+            replacesTaskId: request.replacesTaskId,
+            task: request.task,
+          }),
+        ),
+      )
+      .digest("hex");
+    const existing = this.getReplacement(request.operationId, request.owner);
+    if (existing) {
+      const row = this.db
+        .prepare(
+          "SELECT request_hash FROM task_replacements WHERE operation_id=? AND owner_scope=?",
+        )
+        .get(request.operationId, request.owner) as Row;
+      if (existing.replacesTaskId !== request.replacesTaskId || row.request_hash !== requestHash)
+        throw new Error("Replacement operation id was retried with different inputs.");
+      return existing;
+    }
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 FROM task_replacements WHERE owner_scope=? AND replaces_task_id=? AND state='prepared'",
+        )
+        .get(request.owner, request.replacesTaskId)
+    )
+      throw new Error("Task already has a prepared replacement.");
+    const replaced = this.get(request.replacesTaskId, request.owner);
+    if (!replaced) throw new Error("Task to replace was not found in owner scope.");
+    if (!["queued", "scheduled", "paused"].includes(replaced.state))
+      throw new Error("Only a queued, scheduled, or paused task can be replaced.");
+    const scheduledFor = nextOccurrence(request.task.schedule, this.now() - 1);
+    if (scheduledFor === undefined) throw new Error("Replacement schedule is already past.");
+    const now = this.now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const task = this.insert(
+        { ...request.task, id: request.task.id ?? randomUUID() },
+        "paused",
+        scheduledFor,
+        request.task.schedule,
+        request.task.missedRunPolicy ?? { kind: "latest" },
+      );
+      const held = this.db
+        .prepare(
+          "UPDATE tasks SET state='paused',outcome_code='replacement_preparing',updated_at=? WHERE id=? AND owner_scope=? AND state=?",
+        )
+        .run(now, replaced.id, request.owner, replaced.state);
+      if (held.changes !== 1) throw new Error("Task to replace changed during preparation.");
+      this.db
+        .prepare(
+          "INSERT INTO task_replacements(operation_id,owner_scope,replaces_task_id,replacement_task_id,state,previous_state,request_hash,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+        )
+        .run(
+          request.operationId,
+          request.owner,
+          request.replacesTaskId,
+          task.id,
+          "prepared",
+          replaced.state,
+          requestHash,
+          now,
+          now,
+        );
+      this.db.exec("COMMIT");
+      return {
+        operationId: request.operationId,
+        owner: request.owner,
+        replacesTaskId: request.replacesTaskId,
+        replacementTaskId: task.id,
+        state: "prepared",
+        createdAt: now,
+        updatedAt: now,
+        task,
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getReplacement(operationId: string, owner: OwnerScope): PreparedTaskReplacement | undefined {
+    this.assertOwner(owner);
+    const row = this.db
+      .prepare("SELECT * FROM task_replacements WHERE operation_id=? AND owner_scope=?")
+      .get(operationId, owner) as Row | undefined;
+    if (!row) return undefined;
+    const replacementTaskId = String(row.replacement_task_id);
+    return {
+      operationId: String(row.operation_id),
+      owner: String(row.owner_scope) as OwnerScope,
+      replacesTaskId: String(row.replaces_task_id),
+      replacementTaskId,
+      state: String(row.state) as PreparedTaskReplacement["state"],
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+      ...(this.getInternal(replacementTaskId)
+        ? { task: this.getInternal(replacementTaskId)! }
+        : {}),
+    };
+  }
+
+  activateReplacement(operationId: string, owner: OwnerScope): PreparedTaskReplacement {
+    this.assertAdmission(owner);
+    const replacement = this.getReplacement(operationId, owner);
+    if (!replacement) throw new Error("Prepared replacement was not found in owner scope.");
+    if (replacement.state === "activated") return replacement;
+    if (replacement.state === "discarded") throw new Error("Prepared replacement was discarded.");
+    const oldTask = this.get(replacement.replacesTaskId, owner);
+    const newTask = this.get(replacement.replacementTaskId, owner);
+    if (!oldTask || !newTask) throw new Error("Prepared replacement task metadata is unavailable.");
+    if (terminal.has(oldTask.state)) throw new Error("Task to replace became terminal.");
+    if (oldTask.state !== "paused") throw new Error("Task to replace is no longer held.");
+    if (newTask.state !== "paused" || !newTask.schedule || newTask.scheduledFor === undefined)
+      throw new Error("Prepared replacement is not activatable.");
+    const now = this.now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "UPDATE tasks SET state='cancelled',outcome_code='replaced',updated_at=? WHERE id=? AND owner_scope=? AND state NOT IN ('succeeded','failed','cancelled','expired','unknown')",
+        )
+        .run(now, oldTask.id, owner);
+      this.active.get(oldTask.id)?.controller.abort(new Error("Task replaced."));
+      const activated = this.db
+        .prepare(
+          "UPDATE tasks SET state='scheduled',updated_at=? WHERE id=? AND owner_scope=? AND state='paused'",
+        )
+        .run(now, newTask.id, owner);
+      if (activated.changes !== 1)
+        throw new Error("Prepared replacement changed before activation.");
+      this.db
+        .prepare(
+          "UPDATE task_replacements SET state='activated',updated_at=? WHERE operation_id=? AND owner_scope=? AND state='prepared'",
+        )
+        .run(now, operationId, owner);
+      this.db.exec("COMMIT");
+      return this.getReplacement(operationId, owner)!;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  discardReplacement(operationId: string, owner: OwnerScope): PreparedTaskReplacement {
+    const replacement = this.getReplacement(operationId, owner);
+    if (!replacement) throw new Error("Prepared replacement was not found in owner scope.");
+    if (replacement.state === "discarded") return replacement;
+    if (replacement.state === "activated")
+      throw new Error("An activated replacement cannot be discarded.");
+    const now = this.now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db
+        .prepare(
+          "UPDATE tasks SET state='cancelled',outcome_code='replacement_discarded',updated_at=? WHERE id=? AND owner_scope=? AND state='paused'",
+        )
+        .run(now, replacement.replacementTaskId, owner);
+      const row = this.db
+        .prepare(
+          "SELECT previous_state FROM task_replacements WHERE operation_id=? AND owner_scope=?",
+        )
+        .get(operationId, owner) as Row;
+      this.db
+        .prepare(
+          "UPDATE tasks SET state=?,outcome_code=NULL,updated_at=? WHERE id=? AND owner_scope=? AND state='paused' AND outcome_code='replacement_preparing'",
+        )
+        .run(String(row.previous_state), now, replacement.replacesTaskId, owner);
+      this.db
+        .prepare(
+          "UPDATE task_replacements SET state='discarded',updated_at=? WHERE operation_id=? AND owner_scope=? AND state='prepared'",
+        )
+        .run(now, operationId, owner);
+      this.db.exec("COMMIT");
+      return this.getReplacement(operationId, owner)!;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   watch(request: WatchTask): string {
@@ -687,6 +921,7 @@ export class TaskRuntime {
       this.db
         .prepare("DELETE FROM progress WHERE task_id IN (SELECT id FROM tasks WHERE owner_scope=?)")
         .run(owner);
+      this.db.prepare("DELETE FROM task_replacements WHERE owner_scope=?").run(owner);
       this.db.prepare("DELETE FROM tasks WHERE owner_scope=?").run(owner);
       this.db.prepare("DELETE FROM watches WHERE owner_scope=?").run(owner);
       this.db.prepare("DELETE FROM watch_events WHERE owner_scope=?").run(owner);
@@ -1052,14 +1287,17 @@ export class TaskRuntime {
   }
 
   pause(id: string, owner: OwnerScope): boolean {
+    this.assertNotHeldForReplacement(id, owner);
     return this.transition(id, owner, ["queued", "scheduled", "waiting"], "paused");
   }
   resume(id: string, owner: OwnerScope): boolean {
     this.assertAdmission(owner);
+    this.assertNotHeldForReplacement(id, owner);
     return this.transition(id, owner, ["paused", "waiting"], "queued");
   }
 
   cancel(id: string, owner: OwnerScope): boolean {
+    this.assertNotHeldForReplacement(id, owner);
     const task = this.get(id, owner);
     if (!task || terminal.has(task.state)) return false;
     const ids = [
@@ -1092,6 +1330,7 @@ export class TaskRuntime {
 
   async runNow(id: string, owner: OwnerScope): Promise<void> {
     this.assertAdmission(owner);
+    this.assertNotHeldForReplacement(id, owner);
     const task = this.get(id, owner);
     if (!task) throw new Error("Task not found in owner scope.");
     if (terminal.has(task.state))
@@ -1102,6 +1341,15 @@ export class TaskRuntime {
         .prepare("UPDATE tasks SET state='queued',scheduled_for=NULL,updated_at=? WHERE id=?")
         .run(this.now(), id);
     await this.tick();
+  }
+
+  private assertNotHeldForReplacement(id: string, owner: OwnerScope): void {
+    const row = this.db
+      .prepare(
+        "SELECT 1 FROM task_replacements WHERE owner_scope=? AND state='prepared' AND (replaces_task_id=? OR replacement_task_id=?)",
+      )
+      .get(owner, id, id);
+    if (row) throw new Error("Task controls are disabled while a durable replacement is prepared.");
   }
 
   private recover(): void {

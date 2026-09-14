@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-export const LIFE_SCHEMA_VERSION = 3;
+export const LIFE_SCHEMA_VERSION = 4;
 export const LIFE_RECORD_KINDS = [
   "memory",
   "contact",
@@ -100,7 +100,9 @@ export type PersonalLifeExportItem =
   | { type: "record"; record: LifeRecord }
   | { type: "setting"; key: string; value: unknown; updatedAt: number }
   | { type: "conversation"; conversation: ConversationSummary }
-  | { type: "conversation-turn"; conversationId: string; turn: ConversationTurn };
+  | { type: "conversation-turn"; conversationId: string; turn: ConversationTurn }
+  | { type: "pending-intent"; pendingIntent: PendingLifeIntent }
+  | { type: "reminder-reschedule"; reschedule: ReminderRescheduleState };
 export interface PersonalLifeSummary {
   generation: number;
   records: number;
@@ -110,6 +112,8 @@ export interface PersonalLifeSummary {
   settings: number;
   conversations: number;
   conversationTurns: number;
+  pendingIntents: number;
+  reminderReschedules: number;
   bytes: number;
 }
 export interface PersonalLifeExportPage {
@@ -149,6 +153,7 @@ export interface ConversationResult {
   reply: string;
   actions: Array<{ label: string; status: string }>;
   recordIds: string[];
+  recordReceipts?: Array<{ id: string; kind: "reminder" | "event"; revision: number }>;
   taskIds: string[];
   evidence: ConversationEvidence[];
 }
@@ -171,6 +176,60 @@ export interface ConversationPage<T> {
 }
 export interface ConversationIndex extends ConversationPage<ConversationSummary> {
   chatEpoch: number;
+}
+export type PendingTemporalSpec =
+  | { type: "instant"; at: number }
+  | {
+      type: "local";
+      date: { year: number; month: number; day: number };
+      clock: { hour: number; minute: number };
+      timeZone?: string;
+    };
+export type PendingIntentPayload =
+  | { kind: "schedule-reminder"; title: string; when?: PendingTemporalSpec }
+  | {
+      kind: "create-event";
+      title: string;
+      start?: PendingTemporalSpec;
+      durationMinutes?: number;
+    }
+  | { kind: "reschedule-reminder"; when?: PendingTemporalSpec }
+  | { kind: "reschedule-event"; start?: PendingTemporalSpec; durationMinutes?: number };
+export type PendingIntentField = "when" | "start";
+export interface PendingLifeIntent {
+  id: string;
+  conversationId: string;
+  scope: LifeScope;
+  chatEpoch: number;
+  revision: number;
+  state: "awaiting-fields" | "executing" | "completed" | "cancelled" | "expired" | "interrupted";
+  intent: PendingIntentPayload;
+  missing: PendingIntentField[];
+  question: string;
+  originTurnId: string;
+  originRequestId: string;
+  answerTurnId?: string;
+  target?: { recordId: string; expectedRevision: number; taskId?: string };
+  contextFingerprint: string;
+  outcome?: { recordIds: string[]; taskIds: string[] };
+  expiresAt: number;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface ReminderRescheduleState {
+  operationId: string;
+  userId: string;
+  scope: LifeScope;
+  pendingIntentId?: string;
+  recordId: string;
+  expectedRevision: number;
+  replacesTaskId: string;
+  dueAt?: number;
+  replacementTaskId?: string;
+  recordRevision?: number;
+  state: "begun" | "prepared" | "record-updated" | "completed" | "interrupted";
+  createdAt: number;
+  updatedAt: number;
 }
 export type SourceFormat = "text" | "markdown" | "html" | "email" | "transcript" | "binary";
 export type TextSourceFormat = Exclude<SourceFormat, "binary">;
@@ -409,9 +468,15 @@ export class LifeStore {
       if (version === 0) this.migrate();
       else if (version === 1) this.migrateV2();
       else if (version === 2) this.migrateV3();
+      else if (version === 3) this.migrateV4();
       this.db
         .prepare(
           "UPDATE conversation_turns SET status='interrupted',updated_at=? WHERE status='pending'",
+        )
+        .run(this.clock());
+      this.db
+        .prepare(
+          "UPDATE pending_life_intents SET state='interrupted',revision=revision+1,updated_at=? WHERE state='executing'",
         )
         .run(this.clock());
     } catch (error) {
@@ -480,6 +545,27 @@ export class LifeStore {
     CREATE TRIGGER conversation_turns_generation_delete AFTER DELETE ON conversation_turns BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
     UPDATE conversation_turns SET status='interrupted',updated_at=${this.clock()} WHERE status='pending';
     PRAGMA user_version=3;`),
+    );
+    this.migrateV4();
+  }
+  private migrateV4(): void {
+    this.transaction(() =>
+      this.db.exec(`
+    CREATE TABLE pending_life_intents(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,chat_epoch INTEGER NOT NULL,revision INTEGER NOT NULL,state TEXT NOT NULL CHECK(state IN('awaiting-fields','executing','completed','cancelled','expired','interrupted')),intent_json TEXT NOT NULL,missing_json TEXT NOT NULL,question TEXT NOT NULL,origin_turn_id TEXT NOT NULL,origin_request_id TEXT NOT NULL,answer_turn_id TEXT,target_json TEXT,outcome_json TEXT,context_fingerprint TEXT NOT NULL,expires_at INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL) STRICT;
+    CREATE TABLE reminder_reschedules(operation_id TEXT PRIMARY KEY,user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,pending_intent_id TEXT,record_id TEXT NOT NULL,expected_revision INTEGER NOT NULL,replaces_task_id TEXT NOT NULL,due_at INTEGER,replacement_task_id TEXT,record_revision INTEGER,state TEXT NOT NULL CHECK(state IN('begun','prepared','record-updated','completed','interrupted')),created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL) STRICT;
+    CREATE INDEX reminder_reschedules_user ON reminder_reschedules(user_id,state,updated_at);
+    CREATE UNIQUE INDEX pending_life_intents_active ON pending_life_intents(conversation_id) WHERE state IN('awaiting-fields','executing');
+    CREATE UNIQUE INDEX pending_life_intents_origin ON pending_life_intents(origin_turn_id);
+    CREATE INDEX pending_life_intents_user ON pending_life_intents(user_id,updated_at,id);
+    CREATE TABLE conversation_pending_current(conversation_id TEXT PRIMARY KEY REFERENCES conversations(id) ON DELETE CASCADE,pending_intent_id TEXT NOT NULL REFERENCES pending_life_intents(id) ON DELETE CASCADE) STRICT;
+    CREATE TRIGGER pending_intents_generation_insert AFTER INSERT ON pending_life_intents BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER pending_intents_generation_update AFTER UPDATE ON pending_life_intents BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER pending_intents_generation_delete AFTER DELETE ON pending_life_intents BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER reminder_reschedules_generation_insert AFTER INSERT ON reminder_reschedules BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER reminder_reschedules_generation_update AFTER UPDATE ON reminder_reschedules BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER reminder_reschedules_generation_delete AFTER DELETE ON reminder_reschedules BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    UPDATE pending_life_intents SET state='interrupted',revision=revision+1,updated_at=${this.clock()} WHERE state='executing';
+    PRAGMA user_version=4;`),
     );
   }
   private actor(actor: LifeActor): string {
@@ -1634,6 +1720,175 @@ export class LifeStore {
       };
     });
   }
+  private pendingTemporal(value: unknown, label: string): PendingTemporalSpec {
+    const raw = object(value, label);
+    if (raw.type === "instant") {
+      if (!Number.isSafeInteger(raw.at) || Number(raw.at) < 0)
+        throw new TypeError(`${label}.at is invalid`);
+      if (Object.keys(raw).some((key) => !["type", "at"].includes(key)))
+        throw new TypeError(`${label} has unsupported fields`);
+      return { type: "instant", at: Number(raw.at) };
+    }
+    if (
+      raw.type !== "local" ||
+      Object.keys(raw).some((key) => !["type", "date", "clock", "timeZone"].includes(key))
+    )
+      throw new TypeError(`${label} is invalid`);
+    const date = object(raw.date, `${label}.date`),
+      clock = object(raw.clock, `${label}.clock`);
+    if (
+      Object.keys(date).some((key) => !["year", "month", "day"].includes(key)) ||
+      Object.keys(clock).some((key) => !["hour", "minute"].includes(key)) ||
+      !Number.isInteger(date.year) ||
+      Number(date.year) < 1 ||
+      Number(date.year) > 9999 ||
+      !Number.isInteger(date.month) ||
+      Number(date.month) < 1 ||
+      Number(date.month) > 12 ||
+      !Number.isInteger(date.day) ||
+      Number(date.day) < 1 ||
+      Number(date.day) > 31 ||
+      !Number.isInteger(clock.hour) ||
+      Number(clock.hour) < 0 ||
+      Number(clock.hour) > 23 ||
+      !Number.isInteger(clock.minute) ||
+      Number(clock.minute) < 0 ||
+      Number(clock.minute) > 59
+    )
+      throw new TypeError(`${label} is invalid`);
+    const year = Number(date.year),
+      month = Number(date.month),
+      day = Number(date.day),
+      leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0),
+      monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    if (day > monthDays[month - 1]!) throw new TypeError(`${label}.date is invalid`);
+    const result: Extract<PendingTemporalSpec, { type: "local" }> = {
+      type: "local",
+      date: { year, month, day },
+      clock: { hour: Number(clock.hour), minute: Number(clock.minute) },
+    };
+    if (raw.timeZone !== undefined) {
+      const timeZone = text(raw.timeZone, `${label}.timeZone`, 100);
+      try {
+        new Intl.DateTimeFormat("en", { timeZone }).format();
+      } catch {
+        throw new TypeError(`${label}.timeZone is invalid`);
+      }
+      result.timeZone = timeZone;
+    }
+    return result;
+  }
+  private pendingPayload(value: unknown): PendingIntentPayload {
+    const raw = object(value, "pending intent"),
+      kind = raw.kind,
+      title = "title" in raw ? text(raw.title, "pending intent title", 2000) : undefined;
+    if (kind === "schedule-reminder") {
+      if (!title || Object.keys(raw).some((key) => !["kind", "title", "when"].includes(key)))
+        throw new TypeError("Pending reminder is invalid");
+      return {
+        kind,
+        title,
+        ...(raw.when === undefined ? {} : { when: this.pendingTemporal(raw.when, "when") }),
+      };
+    }
+    if (kind === "create-event") {
+      if (
+        !title ||
+        Object.keys(raw).some((key) => !["kind", "title", "start", "durationMinutes"].includes(key))
+      )
+        throw new TypeError("Pending event is invalid");
+      if (
+        raw.durationMinutes !== undefined &&
+        (!Number.isInteger(raw.durationMinutes) ||
+          Number(raw.durationMinutes) < 1 ||
+          Number(raw.durationMinutes) > 10_080)
+      )
+        throw new TypeError("Event duration is invalid");
+      return {
+        kind,
+        title,
+        ...(raw.start === undefined ? {} : { start: this.pendingTemporal(raw.start, "start") }),
+        ...(raw.durationMinutes === undefined
+          ? {}
+          : { durationMinutes: Number(raw.durationMinutes) }),
+      };
+    }
+    if (kind === "reschedule-reminder") {
+      if (Object.keys(raw).some((key) => !["kind", "when"].includes(key)))
+        throw new TypeError("Pending reschedule is invalid");
+      return {
+        kind,
+        ...(raw.when === undefined ? {} : { when: this.pendingTemporal(raw.when, "when") }),
+      };
+    }
+    if (kind === "reschedule-event") {
+      if (Object.keys(raw).some((key) => !["kind", "start", "durationMinutes"].includes(key)))
+        throw new TypeError("Pending reschedule is invalid");
+      if (
+        raw.durationMinutes !== undefined &&
+        (!Number.isInteger(raw.durationMinutes) ||
+          Number(raw.durationMinutes) < 1 ||
+          Number(raw.durationMinutes) > 10_080)
+      )
+        throw new TypeError("Event duration is invalid");
+      return {
+        kind,
+        ...(raw.start === undefined ? {} : { start: this.pendingTemporal(raw.start, "start") }),
+        ...(raw.durationMinutes === undefined
+          ? {}
+          : { durationMinutes: Number(raw.durationMinutes) }),
+      };
+    }
+    throw new TypeError("Pending intent kind is invalid");
+  }
+  private pendingMissing(value: unknown, intent: PendingIntentPayload): PendingIntentField[] {
+    if (!Array.isArray(value) || value.length > 5)
+      throw new TypeError("Pending fields are invalid");
+    const result = [
+      ...new Set(value.map((item) => text(item, "pending field", 50) as PendingIntentField)),
+    ];
+    const allowed: Record<PendingIntentPayload["kind"], PendingIntentField[]> = {
+      "schedule-reminder": ["when"],
+      "create-event": ["start"],
+      "reschedule-reminder": ["when"],
+      "reschedule-event": ["start"],
+    };
+    if (!result.length || result.some((field) => !allowed[intent.kind].includes(field)))
+      throw new TypeError("Pending fields are invalid");
+    return result;
+  }
+  private pendingRow(row: Record<string, unknown>): PendingLifeIntent {
+    return {
+      id: String(row.id),
+      conversationId: String(row.conversation_id),
+      scope: { type: String(row.scope_type) as LifeScope["type"], id: String(row.scope_id) },
+      chatEpoch: Number(row.chat_epoch),
+      revision: Number(row.revision),
+      state: String(row.state) as PendingLifeIntent["state"],
+      intent: JSON.parse(String(row.intent_json)) as PendingIntentPayload,
+      missing: JSON.parse(String(row.missing_json)) as PendingIntentField[],
+      question: String(row.question),
+      originTurnId: String(row.origin_turn_id),
+      originRequestId: String(row.origin_request_id),
+      ...(row.answer_turn_id ? { answerTurnId: String(row.answer_turn_id) } : {}),
+      ...(row.target_json
+        ? {
+            target: JSON.parse(String(row.target_json)) as NonNullable<PendingLifeIntent["target"]>,
+          }
+        : {}),
+      contextFingerprint: String(row.context_fingerprint),
+      ...(row.outcome_json
+        ? {
+            outcome: JSON.parse(String(row.outcome_json)) as NonNullable<
+              PendingLifeIntent["outcome"]
+            >,
+          }
+        : {}),
+      expiresAt: Number(row.expires_at),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
   private contextFingerprintFor(actor: LifeActor, requested: LifeScope): string {
     const scope = this.scope(actor, requested),
       digest = createHash("sha256"),
@@ -1665,6 +1920,543 @@ export class LifeStore {
           | undefined
       )?.epoch ?? 1,
     );
+  }
+  createPendingIntent(
+    actor: LifeActor,
+    input: {
+      conversationId: string;
+      scope: LifeScope;
+      chatEpoch: number;
+      originTurnId: string;
+      originRequestId: string;
+      intent: PendingIntentPayload;
+      missing: PendingIntentField[];
+      question: string;
+      contextFingerprint: string;
+      target?: { recordId: string; expectedRevision: number; taskId?: string };
+    },
+  ): PendingLifeIntent {
+    const user = this.actor(actor),
+      conversation = this.accessibleConversation(actor, input.conversationId),
+      scope = this.scope(actor, input.scope),
+      epoch = this.chatEpoch(actor),
+      intent = this.pendingPayload(input.intent),
+      missing = this.pendingMissing(input.missing, intent),
+      question = text(input.question, "pending question", 1000),
+      fingerprint = text(input.contextFingerprint, "context fingerprint", 128),
+      originTurnId = identifier(input.originTurnId, "originTurnId"),
+      originRequestId = identifier(input.originRequestId, "originRequestId");
+    if (
+      input.chatEpoch !== epoch ||
+      conversation.scope.type !== scope.type ||
+      conversation.scope.id !== scope.id ||
+      fingerprint !== this.contextFingerprintFor(actor, scope)
+    )
+      throw new LifeConflictError("Pending intent context changed.");
+    const origin = this.db
+      .prepare(
+        "SELECT 1 found FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=? AND request_id=? AND status IN('pending','completed')",
+      )
+      .get(originTurnId, conversation.id, user, originRequestId);
+    if (!origin) throw new LifeAccessError("Pending intent origin is unavailable.");
+    let target: PendingLifeIntent["target"];
+    if (input.target) {
+      const recordId = identifier(input.target.recordId, "target.recordId"),
+        record = this.getRecord(actor, recordId);
+      if (
+        !record ||
+        record.scope.type !== scope.type ||
+        record.scope.id !== scope.id ||
+        record.revision !== input.target.expectedRevision ||
+        !Number.isSafeInteger(input.target.expectedRevision)
+      )
+        throw new LifeConflictError("Pending intent target changed.");
+      if (
+        (intent.kind === "reschedule-reminder" &&
+          (record.kind !== "reminder" || input.target.taskId !== record.data.taskId)) ||
+        (intent.kind === "reschedule-event" && record.kind !== "event") ||
+        (!intent.kind.startsWith("reschedule-") && input.target !== undefined)
+      )
+        throw new LifeConflictError("Pending intent target does not match its operation.");
+      target = {
+        recordId,
+        expectedRevision: input.target.expectedRevision,
+        ...(input.target.taskId
+          ? { taskId: identifier(input.target.taskId, "target.taskId") }
+          : {}),
+      };
+    }
+    const now = this.clock(),
+      id = this.makeId(),
+      expiresAt = now + 24 * 60 * 60_000;
+    const prior = this.db
+      .prepare("SELECT * FROM pending_life_intents WHERE origin_turn_id=?")
+      .get(originTurnId) as Record<string, unknown> | undefined;
+    if (prior) {
+      const value = this.pendingRow(prior);
+      if (
+        value.conversationId !== conversation.id ||
+        value.originRequestId !== originRequestId ||
+        JSON.stringify(value.intent) !== JSON.stringify(intent) ||
+        JSON.stringify(value.missing) !== JSON.stringify(missing) ||
+        value.question !== question ||
+        JSON.stringify(value.target) !== JSON.stringify(target)
+      )
+        throw new LifeConflictError("Pending intent origin is already bound.");
+      return value;
+    }
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 found FROM pending_life_intents WHERE conversation_id=? AND state='executing'",
+        )
+        .get(conversation.id)
+    )
+      throw new LifeConflictError("A conversation request is already executing.");
+    this.transaction(() => {
+      this.db
+        .prepare(
+          "UPDATE pending_life_intents SET state='cancelled',revision=revision+1,updated_at=? WHERE conversation_id=? AND state='awaiting-fields'",
+        )
+        .run(now, conversation.id);
+      this.db
+        .prepare("INSERT INTO pending_life_intents VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run(
+          id,
+          conversation.id,
+          user,
+          scope.type,
+          scope.id,
+          epoch,
+          1,
+          "awaiting-fields",
+          JSON.stringify(intent),
+          JSON.stringify(missing),
+          question,
+          originTurnId,
+          originRequestId,
+          null,
+          target ? JSON.stringify(target) : null,
+          null,
+          fingerprint,
+          expiresAt,
+          now,
+          now,
+        );
+      this.db
+        .prepare(
+          "INSERT INTO conversation_pending_current VALUES(?,?) ON CONFLICT(conversation_id) DO UPDATE SET pending_intent_id=excluded.pending_intent_id",
+        )
+        .run(conversation.id, id);
+    });
+    return this.getPendingIntent(actor, conversation.id)!;
+  }
+  getPendingIntent(actor: LifeActor, conversationId: string): PendingLifeIntent | undefined {
+    const conversation = this.accessibleConversation(actor, conversationId),
+      now = this.clock();
+    this.db
+      .prepare(
+        "UPDATE pending_life_intents SET state='expired',revision=revision+1,updated_at=? WHERE conversation_id=? AND state='awaiting-fields' AND expires_at<=?",
+      )
+      .run(now, conversation.id, now);
+    let row = this.db
+      .prepare(
+        "SELECT p.* FROM conversation_pending_current current JOIN pending_life_intents p ON p.id=current.pending_intent_id WHERE current.conversation_id=?",
+      )
+      .get(conversation.id) as Record<string, unknown> | undefined;
+    if (
+      row?.state === "awaiting-fields" &&
+      String(row.context_fingerprint) !== this.contextFingerprintFor(actor, conversation.scope)
+    ) {
+      const pendingId = String(row.id);
+      this.db
+        .prepare(
+          "UPDATE pending_life_intents SET state='interrupted',revision=revision+1,updated_at=? WHERE id=? AND state='awaiting-fields'",
+        )
+        .run(now, pendingId);
+      row = this.db
+        .prepare("SELECT * FROM pending_life_intents WHERE id=?")
+        .get(pendingId) as Record<string, unknown>;
+    }
+    return row ? this.pendingRow(row) : undefined;
+  }
+  answerPendingIntent(
+    actor: LifeActor,
+    input: {
+      id: string;
+      expectedRevision: number;
+      answerTurnId: string;
+      answerRequestId: string;
+      answer: Partial<Record<PendingIntentField, unknown>>;
+    },
+  ): PendingLifeIntent {
+    const user = this.actor(actor),
+      id = identifier(input.id, "pendingIntentId"),
+      row = this.db
+        .prepare("SELECT * FROM pending_life_intents WHERE id=? AND user_id=?")
+        .get(id, user) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Pending intent unavailable.");
+    const current = this.getPendingIntent(actor, String(row.conversation_id));
+    if (
+      !current ||
+      current.id !== id ||
+      current.state !== "awaiting-fields" ||
+      current.revision !== input.expectedRevision
+    )
+      throw new LifeConflictError("Pending intent changed.");
+    if (
+      current.chatEpoch !== this.chatEpoch(actor) ||
+      current.contextFingerprint !== this.contextFingerprintFor(actor, current.scope)
+    )
+      throw new LifeConflictError("Pending intent context changed.");
+    const answerTurnId = identifier(input.answerTurnId, "answerTurnId"),
+      answerRequestId = identifier(input.answerRequestId, "answerRequestId");
+    if (
+      !this.db
+        .prepare(
+          "SELECT 1 found FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=? AND request_id=? AND status='pending'",
+        )
+        .get(answerTurnId, current.conversationId, user, answerRequestId)
+    )
+      throw new LifeAccessError("Pending intent answer is unavailable.");
+    const raw = object(input.answer, "pending answer"),
+      keys = Object.keys(raw) as PendingIntentField[];
+    if (!keys.length || keys.some((key) => !current.missing.includes(key)))
+      throw new TypeError("Pending answer changes undeclared fields");
+    const merged = { ...current.intent } as Record<string, unknown>;
+    for (const key of keys) {
+      if (["when", "start", "due"].includes(key)) merged[key] = this.pendingTemporal(raw[key], key);
+      else throw new TypeError("Pending answer changes undeclared fields");
+    }
+    const intent = this.pendingPayload(merged),
+      missing = current.missing.filter((field) => !keys.includes(field)),
+      now = this.clock();
+    this.db
+      .prepare(
+        "UPDATE pending_life_intents SET intent_json=?,missing_json=?,answer_turn_id=?,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND state='awaiting-fields'",
+      )
+      .run(
+        JSON.stringify(intent),
+        JSON.stringify(missing),
+        answerTurnId,
+        now,
+        id,
+        input.expectedRevision,
+      );
+    return this.pendingRow(
+      this.db.prepare("SELECT * FROM pending_life_intents WHERE id=?").get(id) as Record<
+        string,
+        unknown
+      >,
+    );
+  }
+  claimPendingIntent(
+    actor: LifeActor,
+    idInput: string,
+    expectedRevision: number,
+  ): PendingLifeIntent {
+    const user = this.actor(actor),
+      id = identifier(idInput, "pendingIntentId"),
+      row = this.db
+        .prepare("SELECT conversation_id FROM pending_life_intents WHERE id=? AND user_id=?")
+        .get(id, user) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Pending intent unavailable.");
+    const current = this.getPendingIntent(actor, String(row.conversation_id));
+    if (
+      !current ||
+      current.id !== id ||
+      current.state !== "awaiting-fields" ||
+      current.revision !== expectedRevision ||
+      current.missing.length
+    )
+      throw new LifeConflictError("Pending intent is not ready.");
+    if (current.contextFingerprint !== this.contextFingerprintFor(actor, current.scope))
+      throw new LifeConflictError("Pending intent context changed.");
+    this.db
+      .prepare(
+        "UPDATE pending_life_intents SET state='executing',revision=revision+1,updated_at=? WHERE id=? AND revision=? AND state='awaiting-fields'",
+      )
+      .run(this.clock(), current.id, expectedRevision);
+    return this.pendingRow(
+      this.db.prepare("SELECT * FROM pending_life_intents WHERE id=?").get(current.id) as Record<
+        string,
+        unknown
+      >,
+    );
+  }
+  finishPendingIntent(
+    actor: LifeActor,
+    idInput: string,
+    expectedRevision: number,
+    outcome: { recordIds: string[]; taskIds: string[] },
+  ): PendingLifeIntent {
+    const user = this.actor(actor),
+      id = identifier(idInput, "pendingIntentId"),
+      checked = object(outcome, "pending outcome");
+    const owned = this.db
+      .prepare("SELECT conversation_id FROM pending_life_intents WHERE id=? AND user_id=?")
+      .get(id, user) as Record<string, unknown> | undefined;
+    if (!owned) throw new LifeAccessError("Pending intent unavailable.");
+    this.accessibleConversation(actor, String(owned.conversation_id));
+    if (
+      !Array.isArray(checked.recordIds) ||
+      !Array.isArray(checked.taskIds) ||
+      checked.recordIds.length > 100 ||
+      checked.taskIds.length > 100
+    )
+      throw new TypeError("Pending outcome is invalid");
+    const normalized = {
+      recordIds: checked.recordIds.map((value) => identifier(value, "recordId")),
+      taskIds: checked.taskIds.map((value) => identifier(value, "taskId")),
+    };
+    const result = this.db
+      .prepare(
+        "UPDATE pending_life_intents SET state='completed',outcome_json=?,revision=revision+1,updated_at=? WHERE id=? AND user_id=? AND revision=? AND state='executing'",
+      )
+      .run(JSON.stringify(normalized), this.clock(), id, user, expectedRevision);
+    if (!result.changes) throw new LifeConflictError("Pending intent changed.");
+    return this.pendingRow(
+      this.db.prepare("SELECT * FROM pending_life_intents WHERE id=?").get(id) as Record<
+        string,
+        unknown
+      >,
+    );
+  }
+  interruptPendingIntent(
+    actor: LifeActor,
+    idInput: string,
+    expectedRevision: number,
+  ): PendingLifeIntent {
+    const user = this.actor(actor),
+      id = identifier(idInput, "pendingIntentId"),
+      result = this.db
+        .prepare(
+          "UPDATE pending_life_intents SET state='interrupted',revision=revision+1,updated_at=? WHERE id=? AND user_id=? AND revision=? AND state='executing'",
+        )
+        .run(this.clock(), id, user, expectedRevision);
+    if (!result.changes) throw new LifeConflictError("Pending intent changed.");
+    return this.pendingRow(
+      this.db.prepare("SELECT * FROM pending_life_intents WHERE id=?").get(id) as Record<
+        string,
+        unknown
+      >,
+    );
+  }
+  cancelPendingIntent(actor: LifeActor, idInput: string, expectedRevision: number): void {
+    const user = this.actor(actor),
+      id = identifier(idInput, "pendingIntentId"),
+      row = this.db
+        .prepare("SELECT conversation_id FROM pending_life_intents WHERE id=? AND user_id=?")
+        .get(id, user) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Pending intent unavailable.");
+    this.accessibleConversation(actor, String(row.conversation_id));
+    const result = this.db
+      .prepare(
+        "UPDATE pending_life_intents SET state='cancelled',revision=revision+1,updated_at=? WHERE id=? AND user_id=? AND revision=? AND state='awaiting-fields'",
+      )
+      .run(this.clock(), id, user, expectedRevision);
+    if (!result.changes) throw new LifeConflictError("Pending intent changed.");
+  }
+  private rescheduleRow(row: Record<string, unknown>): ReminderRescheduleState {
+    return {
+      operationId: String(row.operation_id),
+      userId: String(row.user_id),
+      scope: { type: String(row.scope_type) as LifeScope["type"], id: String(row.scope_id) },
+      ...(row.pending_intent_id ? { pendingIntentId: String(row.pending_intent_id) } : {}),
+      recordId: String(row.record_id),
+      expectedRevision: Number(row.expected_revision),
+      replacesTaskId: String(row.replaces_task_id),
+      ...(row.due_at === null ? {} : { dueAt: Number(row.due_at) }),
+      ...(row.replacement_task_id ? { replacementTaskId: String(row.replacement_task_id) } : {}),
+      ...(row.record_revision === null ? {} : { recordRevision: Number(row.record_revision) }),
+      state: String(row.state) as ReminderRescheduleState["state"],
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+  beginReminderReschedule(
+    actor: LifeActor,
+    input: {
+      operationId: string;
+      scope: LifeScope;
+      pendingIntentId?: string;
+      recordId: string;
+      expectedRevision: number;
+      replacesTaskId: string;
+    },
+  ): ReminderRescheduleState {
+    const user = this.actor(actor),
+      operationId = identifier(input.operationId, "operationId"),
+      scope = this.scope(actor, input.scope),
+      recordId = identifier(input.recordId, "recordId"),
+      replacesTaskId = identifier(input.replacesTaskId, "replacesTaskId");
+    const existing = this.db
+      .prepare("SELECT * FROM reminder_reschedules WHERE operation_id=?")
+      .get(operationId) as Record<string, unknown> | undefined;
+    if (existing) {
+      const value = this.rescheduleRow(existing);
+      if (
+        value.userId !== user ||
+        value.scope.type !== scope.type ||
+        value.scope.id !== scope.id ||
+        value.recordId !== recordId ||
+        value.expectedRevision !== input.expectedRevision ||
+        value.replacesTaskId !== replacesTaskId
+      )
+        throw new LifeConflictError("Reschedule operation id is already bound.");
+      return value;
+    }
+    const record = this.getRecord(actor, recordId);
+    if (
+      !record ||
+      record.kind !== "reminder" ||
+      record.scope.type !== scope.type ||
+      record.scope.id !== scope.id ||
+      record.revision !== input.expectedRevision ||
+      record.data.taskId !== replacesTaskId
+    )
+      throw new LifeConflictError("Reminder changed before rescheduling.");
+    const pendingIntentId = input.pendingIntentId
+      ? identifier(input.pendingIntentId, "pendingIntentId")
+      : undefined;
+    if (pendingIntentId) {
+      const pending = this.db
+        .prepare("SELECT * FROM pending_life_intents WHERE id=?")
+        .get(pendingIntentId) as Record<string, unknown> | undefined;
+      const pendingValue = pending ? this.pendingRow(pending) : undefined;
+      if (
+        !pendingValue ||
+        pending!.user_id !== user ||
+        pendingValue.state !== "executing" ||
+        pendingValue.intent.kind !== "reschedule-reminder" ||
+        pendingValue.target?.recordId !== recordId ||
+        pendingValue.target.expectedRevision !== input.expectedRevision ||
+        pendingValue.target.taskId !== replacesTaskId
+      )
+        throw new LifeConflictError("Pending reschedule is unavailable.");
+    }
+    const now = this.clock();
+    this.db
+      .prepare("INSERT INTO reminder_reschedules VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        operationId,
+        user,
+        scope.type,
+        scope.id,
+        pendingIntentId ?? null,
+        recordId,
+        input.expectedRevision,
+        replacesTaskId,
+        null,
+        null,
+        null,
+        "begun",
+        now,
+        now,
+      );
+    return this.getReminderReschedule(actor, operationId)!;
+  }
+  getReminderReschedule(
+    actor: LifeActor,
+    operationIdInput: string,
+  ): ReminderRescheduleState | undefined {
+    const user = this.actor(actor),
+      operationId = identifier(operationIdInput, "operationId"),
+      row = this.db
+        .prepare("SELECT * FROM reminder_reschedules WHERE operation_id=? AND user_id=?")
+        .get(operationId, user) as Record<string, unknown> | undefined;
+    return row ? this.rescheduleRow(row) : undefined;
+  }
+  listReminderReschedules(
+    actor: LifeActor,
+    options: { activeOnly?: boolean } = {},
+  ): ReminderRescheduleState[] {
+    const user = this.actor(actor),
+      rows = this.db
+        .prepare(
+          `SELECT * FROM reminder_reschedules WHERE user_id=?${options.activeOnly ? " AND state IN('begun','prepared','record-updated')" : ""} ORDER BY updated_at,operation_id LIMIT 100`,
+        )
+        .all(user) as Array<Record<string, unknown>>;
+    return rows.map((row) => this.rescheduleRow(row));
+  }
+  markReminderReschedulePrepared(
+    actor: LifeActor,
+    operationIdInput: string,
+    input: { replacementTaskId: string; dueAt: number },
+  ): ReminderRescheduleState {
+    const user = this.actor(actor),
+      operationId = identifier(operationIdInput, "operationId"),
+      replacementTaskId = identifier(input.replacementTaskId, "replacementTaskId");
+    const current = this.getReminderReschedule(actor, operationId);
+    if (!current) throw new LifeAccessError("Reschedule journal unavailable.");
+    this.scope(actor, current.scope);
+    if (!Number.isSafeInteger(input.dueAt) || input.dueAt < 0)
+      throw new TypeError("Reschedule time is invalid");
+    const result = this.db
+      .prepare(
+        "UPDATE reminder_reschedules SET state='prepared',replacement_task_id=?,due_at=?,updated_at=? WHERE operation_id=? AND user_id=? AND state IN('begun','prepared') AND (replacement_task_id IS NULL OR replacement_task_id=?)",
+      )
+      .run(replacementTaskId, input.dueAt, this.clock(), operationId, user, replacementTaskId);
+    if (!result.changes) throw new LifeConflictError("Reschedule journal changed.");
+    return this.getReminderReschedule(actor, operationId)!;
+  }
+  markReminderRescheduleRecordUpdated(
+    actor: LifeActor,
+    operationIdInput: string,
+    input: { recordId: string; revision: number; replacementTaskId: string },
+  ): ReminderRescheduleState {
+    const user = this.actor(actor),
+      operationId = identifier(operationIdInput, "operationId"),
+      current = this.getReminderReschedule(actor, operationId);
+    if (
+      !current ||
+      current.recordId !== input.recordId ||
+      current.replacementTaskId !== input.replacementTaskId ||
+      !Number.isSafeInteger(input.revision)
+    )
+      throw new LifeConflictError("Reschedule journal changed.");
+    const record = this.getRecord(actor, current.recordId);
+    if (
+      !record ||
+      record.revision !== input.revision ||
+      record.data.taskId !== input.replacementTaskId ||
+      record.data.rescheduleOperationId !== operationId
+    )
+      throw new LifeConflictError("Rescheduled reminder does not match the journal.");
+    const result = this.db
+      .prepare(
+        "UPDATE reminder_reschedules SET state='record-updated',record_revision=?,updated_at=? WHERE operation_id=? AND user_id=? AND state IN('prepared','record-updated')",
+      )
+      .run(input.revision, this.clock(), operationId, user);
+    if (!result.changes) throw new LifeConflictError("Reschedule journal changed.");
+    return this.getReminderReschedule(actor, operationId)!;
+  }
+  completeReminderReschedule(actor: LifeActor, operationIdInput: string): ReminderRescheduleState {
+    const user = this.actor(actor),
+      operationId = identifier(operationIdInput, "operationId"),
+      result = this.db
+        .prepare(
+          "UPDATE reminder_reschedules SET state='completed',updated_at=? WHERE operation_id=? AND user_id=? AND state='record-updated'",
+        )
+        .run(this.clock(), operationId, user);
+    if (!result.changes) throw new LifeConflictError("Reschedule journal changed.");
+    return this.getReminderReschedule(actor, operationId)!;
+  }
+  interruptReminderReschedule(actor: LifeActor, operationIdInput: string): ReminderRescheduleState {
+    const user = this.actor(actor),
+      operationId = identifier(operationIdInput, "operationId"),
+      current = this.getReminderReschedule(actor, operationId);
+    if (!current) throw new LifeAccessError("Reschedule journal unavailable.");
+    if (current.state === "record-updated")
+      throw new LifeConflictError(
+        "A record-updated reschedule must be recovered before interruption.",
+      );
+    this.db
+      .prepare(
+        "UPDATE reminder_reschedules SET state='interrupted',updated_at=? WHERE operation_id=? AND user_id=? AND state IN('begun','prepared')",
+      )
+      .run(this.clock(), operationId, user);
+    return this.getReminderReschedule(actor, operationId)!;
   }
   private conversationRow(row: Record<string, unknown>): ConversationSummary {
     return {
@@ -1919,6 +2711,7 @@ export class LifeStore {
       input.result.recordIds.length > 100 ||
       !Array.isArray(input.result.taskIds) ||
       input.result.taskIds.length > 100 ||
+      (input.result.recordReceipts !== undefined && !Array.isArray(input.result.recordReceipts)) ||
       !Array.isArray(input.result.evidence) ||
       input.result.evidence.length > 50
     )
@@ -1937,11 +2730,31 @@ export class LifeStore {
         title: text(e.title, "evidence.title", 500),
         ...(e.reference ? { reference: text(e.reference, "evidence.reference", 1000) } : {}),
       })),
+      ...(input.result.recordReceipts
+        ? {
+            recordReceipts: input.result.recordReceipts.map((receipt) => ({
+              id: identifier(receipt.id, "recordReceipt.id"),
+              kind: receipt.kind,
+              revision: Number(receipt.revision),
+            })),
+          }
+        : {}),
     };
     if (
       result.evidence.some((e) => !Number.isSafeInteger(e.sourceRevision) || e.sourceRevision < 1)
     )
       throw new TypeError("Evidence revision is invalid");
+    if (
+      result.recordReceipts &&
+      (result.recordReceipts.length > 100 ||
+        result.recordReceipts.some(
+          (receipt) =>
+            !["reminder", "event"].includes(receipt.kind) ||
+            !Number.isSafeInteger(receipt.revision) ||
+            receipt.revision < 1,
+        ))
+    )
+      throw new TypeError("Record receipts are invalid");
     const encoded = JSON.stringify(result);
     if (Buffer.byteLength(encoded) > 256_000)
       throw new TypeError("Conversation result is too large");
@@ -2151,6 +2964,39 @@ export class LifeStore {
       ])
       .slice(-limit);
   }
+  recentConversationOperation(
+    actor: LifeActor,
+    id: string,
+  ):
+    | { kind: "reminder" | "event"; recordId: string; expectedRevision: number; taskId?: string }
+    | undefined {
+    const conversation = this.accessibleConversation(actor, id),
+      row = this.db
+        .prepare(
+          "SELECT result_json FROM conversation_turns WHERE conversation_id=? AND status='completed' AND result_json IS NOT NULL ORDER BY created_at DESC,id DESC LIMIT 1",
+        )
+        .get(conversation.id) as Record<string, unknown> | undefined;
+    if (!row) return;
+    const result = JSON.parse(String(row.result_json)) as ConversationResult,
+      receipts = result.recordReceipts ?? [];
+    if (receipts.length !== 1) return;
+    const receipt = receipts[0]!,
+      record = this.getRecord(actor, receipt.id);
+    if (
+      !record ||
+      record.kind !== receipt.kind ||
+      record.revision !== receipt.revision ||
+      record.scope.type !== conversation.scope.type ||
+      record.scope.id !== conversation.scope.id
+    )
+      return;
+    return {
+      kind: receipt.kind,
+      recordId: record.id,
+      expectedRevision: record.revision,
+      ...(typeof record.data.taskId === "string" ? { taskId: record.data.taskId } : {}),
+    };
+  }
   conversationContextFingerprint(actor: LifeActor, id: string): string {
     const conversation = this.accessibleConversation(actor, id);
     return this.contextFingerprintFor(actor, conversation.scope);
@@ -2161,6 +3007,14 @@ export class LifeStore {
       throw new LifeConflictError("Conversation changed.");
     if (conversation.pending)
       throw new LifeConflictError("A pending conversation cannot be deleted.");
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 found FROM pending_life_intents WHERE conversation_id=? AND state='executing'",
+        )
+        .get(conversation.id)
+    )
+      throw new LifeConflictError("An executing conversation request cannot be deleted.");
     const user = this.actor(actor),
       epoch = this.chatEpoch(actor);
     this.transaction(() => {
@@ -2205,9 +3059,14 @@ export class LifeStore {
           (SELECT count(*) FROM settings WHERE level='user' AND scope_id=?) settings,
           (SELECT count(*) FROM conversations WHERE user_id=?) conversations,
           (SELECT count(*) FROM conversation_turns WHERE user_id=?) conversation_turns,
-          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?) bytes
+          (SELECT count(*) FROM pending_life_intents WHERE user_id=?) pending_intents,
+          (SELECT count(*) FROM reminder_reschedules WHERE user_id=?) reminder_reschedules,
+          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(intent_json AS BLOB))+length(CAST(missing_json AS BLOB))+length(CAST(question AS BLOB))+length(CAST(coalesce(target_json,'') AS BLOB))+length(CAST(coalesce(outcome_json,'') AS BLOB))),0) FROM pending_life_intents WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(operation_id AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(replaces_task_id AS BLOB))+length(CAST(coalesce(replacement_task_id,'') AS BLOB))),0) FROM reminder_reschedules WHERE user_id=?) bytes
           FROM records WHERE scope_type='user' AND scope_id=?`)
-        .get(user, user, user, user, user, user, user) as Record<string, unknown>;
+        .get(user, user, user, user, user, user, user, user, user, user, user) as Record<
+        string,
+        unknown
+      >;
     return {
       generation: Number(row.generation ?? 0),
       records: Number(row.records),
@@ -2217,6 +3076,8 @@ export class LifeStore {
       settings: Number(row.settings),
       conversations: Number(row.conversations),
       conversationTurns: Number(row.conversation_turns),
+      pendingIntents: Number(row.pending_intents),
+      reminderReschedules: Number(row.reminder_reschedules),
       bytes: Number(row.bytes),
     };
   }
@@ -2242,7 +3103,14 @@ export class LifeStore {
           cursor?.user !== user ||
           cursor.generation !== generation ||
           !Number.isSafeInteger(cursor.updatedAt) ||
-          !["record", "setting", "conversation", "conversation-turn"].includes(cursor.type) ||
+          ![
+            "record",
+            "setting",
+            "conversation",
+            "conversation-turn",
+            "pending-intent",
+            "reminder-reschedule",
+          ].includes(cursor.type) ||
           typeof cursor.key !== "string"
         )
           throw new Error();
@@ -2256,9 +3124,15 @@ export class LifeStore {
         UNION ALL SELECT 'setting' type,key,updated_at FROM settings WHERE level='user' AND scope_id=?
         UNION ALL SELECT 'conversation' type,id key,updated_at FROM conversations WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=scope_id AND m.user_id=?))
         UNION ALL SELECT 'conversation-turn' type,t.id key,t.updated_at FROM conversation_turns t JOIN conversations c ON c.id=t.conversation_id WHERE t.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
+        UNION ALL SELECT 'pending-intent' type,p.id key,p.updated_at FROM pending_life_intents p JOIN conversations c ON c.id=p.conversation_id WHERE p.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
+        UNION ALL SELECT 'reminder-reschedule' type,operation_id key,updated_at FROM reminder_reschedules r WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=r.scope_id AND m.user_id=?))
       ) WHERE (? IS NULL OR updated_at<? OR (updated_at=? AND (type<? OR (type=? AND key<?))))
       ORDER BY updated_at DESC,type DESC,key DESC LIMIT ?`)
       .all(
+        user,
+        user,
+        user,
+        user,
         user,
         user,
         user,
@@ -2273,7 +3147,13 @@ export class LifeStore {
         cursor?.key ?? "",
         limit + 1,
       ) as Array<{
-      type: "record" | "setting" | "conversation" | "conversation-turn";
+      type:
+        | "record"
+        | "setting"
+        | "conversation"
+        | "conversation-turn"
+        | "pending-intent"
+        | "reminder-reschedule";
       key: string;
       updated_at: number;
     }>;
@@ -2288,6 +3168,12 @@ export class LifeStore {
         "SELECT c.*,(SELECT count(*) FROM conversation_turns t WHERE t.conversation_id=c.id) turn_count,EXISTS(SELECT 1 FROM conversation_turns t WHERE t.conversation_id=c.id AND t.status='pending') pending FROM conversations c WHERE c.id=? AND c.user_id=?",
       ),
       turnStatement = this.db.prepare("SELECT * FROM conversation_turns WHERE id=? AND user_id=?"),
+      pendingStatement = this.db.prepare(
+        "SELECT * FROM pending_life_intents WHERE id=? AND user_id=?",
+      ),
+      rescheduleStatement = this.db.prepare(
+        "SELECT * FROM reminder_reschedules WHERE operation_id=? AND user_id=?",
+      ),
       fingerprintByScope = new Map<string, string>(),
       items: PersonalLifeExportItem[] = [];
     let pageBytes = 0;
@@ -2312,7 +3198,7 @@ export class LifeStore {
           | undefined;
         if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
         item = { type: "conversation", conversation: this.conversationRow(found) };
-      } else {
+      } else if (row.type === "conversation-turn") {
         const found = turnStatement.get(row.key, user) as Record<string, unknown> | undefined;
         if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
         const conversation = this.accessibleConversation(actor, String(found.conversation_id));
@@ -2326,6 +3212,19 @@ export class LifeStore {
           conversationId: conversation.id,
           turn: this.turn(actor, found, conversation, fingerprint),
         };
+      } else if (row.type === "pending-intent") {
+        const found = pendingStatement.get(row.key, user) as Record<string, unknown> | undefined;
+        if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        this.accessibleConversation(actor, String(found.conversation_id));
+        item = { type: "pending-intent", pendingIntent: this.pendingRow(found) };
+      } else {
+        const found = rescheduleStatement.get(row.key, user) as Record<string, unknown> | undefined;
+        if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        this.scope(actor, {
+          type: String(found.scope_type) as LifeScope["type"],
+          id: String(found.scope_id),
+        });
+        item = { type: "reminder-reschedule", reschedule: this.rescheduleRow(found) };
       }
       const itemBytes = Buffer.byteLength(JSON.stringify(item));
       if (items.length && pageBytes + itemBytes > 6_000_000) break;
@@ -2470,11 +3369,24 @@ export class LifeStore {
   ): PersonalLifeSummary {
     const user = this.actor(actor);
     if (
+      this.db
+        .prepare(
+          "SELECT 1 found FROM reminder_reschedules WHERE user_id=? AND state IN('begun','prepared','record-updated') LIMIT 1",
+        )
+        .get(user)
+    )
+      throw new LifeConflictError("Active reminder reschedules must be recovered before reset.");
+    if (
       options.expectedGeneration !== undefined &&
       this.personalSummary(actor).generation !== options.expectedGeneration
     )
       throw new LifeConflictError("Personal data changed; review reset again.");
     this.transaction(() => {
+      this.db
+        .prepare(
+          "DELETE FROM reminder_reschedules WHERE user_id=? AND state IN('completed','interrupted')",
+        )
+        .run(user);
       const epoch = this.chatEpoch(actor);
       this.db
         .prepare(

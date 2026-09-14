@@ -1054,3 +1054,143 @@ test("personal deletion does not abort or erase a running group-owned callback",
     await rm(f.directory, { recursive: true, force: true });
   }
 });
+
+test("prepared replacements remain nondispatchable across restart and activate atomically", async () => {
+  const f = await fixture();
+  try {
+    let calls = 0;
+    f.runtime.registerHandler(
+      handler("replaceable", async () => {
+        calls++;
+        return "done";
+      }),
+    );
+    const old = f.runtime.schedule({
+      owner,
+      handler: "replaceable",
+      schedule: { kind: "once", at: 2_000 },
+    });
+    const prepared = f.runtime.prepareReplacement({
+      operationId: "move-reminder-1",
+      owner,
+      replacesTaskId: old.id,
+      task: {
+        owner,
+        handler: "replaceable",
+        schedule: { kind: "once", at: 3_000 },
+      },
+    });
+    assert.equal(prepared.task?.state, "paused");
+    assert.equal(
+      f.runtime.prepareReplacement({
+        operationId: "move-reminder-1",
+        owner,
+        replacesTaskId: old.id,
+        task: { owner, handler: "replaceable", schedule: { kind: "once", at: 3_000 } },
+      }).replacementTaskId,
+      prepared.replacementTaskId,
+    );
+    assert.throws(
+      () =>
+        f.runtime.prepareReplacement({
+          operationId: "move-reminder-1",
+          owner,
+          replacesTaskId: old.id,
+          task: { owner, handler: "replaceable", schedule: { kind: "once", at: 4_000 } },
+        }),
+      /different inputs/,
+    );
+    assert.throws(
+      () =>
+        f.runtime.prepareReplacement({
+          operationId: "move-reminder-2",
+          owner,
+          replacesTaskId: old.id,
+          task: { owner, handler: "replaceable", schedule: { kind: "once", at: 3_000 } },
+        }),
+      /already has a prepared replacement/,
+    );
+    assert.throws(() => f.runtime.resume(old.id, owner), /replacement is prepared/);
+    assert.throws(() => f.runtime.cancel(old.id, owner), /replacement is prepared/);
+    assert.throws(
+      () => f.runtime.resume(prepared.replacementTaskId, owner),
+      /replacement is prepared/,
+    );
+    await assert.rejects(
+      () => f.runtime.runNow(prepared.replacementTaskId, owner),
+      /replacement is prepared/,
+    );
+    f.setNow(3_000);
+    await f.runtime.tick();
+    assert.equal(calls, 0);
+    assert.equal(f.runtime.get(prepared.replacementTaskId, owner)?.state, "paused");
+    const activated = f.runtime.activateReplacement("move-reminder-1", owner);
+    assert.equal(activated.state, "activated");
+    assert.equal(f.runtime.get(old.id, owner)?.state, "cancelled");
+    assert.equal(f.runtime.get(prepared.replacementTaskId, owner)?.state, "scheduled");
+    await f.runtime.tick();
+    assert.equal(calls, 1);
+    assert.equal(f.runtime.activateReplacement("move-reminder-1", owner).state, "activated");
+  } finally {
+    await f.close();
+  }
+});
+
+test("a discarded prepared replacement never dispatches", async () => {
+  const f = await fixture();
+  try {
+    let calls = 0;
+    f.runtime.registerHandler(handler("discardable", async () => ++calls));
+    const old = f.runtime.schedule({
+      owner,
+      handler: "discardable",
+      schedule: { kind: "once", at: 2_000 },
+    });
+    const prepared = f.runtime.prepareReplacement({
+      operationId: "discard-reminder-1",
+      owner,
+      replacesTaskId: old.id,
+      task: { owner, handler: "discardable", schedule: { kind: "once", at: 3_000 } },
+    });
+    assert.equal(f.runtime.discardReplacement("discard-reminder-1", owner).state, "discarded");
+    f.setNow(3_000);
+    await f.runtime.tick();
+    assert.equal(f.runtime.get(prepared.replacementTaskId, owner)?.state, "cancelled");
+    assert.equal(calls, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("prepared replacement metadata and both paused tasks survive restart", async () => {
+  const f = await fixture();
+  let reopened: TaskRuntime | undefined;
+  try {
+    f.runtime.registerHandler(handler("restart-replacement"));
+    const old = f.runtime.schedule({
+      owner,
+      handler: "restart-replacement",
+      schedule: { kind: "once", at: 2_000 },
+    });
+    const prepared = f.runtime.prepareReplacement({
+      operationId: "restart-replacement-1",
+      owner,
+      replacesTaskId: old.id,
+      task: { owner, handler: "restart-replacement", schedule: { kind: "once", at: 3_000 } },
+    });
+    await f.runtime.close();
+    reopened = new TaskRuntime({ directory: f.directory, now: () => 3_000 });
+    reopened.registerHandler(handler("restart-replacement"));
+    await reopened.tick();
+    assert.equal(reopened.get(old.id, owner)?.state, "paused");
+    assert.equal(reopened.get(prepared.replacementTaskId, owner)?.state, "paused");
+    assert.equal(reopened.getReplacement("restart-replacement-1", owner)?.state, "prepared");
+    reopened.activateReplacement("restart-replacement-1", owner);
+    await reopened.tick();
+    assert.equal(reopened.get(old.id, owner)?.state, "cancelled");
+    assert.equal(reopened.get(prepared.replacementTaskId, owner)?.state, "succeeded");
+  } finally {
+    await reopened?.close();
+    await rm(f.directory, { recursive: true, force: true });
+  }
+});

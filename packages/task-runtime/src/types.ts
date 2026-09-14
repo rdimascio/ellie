@@ -113,6 +113,24 @@ export interface ScheduleTask extends EnqueueTask {
   missedRunPolicy?: MissedRunPolicy;
 }
 
+export interface PrepareTaskReplacement {
+  operationId: string;
+  owner: OwnerScope;
+  replacesTaskId: string;
+  task: ScheduleTask;
+}
+
+export interface PreparedTaskReplacement {
+  operationId: string;
+  owner: OwnerScope;
+  replacesTaskId: string;
+  replacementTaskId: string;
+  state: "prepared" | "activated" | "discarded";
+  createdAt: number;
+  updatedAt: number;
+  task?: TaskRecord;
+}
+
 export interface WatchTask extends EnqueueTask {
   topic: string;
 }

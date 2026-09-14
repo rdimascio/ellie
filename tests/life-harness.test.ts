@@ -13,6 +13,7 @@ import {
   validateModelPlan,
 } from "../packages/life-harness/src/index.ts";
 import type { LifeModel } from "../packages/life-harness/src/index.ts";
+import type { PendingLifeIntent } from "../packages/life-harness/src/index.ts";
 import { TaskRuntime } from "../packages/task-runtime/src/index.ts";
 
 const actor = { userId: "alice" },
@@ -276,6 +277,43 @@ test("model-translated reminder executes through the validated life operation", 
     });
     assert.equal(polite.taskIds.length, 1);
     assert.match(polite.reply, /I'll remind you/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a model-translated polite add-reminder request has current-turn authority", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    const model: LifeModel = {
+      async plan() {
+        return {
+          reply: "Added.",
+          actions: [
+            {
+              type: "life_operation",
+              intent: {
+                kind: "schedule_reminder",
+                title: "Water the basil",
+                when: { type: "instant", at: Date.UTC(2026, 8, 14, 17) },
+              },
+            },
+          ],
+        };
+      },
+    };
+    const response = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Could you add a reminder to water the basil tomorrow at 10 am?",
+    });
+    assert.equal(response.taskIds.length, 1);
+    assert.equal(
+      response.records.some((record) => record.kind === "reminder"),
+      true,
+    );
+    assert.match(response.reply, /I'll remind you/i);
+    assert.doesNotMatch(response.reply, /^Added\.$/);
   } finally {
     await f.close();
   }
@@ -1543,6 +1581,420 @@ test("next weekday birthday means the following week even before today's nominal
       response.records.find((record) => record.kind === "birthday")?.data.nextDate,
       "2026-09-20",
     );
+  } finally {
+    await f.close();
+  }
+});
+
+test("a missing reminder time becomes a trusted continuation and survives a fresh harness", async () => {
+  const f = await fixture();
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const first = await f.make().chat({
+      actor,
+      scope,
+      conversationId: "continuation-one",
+      message: "Could you remind me to call Mum?",
+    });
+    assert.equal(first.records.length, 0);
+    assert.deepEqual(first.continuation, {
+      action: "create",
+      intent: { kind: "schedule-reminder", title: "call Mum" },
+      missing: ["when"],
+      question: "When should I remind you?",
+    });
+    if (
+      first.continuation?.action !== "create" ||
+      first.continuation.intent.kind !== "schedule-reminder"
+    )
+      throw new Error("reminder draft missing");
+    const pending: PendingLifeIntent = {
+      id: "pending-one",
+      conversationId: "continuation-one",
+      scope,
+      chatEpoch: 1,
+      revision: 1,
+      state: "awaiting-fields",
+      intent: first.continuation.intent,
+      missing: ["when"],
+      question: "When should I remind you?",
+      originTurnId: "turn-one",
+      originRequestId: "request-one",
+      contextFingerprint: "fingerprint-one",
+      expiresAt: Date.UTC(2026, 8, 14, 16),
+      createdAt: Date.UTC(2026, 8, 13, 16),
+      updatedAt: Date.UTC(2026, 8, 13, 16),
+    };
+    const answered = await f.make().chat({
+      actor,
+      scope,
+      conversationId: "continuation-one",
+      pendingIntent: pending,
+      message: "Tomorrow at 10",
+    });
+    assert.equal(answered.continuation?.action, "answer");
+    assert.equal(answered.records.length, 0);
+    const answer =
+      answered.continuation?.action === "answer" ? answered.continuation.answer : undefined;
+    if (!answer || !("when" in answer)) throw new Error("reminder answer missing");
+    const executed = await f.make().continuePendingIntent({
+      actor,
+      scope,
+      pendingIntent: {
+        ...pending,
+        state: "executing",
+        missing: [],
+        intent: {
+          kind: "schedule-reminder",
+          title: first.continuation.intent.title,
+          when: answer.when,
+        },
+      },
+      answer,
+    });
+    assert.equal(
+      executed.records.some((record) => record.kind === "reminder"),
+      true,
+    );
+    assert.equal(executed.taskIds.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("pending reminder cancellation, expiry, and unrelated chat do not mutate", async () => {
+  const f = await fixture();
+  try {
+    const base: PendingLifeIntent = {
+      id: "pending-two",
+      conversationId: "continuation-two",
+      scope,
+      chatEpoch: 1,
+      revision: 3,
+      state: "awaiting-fields",
+      intent: { kind: "schedule-reminder", title: "call Mum" },
+      missing: ["when"],
+      question: "When should I remind you?",
+      originTurnId: "turn-two",
+      originRequestId: "request-two",
+      contextFingerprint: "fingerprint-two",
+      expiresAt: Date.UTC(2026, 8, 14, 16),
+      createdAt: Date.UTC(2026, 8, 13, 16),
+      updatedAt: Date.UTC(2026, 8, 13, 16),
+    };
+    const harness = f.make();
+    const unrelated = await harness.chat({
+      actor,
+      scope,
+      pendingIntent: base,
+      message: "Hello Ellie",
+    });
+    assert.equal(unrelated.continuation, undefined);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"] }).length, 0);
+    const past = await harness.chat({
+      actor,
+      scope,
+      pendingIntent: base,
+      message: "Today at 1 am",
+    });
+    assert.equal(past.continuation, undefined);
+    assert.match(past.reply, /past.*future/i);
+    const rejected = await harness.continuePendingIntent({
+      actor,
+      scope,
+      pendingIntent: {
+        ...base,
+        state: "executing",
+        missing: [],
+        intent: {
+          kind: "schedule-reminder",
+          title: "call Mum",
+          when: { type: "instant", at: Date.UTC(2026, 8, 13, 8) },
+        },
+      },
+    });
+    assert.equal(rejected.operationOutcome, "rejected");
+    assert.equal(rejected.actions[0]?.status, "skipped");
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"] }).length, 0);
+    const cancelled = await harness.chat({
+      actor,
+      scope,
+      pendingIntent: base,
+      message: "Never mind",
+    });
+    assert.deepEqual(cancelled.continuation, {
+      action: "cancel",
+      pendingIntentId: "pending-two",
+      expectedRevision: 3,
+    });
+    const expired = await harness.chat({
+      actor,
+      scope,
+      pendingIntent: { ...base, expiresAt: Date.UTC(2026, 8, 13, 15) },
+      message: "Tomorrow at 10",
+    });
+    assert.equal(expired.continuation, undefined);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a fresh complete reminder request explicitly clears an older incomplete draft", async () => {
+  const f = await fixture();
+  try {
+    const pending: PendingLifeIntent = {
+      id: "pending-replaced",
+      conversationId: "continuation-replaced",
+      scope,
+      chatEpoch: 1,
+      revision: 2,
+      state: "awaiting-fields",
+      intent: { kind: "schedule-reminder", title: "old draft" },
+      missing: ["when"],
+      question: "When should I remind you?",
+      originTurnId: "turn-old",
+      originRequestId: "request-old",
+      contextFingerprint: "fingerprint-old",
+      expiresAt: Date.UTC(2026, 8, 14, 16),
+      createdAt: Date.UTC(2026, 8, 13, 16),
+      updatedAt: Date.UTC(2026, 8, 13, 16),
+    };
+    const response = await f.make().chat({
+      actor,
+      scope,
+      pendingIntent: pending,
+      message: "Remind me tomorrow at 10 to call Dad",
+    });
+    assert.deepEqual(response.continuation, {
+      action: "cancel",
+      pendingIntentId: pending.id,
+      expectedRevision: pending.revision,
+    });
+    assert.equal(response.taskIds.length, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("reminder replacement recovers after the record update and stale tasks skip delivery", async () => {
+  const f = await fixture();
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const harness = f.make();
+    const original = await harness.chat({
+      actor,
+      scope,
+      message: "Remind me tomorrow at 10 to call Mum",
+    });
+    const reminder = original.records.findLast((record) => record.kind === "reminder")!;
+    const operation = new LifeOperations({
+      store: f.store,
+      tasks: f.tasks,
+      now: () => Date.UTC(2026, 8, 13, 16),
+    });
+    assert.throws(
+      () =>
+        operation.rescheduleReminder(
+          actor,
+          scope,
+          {
+            operationId: "reschedule-one",
+            recordId: reminder.id,
+            expectedRevision: reminder.revision,
+            replacesTaskId: original.taskIds[0]!,
+            when: { type: "instant", at: Date.UTC(2026, 8, 15, 18) },
+          },
+          "America/Los_Angeles",
+          {
+            prepared() {},
+            recordUpdated() {
+              throw new Error("simulated journal crash");
+            },
+          },
+        ),
+      /simulated journal crash/,
+    );
+    const prepared = f.tasks.getReplacement("reschedule-one", "user:alice")!;
+    assert.equal(prepared.state, "prepared");
+    assert.equal(f.tasks.get(prepared.replacementTaskId, "user:alice")?.state, "paused");
+    assert.equal(
+      operation.recoverReminderReschedule(actor, scope, "reschedule-one", reminder.id).state,
+      "activated",
+    );
+    assert.equal(f.tasks.get(original.taskIds[0]!, "user:alice")?.state, "cancelled");
+
+    const stale = f.tasks.schedule({
+      owner: "user:alice",
+      handler: "reminder.notify",
+      input: { recordId: reminder.id, scope, userId: actor.userId },
+      schedule: { kind: "once", at: Date.UTC(2026, 8, 14, 17) },
+    });
+    f.setNow(Date.UTC(2026, 8, 14, 17));
+    await f.tasks.tick();
+    const staleOccurrence = f.tasks
+      .list({ owner: "user:alice" })
+      .find((task) => task.parentId === stale.id)!;
+    assert.deepEqual(staleOccurrence.result, {
+      status: "skipped",
+      reason: "task_superseded",
+    });
+    assert.equal(
+      f.store
+        .listRecords(actor, { scope, kinds: ["event"] })
+        .filter((record) => record.data.type === "notification").length,
+      0,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("event rescheduling uses the expected revision and preserves duration", async () => {
+  const f = await fixture();
+  try {
+    const event = f.store.createRecord(actor, {
+      kind: "event",
+      title: "Dentist",
+      scope,
+      data: { startAt: Date.UTC(2026, 8, 14, 17), endAt: Date.UTC(2026, 8, 14, 18, 30) },
+    });
+    const operation = new LifeOperations({
+      store: f.store,
+      tasks: f.tasks,
+      now: () => Date.UTC(2026, 8, 13, 16),
+    });
+    const moved = operation.rescheduleEvent(
+      actor,
+      scope,
+      {
+        recordId: event.id,
+        expectedRevision: event.revision,
+        start: { type: "instant", at: Date.UTC(2026, 8, 15, 19) },
+      },
+      "America/Los_Angeles",
+    );
+    assert.equal(
+      Number(moved.records[0]!.data.endAt) - Number(moved.records[0]!.data.startAt),
+      90 * 60_000,
+    );
+    assert.equal(
+      operation.rescheduleEvent(
+        actor,
+        scope,
+        {
+          recordId: event.id,
+          expectedRevision: event.revision,
+          start: { type: "instant", at: Date.UTC(2026, 8, 16, 19) },
+        },
+        "America/Los_Angeles",
+      ).status,
+      "rejected",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("a direct correction produces a revision-bound reminder replacement receipt", async () => {
+  const f = await fixture();
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const harness = f.make();
+    const original = await harness.chat({
+      actor,
+      scope,
+      conversationId: "correction-one",
+      message: "Remind me tomorrow at 10 to call Mum",
+    });
+    const reminder = original.records.findLast((record) => record.kind === "reminder")!;
+    const correction = await harness.chat({
+      actor,
+      scope,
+      conversationId: "correction-one",
+      message: "Actually make it 11",
+      recentOperation: {
+        kind: "reminder",
+        recordId: reminder.id,
+        expectedRevision: reminder.revision,
+        taskId: original.taskIds[0],
+      },
+    });
+    assert.equal(correction.continuation?.action, "replace");
+    if (correction.continuation?.action !== "replace") throw new Error("replacement missing");
+    const pending: PendingLifeIntent = {
+      id: "reschedule-chat-one",
+      conversationId: "correction-one",
+      scope,
+      chatEpoch: 1,
+      revision: 3,
+      state: "executing",
+      intent: {
+        ...correction.continuation.intent,
+        ...correction.continuation.answer,
+      },
+      missing: [],
+      question: correction.continuation.question,
+      originTurnId: "turn-correction",
+      originRequestId: "request-correction",
+      answerTurnId: "turn-correction",
+      target: correction.continuation.target,
+      contextFingerprint: "fingerprint-correction",
+      expiresAt: Date.UTC(2026, 8, 14, 16),
+      createdAt: Date.UTC(2026, 8, 13, 16),
+      updatedAt: Date.UTC(2026, 8, 13, 16),
+    };
+    const phases: string[] = [];
+    const moved = await harness.continuePendingIntent({
+      actor,
+      scope,
+      pendingIntent: pending,
+      replacementJournal: {
+        prepared: () => phases.push("prepared"),
+        recordUpdated: () => phases.push("record-updated"),
+      },
+    });
+    const current = f.store.getRecord(actor, reminder.id)!;
+    assert.equal(current.revision, reminder.revision + 1);
+    assert.equal(current.data.dueAt, Date.UTC(2026, 8, 14, 18));
+    assert.equal(f.tasks.get(original.taskIds[0]!, "user:alice")?.state, "cancelled");
+    assert.equal(f.tasks.get(String(current.data.taskId), "user:alice")?.state, "scheduled");
+    assert.deepEqual(phases, ["prepared", "record-updated"]);
+    assert.equal(moved.actions[0]?.status, "scheduled");
+  } finally {
+    await f.close();
+  }
+});
+
+test("a pending local-time answer rejects a DST gap without guessing", async () => {
+  const f = await fixture(Date.UTC(2026, 2, 7, 16));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    const pending: PendingLifeIntent = {
+      id: "pending-gap",
+      conversationId: "continuation-gap",
+      scope,
+      chatEpoch: 1,
+      revision: 1,
+      state: "awaiting-fields",
+      intent: { kind: "schedule-reminder", title: "check clocks" },
+      missing: ["when"],
+      question: "When should I remind you?",
+      originTurnId: "turn-gap",
+      originRequestId: "request-gap",
+      contextFingerprint: "fingerprint-gap",
+      expiresAt: Date.UTC(2026, 2, 8, 16),
+      createdAt: Date.UTC(2026, 2, 7, 16),
+      updatedAt: Date.UTC(2026, 2, 7, 16),
+    };
+    const response = await f.make().chat({
+      actor,
+      scope,
+      pendingIntent: pending,
+      message: "Tomorrow at 2:30",
+    });
+    assert.match(response.reply, /does not exist/i);
+    assert.equal(response.continuation, undefined);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"] }).length, 0);
   } finally {
     await f.close();
   }

@@ -880,14 +880,159 @@ test("revoked group conversation contexts stay private and reset still deletes t
       turnId: begun.turn.id,
       requestId: "group-request",
     });
+    const reminder = store.createRecord(bob, {
+      kind: "reminder",
+      title: "Shared reminder",
+      scope: { type: "group", id: "chat-group" },
+      data: { dueAt: 90_000_000, completed: false, taskId: "old-task" },
+    });
+    store.beginReminderReschedule(bob, {
+      operationId: "shared-reschedule",
+      scope: reminder.scope,
+      recordId: reminder.id,
+      expectedRevision: reminder.revision,
+      replacesTaskId: "old-task",
+    });
+    store.markReminderReschedulePrepared(bob, "shared-reschedule", {
+      replacementTaskId: "new-task",
+      dueAt: 91_000_000,
+    });
     assert.throws(() => store.getConversation(alice, begun.conversation.id), LifeAccessError);
     store.setGroupMember(alice, "chat-group", { userId: "bob", remove: true });
     assert.throws(() => store.getConversation(bob, begun.conversation.id), LifeAccessError);
     assert.equal(store.exportPersonalPage(bob).items.length, 0);
     assert.equal(store.personalSummary(bob).conversations, 1);
+    assert.throws(
+      () => store.deletePersonal(bob, { preserveMemberships: true }),
+      /reschedules must be recovered/,
+    );
+    store.interruptReminderReschedule(bob, "shared-reschedule");
     store.deletePersonal(bob, { preserveMemberships: true });
     assert.equal(store.personalSummary(bob).conversations, 0);
     assert.equal(store.chatEpoch(bob), 2);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("pending intents bind direct turns, fill only missing fields, persist and never replay executing work", async () => {
+  const f = await fixture();
+  try {
+    let store = f.open(1_000);
+    const origin = store.beginConversationTurn(alice, {
+      scope: { type: "user", id: "alice" },
+      requestId: "clarify-origin",
+      chatEpoch: 1,
+      message: "Remind me to call Mum",
+    });
+    store.completeConversationTurn(alice, {
+      conversationId: origin.conversation.id,
+      turnId: origin.turn.id,
+      requestId: "clarify-origin",
+      result: {
+        reply: "When should I remind you?",
+        actions: [],
+        recordIds: [],
+        taskIds: [],
+        evidence: [],
+      },
+    });
+    const pending = store.createPendingIntent(alice, {
+      conversationId: origin.conversation.id,
+      scope: { type: "user", id: "alice" },
+      chatEpoch: 1,
+      originTurnId: origin.turn.id,
+      originRequestId: "clarify-origin",
+      intent: { kind: "schedule-reminder", title: "Call Mum" },
+      missing: ["when"],
+      question: "When should I remind you?",
+      contextFingerprint: origin.contextFingerprint,
+    });
+    assert.equal(pending.expiresAt, 1_000 + 24 * 60 * 60_000);
+    store.close();
+    store = f.open(2_000);
+    assert.equal(store.getPendingIntent(alice, origin.conversation.id)?.state, "awaiting-fields");
+    const answerTurn = store.beginConversationTurn(alice, {
+      scope: { type: "user", id: "alice" },
+      conversationId: origin.conversation.id,
+      requestId: "clarify-answer",
+      chatEpoch: 1,
+      message: "Tomorrow at 10",
+    });
+    assert.throws(
+      () =>
+        store.answerPendingIntent(alice, {
+          id: pending.id,
+          expectedRevision: pending.revision,
+          answerTurnId: answerTurn.turn.id,
+          answerRequestId: "clarify-answer",
+          answer: { budget: 5 } as never,
+        }),
+      /undeclared/,
+    );
+    const answered = store.answerPendingIntent(alice, {
+      id: pending.id,
+      expectedRevision: pending.revision,
+      answerTurnId: answerTurn.turn.id,
+      answerRequestId: "clarify-answer",
+      answer: { when: { type: "instant", at: 90_000_000 } },
+    });
+    assert.deepEqual(answered.missing, []);
+    const executing = store.claimPendingIntent(alice, answered.id, answered.revision);
+    assert.equal(executing.state, "executing");
+    store.close();
+    store = f.open(3_000);
+    assert.equal(store.getPendingIntent(alice, origin.conversation.id)?.state, "interrupted");
+    assert.throws(
+      () => store.claimPendingIntent(alice, executing.id, executing.revision),
+      /not ready/,
+    );
+    const newerOrigin = store.beginConversationTurn(alice, {
+      scope: { type: "user", id: "alice" },
+      conversationId: origin.conversation.id,
+      requestId: "newer-origin",
+      chatEpoch: 1,
+      message: "Remind me to check the door",
+    });
+    store.completeConversationTurn(alice, {
+      conversationId: origin.conversation.id,
+      turnId: newerOrigin.turn.id,
+      requestId: "newer-origin",
+      result: {
+        reply: "When?",
+        actions: [],
+        recordIds: [],
+        taskIds: [],
+        evidence: [],
+      },
+    });
+    const newerInput = {
+      conversationId: origin.conversation.id,
+      scope: { type: "user" as const, id: "alice" },
+      chatEpoch: 1,
+      originTurnId: newerOrigin.turn.id,
+      originRequestId: "newer-origin",
+      intent: { kind: "schedule-reminder" as const, title: "Check the door" },
+      missing: ["when" as const],
+      question: "When?",
+      contextFingerprint: newerOrigin.contextFingerprint,
+    };
+    const newer = store.createPendingIntent(alice, newerInput);
+    assert.equal(store.createPendingIntent(alice, newerInput).id, newer.id);
+    store.cancelPendingIntent(alice, newer.id, newer.revision);
+    assert.equal(
+      store.getPendingIntent(alice, origin.conversation.id)?.state,
+      "cancelled",
+      "an older interrupted draft must not resurface",
+    );
+    assert.ok(
+      store
+        .exportPersonalPage(alice, { limit: 100 })
+        .items.some((item) => item.type === "pending-intent"),
+    );
+    store.deletePersonal(alice, { preserveMemberships: true });
+    assert.equal(store.personalSummary(alice).pendingIntents, 0);
     store.close();
   } finally {
     await rm(f.dir, { recursive: true, force: true });

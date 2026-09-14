@@ -6,6 +6,7 @@ import type {
   ConversationTurn,
   LifeRecord,
   ModelStatus,
+  PendingIntent,
   PluginSummary,
   TeachingGuide,
   TeachingSource,
@@ -85,6 +86,8 @@ export function App() {
     [messages, setMessages] = useState<Message[]>([]),
     [conversation, setConversation] = useState<string>(),
     [conversationMeta, setConversationMeta] = useState<ConversationSummary>(),
+    [pendingIntent, setPendingIntent] = useState<PendingIntent | null>(null),
+    [pendingIntentState, setPendingIntentState] = useState<"idle" | "loading" | "error">("idle"),
     [uncertainRequest, setUncertainRequest] = useState<{
       id: string;
       scope: string;
@@ -102,6 +105,7 @@ export function App() {
   const refreshRunning = useRef(false);
   const chatEpoch = useRef(0);
   const chatRequest = useRef<AbortController | undefined>(undefined);
+  const pendingIntentRequest = useRef<AbortController | undefined>(undefined);
   const chatInFlight = useRef("");
   const restoredUrl = useRef(false);
   const observedChatEpoch = useRef<number | undefined>(undefined);
@@ -143,10 +147,13 @@ export function App() {
     if (observedChatEpoch.current !== undefined && observedChatEpoch.current !== data.chatEpoch) {
       ++chatEpoch.current;
       chatRequest.current?.abort();
+      pendingIntentRequest.current?.abort();
       chatInFlight.current = "";
       setMessages([]);
       setConversation(undefined);
       setConversationMeta(undefined);
+      setPendingIntent(null);
+      setPendingIntentState("idle");
       setUncertainRequest(undefined);
       setBusy("");
       setChatUrl();
@@ -202,7 +209,7 @@ export function App() {
               text: turn.assistant,
               prompt: turn.user,
               status: turn.status,
-              outdated: turn.outdated,
+              outdated: turn.outdated && turn.evidence.length > 0,
               actions: turn.actions,
             },
           ]
@@ -211,6 +218,7 @@ export function App() {
   async function openConversation(id: string, preserveRequest?: { id: string; scope: string }) {
     const epoch = ++chatEpoch.current;
     chatRequest.current?.abort();
+    pendingIntentRequest.current?.abort();
     const controller = new AbortController();
     chatRequest.current = controller;
     setBusy("conversation");
@@ -238,6 +246,19 @@ export function App() {
           : undefined;
       setUncertainRequest(pending);
       setChatUrl(id, pending?.id);
+      setPendingIntentState("loading");
+      try {
+        const intent = await api.conversations.pendingIntent(id, controller.signal);
+        if (epoch === chatEpoch.current) {
+          setPendingIntent(intent.pendingIntent);
+          setPendingIntentState("idle");
+        }
+      } catch (intentError) {
+        if (!controller.signal.aborted && epoch === chatEpoch.current) {
+          setPendingIntent(null);
+          setPendingIntentState("error");
+        }
+      }
     } catch (e) {
       if (!controller.signal.aborted && epoch === chatEpoch.current)
         setError(e instanceof Error ? e.message : "That conversation could not be opened.");
@@ -255,12 +276,19 @@ export function App() {
     if (recovery) setUncertainRequest(recovery);
     if (conversationId) void openConversation(conversationId, recovery);
   }, [data]);
-  useEffect(() => () => chatRequest.current?.abort(), []);
+  useEffect(
+    () => () => {
+      chatRequest.current?.abort();
+      pendingIntentRequest.current?.abort();
+    },
+    [],
+  );
   async function send(message: string) {
     if (!message.trim() || !data || chatInFlight.current) return;
     const generation = scopeGeneration.current;
     const epoch = ++chatEpoch.current;
     chatRequest.current?.abort();
+    pendingIntentRequest.current?.abort();
     const controller = new AbortController();
     chatRequest.current = controller;
     const requestId = newRequestId();
@@ -381,10 +409,13 @@ export function App() {
   function newConversation() {
     ++chatEpoch.current;
     chatRequest.current?.abort();
+    pendingIntentRequest.current?.abort();
     chatInFlight.current = "";
     setMessages([]);
     setConversation(undefined);
     setConversationMeta(undefined);
+    setPendingIntent(null);
+    setPendingIntentState("idle");
     setBusy("");
     setOlderTurns({ hasMore: false });
     setChatUrl(undefined, uncertainRequest?.id);
@@ -474,11 +505,14 @@ export function App() {
               scopeGeneration.current += 1;
               chatEpoch.current += 1;
               chatRequest.current?.abort();
+              pendingIntentRequest.current?.abort();
               chatInFlight.current = "";
               desiredScope.current = e.target.value;
               setMessages([]);
               setConversation(undefined);
               setConversationMeta(undefined);
+              setPendingIntent(null);
+              setPendingIntentState("idle");
               setBusy("");
               setChatUrl(undefined, uncertainRequest?.id);
               setLoading(true);
@@ -530,6 +564,44 @@ export function App() {
             newConversation={newConversation}
             uncertainRequest={uncertainRequest}
             checkOutcome={checkChatOutcome}
+            pendingIntent={pendingIntent}
+            pendingIntentState={pendingIntentState}
+            clearPendingIntent={async () => {
+              if (!conversation || !pendingIntent || pendingIntent.state !== "awaiting-fields")
+                return;
+              const generation = scopeGeneration.current;
+              const epoch = chatEpoch.current;
+              const controller = new AbortController();
+              pendingIntentRequest.current?.abort();
+              pendingIntentRequest.current = controller;
+              setPendingIntentState("loading");
+              try {
+                await api.conversations.clearPendingIntent(
+                  conversation,
+                  pendingIntent.revision,
+                  controller.signal,
+                );
+                if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
+                setPendingIntent(null);
+                setPendingIntentState("idle");
+                setNotice("Draft cleared");
+              } catch (cause) {
+                if (controller.signal.aborted) return;
+                if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
+                if (cause instanceof ApiError && cause.status === 409) {
+                  setNotice("That draft changed. Ellie is checking its current status.");
+                  await openConversation(conversation);
+                  return;
+                }
+                setPendingIntentState("error");
+                setError(
+                  cause instanceof Error ? cause.message : "The draft could not be cleared.",
+                );
+              } finally {
+                if (pendingIntentRequest.current === controller)
+                  pendingIntentRequest.current = undefined;
+              }
+            }}
             olderTurns={olderTurns}
             loadOlder={loadOlderConversationTurns}
             notify={setNotice}
@@ -698,6 +770,9 @@ function Chat({
   newConversation,
   uncertainRequest,
   checkOutcome,
+  pendingIntent,
+  pendingIntentState,
+  clearPendingIntent,
   olderTurns,
   loadOlder,
   notify,
@@ -718,6 +793,9 @@ function Chat({
     status?: "pending" | "interrupted";
   };
   checkOutcome: () => Promise<void>;
+  pendingIntent: PendingIntent | null;
+  pendingIntentState: "idle" | "loading" | "error";
+  clearPendingIntent: () => Promise<void>;
   olderTurns: { hasMore: boolean; nextCursor?: string };
   loadOlder: () => Promise<void>;
   notify: (value: string) => void;
@@ -777,6 +855,14 @@ function Chat({
             </button>
           )}
         </div>
+      )}
+      {active && (pendingIntent || pendingIntentState !== "idle") && (
+        <PendingIntentStrip
+          intent={pendingIntent}
+          state={pendingIntentState}
+          clear={clearPendingIntent}
+          retry={() => openConversation(active.id)}
+        />
       )}
       <div className="hello">
         <span className="ellie-mark">e</span>
@@ -842,7 +928,15 @@ function Chat({
         )}
         <div ref={end} />
       </div>
-      <Composer onSend={send} busy={busy} />
+      <Composer
+        onSend={send}
+        busy={busy || pendingIntentState === "loading" || pendingIntent?.state === "executing"}
+        placeholder={
+          pendingIntent?.state === "awaiting-fields"
+            ? pendingIntent.question || `Tell Ellie ${pendingIntent.missing.join(" and ")}`
+            : undefined
+        }
+      />
       {historyOpen && (
         <ConversationHistory
           scope={scope}
@@ -859,6 +953,61 @@ function Chat({
         />
       )}
     </section>
+  );
+}
+
+function PendingIntentStrip({
+  intent,
+  state,
+  clear,
+  retry,
+}: {
+  intent: PendingIntent | null;
+  state: "idle" | "loading" | "error";
+  clear: () => Promise<void>;
+  retry: () => Promise<void>;
+}) {
+  if (state === "loading")
+    return (
+      <div className="intent-strip" role="status">
+        <span>Checking saved draft…</span>
+      </div>
+    );
+  if (state === "error")
+    return (
+      <div className="intent-strip intent-error" role="alert">
+        <div>
+          <strong>Draft status unavailable</strong>
+          <span>Ellie could not verify whether this conversation has a saved draft.</span>
+        </div>
+        <button onClick={() => void retry()}>Try again</button>
+      </div>
+    );
+  if (!intent) return null;
+  const kind = intent.kind === "need" ? "need" : intent.kind;
+  const missing = intent.missing.map((value) => value.replace(/[-_]/g, " ")).join(" and ");
+  return (
+    <div className={`intent-strip intent-${intent.state}`} role="status">
+      <div>
+        <strong>
+          {intent.state === "expired" ? "Expired" : "Draft"} {kind} · {intent.title}
+        </strong>
+        <span>
+          {intent.state === "awaiting-fields"
+            ? intent.question || `Needs ${missing}`
+            : intent.state === "executing"
+              ? "Ellie is carrying this out. Closing the page will not cancel it."
+              : intent.state === "interrupted"
+                ? "Execution was interrupted. Check Today and Activity before trying again."
+                : "This draft expired before it was completed. Start a new request when you’re ready."}
+        </span>
+      </div>
+      {intent.state === "awaiting-fields" && (
+        <button onClick={() => void clear()} aria-label={`Clear draft ${kind}: ${intent.title}`}>
+          Clear draft
+        </button>
+      )}
+    </div>
   );
 }
 

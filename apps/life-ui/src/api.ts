@@ -13,6 +13,7 @@ import type {
   ConversationSummary,
   ConversationTurn,
   ModelStatus,
+  PendingIntent,
 } from "./types";
 export class ApiError extends Error {
   constructor(
@@ -28,6 +29,7 @@ export type ChatResponse = {
   turnId: string;
   status: "completed" | "pending" | "interrupted";
   actions?: { label: string; status: string }[];
+  pendingIntent: PendingIntent | null;
 };
 export type PluginBridgeRequest = {
   id: string;
@@ -137,6 +139,16 @@ export const api = {
       request<void>(`/api/life/conversations/${encodeURIComponent(id)}?revision=${revision}`, {
         method: "DELETE",
       }),
+    pendingIntent: (id: string, signal?: AbortSignal) =>
+      request<{ pendingIntent: PendingIntent | null }>(
+        `/api/life/conversations/${encodeURIComponent(id)}/pending-intent`,
+        { signal },
+      ),
+    clearPendingIntent: (id: string, revision: number, signal?: AbortSignal) =>
+      request<void>(
+        `/api/life/conversations/${encodeURIComponent(id)}/pending-intent?revision=${revision}`,
+        { method: "DELETE", signal },
+      ),
   },
   modelStatus: (signal?: AbortSignal) => request<ModelStatus>("/api/life/model/status", { signal }),
   createRecord: (value: {

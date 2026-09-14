@@ -29,9 +29,13 @@ import { TaskRuntime } from "../../task-runtime/src/index.ts";
 import type { LifeModel, LifeModelPlan } from "./model.ts";
 import { validateModelPlan } from "./model.ts";
 import { LifeOperationInputError, LifeOperations } from "./operations.ts";
+import type { OperationOutcome, ReminderRescheduleJournal } from "./operations.ts";
 import type { LifeIntent } from "./operations.ts";
+import { parseMissingReminder, pendingDirective, PendingAnswerInputError } from "./continuation.ts";
+import type { ContinuationDirective, PendingLifeIntent, TemporalAnswer } from "./continuation.ts";
 export * from "./model.ts";
 export * from "./operations.ts";
+export * from "./continuation.ts";
 
 export interface LifeHarnessOptions {
   store: LifeStore;
@@ -50,6 +54,15 @@ export interface ChatRequest {
   conversationId?: string;
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   isContextCurrent?: () => boolean;
+  /** Trusted service data. Never populate this from a client request body. */
+  pendingIntent?: PendingLifeIntent;
+  /** Trusted receipt from the immediately preceding completed operation. */
+  recentOperation?: {
+    kind: "reminder" | "event";
+    recordId: string;
+    expectedRevision: number;
+    taskId?: string;
+  };
 }
 export interface ChatAction {
   label: string;
@@ -62,9 +75,19 @@ export interface ChatResponse {
   records: LifeRecord[];
   taskIds: string[];
   evidence: Array<{ sourceId: string; title: string; reference?: string }>;
+  continuation?: ContinuationDirective;
+  operationOutcome?: OperationOutcome["status"];
 }
 export interface LifeHarness {
   chat(request: ChatRequest): Promise<ChatResponse>;
+  continuePendingIntent(request: {
+    actor: LifeActor;
+    scope: LifeScope;
+    pendingIntent: PendingLifeIntent;
+    answer?: TemporalAnswer;
+    replacementJournal?: ReminderRescheduleJournal;
+    isContextCurrent?: () => boolean;
+  }): Promise<ChatResponse>;
   invalidateContext(actor: LifeActor, scope: LifeScope): void;
   invalidateActorContext(actor: LifeActor): void;
   rerunBackgroundSummary(request: {
@@ -319,6 +342,125 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     now,
     enqueueSummary: enqueueBackgroundSummary,
   });
+  const continuePendingIntent: LifeHarness["continuePendingIntent"] = async (request) => {
+    const pending = request.pendingIntent;
+    options.store.listRecords(request.actor, { scope: request.scope, limit: 1 });
+    if (request.isContextCurrent?.() === false)
+      throw new Error("Conversation context changed before the pending request was executed.");
+    if (
+      pending.scope.type !== request.scope.type ||
+      pending.scope.id !== request.scope.id ||
+      pending.state !== "executing" ||
+      pending.expiresAt <= now()
+    )
+      throw new Error("Pending request is unavailable or expired.");
+    const settings = options.store.resolveSettings(
+      request.actor,
+      request.scope.type === "group" ? { groupId: request.scope.id } : {},
+    );
+    const timeZone =
+      typeof settings.values.timeZone === "string"
+        ? settings.values.timeZone
+        : Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const temporal =
+      request.answer && "when" in request.answer
+        ? request.answer.when
+        : request.answer && "start" in request.answer
+          ? request.answer.start
+          : pending.intent.kind === "schedule-reminder" ||
+              pending.intent.kind === "reschedule-reminder"
+            ? pending.intent.when
+            : pending.intent.start;
+    if (!temporal || pending.missing.length)
+      throw new Error("Pending request still needs a date or time.");
+    options.store.listRecords(request.actor, { scope: request.scope, limit: 1 });
+    if (request.isContextCurrent?.() === false)
+      throw new Error("Conversation context changed before the pending request was executed.");
+    const outcome =
+      pending.intent.kind === "schedule-reminder"
+        ? operations.execute(
+            request.actor,
+            request.scope,
+            { kind: "schedule_reminder", title: pending.intent.title, when: temporal },
+            timeZone,
+          )
+        : pending.intent.kind === "create-event"
+          ? operations.execute(
+              request.actor,
+              request.scope,
+              {
+                kind: "create_event",
+                title: pending.intent.title,
+                start: temporal,
+                ...(pending.intent.durationMinutes === undefined
+                  ? {}
+                  : { durationMinutes: pending.intent.durationMinutes }),
+              },
+              timeZone,
+            )
+          : pending.intent.kind === "reschedule-reminder"
+            ? (() => {
+                if (!pending.target?.taskId || !request.replacementJournal)
+                  throw new Error("This reminder change requires its durable replacement journal.");
+                return operations.rescheduleReminder(
+                  request.actor,
+                  request.scope,
+                  {
+                    operationId: pending.id,
+                    recordId: pending.target.recordId,
+                    expectedRevision: pending.target.expectedRevision,
+                    replacesTaskId: pending.target.taskId,
+                    when: temporal,
+                  },
+                  timeZone,
+                  request.replacementJournal,
+                );
+              })()
+            : (() => {
+                if (!pending.target)
+                  throw new Error("This event change is missing its revision-bound target.");
+                return operations.rescheduleEvent(
+                  request.actor,
+                  request.scope,
+                  {
+                    recordId: pending.target.recordId,
+                    expectedRevision: pending.target.expectedRevision,
+                    start: temporal,
+                    ...(pending.intent.durationMinutes === undefined
+                      ? {}
+                      : { durationMinutes: pending.intent.durationMinutes }),
+                  },
+                  timeZone,
+                );
+              })();
+    return {
+      reply: outcome.reply,
+      conversationId: pending.conversationId,
+      actions: [
+        {
+          label:
+            pending.intent.kind === "schedule-reminder"
+              ? `Schedule reminder: ${pending.intent.title}`
+              : pending.intent.kind === "create-event"
+                ? `Create event: ${pending.intent.title}`
+                : pending.intent.kind === "reschedule-reminder"
+                  ? `Reschedule reminder: ${outcome.records[0]?.title ?? "reminder"}`.slice(
+                      0,
+                      2_100,
+                    )
+                  : `Reschedule event: ${outcome.records[0]?.title ?? "event"}`.slice(0, 2_100),
+          status:
+            outcome.status === "rejected" || outcome.status === "clarify"
+              ? "skipped"
+              : outcome.status,
+        },
+      ],
+      records: outcome.records,
+      taskIds: outcome.tasks.map((task) => task.id),
+      evidence: [],
+      operationOutcome: outcome.status,
+    };
+  };
   const rerunBackgroundSummary = (input: {
     actor: LifeActor;
     scope: LifeScope;
@@ -449,6 +591,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       records.push(record);
       return record;
     };
+    let continuation: ContinuationDirective | undefined;
     const finish = (reply: string): ChatResponse => {
       rememberSession(conversationKey, "assistant", reply);
       return {
@@ -458,6 +601,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         records,
         taskIds: tasks.map((task) => task.id),
         evidence,
+        ...(continuation ? { continuation } : {}),
       };
     };
     const lower = message.toLowerCase();
@@ -469,6 +613,113 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       typeof settings.values.timeZone === "string"
         ? settings.values.timeZone
         : Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (request.pendingIntent) {
+      try {
+        const directive = pendingDirective(
+          request.actor,
+          request.scope,
+          request.pendingIntent,
+          message,
+          now(),
+          timeZone,
+        );
+        if (directive) {
+          continuation = directive;
+          return finish(
+            directive.action === "cancel"
+              ? "Okay, I’ll drop that reminder request."
+              : "Got it. I can schedule that reminder now.",
+          );
+        }
+      } catch (error) {
+        if (error instanceof PendingAnswerInputError) return finish(error.message);
+        if (error instanceof CalendarTimeError)
+          return finish(`${error.message} Please choose another time.`);
+        throw error;
+      }
+      if (
+        request.pendingIntent.state === "awaiting-fields" &&
+        /^(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?(?:please\s+)?remind me\b/i.test(
+          message,
+        ) &&
+        /\b(?:in\s+\d|today|tomorrow|next\s+(?:sun|mon|tues|wednes|thurs|fri|satur)day|at\s+\d)\b/i.test(
+          message,
+        )
+      )
+        continuation = {
+          action: "cancel",
+          pendingIntentId: request.pendingIntent.id,
+          expectedRevision: request.pendingIntent.revision,
+        };
+    }
+    const timeCorrection =
+      /^actually,?\s+(?:make|move|change)\s+it\s+(?:to\s+)?(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)[.!?]?$/i.exec(
+        message,
+      );
+    if (timeCorrection && request.recentOperation) {
+      const receipt = request.recentOperation;
+      const target = options.store.getRecord(request.actor, receipt.recordId);
+      if (
+        !target ||
+        target.kind !== receipt.kind ||
+        target.scope.type !== request.scope.type ||
+        target.scope.id !== request.scope.id ||
+        target.revision !== receipt.expectedRevision
+      )
+        return finish("That item changed. Please tell me which current reminder or event to move.");
+      const previousAt = parseInstant(
+        target.data[receipt.kind === "reminder" ? "dueAt" : "startAt"],
+      );
+      if (previousAt === undefined)
+        return finish("That item does not have a current time I can safely change.");
+      try {
+        const previous = localParts(previousAt, timeZone),
+          clock = parseClock(timeCorrection[1]!),
+          at = resolveZoned(
+            {
+              year: previous.year,
+              month: previous.month,
+              day: previous.day,
+              ...clock,
+            },
+            timeZone,
+          );
+        if (at <= now()) return finish("That time is in the past. Please choose a future time.");
+        continuation = {
+          action: "replace",
+          intent:
+            receipt.kind === "reminder"
+              ? { kind: "reschedule-reminder" }
+              : { kind: "reschedule-event" },
+          missing: [receipt.kind === "reminder" ? "when" : "start"],
+          question: `Move “${target.title}” to ${timeCorrection[1]!.trim()}?`,
+          answer:
+            receipt.kind === "reminder"
+              ? { when: { type: "instant", at } }
+              : { start: { type: "instant", at } },
+          target: {
+            recordId: target.id,
+            expectedRevision: target.revision,
+            ...(receipt.taskId ? { taskId: receipt.taskId } : {}),
+          },
+        };
+        return finish(`I can move “${target.title}” to ${timeCorrection[1]!.trim()}.`);
+      } catch (error) {
+        if (error instanceof CalendarTimeError)
+          return finish(`${error.message} Please choose another time.`);
+        throw error;
+      }
+    }
+    const missingReminder = options.model ? undefined : parseMissingReminder(message);
+    if (missingReminder) {
+      continuation = {
+        action: request.pendingIntent?.state === "awaiting-fields" ? "replace" : "create",
+        intent: missingReminder,
+        missing: ["when"],
+        question: "When should I remind you?",
+      };
+      return finish("When should I remind you?");
+    }
     const runOperation = (intent: LifeIntent, label: string) => {
       const outcome = operations.execute(request.actor, request.scope, intent, timeZone);
       records.push(...outcome.records);
@@ -1274,6 +1525,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   }
   return {
     chat,
+    continuePendingIntent,
     invalidateContext,
     invalidateActorContext,
     rerunBackgroundSummary,
@@ -1349,6 +1601,11 @@ function registerHandlers(
       const reminder = store.getRecord(actor, input.recordId);
       if (!reminder || !active(reminder))
         return { status: "skipped", reason: "record_unavailable_or_closed" };
+      if (
+        reminder.data.taskId !== context.task.id &&
+        reminder.data.taskId !== context.task.parentId
+      )
+        return { status: "skipped", reason: "task_superseded" };
       for (const relation of reminder.relationships) {
         const linked = store.getRecord(actor, relation.targetId);
         if (linked?.kind === "need" && !active(linked))
@@ -1591,6 +1848,7 @@ function applyModelPlan(
 ): ChatResponse {
   let reply = plan.reply;
   const outcomeReplies: string[] = [];
+  let continuation: ContinuationDirective | undefined;
   for (const action of plan.actions) {
     if (action.type === "reply") {
       if (!outcomeReplies.length) reply = action.text;
@@ -1623,6 +1881,49 @@ function applyModelPlan(
           ...(item.reference ? { reference: item.reference } : {}),
         })),
       );
+    } else if (action.type === "draft_life_operation") {
+      const authorized =
+        action.intent.kind === "schedule_reminder"
+          ? authorizesIntent(request.message, {
+              kind: "schedule_reminder",
+              title: action.intent.title,
+              when: { type: "instant", at: 0 },
+            })
+          : authorizesIntent(request.message, {
+              kind: "create_event",
+              title: action.intent.title,
+              start: { type: "instant", at: 0 },
+              ...(action.intent.durationMinutes === undefined
+                ? {}
+                : { durationMinutes: action.intent.durationMinutes }),
+            });
+      if (!authorized) {
+        outcomeReplies.push(
+          "I need a direct request in your current message before I prepare that change.",
+        );
+      } else if (action.intent.kind === "schedule_reminder") {
+        continuation = {
+          action: "create",
+          intent: { kind: "schedule-reminder", title: action.intent.title },
+          missing: ["when"],
+          question: "When should I remind you?",
+        };
+        outcomeReplies.push("When should I remind you?");
+      } else {
+        continuation = {
+          action: "create",
+          intent: {
+            kind: "create-event",
+            title: action.intent.title,
+            ...(action.intent.durationMinutes === undefined
+              ? {}
+              : { durationMinutes: action.intent.durationMinutes }),
+          },
+          missing: ["start"],
+          question: "When should I add that event?",
+        };
+        outcomeReplies.push("When should I add that event?");
+      }
     } else if (action.type === "life_operation") {
       if (!authorizesIntent(request.message, action.intent)) {
         outcomeReplies.push(
@@ -1652,7 +1953,10 @@ function applyModelPlan(
       outcomeReplies.push(outcome.reply);
     }
   }
-  return finish((outcomeReplies.length ? outcomeReplies.join("\n") : reply).slice(0, 8_000));
+  const response = finish(
+    (outcomeReplies.length ? outcomeReplies.join("\n") : reply).slice(0, 8_000),
+  );
+  return continuation ? { ...response, continuation } : response;
 }
 
 function authorizesIntent(message: string, intent: LifeIntent): boolean {
@@ -1678,7 +1982,9 @@ function authorizesIntent(message: string, intent: LifeIntent): boolean {
           `^(?:please\\s+)?${polite}(?:remind|make sure|don't let me forget)\\b`,
           "i",
         ).test(requestText) ||
-          (new RegExp(`^(?:please\\s+)?${polite}(?:set|schedule)\\b`, "i").test(requestText) &&
+          (new RegExp(`^(?:please\\s+)?${polite}(?:set|schedule|create|add|put)\\b`, "i").test(
+            requestText,
+          ) &&
             /\b(?:reminder|timer)\b/i.test(requestText))) &&
         overlaps(intent.title)
       );

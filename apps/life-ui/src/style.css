@@ -287,6 +287,50 @@ main {
   font-size: 12px;
   line-height: 1.45;
 }
+.intent-strip {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  margin: 12px 0 0;
+  padding: 12px 15px;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  background: rgba(255, 253, 248, 0.72);
+}
+.intent-strip > div {
+  flex: 1;
+  min-width: 0;
+}
+.intent-strip strong,
+.intent-strip span {
+  display: block;
+}
+.intent-strip strong {
+  font:
+    400 17px Georgia,
+    serif;
+}
+.intent-strip span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+.intent-strip button {
+  flex: 0 0 auto;
+  border: 1px solid var(--rule);
+  border-radius: 18px;
+  background: var(--paper);
+  padding: 7px 11px;
+}
+.intent-executing {
+  border-left: 3px solid var(--moss);
+}
+.intent-interrupted,
+.intent-expired,
+.intent-error {
+  border-left: 3px solid var(--coral);
+}
 .conversation-history {
   max-width: 650px;
 }

@@ -187,6 +187,16 @@ export interface ConversationTurn {
   createdAt: string | number;
   updatedAt: string | number;
 }
+export interface PendingIntent {
+  id: string;
+  kind: "reminder" | "event" | "need";
+  title: string;
+  state: "awaiting-fields" | "executing" | "interrupted" | "expired";
+  question?: string;
+  missing: string[];
+  expiresAt: string;
+  revision: number;
+}
 export interface ModelStatus {
   mode: "deterministic" | "local";
   configured: boolean;
