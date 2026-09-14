@@ -106,6 +106,7 @@ export function App() {
   const chatEpoch = useRef(0);
   const chatRequest = useRef<AbortController | undefined>(undefined);
   const pendingIntentRequest = useRef<AbortController | undefined>(undefined);
+  const pluginBuildRequest = useRef<AbortController | undefined>(undefined);
   const chatInFlight = useRef("");
   const restoredUrl = useRef(false);
   const observedChatEpoch = useRef<number | undefined>(undefined);
@@ -141,6 +142,12 @@ export function App() {
     const id = setTimeout(() => setNotice(""), 3500);
     return () => clearTimeout(id);
   }, [notice]);
+  useEffect(
+    () => () => {
+      pluginBuildRequest.current?.abort();
+    },
+    [],
+  );
   const scope = data?.scope ?? "";
   useEffect(() => {
     if (!data) return;
@@ -506,6 +513,7 @@ export function App() {
               chatEpoch.current += 1;
               chatRequest.current?.abort();
               pendingIntentRequest.current?.abort();
+              pluginBuildRequest.current?.abort();
               chatInFlight.current = "";
               desiredScope.current = e.target.value;
               setMessages([]);
@@ -619,21 +627,37 @@ export function App() {
             }}
             build={async (r) => {
               const generation = scopeGeneration.current;
+              const controller = new AbortController();
+              pluginBuildRequest.current?.abort();
+              pluginBuildRequest.current = controller;
               setBusy("build");
               try {
-                await api.buildPlugin(r, scope);
+                await api.buildPlugin(r, scope, controller.signal);
                 if (generation !== scopeGeneration.current) return;
-                setNotice("Ellie started building it");
+                setNotice("App created");
                 await load(desiredScope.current);
               } catch (error) {
-                if (generation === scopeGeneration.current)
-                  setError(
-                    error instanceof Error ? error.message : "Ellie could not start that build.",
-                  );
+                if (generation === scopeGeneration.current) {
+                  const stopped =
+                    controller.signal.aborted ||
+                    (error instanceof ApiError && error.status === 408) ||
+                    (error instanceof DOMException && error.name === "AbortError");
+                  if (stopped) {
+                    setNotice("Build request cancelled");
+                    await load(scope, true);
+                  } else
+                    setError(
+                      error instanceof Error ? error.message : "Ellie could not start that build.",
+                    );
+                }
               } finally {
-                if (generation === scopeGeneration.current) setBusy("");
+                if (pluginBuildRequest.current === controller) {
+                  pluginBuildRequest.current = undefined;
+                  if (generation === scopeGeneration.current) setBusy("");
+                }
               }
             }}
+            cancelBuild={() => pluginBuildRequest.current?.abort()}
             busy={busy === "build"}
           />
         )}{" "}
@@ -2458,12 +2482,14 @@ function Space({
   open,
   changed,
   build,
+  cancelBuild,
   busy,
 }: {
   plugins: PluginSummary[];
   open: (p: PluginSummary) => void;
   changed: (message: string) => Promise<void>;
   build: (s: string) => Promise<void>;
+  cancelBuild: () => void;
   busy: boolean;
 }) {
   const [idea, setIdea] = useState(""),
@@ -2489,7 +2515,16 @@ function Space({
             placeholder="A family board, a tiny game, a standings view…"
           />
         </label>
-        <button disabled={busy || !idea.trim()}>{busy ? "Starting…" : "Build it"}</button>
+        {busy ? (
+          <div className="build-progress" role="status">
+            <span>Ellie is building your app. This can take up to two minutes.</span>
+            <button type="button" onClick={cancelBuild}>
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button disabled={!idea.trim()}>Build it</button>
+        )}
       </form>
       {plugins.length ? (
         <div className="plugins">
@@ -2611,6 +2646,8 @@ function PluginManager({
     [confirmRemove, setConfirmRemove] = useState(false),
     [busy, setBusy] = useState(""),
     [error, setError] = useState("");
+  const revisionRequest = useRef<AbortController | undefined>(undefined);
+  const mounted = useRef(true);
   useEffect(() => {
     let active = true;
     void api
@@ -2629,6 +2666,8 @@ function PluginManager({
       );
     return () => {
       active = false;
+      mounted.current = false;
+      revisionRequest.current?.abort();
     };
   }, [plugin.id]);
   const mutate = async (name: string, operation: () => Promise<unknown>, message: string) => {
@@ -2641,6 +2680,32 @@ function PluginManager({
       setError(cause instanceof Error ? cause.message : "The app could not be updated.");
     } finally {
       setBusy("");
+    }
+  };
+  const revise = async () => {
+    const controller = new AbortController();
+    revisionRequest.current = controller;
+    setBusy("revise");
+    setError("");
+    try {
+      await api.revisePlugin(plugin.id, request.trim(), plugin.version, controller.signal);
+      await changed("App revision created");
+    } catch (cause) {
+      const stopped =
+        controller.signal.aborted ||
+        (cause instanceof ApiError && cause.status === 408) ||
+        (cause instanceof DOMException && cause.name === "AbortError");
+      if (!mounted.current) return;
+      if (stopped) {
+        await changed("Revision request cancelled");
+        return;
+      }
+      setError(cause instanceof Error ? cause.message : "The app could not be updated.");
+    } finally {
+      if (mounted.current && revisionRequest.current === controller) {
+        revisionRequest.current = undefined;
+        setBusy("");
+      }
     }
   };
   return (
@@ -2661,16 +2726,18 @@ function PluginManager({
       <button
         className="primary"
         disabled={Boolean(busy) || !request.trim()}
-        onClick={() =>
-          void mutate(
-            "revise",
-            () => api.revisePlugin(plugin.id, request.trim(), plugin.version),
-            "App revision created",
-          )
-        }
+        onClick={() => void revise()}
       >
         {busy === "revise" ? "Revising…" : "Create revision"}
       </button>
+      {busy === "revise" && (
+        <div className="revision-progress" role="status">
+          <span>Ellie is preparing a new version. The current app stays active.</span>
+          <button type="button" onClick={() => revisionRequest.current?.abort()}>
+            Cancel revision
+          </button>
+        </div>
+      )}
       <section className="revision-history">
         <h3>Revision history</h3>
         {history.map((revision) => (

@@ -27,7 +27,9 @@ import {
 } from "../../../packages/life-import/src/index.ts";
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
 import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
+import { PluginBuildError } from "../../../packages/life-harness/src/build.ts";
 import type { ModelStatus } from "./model-status.ts";
+import { pluginChildDocument } from "./plugin-bootstrap.ts";
 import type { LifePlugin, PluginStore } from "../../../packages/life-plugins/src/index.ts";
 import {
   PluginError,
@@ -67,6 +69,7 @@ export interface LifeHarnessLike {
     history?: Array<{ role: "user" | "assistant"; content: string }>;
     isContextCurrent?: () => boolean;
     pendingIntent?: PendingLifeIntent;
+    signal?: AbortSignal;
     recentOperation?: {
       kind: "reminder" | "event";
       recordId: string;
@@ -116,13 +119,23 @@ export interface LifeHarnessLike {
     evidence?: Array<{ sourceId: string; title: string; reference?: string }>;
     operationOutcome?: "completed" | "scheduled" | "queued" | "clarify" | "rejected";
   }>;
-  buildPlugin?(input: { actor: LifeActor; scope: LifeScope; request: string }): Promise<LifePlugin>;
+  buildPlugin?(input: {
+    actor: LifeActor;
+    scope: LifeScope;
+    request: string;
+    isContextCurrent?: () => boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
+  }): Promise<LifePlugin>;
   revisePlugin?(input: {
     actor: LifeActor;
     scope: LifeScope;
     id: string;
     request: string;
     expectedVersion: number;
+    isContextCurrent?: () => boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
   }): Promise<LifePlugin>;
   invalidateContext?(actor: LifeActor, scope: LifeScope): void;
   invalidateActorContext?(actor: LifeActor): void;
@@ -313,6 +326,7 @@ export class LifeHttpServer {
   private contextTail: Promise<void> = Promise.resolve();
   private readonly activeRequests = new Set<Promise<void>>();
   private readonly extractionControllers = new Set<AbortController>();
+  private readonly pluginBuildControllers = new Set<AbortController>();
   private binaryUploads = 0;
   private readonly mutationRequests = new Set<Promise<void>>();
   private readonly personalReviews = new Map<
@@ -492,6 +506,7 @@ export class LifeHttpServer {
     this.accepting = false;
     this.options.preparationMonitor?.stop();
     for (const controller of this.extractionControllers) controller.abort();
+    for (const controller of this.pluginBuildControllers) controller.abort();
     if (this.server) {
       const closing = this.server;
       await new Promise<void>((ok, fail) => {
@@ -973,6 +988,7 @@ export class LifeHttpServer {
   }
   private async settleActorMutations(): Promise<boolean> {
     for (const controller of this.extractionControllers) controller.abort();
+    for (const controller of this.pluginBuildControllers) controller.abort();
     if (!this.mutationRequests.size) return true;
     let timer: NodeJS.Timeout | undefined;
     const settled = await Promise.race([
@@ -1771,8 +1787,11 @@ export class LifeHttpServer {
       );
       return;
     }
+    const controller = new AbortController();
+    this.pluginBuildControllers.add(controller);
     const fingerprint = begun.contextFingerprint,
       contextCurrent = () => {
+        if (controller.signal.aborted || this.personalResetActive || !this.accepting) return false;
         try {
           return (
             this.options.store.conversationContextFingerprint(this.actor, begun.conversation.id) ===
@@ -1888,6 +1907,7 @@ export class LifeHttpServer {
         isContextCurrent: contextCurrent,
         ...(pendingIntent ? { pendingIntent } : {}),
         ...(recentOperation ? { recentOperation } : {}),
+        signal: controller.signal,
       });
       this.recheckOwner(owner(scope));
       const directive = result.continuation;
@@ -1964,6 +1984,8 @@ export class LifeHttpServer {
         });
       } catch {}
       throw error;
+    } finally {
+      this.pluginBuildControllers.delete(controller);
     }
   }
   private conversationResult(
@@ -2358,21 +2380,40 @@ export class LifeHttpServer {
       manifest = builtInManifest(requestText);
     let plugin: LifePlugin;
     if (manifest) plugin = this.options.plugins.install(owner(scope), manifest);
-    else if (this.options.harness.buildPlugin)
+    else if (this.options.harness.buildPlugin) {
+      const controller = new AbortController(),
+        disconnect = () => {
+          if (!response.writableFinished)
+            controller.abort(new Error("Plugin build client disconnected."));
+        },
+        isContextCurrent = () => {
+          if (controller.signal.aborted || this.personalResetActive || !this.accepting)
+            return false;
+          try {
+            this.recheckOwner(owner(scope));
+            return true;
+          } catch {
+            return false;
+          }
+        };
+      this.pluginBuildControllers.add(controller);
+      response.once("close", disconnect);
       try {
         plugin = await this.options.harness.buildPlugin({
           actor: this.actor,
           scope,
           request: requestText,
+          signal: controller.signal,
+          isContextCurrent,
         });
       } catch (error) {
         if (error instanceof PluginError) throw error;
-        throw new HttpError(
-          422,
-          "Connect a local model to build a custom app; arcade and MLB work now.",
-        );
+        throw this.pluginBuildError(error);
+      } finally {
+        response.off("close", disconnect);
+        this.pluginBuildControllers.delete(controller);
       }
-    else throw new HttpError(503, "Custom plugin building is unavailable.");
+    } else throw new HttpError(503, "Custom plugin building is unavailable.");
     this.recheckOwner(owner(scope));
     this.send(response, 201, serializePlugin(plugin));
   }
@@ -2380,11 +2421,7 @@ export class LifeHttpServer {
     const id = identifier(decodeURIComponent(path.split("/").at(-2)!)),
       found = this.findPlugin(id),
       pluginHtml = this.options.plugins.view(found.owner, id),
-      childPolicy =
-        "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; form-action 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'",
-      childBootstrap = `<meta http-equiv="Content-Security-Policy" content=${JSON.stringify(childPolicy)}><script>(()=>{const pluginId=${JSON.stringify(id)},channel=new MessageChannel();parent.postMessage({type:'ellie:child-port',pluginId},'*',[channel.port1]);addEventListener('ellie:deliver-port',()=>postMessage({type:'ellie:connect',pluginId},'*',[channel.port2]),{once:true})})()</script>`,
-      childDelivery = `<script>dispatchEvent(new Event('ellie:deliver-port'))</script>`,
-      encoded = Buffer.from(`${childBootstrap}${pluginHtml}${childDelivery}`).toString("base64"),
+      encoded = Buffer.from(pluginChildDocument(id, pluginHtml)).toString("base64"),
       html = `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><body>
 <style>html,body,iframe{width:100%;height:100%;margin:0;border:0;background:transparent}body{overflow:hidden}</style>
 <script>(()=>{const pluginId=${JSON.stringify(id)},frame=document.createElement('iframe');frame.title='Plugin';frame.sandbox='allow-scripts';let hostPort,childPort,loaded=false,connected=false;
@@ -2471,20 +2508,60 @@ frame.srcdoc=new TextDecoder().decode(Uint8Array.from(atob(${JSON.stringify(enco
       found = this.findPlugin(id),
       body = jsonObject(await this.body(request)),
       [scopeType, ...scopeId] = found.owner.split(":"),
-      plugin = await this.options.harness
-        .revisePlugin({
-          actor: this.actor,
-          scope: { type: scopeType as "user" | "group", id: scopeId.join(":") },
-          id,
-          request: bounded(body.request, "request", 8000),
-          expectedVersion: Number(body.expectedVersion),
-        })
-        .catch((error: unknown) => {
-          if (error instanceof PluginError) throw error;
-          throw new HttpError(422, "Connect a local model to revise this app.");
-        });
+      scope = { type: scopeType as "user" | "group", id: scopeId.join(":") },
+      controller = new AbortController(),
+      disconnect = () => {
+        if (!response.writableFinished)
+          controller.abort(new Error("Plugin revision client disconnected."));
+      },
+      isContextCurrent = () => {
+        if (controller.signal.aborted || this.personalResetActive || !this.accepting) return false;
+        try {
+          this.recheckOwner(found.owner);
+          return true;
+        } catch {
+          return false;
+        }
+      };
+    this.pluginBuildControllers.add(controller);
+    response.once("close", disconnect);
+    let plugin: LifePlugin;
+    try {
+      plugin = await this.options.harness.revisePlugin({
+        actor: this.actor,
+        scope,
+        id,
+        request: bounded(body.request, "request", 8000),
+        expectedVersion: Number(body.expectedVersion),
+        signal: controller.signal,
+        isContextCurrent,
+      });
+    } catch (error) {
+      if (error instanceof PluginError) throw error;
+      throw this.pluginBuildError(error);
+    } finally {
+      response.off("close", disconnect);
+      this.pluginBuildControllers.delete(controller);
+    }
     this.recheckOwner(found.owner);
     this.send(response, 200, serializePlugin(plugin));
+  }
+  private pluginBuildError(error: unknown): Error {
+    if (!(error instanceof PluginBuildError))
+      return error instanceof Error ? error : new Error("Custom app operation failed.");
+    if (error.code === "timeout")
+      return new HttpError(504, "The local model took too long. Try a smaller app request.");
+    if (error.code === "cancelled")
+      return new HttpError(408, "The custom app request was cancelled.");
+    if (error.code === "model_unavailable") return new HttpError(422, error.message);
+    if (error.code === "access_revoked")
+      return new HttpError(403, "Access changed before the custom app was saved.");
+    if (error.code === "context_changed" || error.code === "conflict")
+      return new HttpError(409, "The app or its context changed. Review it and try again.");
+    return new HttpError(
+      422,
+      "The local model returned an invalid custom app. Refine the request.",
+    );
   }
   private pluginDelete(response: ServerResponse, path: string): void {
     const id = identifier(decodeURIComponent(path.split("/").at(-1)!)),

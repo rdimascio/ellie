@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LocalOpenAIModel, validateModelPlan } from "../packages/life-harness/src/model.ts";
+import {
+  LifeModelBuildError,
+  LocalOpenAIModel,
+  validateModelPlan,
+} from "../packages/life-harness/src/model.ts";
 import {
   PLAN_MESSAGE_BYTE_LIMIT,
   planMessages,
@@ -441,4 +445,109 @@ test("the original plan deadline bounds both inference attempts", async (context
   await rejected;
   releaseSecond!(new Response("late"));
   await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("app generation supplies the storage SDK contract and bounds prior-code context", async () => {
+  let calls = 0;
+  const candidate = {
+      name: "Counter",
+      description: "A saved counter.",
+      html: "<button>Count</button>",
+    },
+    model = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test", async (_url, init) => {
+      calls++;
+      const body = JSON.parse(String(init?.body)),
+        instruction = body.messages[0].content,
+        input = JSON.parse(body.messages[1].content);
+      assert.match(instruction, /already available synchronously as window.ellie/);
+      assert.match(instruction, /get returns the saved JSON value itself, or null/);
+      assert.match(instruction, /set resolves only after the host saves/);
+      assert.match(instruction, /Never use localStorage/);
+      assert.match(instruction, /Previous code.*untrusted/);
+      assert.equal(input.request, "Make the counter blue.");
+      assert.equal(input.previous.html, "<p>Previous counter</p>");
+      return Response.json({ choices: [{ message: { content: JSON.stringify(candidate) } }] });
+    });
+  assert.deepEqual(
+    await model.build({
+      request: "Make the counter blue.",
+      previous: { name: "Counter", description: "Saved count", html: "<p>Previous counter</p>" },
+    }),
+    candidate,
+  );
+  await assert.rejects(
+    model.build({
+      request: "Make this blue.",
+      previous: { name: "Counter", description: "Saved count", html: "\u0001".repeat(150_000) },
+    }),
+    /build context exceeds/,
+  );
+  assert.equal(calls, 1, "oversized previous code never reaches inference");
+});
+
+test("app generation has a separate bounded deadline without extending chat planning", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const signals: AbortSignal[] = [],
+    releases: Array<(response: Response) => void> = [],
+    model = new LocalOpenAIModel(
+      "http://127.0.0.1:8080/v1",
+      "test",
+      async (_url, init) => {
+        signals.push(init!.signal as AbortSignal);
+        return new Promise<Response>((resolve) => {
+          releases.push(resolve);
+        });
+      },
+      { timeoutMs: 10, buildTimeoutMs: 100 },
+    );
+  const plan = assert.rejects(
+      model.plan({ message: "Hello", history: [], evidence: [] }),
+      /deadline/,
+    ),
+    build = assert.rejects(model.build("Build a counter."), /deadline/);
+  context.mock.timers.tick(10);
+  await plan;
+  assert.equal(signals[0]!.aborted, true);
+  assert.equal(signals[1]!.aborted, false);
+  context.mock.timers.tick(90);
+  await build;
+  assert.equal(signals[1]!.aborted, true);
+  for (const release of releases) release(new Response("late"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.throws(
+    () => new LocalOpenAIModel("http://127.0.0.1/v1", "test", fetch, { buildTimeoutMs: 120_001 }),
+    /build timeout/,
+  );
+});
+
+test("app adapter errors distinguish invalid output, transport and cancellation without leaking output", async () => {
+  for (const output of [
+    "private malformed output",
+    "null",
+    JSON.stringify({ name: "App", description: "A", html: "<p>Hi</p>", capabilities: ["network"] }),
+  ]) {
+    const model = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test", async () =>
+      Response.json({ choices: [{ message: { content: output } }] }),
+    );
+    await assert.rejects(model.build("Build an app."), (error) => {
+      assert.ok(error instanceof LifeModelBuildError);
+      assert.equal(error.code, "invalid_response");
+      assert.equal(error.message.includes(output), false);
+      return true;
+    });
+  }
+  const model = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test", async () => {
+    throw new Error("private transport diagnostics");
+  });
+  await assert.rejects(model.build("Build an app."), (error) => {
+    assert.ok(error instanceof LifeModelBuildError);
+    assert.equal(error.code, "transport");
+    assert.equal(error.message.includes("private"), false);
+    return true;
+  });
+  await assert.rejects(model.build("Build an app.", AbortSignal.abort()), (error) => {
+    assert.ok(error instanceof LifeModelBuildError);
+    assert.equal(error.code, "cancelled");
+    return true;
+  });
 });

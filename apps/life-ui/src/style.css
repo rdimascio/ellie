@@ -838,6 +838,26 @@ main {
   border-radius: 18px;
   padding: 9px 16px;
 }
+.build-progress {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: 300px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.build-progress button,
+.revision-progress button {
+  white-space: nowrap;
+}
+.revision-progress {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
 .plugins {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

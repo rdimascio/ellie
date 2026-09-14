@@ -9,7 +9,9 @@ import { MLBAdapter, PluginStore } from "../packages/life-plugins/src/index.ts";
 import {
   createLifeHarness,
   LifeOperations,
+  LifeModelBuildError,
   LocalOpenAIModel,
+  PluginBuildError,
   validateModelPlan,
 } from "../packages/life-harness/src/index.ts";
 import type { LifeModel } from "../packages/life-harness/src/index.ts";
@@ -1191,6 +1193,329 @@ test("custom plugin revisions keep their capability boundary and saved version",
     assert.match(JSON.stringify(revisionInput), /Revision 1/);
     assert.equal(f.plugins.rollback("user:alice", revised.id, revised.version, 1).version, 3);
   } finally {
+    await f.close();
+  }
+});
+
+test("a timed-out noncooperative plugin build cannot install its late result", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  let observedSignal: AbortSignal | undefined;
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build(_request, signal) {
+      observedSignal = signal;
+      await blocked;
+      return {
+        name: "Too late",
+        description: "Late result",
+        html: "<!doctype html><main>late</main>",
+      };
+    },
+  };
+  try {
+    const harness = f.make(model);
+    await assert.rejects(
+      harness.buildPlugin({ actor, scope, request: "Build a custom late app", timeoutMs: 5 }),
+      (error: unknown) => error instanceof PluginBuildError && error.code === "timeout",
+    );
+    assert.equal(observedSignal?.aborted, true);
+    assert.deepEqual(f.plugins.list("user:alice"), []);
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(f.plugins.list("user:alice"), []);
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
+test("an abort before the deferred build call never invokes the model builder", async () => {
+  const f = await fixture();
+  let calls = 0;
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      calls++;
+      return { name: "Unexpected", description: "Unexpected", html: "<main>unexpected</main>" };
+    },
+  };
+  try {
+    const controller = new AbortController(),
+      pending = f.make(model).buildPlugin({
+        actor,
+        scope,
+        request: "Build a custom app",
+        signal: controller.signal,
+      });
+    controller.abort();
+    await assert.rejects(
+      pending,
+      (error: unknown) => error instanceof PluginBuildError && error.code === "cancelled",
+    );
+    assert.equal(calls, 0);
+    assert.deepEqual(f.plugins.list("user:alice"), []);
+  } finally {
+    await f.close();
+  }
+});
+
+test("noncooperative timed-out builds retain admission slots until they settle", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      await blocked;
+      return { name: "Late", description: "Late", html: "<!doctype html><main>late</main>" };
+    },
+  };
+  try {
+    const harness = f.make(model),
+      first = harness.buildPlugin({ actor, scope, request: "Build first", timeoutMs: 2 }),
+      second = harness.buildPlugin({ actor, scope, request: "Build second", timeoutMs: 2 });
+    await Promise.allSettled([first, second]);
+    await assert.rejects(
+      harness.buildPlugin({ actor, scope, request: "Build third", timeoutMs: 2 }),
+      (error: unknown) => error instanceof PluginBuildError && error.code === "model_unavailable",
+    );
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    const installed = await harness.buildPlugin({ actor, scope, request: "Build after settle" });
+    assert.equal(installed.name, "Late");
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
+test("invalid candidates are actionable and a failed revision preserves the active app", async () => {
+  const f = await fixture();
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      return {
+        name: "Broken",
+        description: "Broken",
+        html: "<!doctype html><script>function (</script>",
+      };
+    },
+  };
+  try {
+    const plugin = f.plugins.install("user:alice", {
+      name: "Current",
+      description: "Current",
+      kind: "custom",
+      capabilities: ["storage"],
+      html: "<!doctype html><main>current</main>",
+    });
+    const harness = f.make(model);
+    await assert.rejects(
+      harness.revisePlugin({
+        actor,
+        scope,
+        id: plugin.id,
+        request: "break it",
+        expectedVersion: plugin.version,
+      }),
+      (error: unknown) =>
+        error instanceof PluginBuildError &&
+        error.code === "invalid_candidate" &&
+        !error.message.includes("function ("),
+    );
+    assert.equal(f.plugins.get("user:alice", plugin.id).version, 1);
+    assert.match(f.plugins.get("user:alice", plugin.id).html!, /current/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("known local model build failures map to bounded plugin build outcomes", async () => {
+  const f = await fixture();
+  try {
+    const mappings = [
+      ["invalid_response", "invalid_candidate"],
+      ["transport", "model_unavailable"],
+      ["timeout", "timeout"],
+      ["cancelled", "cancelled"],
+    ] as const;
+    for (const [adapterCode, pluginCode] of mappings) {
+      const model: LifeModel = {
+        async plan() {
+          return { reply: "ok", actions: [] };
+        },
+        async build() {
+          throw new LifeModelBuildError(adapterCode, "static adapter failure", {
+            cause: new Error("internal candidate details"),
+          });
+        },
+      };
+      await assert.rejects(
+        f.make(model).buildPlugin({ actor, scope, request: "Build a custom app" }),
+        (error: unknown) =>
+          error instanceof PluginBuildError &&
+          error.code === pluginCode &&
+          !error.message.includes("internal candidate details"),
+      );
+    }
+    const unexpected = new Error("unexpected custom adapter failure");
+    await assert.rejects(
+      f
+        .make({
+          async plan() {
+            return { reply: "ok", actions: [] };
+          },
+          async build() {
+            throw unexpected;
+          },
+        })
+        .buildPlugin({ actor, scope, request: "Build another custom app" }),
+      (error: unknown) => error === unexpected,
+    );
+    assert.deepEqual(f.plugins.list("user:alice"), []);
+  } finally {
+    await f.close();
+  }
+});
+
+test("concurrent plugin revisions preserve one CAS winner", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  let build = 0;
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      const revision = ++build;
+      await blocked;
+      return {
+        name: "Counter",
+        description: `Revision ${revision}`,
+        html: `<!doctype html><main>${revision}</main>`,
+      };
+    },
+  };
+  try {
+    const plugin = f.plugins.install("user:alice", {
+      name: "Counter",
+      description: "Current",
+      kind: "custom",
+      capabilities: ["storage"],
+      html: "<!doctype html><main>0</main>",
+    });
+    const harness = f.make(model),
+      one = harness.revisePlugin({
+        actor,
+        scope,
+        id: plugin.id,
+        request: "one",
+        expectedVersion: 1,
+      }),
+      two = harness.revisePlugin({
+        actor,
+        scope,
+        id: plugin.id,
+        request: "two",
+        expectedVersion: 1,
+      });
+    release();
+    const results = await Promise.allSettled([one, two]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    const failure = results.find((result) => result.status === "rejected") as PromiseRejectedResult;
+    assert.equal(failure.reason instanceof PluginBuildError && failure.reason.code, "conflict");
+    assert.equal(f.plugins.get("user:alice", plugin.id).version, 2);
+  } finally {
+    release();
+    await f.close();
+  }
+});
+
+test("a stale expected plugin version is rejected before model inference", async () => {
+  const f = await fixture();
+  let calls = 0;
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      calls++;
+      return { name: "Changed", description: "Changed", html: "<main>changed</main>" };
+    },
+  };
+  try {
+    const plugin = f.plugins.install("user:alice", {
+      name: "Current",
+      description: "Current",
+      kind: "custom",
+      capabilities: ["storage"],
+      html: "<main>current</main>",
+    });
+    await assert.rejects(
+      f.make(model).revisePlugin({
+        actor,
+        scope,
+        id: plugin.id,
+        request: "change it",
+        expectedVersion: plugin.version + 1,
+      }),
+      (error: unknown) => error instanceof PluginBuildError && error.code === "conflict",
+    );
+    assert.equal(calls, 0);
+    assert.equal(f.plugins.get("user:alice", plugin.id).version, 1);
+  } finally {
+    await f.close();
+  }
+});
+
+test("pre-aborted built-in builds and invalidated late custom builds do not install", async () => {
+  const f = await fixture();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => (release = resolve));
+  const model: LifeModel = {
+    async plan() {
+      return { reply: "ok", actions: [] };
+    },
+    async build() {
+      await blocked;
+      return { name: "Late", description: "Late", html: "<!doctype html><main>late</main>" };
+    },
+  };
+  try {
+    const harness = f.make(model),
+      controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      harness.buildPlugin({
+        actor,
+        scope,
+        request: "Build an arcade game",
+        signal: controller.signal,
+      }),
+      (error: unknown) => error instanceof PluginBuildError && error.code === "cancelled",
+    );
+    const pending = harness.buildPlugin({ actor, scope, request: "Build a custom late app" });
+    await new Promise((resolve) => setImmediate(resolve));
+    harness.invalidateContext(actor, scope);
+    release();
+    await assert.rejects(
+      pending,
+      (error: unknown) => error instanceof PluginBuildError && error.code === "context_changed",
+    );
+    assert.deepEqual(f.plugins.list("user:alice"), []);
+  } finally {
+    release();
     await f.close();
   }
 });

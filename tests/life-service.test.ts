@@ -14,7 +14,114 @@ import {
   type TaskRecord,
 } from "../packages/task-runtime/src/index.ts";
 import { createLifeServer, type LifeHarnessLike } from "../apps/life/src/server.ts";
+import { pluginChildDocument } from "../apps/life/src/plugin-bootstrap.ts";
+import { PluginBuildError } from "../packages/life-harness/src/build.ts";
 import { createLifeApplication } from "../apps/life/src/main.ts";
+
+test("plugin child bootstrap installs a frozen storage SDK before custom HTML", () => {
+  const marker = "<script>window.customSawEllie=window.ellie</script>",
+    document = pluginChildDocument("plugin-1", marker);
+  assert.ok(document.indexOf("Object.defineProperty(window,'ellie'") < document.indexOf(marker));
+  assert.match(document, /Object\.freeze\(\{get:key=>send/);
+  assert.match(document, /writable:false,configurable:false/);
+  assert.match(document, /pending\.size>=32/);
+  assert.match(document, /hasOwnProperty\.call\(item,'toJSON'\)/);
+  assert.match(document, /Number\.isFinite/);
+  assert.match(document, /byteLength>16384/);
+  assert.match(document, /Storage request timed out\./);
+  assert.match(document, /addEventListener\('pagehide',stop/);
+  assert.match(document, /legacy\.port2/);
+  assert.match(document, /addEventListener\('DOMContentLoaded'/);
+  assert.match(document, /sendWindow\(\{type:'ellie:connect'/);
+  assert.doesNotMatch(document, /\[upstream\.port2\]/);
+});
+
+test("plugin builds expose actionable deadlines and abort during service shutdown", async () => {
+  const f = await fixture();
+  try {
+    f.harness.buildPlugin = async () => {
+      throw new PluginBuildError("timeout", "deadline");
+    };
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43)),
+      timedOut = await fetch(`${running.url}/api/life/plugins/build`, {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({ scope: "user:local", request: "make a custom journal" }),
+      });
+    assert.equal(timedOut.status, 504);
+    assert.match(
+      ((await timedOut.json()) as { error: string }).error,
+      /local model took too long/i,
+    );
+
+    let aborted = false,
+      enteredBuild!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredBuild = resolve;
+    });
+    f.harness.buildPlugin = (input) =>
+      new Promise((_resolve, reject) => {
+        enteredBuild();
+        input.signal?.addEventListener(
+          "abort",
+          () => {
+            aborted = true;
+            reject(new PluginBuildError("cancelled", "cancelled"));
+          },
+          { once: true },
+        );
+      });
+    const pending = fetch(`${running.url}/api/life/plugins/build`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ scope: "user:local", request: "make another custom journal" }),
+    }).catch(() => undefined);
+    await entered;
+    await running.server.close();
+    await pending;
+    assert.equal(aborted, true);
+  } finally {
+    await f.close();
+  }
+});
+
+test("service shutdown aborts a conversational custom build without a late install", async () => {
+  const f = await fixture();
+  try {
+    let enteredBuild!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enteredBuild = resolve;
+    });
+    f.harness.chat = (input) =>
+      new Promise((_resolve, reject) => {
+        enteredBuild();
+        input.signal?.addEventListener(
+          "abort",
+          () => reject(new PluginBuildError("cancelled", "cancelled")),
+          { once: true },
+        );
+      });
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43)),
+      pending = fetch(`${running.url}/api/life/chat`, {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({
+          scope: "user:local",
+          message: "Build a custom journal",
+          requestId: "chat-build-shutdown",
+          chatEpoch: 1,
+        }),
+      }).catch(() => undefined);
+    await entered;
+    await running.server.close();
+    await pending;
+    assert.deepEqual(f.plugins.list("user:local"), []);
+  } finally {
+    await f.close();
+  }
+});
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "ellie-life-service-"));

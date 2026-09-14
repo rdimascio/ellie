@@ -287,17 +287,19 @@ export const api = {
     }),
   taskDetail: (id: string) =>
     request<TaskDetail>(`/api/life/tasks/${encodeURIComponent(id)}/detail`),
-  buildPlugin: (requestText: string, scope: string) =>
+  buildPlugin: (requestText: string, scope: string, signal?: AbortSignal) =>
     request("/api/life/plugins/build", {
       method: "POST",
       body: JSON.stringify({ request: requestText, scope }),
+      signal,
     }),
   pluginHistory: (id: string) =>
     request<{ revisions: PluginRevision[] }>(`/api/life/plugins/${encodeURIComponent(id)}/history`),
-  revisePlugin: (id: string, requestText: string, expectedVersion: number) =>
+  revisePlugin: (id: string, requestText: string, expectedVersion: number, signal?: AbortSignal) =>
     request<PluginSummary>(`/api/life/plugins/${encodeURIComponent(id)}/revise`, {
       method: "POST",
       body: JSON.stringify({ request: requestText, expectedVersion }),
+      signal,
     }),
   rollbackPlugin: (id: string, expectedVersion: number, targetVersion: number) =>
     request<PluginSummary>(`/api/life/plugins/${encodeURIComponent(id)}/rollback`, {

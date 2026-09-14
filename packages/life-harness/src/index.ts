@@ -5,10 +5,10 @@ import type {
   LifeScope,
   LifeRecordKind,
 } from "../../life-core/src/index.ts";
-import { inferTone, LifeStore } from "../../life-core/src/index.ts";
+import { inferTone, LifeAccessError, LifeStore } from "../../life-core/src/index.ts";
 import { ProactivityEngine } from "../../life-context/src/index.ts";
 import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src/index.ts";
-import { builtInManifest } from "../../life-plugins/src/index.ts";
+import { builtInManifest, PluginError } from "../../life-plugins/src/index.ts";
 import { LifeTeaching } from "../../life-teaching/src/index.ts";
 import {
   addCalendarDays,
@@ -27,15 +27,17 @@ import {
 import type { OwnerScope, TaskRecord } from "../../task-runtime/src/index.ts";
 import { TaskRuntime } from "../../task-runtime/src/index.ts";
 import type { LifeModel, LifeModelPlan } from "./model.ts";
-import { validateModelPlan } from "./model.ts";
+import { LifeModelBuildError, validateModelPlan } from "./model.ts";
 import { LifeOperationInputError, LifeOperations } from "./operations.ts";
 import type { OperationOutcome, ReminderRescheduleJournal } from "./operations.ts";
 import type { LifeIntent } from "./operations.ts";
 import { parseMissingReminder, pendingDirective, PendingAnswerInputError } from "./continuation.ts";
 import type { ContinuationDirective, PendingLifeIntent, TemporalAnswer } from "./continuation.ts";
+import { BoundedPluginBuilder, PluginBuildError, pluginBuildTimeout } from "./build.ts";
 export * from "./model.ts";
 export * from "./operations.ts";
 export * from "./continuation.ts";
+export * from "./build.ts";
 
 export interface LifeHarnessOptions {
   store: LifeStore;
@@ -54,6 +56,7 @@ export interface ChatRequest {
   conversationId?: string;
   history?: Array<{ role: "user" | "assistant"; content: string }>;
   isContextCurrent?: () => boolean;
+  signal?: AbortSignal;
   /** Trusted service data. Never populate this from a client request body. */
   pendingIntent?: PendingLifeIntent;
   /** Trusted receipt from the immediately preceding completed operation. */
@@ -87,6 +90,8 @@ export interface LifeHarness {
     answer?: TemporalAnswer;
     replacementJournal?: ReminderRescheduleJournal;
     isContextCurrent?: () => boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
   }): Promise<ChatResponse>;
   invalidateContext(actor: LifeActor, scope: LifeScope): void;
   invalidateActorContext(actor: LifeActor): void;
@@ -100,6 +105,8 @@ export interface LifeHarness {
     scope: LifeScope;
     request: string;
     isContextCurrent?: () => boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
   }): Promise<LifePlugin>;
   revisePlugin(request: {
     actor: LifeActor;
@@ -265,6 +272,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   const sessions = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
   const contextGenerations = new Map<string, number>();
   const actorGenerations = new Map<string, number>();
+  const pluginBuilder = new BoundedPluginBuilder(2);
   registerHandlers(options.store, options.tasks, options.model, now);
 
   const sessionId = (actor: LifeActor, scope: LifeScope, id: string) => {
@@ -482,25 +490,134 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     return task;
   };
 
+  const checkBuildAuthority = (actor: LifeActor, scope: LifeScope) => {
+    try {
+      options.store.listRecords(actor, { scope, limit: 1 });
+    } catch (error) {
+      if (error instanceof LifeAccessError)
+        throw new PluginBuildError(
+          "access_revoked",
+          "Access to this space changed while building the app.",
+          { cause: error },
+        );
+      throw error;
+    }
+  };
+  const checkBuildContext = (
+    input: {
+      actor: LifeActor;
+      scope: LifeScope;
+      signal?: AbortSignal;
+      isContextCurrent?: () => boolean;
+    },
+    scopeGeneration: number,
+    actorGeneration: number,
+  ) => {
+    if (input.signal?.aborted)
+      throw new PluginBuildError("cancelled", "Plugin build was cancelled.");
+    if (
+      input.isContextCurrent?.() === false ||
+      (contextGenerations.get(contextKey(input.actor, input.scope)) ?? 0) !== scopeGeneration ||
+      (actorGenerations.get(input.actor.userId) ?? 0) !== actorGeneration
+    )
+      throw new PluginBuildError(
+        "context_changed",
+        "Conversation context changed while building the app. Please try again.",
+      );
+  };
+  const installCandidate = (owner: string, manifest: Parameters<PluginStore["install"]>[1]) => {
+    try {
+      return options.plugins.install(owner, manifest);
+    } catch (error) {
+      if (error instanceof PluginError && error.code === "invalid")
+        throw new PluginBuildError(
+          "invalid_candidate",
+          "The generated app was invalid and was not installed. Try a simpler request.",
+          { cause: error },
+        );
+      throw error;
+    }
+  };
+  const updateCandidate = (
+    owner: string,
+    id: string,
+    expectedVersion: number,
+    manifest: Parameters<PluginStore["update"]>[3],
+  ) => {
+    try {
+      return options.plugins.update(owner, id, expectedVersion, manifest);
+    } catch (error) {
+      if (error instanceof PluginError && error.code === "invalid")
+        throw new PluginBuildError(
+          "invalid_candidate",
+          "The generated revision was invalid, so the current app was kept.",
+          { cause: error },
+        );
+      if (error instanceof PluginError && ["conflict", "not_found"].includes(error.code))
+        throw new PluginBuildError("conflict", "The app changed while its revision was building.", {
+          cause: error,
+        });
+      throw error;
+    }
+  };
+  const runModelBuild = async <T>(
+    execute: (signal: AbortSignal) => Promise<T>,
+    input: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<T> => {
+    try {
+      return await pluginBuilder.run(execute, input);
+    } catch (error) {
+      if (!(error instanceof LifeModelBuildError)) throw error;
+      const code = {
+        invalid_response: "invalid_candidate",
+        transport: "model_unavailable",
+        timeout: "timeout",
+        cancelled: "cancelled",
+      }[error.code] as PluginBuildError["code"];
+      const message = {
+        invalid_response:
+          "The local model returned an invalid app candidate. Try a simpler request.",
+        transport:
+          "The local model could not complete the app build. Try again when it is available.",
+        timeout: "The local model did not finish the app build before its deadline.",
+        cancelled: "Plugin build was cancelled.",
+      }[error.code];
+      throw new PluginBuildError(code, message, { cause: error });
+    }
+  };
+
   async function buildPlugin(input: {
     actor: LifeActor;
     scope: LifeScope;
     request: string;
     isContextCurrent?: () => boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
   }): Promise<LifePlugin> {
-    // Reading the scope through LifeStore is the authority check, even when there are no records yet.
-    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
+    if (!input.request.trim() || input.request.length > 8_000)
+      throw new TypeError("Plugin build request is invalid.");
+    pluginBuildTimeout(input.timeoutMs);
+    const scopeGeneration = contextGenerations.get(contextKey(input.actor, input.scope)) ?? 0,
+      actorGeneration = actorGenerations.get(input.actor.userId) ?? 0;
+    checkBuildAuthority(input.actor, input.scope);
+    checkBuildContext(input, scopeGeneration, actorGeneration);
     const manifest = builtInManifest(input.request);
-    if (manifest) return options.plugins.install(scopeOwner(input.scope), manifest);
+    if (manifest) {
+      checkBuildContext(input, scopeGeneration, actorGeneration);
+      return installCandidate(scopeOwner(input.scope), manifest);
+    }
     if (!options.model?.build)
-      throw new Error(
+      throw new PluginBuildError(
+        "model_unavailable",
         "A local model is required to build this custom app. I can build an arcade or MLB view without one.",
       );
-    const generated = await options.model.build(input.request);
-    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
-    if (input.isContextCurrent?.() === false)
-      throw new Error("Conversation context changed while building the app.");
-    return options.plugins.install(scopeOwner(input.scope), {
+    const generated = await runModelBuild(
+      (signal) => options.model!.build!(input.request, signal),
+      { signal: input.signal, timeoutMs: input.timeoutMs },
+    );
+    checkBuildAuthority(input.actor, input.scope);
+    checkBuildContext(input, scopeGeneration, actorGeneration);
+    return installCandidate(scopeOwner(input.scope), {
       ...generated,
       kind: "custom",
       capabilities: ["storage"],
@@ -514,40 +631,77 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     request: string;
     expectedVersion: number;
     isContextCurrent?: () => boolean;
+    signal?: AbortSignal;
+    timeoutMs?: number;
   }): Promise<LifePlugin> {
     if (!input.request.trim() || input.request.length > 8_000)
       throw new TypeError("Plugin revision request is invalid.");
-    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
-    if (input.isContextCurrent?.() === false)
-      throw new Error("Conversation context changed while revising the app.");
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1)
+      throw new TypeError("Plugin expected version is invalid.");
+    pluginBuildTimeout(input.timeoutMs);
+    const scopeGeneration = contextGenerations.get(contextKey(input.actor, input.scope)) ?? 0,
+      actorGeneration = actorGenerations.get(input.actor.userId) ?? 0;
+    checkBuildAuthority(input.actor, input.scope);
+    checkBuildContext(input, scopeGeneration, actorGeneration);
     const owner = scopeOwner(input.scope),
       previous = options.plugins.get(owner, input.id);
+    if (previous.version !== input.expectedVersion)
+      throw new PluginBuildError(
+        "conflict",
+        "The app changed before its revision started building.",
+      );
     if (previous.kind !== "custom") {
       const rename = /(?:rename|change (?:the )?name)(?: it)? to\s+(.+)$/i.exec(input.request);
       if (!rename)
         throw new Error(
           "Built-in apps can be renamed here; code revisions are available for custom apps.",
         );
-      return options.plugins.update(owner, input.id, input.expectedVersion, {
+      return updateCandidate(owner, input.id, input.expectedVersion, {
         name: clean(rename[1]!),
         description: previous.description,
         kind: previous.kind,
         capabilities: previous.capabilities,
       });
     }
-    if (!options.model?.build) throw new Error("A local model is required to revise a custom app.");
-    const generated = await options.model.build({
-      request: input.request,
-      previous: {
-        name: previous.name,
-        description: previous.description,
-        html: previous.html!,
-      },
-    });
-    options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
-    if (input.isContextCurrent?.() === false)
-      throw new Error("Conversation context changed while revising the app.");
-    return options.plugins.update(owner, input.id, input.expectedVersion, {
+    if (!options.model?.build)
+      throw new PluginBuildError(
+        "model_unavailable",
+        "A local model is required to revise a custom app.",
+      );
+    const generated = await runModelBuild(
+      (signal) =>
+        options.model!.build!(
+          {
+            request: input.request,
+            previous: {
+              name: previous.name,
+              description: previous.description,
+              html: previous.html!,
+            },
+          },
+          signal,
+        ),
+      { signal: input.signal, timeoutMs: input.timeoutMs },
+    );
+    checkBuildAuthority(input.actor, input.scope);
+    checkBuildContext(input, scopeGeneration, actorGeneration);
+    let current: LifePlugin;
+    try {
+      current = options.plugins.get(owner, input.id);
+    } catch (error) {
+      if (error instanceof PluginError && error.code === "not_found")
+        throw new PluginBuildError("conflict", "The app changed while its revision was building.", {
+          cause: error,
+        });
+      throw error;
+    }
+    if (
+      current.version !== input.expectedVersion ||
+      current.kind !== previous.kind ||
+      JSON.stringify(current.capabilities) !== JSON.stringify(previous.capabilities)
+    )
+      throw new PluginBuildError("conflict", "The app changed while its revision was building.");
+    return updateCandidate(owner, input.id, input.expectedVersion, {
       ...generated,
       kind: "custom",
       capabilities: [...previous.capabilities],
@@ -1360,6 +1514,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         scope: request.scope,
         request: message,
         isContextCurrent: request.isContextCurrent,
+        signal: request.signal,
       });
       actions.push({ label: `Build ${plugin.name}`, status: "completed" });
       return finish(`Built “${plugin.name}”. It’s ready in your space.`);
@@ -1409,6 +1564,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         request: clean(revision[2]!),
         expectedVersion: matches[0]!.version,
         isContextCurrent: request.isContextCurrent,
+        signal: request.signal,
       });
       actions.push({ label: `Revise ${plugin.name}`, status: "completed" });
       return finish(`Updated “${plugin.name}” to version ${plugin.version}.`);

@@ -16,10 +16,18 @@ Source text may be excerpted at a Unicode code-point boundary, with an explicit 
 
 ## Transport behavior
 
-The adapter uses an explicitly configured unauthenticated literal-IP HTTP loopback endpoint and rejects redirects. Its response limit is 256,000 bytes. Each request has a thirty-second deadline; direct SDK tests or callers may choose a shorter deadline.
+The adapter uses an explicitly configured unauthenticated literal-IP HTTP loopback endpoint and rejects redirects. Its response limit is 256,000 bytes. A conversational plan has a thirty-second deadline. App generation has a separate ninety-second default, configurable up to two minutes; callers may choose shorter deadlines. This longer generation budget does not extend ordinary chat planning.
 
 Deadline and cancellation return even if an injected transport ignores abort. At most four inference requests can remain active in one adapter instance. A timed-out fetch that has not actually settled retains its slot, so retries cannot create unlimited orphan requests. Response bodies are cancelled on abort, oversized headers or read failure, without waiting indefinitely for a cancellation callback.
 
 Invalid JSON or an invalid action schema gets one repair attempt before the host receives any proposal. Repair retains the original direct request and includes at most 4,000 characters of untrusted diagnostic output. Both attempts share the original deadline and context ceiling. Transport failures are not retried, and a second invalid proposal fails without executing either proposal.
 
 Synthetic model replies and transport fixtures establish host behavior. Separate [real-model acceptance](life-model-validation.md) exercises a pinned local model through the actual harness and temporary stores; it does not establish compatibility or quality for every model. The [readiness probe](life-model-status.md) checks inventory without running inference.
+
+## App generation
+
+The builder supplies the synchronous `window.ellie` SDK contract, including raw-value reads, acknowledged writes, initialization and error handling. Generated apps use inline classic JavaScript and CSS in the opaque plugin sandbox. Browser databases, external resources, navigation and modal dialogs are unavailable. The host supplies storage capability only; model instructions do not add new grants.
+
+A revision includes the previous complete app as untrusted input and requests a complete replacement. Serialized builder messages have a 256-KiB UTF-8 ceiling. The adapter distinguishes invalid output, transport failure, timeout and cancellation through typed errors with static user-facing messages. The harness separately guards generation admission, scope, cancellation and current version before saving. No generated code executes on the server.
+
+An app that passes JSON, syntax and capability checks can still have functional defects. Real browser acceptance must check the requested behavior, persistence and failure handling. Natural-language revisions create retained app versions, allowing a failed improvement to leave the existing version active and successful revisions to be rolled back.

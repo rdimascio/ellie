@@ -12,6 +12,7 @@ import { extractDocument } from "../../../packages/life-ingest/src/index.ts";
 import {
   groupStorageKey,
   MLBAdapter,
+  PluginError,
   PluginStore,
 } from "../../../packages/life-plugins/src/index.ts";
 import { TaskRuntime } from "../../../packages/task-runtime/src/index.ts";
@@ -44,6 +45,32 @@ const taskDir = join(root, "tasks");
 await mkdir(taskDir, { mode: 0o700 });
 const store = new LifeStore(join(root, "life.sqlite"));
 const plugins = new PluginStore(join(root, "plugins.sqlite"));
+const generatedWaterCandidate = JSON.parse(
+  await readFile(resolve("apps/life-ui/tests/fixtures/sdk-water-counter-v3.json"), "utf8"),
+) as { name: string; description: string; html: string };
+const generatedWaterPlugin = plugins.install("user:e2e-user", {
+  ...generatedWaterCandidate,
+  kind: "custom",
+  capabilities: ["storage"],
+});
+let failGeneratedGet = false,
+  failGeneratedSet = false;
+const storageGet = plugins.storageGet.bind(plugins),
+  storageSet = plugins.storageSet.bind(plugins);
+plugins.storageGet = (owner, id, key) => {
+  if (id === generatedWaterPlugin.id && failGeneratedGet) {
+    failGeneratedGet = false;
+    throw new PluginError("unavailable");
+  }
+  return storageGet(owner, id, key);
+};
+plugins.storageSet = (owner, id, key, value) => {
+  if (id === generatedWaterPlugin.id && failGeneratedSet) {
+    failGeneratedSet = false;
+    throw new PluginError("unavailable");
+  }
+  return storageSet(owner, id, key, value);
+};
 const sharedGroup = store.createGroup(
   { userId: "e2e-user" },
   { id: "e2e-family", name: "E2E family" },
@@ -88,6 +115,35 @@ const hostilePlugin = plugins.install("user:e2e-user", {
   kind: "custom",
   capabilities: ["storage"],
   html: `<meta http-equiv="refresh" content="0;url=http://127.0.0.1:${hostileAddress.port}/replacement">`,
+});
+const sdkProbePlugin = plugins.install("user:e2e-user", {
+  name: "SDK water probe",
+  description: "Immediate SDK readiness and persistence regression",
+  kind: "custom",
+  capabilities: ["storage"],
+  html: `<!doctype html><main><output aria-label="Water count">loading</output><button>Add water</button><p id="sdk"></p><p id="error"></p></main><script>
+const count=document.querySelector('output'),status=document.querySelector('#sdk'),error=document.querySelector('#error');
+status.textContent=Object.isFrozen(window.ellie)&&Object.isFrozen(window.ellie.storage)&&Object.getOwnPropertyDescriptor(window,'ellie').writable===false?'SDK locked':'SDK mutable';
+const ready=window.ellie.storage.get('water-count').then(value=>count.textContent=String(Number(value??0))).catch(reason=>error.textContent=reason.message);
+document.querySelector('button').addEventListener('click',async()=>{try{await ready;const next=Number(count.textContent)+1;await window.ellie.storage.set('water-count',next);count.textContent=String(next)}catch(reason){error.textContent=reason.message}});
+</script>`,
+});
+const sdkBoundsPlugin = plugins.install("user:e2e-user", {
+  name: "SDK bounds probe",
+  description: "Client-side SDK bounds and error regression",
+  kind: "custom",
+  capabilities: ["storage"],
+  html: `<!doctype html><main><p id="pending">checking</p><p id="invalid">checking</p><p id="cyclic">checking</p></main><script>
+const calls=Array.from({length:33},(_,index)=>window.ellie.storage.get('pending-'+index));Promise.allSettled(calls).then(results=>{document.querySelector('#pending').textContent=results.some(result=>result.status==='rejected'&&result.reason.message==='Too many pending storage requests.')?'Pending bounded':'Pending unbounded';const cyclic={};cyclic.self=cyclic;window.ellie.storage.set('cyclic',cyclic).catch(reason=>document.querySelector('#cyclic').textContent=reason.message)});
+window.ellie.storage.get('').catch(reason=>document.querySelector('#invalid').textContent=reason.message);
+</script>`,
+});
+const sdkDeniedPlugin = plugins.install("user:e2e-user", {
+  name: "SDK denied probe",
+  description: "Host capability error regression",
+  kind: "custom",
+  capabilities: [],
+  html: `<!doctype html><p id="denied">checking</p><script>window.ellie.storage.get('forbidden').catch(reason=>document.querySelector('#denied').textContent=reason.message)</script>`,
 });
 const tasks = new TaskRuntime({
   directory: taskDir,
@@ -772,6 +828,149 @@ try {
   );
 
   await page.getByRole("button", { name: /Your space/ }).click();
+  const sdkCard = page.locator("article").filter({ hasText: "SDK water probe" });
+  await sdkCard.getByRole("button", { name: "Open" }).click();
+  let sdkFrame = page
+    .frameLocator('iframe[title="SDK water probe"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await sdkFrame.getByText("SDK locked", { exact: true }).waitFor();
+  await sdkFrame.getByLabel("Water count").filter({ hasText: "0" }).waitFor();
+  await sdkFrame.getByRole("button", { name: "Add water" }).click();
+  await sdkFrame.getByLabel("Water count").filter({ hasText: "1" }).waitFor();
+  assert.equal(
+    plugins.storageGet("user:e2e-user", sdkProbePlugin.id, "water-count"),
+    1,
+    "SDK set waits for persisted host acknowledgement",
+  );
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await sdkCard.getByRole("button", { name: "Open" }).click();
+  sdkFrame = page
+    .frameLocator('iframe[title="SDK water probe"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await sdkFrame.getByLabel("Water count").filter({ hasText: "1" }).waitFor();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.reload();
+  await page.getByRole("button", { name: /Your space/ }).click();
+  await page
+    .locator("article")
+    .filter({ hasText: "SDK water probe" })
+    .getByRole("button", { name: "Open" })
+    .click();
+  sdkFrame = page
+    .frameLocator('iframe[title="SDK water probe"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await sdkFrame.getByLabel("Water count").filter({ hasText: "1" }).waitFor();
+  await sdkFrame.getByRole("button", { name: "Add water" }).click();
+  await sdkFrame.getByLabel("Water count").filter({ hasText: "2" }).waitFor();
+  if (artifactDir)
+    await page.screenshot({
+      path: join(artifactDir, "life-sdk-water-counter.png"),
+      fullPage: false,
+    });
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  const generatedCard = page.locator("article").filter({ hasText: "Water Counter Widget" });
+  await generatedCard.getByRole("button", { name: "Open" }).click();
+  let generatedFrame = page
+    .frameLocator('iframe[title="Water Counter Widget"]')
+    .frameLocator('iframe[title="Plugin"]');
+  const generatedCount = () => generatedFrame.locator("#count");
+  await generatedCount().getByText("0", { exact: true }).waitFor();
+  await generatedFrame.getByRole("button", { name: "Add a glass" }).click();
+  await generatedCount().getByText("1", { exact: true }).waitFor();
+  await generatedFrame.getByRole("button", { name: "Add a glass" }).click();
+  await generatedCount().getByText("2", { exact: true }).waitFor();
+  assert.equal(plugins.storageGet("user:e2e-user", generatedWaterPlugin.id, "waterCount"), 2);
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await generatedCard.getByRole("button", { name: "Open" }).click();
+  generatedFrame = page
+    .frameLocator('iframe[title="Water Counter Widget"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await generatedCount().getByText("2", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.reload();
+  await page.getByRole("button", { name: /Your space/ }).click();
+  await page
+    .locator("article")
+    .filter({ hasText: "Water Counter Widget" })
+    .getByRole("button", { name: "Open" })
+    .click();
+  generatedFrame = page
+    .frameLocator('iframe[title="Water Counter Widget"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await generatedCount().getByText("2", { exact: true }).waitFor();
+  failGeneratedSet = true;
+  await generatedFrame.getByRole("button", { name: "Add a glass" }).click();
+  await generatedFrame.getByText("Failed to save your progress. Please try again.").waitFor();
+  await generatedCount().getByText("2", { exact: true }).waitFor();
+  assert.equal(await generatedFrame.getByRole("button", { name: "Add a glass" }).isEnabled(), true);
+  await generatedFrame.getByRole("button", { name: "Add a glass" }).click();
+  await generatedCount().getByText("3", { exact: true }).waitFor();
+  await generatedFrame.getByRole("button", { name: "Reset" }).click();
+  await generatedCount().getByText("0", { exact: true }).waitFor();
+  assert.equal(plugins.storageGet("user:e2e-user", generatedWaterPlugin.id, "waterCount"), 0);
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  failGeneratedGet = true;
+  await page
+    .locator("article")
+    .filter({ hasText: "Water Counter Widget" })
+    .getByRole("button", { name: "Open" })
+    .click();
+  generatedFrame = page
+    .frameLocator('iframe[title="Water Counter Widget"]')
+    .frameLocator('iframe[title="Plugin"]');
+  const loadError = generatedFrame.getByText("Failed to load data. Click Retry to try again.");
+  await loadError.waitFor();
+  assert.equal(
+    await generatedFrame.getByRole("button", { name: "Add a glass" }).isDisabled(),
+    true,
+  );
+  assert.equal(await generatedFrame.getByRole("button", { name: "Reset" }).isDisabled(), true);
+  await loadError.click();
+  await generatedCount().getByText("0", { exact: true }).waitFor();
+  assert.equal(await generatedFrame.getByRole("button", { name: "Add a glass" }).isEnabled(), true);
+  if (artifactDir)
+    await page.screenshot({
+      path: join(artifactDir, "life-generated-water-counter.png"),
+      fullPage: false,
+    });
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page
+    .locator("article")
+    .filter({ hasText: "SDK bounds probe" })
+    .getByRole("button", { name: "Open" })
+    .click();
+  const boundsFrame = page
+    .frameLocator('iframe[title="SDK bounds probe"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await boundsFrame.getByText("Pending bounded", { exact: true }).waitFor();
+  await boundsFrame.getByText("Invalid storage key.", { exact: true }).waitFor();
+  await boundsFrame
+    .getByText("Storage value must be JSON and no larger than 16 KiB.", { exact: true })
+    .waitFor();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page
+    .locator("article")
+    .filter({ hasText: "SDK denied probe" })
+    .getByRole("button", { name: "Open" })
+    .click();
+  const deniedFrame = page
+    .frameLocator('iframe[title="SDK denied probe"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await deniedFrame.getByText(/forbidden|storage|capability|authoriz/i).waitFor();
+  await page.getByRole("button", { name: "Close", exact: true }).click();
+  await page.evaluate((pluginId) => {
+    const iframe = document.createElement("iframe");
+    iframe.dataset.sdkTimeout = "true";
+    iframe.src = `/api/life/plugins/${pluginId}/view`;
+    document.body.append(iframe);
+  }, sdkProbePlugin.id);
+  const timeoutFrame = page
+    .frameLocator('iframe[data-sdk-timeout="true"]')
+    .frameLocator('iframe[title="Plugin"]');
+  await timeoutFrame.getByText("Storage request timed out.", { exact: true }).waitFor({
+    timeout: 7_000,
+  });
+  await page.locator('iframe[data-sdk-timeout="true"]').evaluate((element) => element.remove());
   await page
     .locator("article")
     .filter({ hasText: "Navigation probe" })
