@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
+  copyFile,
   link,
   lstat,
   mkdir,
@@ -52,6 +53,37 @@ const launcherSource = new URL(
 ).pathname;
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 const boundedCommand = { timeout: 15_000, stdio: "pipe" as const };
+const sharedSetupTimeout = 120_000;
+const sharedTemplateNames = [
+  "build-key.json",
+  "coordinator-launcher",
+  "installer",
+  "node-launcher",
+  "tiny",
+] as const;
+type TemplateArtifact = {
+  path: string;
+  dev: bigint;
+  ino: bigint;
+  uid: number;
+  mode: number;
+  size: number;
+  sha256: string;
+};
+type SharedTemplate = {
+  root: string;
+  rootDev: bigint;
+  rootIno: bigint;
+  rootUID: number;
+  artifacts: Readonly<Record<string, Readonly<TemplateArtifact>>>;
+};
+type OwnedDirectoryIdentity = {
+  dev: bigint;
+  ino: bigint;
+  uid: number;
+};
+let sharedTemplate: SharedTemplate | undefined;
+let sharedSetupCertain = false;
 function authorizationRequirement(teamID: string) {
   return `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${teamID}" and identifier "org.ellie.service.authorization"`;
 }
@@ -79,6 +111,85 @@ function canonicalJSON(value: unknown): string {
     return item;
   };
   return `${JSON.stringify(sorted(value))}\n`;
+}
+function deepFreeze<T>(value: T): T {
+  if (value && typeof value === "object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+async function templateArtifact(root: string, name: string): Promise<TemplateArtifact> {
+  const path = join(root, name);
+  const info = await lstat(path, { bigint: true });
+  assert.equal(info.isFile(), true);
+  assert.equal(info.nlink, 1n);
+  assert.equal(Number(info.uid), process.getuid?.());
+  return Object.freeze({
+    path: name,
+    dev: info.dev,
+    ino: info.ino,
+    uid: Number(info.uid),
+    mode: Number(info.mode & 0o7777n),
+    size: Number(info.size),
+    sha256: digest(await readFile(path)),
+  });
+}
+async function captureOwnedDirectory(path: string): Promise<OwnedDirectoryIdentity> {
+  const info = await lstat(path, { bigint: true });
+  assert.equal(info.isDirectory(), true);
+  assert.equal(Number(info.uid), process.getuid?.());
+  assert.equal(Number(info.mode & 0o7777n), 0o700);
+  return Object.freeze({ dev: info.dev, ino: info.ino, uid: Number(info.uid) });
+}
+async function verifyOwnedDirectory(
+  path: string,
+  expected: OwnedDirectoryIdentity,
+  mode: number,
+  names: readonly string[],
+) {
+  const info = await lstat(path, { bigint: true });
+  assert.equal(info.isDirectory(), true);
+  assert.equal(info.dev, expected.dev);
+  assert.equal(info.ino, expected.ino);
+  assert.equal(Number(info.uid), expected.uid);
+  assert.equal(Number(info.uid), process.getuid?.());
+  assert.equal(Number(info.mode & 0o7777n), mode);
+  assert.deepEqual((await readdir(path)).sort(), [...names].sort());
+}
+async function verifySharedTemplate(): Promise<SharedTemplate> {
+  assert.ok(sharedTemplate);
+  const expected = sharedTemplate;
+  const root = await lstat(expected.root, { bigint: true });
+  assert.equal(root.isDirectory(), true);
+  assert.equal(root.dev, expected.rootDev);
+  assert.equal(root.ino, expected.rootIno);
+  assert.equal(Number(root.uid), expected.rootUID);
+  assert.equal(Number(root.mode & 0o7777n), 0o500);
+  assert.deepEqual((await readdir(expected.root)).sort(), [...sharedTemplateNames]);
+  for (const name of sharedTemplateNames) {
+    const actual = await templateArtifact(expected.root, name);
+    const recorded = expected.artifacts[name];
+    assert.ok(recorded);
+    assert.deepEqual(actual, recorded);
+  }
+  return expected;
+}
+async function copyTemplateArtifact(name: string, destination: string) {
+  const template = await verifySharedTemplate();
+  const expected = template.artifacts[name];
+  assert.ok(expected);
+  await copyFile(join(template.root, name), destination);
+  await chmod(destination, 0o755);
+  const copied = await lstat(destination, { bigint: true });
+  assert.equal(copied.isFile(), true);
+  assert.equal(copied.nlink, 1n);
+  assert.equal(Number(copied.uid), expected.uid);
+  assert.equal(Number(copied.mode & 0o7777n), 0o755);
+  assert.equal(Number(copied.size), expected.size);
+  assert.notEqual(copied.dev === expected.dev && copied.ino === expected.ino, true);
+  assert.equal(digest(await readFile(destination)), expected.sha256);
+  await verifySharedTemplate();
 }
 const run = (file: string, args: string[]) =>
   spawnSync(file, args, { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
@@ -135,7 +246,222 @@ async function removeOwned(root: string) {
   await makeWritable(root);
   await rm(root, { recursive: true });
 }
-async function fixture(root: string, installer: string, tiny: string) {
+test.before(
+  async () => {
+    if (!mac) return;
+    const templateRoot = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-template-")));
+    const templateIdentity = await captureOwnedDirectory(templateRoot);
+    const buildRoot = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-build-")));
+    const buildIdentity = await captureOwnedDirectory(buildRoot);
+    try {
+      const compilerVersion = execFileSync("/usr/bin/xcrun", ["swiftc", "--version"], {
+        ...boundedCommand,
+        encoding: "utf8",
+      }).trim();
+      const tinySource = join(buildRoot, "tiny.swift");
+      const tinySourceBytes = Buffer.from("@main struct Tiny { static func main() {} }\n");
+      await writeFile(tinySource, tinySourceBytes, { mode: 0o600 });
+      const tinySourceRecord = await templateArtifact(buildRoot, "tiny.swift");
+      const sources = [
+        authorizationSource,
+        authenticatedPayloadSource,
+        selectionSource,
+        lifecycleSource,
+        migrationSource,
+        source,
+        launcherSource,
+      ];
+      const sourceRecords = await Promise.all(
+        sources.map(async (path) => ({
+          path,
+          name: path.split("/").at(-1),
+          sha256: digest(await readFile(path)),
+        })),
+      );
+      const installerArguments = [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-parse-as-library",
+        "-D",
+        "ELLIE_INSTALLER_TESTING",
+        "-D",
+        "ELLIE_AUTHORIZATION_TESTING",
+        "-D",
+        "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
+        authorizationSource,
+        authenticatedPayloadSource,
+        selectionSource,
+        lifecycleSource,
+        migrationSource,
+        source,
+        "-o",
+        join(templateRoot, "installer"),
+      ];
+      execFileSync("/usr/bin/xcrun", installerArguments, boundedCommand);
+      execFileSync(
+        "/usr/bin/codesign",
+        [
+          "--force",
+          "--sign",
+          "-",
+          "--identifier",
+          "org.ellie.installer",
+          join(templateRoot, "installer"),
+        ],
+        boundedCommand,
+      );
+      const tinyArguments = [
+        "swiftc",
+        "-parse-as-library",
+        tinySource,
+        "-o",
+        join(templateRoot, "tiny"),
+      ];
+      execFileSync("/usr/bin/xcrun", tinyArguments, boundedCommand);
+      const launcherArguments: Record<"coordinator-launcher" | "node-launcher", string[]> = {
+        "coordinator-launcher": [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          "-D",
+          "ELLIE_COORDINATOR",
+          launcherSource,
+          "-o",
+          join(templateRoot, "coordinator-launcher"),
+        ],
+        "node-launcher": [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          "-D",
+          "ELLIE_NODE",
+          launcherSource,
+          "-o",
+          join(templateRoot, "node-launcher"),
+        ],
+      };
+      for (const arguments_ of Object.values(launcherArguments))
+        execFileSync("/usr/bin/xcrun", arguments_, boundedCommand);
+      for (const name of ["installer", "tiny", "coordinator-launcher", "node-launcher"])
+        await chmod(join(templateRoot, name), 0o500);
+      for (const record of sourceRecords)
+        assert.equal(digest(await readFile(record.path)), record.sha256);
+      assert.deepEqual(await templateArtifact(buildRoot, "tiny.swift"), tinySourceRecord);
+      const buildKey = deepFreeze({
+        version: 1,
+        architecture: process.arch,
+        compilerVersion,
+        sources: [
+          ...sourceRecords.map(({ name, sha256 }) => ({ name, sha256 })),
+          { name: "tiny.swift", sha256: digest(tinySourceBytes) },
+        ],
+        commands: {
+          installer: [
+            "swiftc",
+            "-swift-version",
+            "5",
+            "-parse-as-library",
+            "-D",
+            "ELLIE_INSTALLER_TESTING",
+            "-D",
+            "ELLIE_AUTHORIZATION_TESTING",
+            "-D",
+            "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
+            ...sources.slice(0, 6).map((path) => path.split("/").at(-1)),
+            "-o",
+            "installer",
+          ],
+          installerSignature: [
+            "codesign",
+            "--force",
+            "--sign",
+            "-",
+            "--identifier",
+            "org.ellie.installer",
+            "installer",
+          ],
+          tiny: ["swiftc", "-parse-as-library", "tiny.swift", "-o", "tiny"],
+          launchers: {
+            coordinator: [
+              "swiftc",
+              "-swift-version",
+              "5",
+              "-parse-as-library",
+              "-D",
+              "ELLIE_COORDINATOR",
+              "PackagedServiceLauncher.swift",
+              "-o",
+              "coordinator-launcher",
+            ],
+            node: [
+              "swiftc",
+              "-swift-version",
+              "5",
+              "-parse-as-library",
+              "-D",
+              "ELLIE_NODE",
+              "PackagedServiceLauncher.swift",
+              "-o",
+              "node-launcher",
+            ],
+          },
+        },
+        outputs: await Promise.all(
+          ["installer", "tiny", "coordinator-launcher", "node-launcher"].map(async (name) => ({
+            name,
+            sha256: digest(await readFile(join(templateRoot, name))),
+          })),
+        ),
+      });
+      const buildKeyBytes = Buffer.from(canonicalJSON(buildKey));
+      await writeFile(join(templateRoot, "build-key.json"), buildKeyBytes, {
+        mode: 0o400,
+      });
+      await verifyOwnedDirectory(templateRoot, templateIdentity, 0o700, sharedTemplateNames);
+      const artifacts: Record<string, Readonly<TemplateArtifact>> = {};
+      for (const name of sharedTemplateNames)
+        artifacts[name] = await templateArtifact(templateRoot, name);
+      for (const name of sharedTemplateNames)
+        assert.equal(artifacts[name]?.mode, name === "build-key.json" ? 0o400 : 0o500);
+      assert.equal(artifacts["build-key.json"]?.sha256, digest(buildKeyBytes));
+      for (const output of buildKey.outputs)
+        assert.equal(artifacts[output.name]?.sha256, output.sha256);
+      await chmod(templateRoot, 0o500);
+      sharedTemplate = Object.freeze({
+        root: templateRoot,
+        rootDev: templateIdentity.dev,
+        rootIno: templateIdentity.ino,
+        rootUID: templateIdentity.uid,
+        artifacts: Object.freeze(artifacts),
+      });
+      await verifySharedTemplate();
+      await verifyOwnedDirectory(buildRoot, buildIdentity, 0o700, ["tiny.swift"]);
+      assert.deepEqual(await templateArtifact(buildRoot, "tiny.swift"), tinySourceRecord);
+      await removeOwned(buildRoot);
+      sharedSetupCertain = true;
+    } catch (error) {
+      console.error(`Native fixture setup retained owned roots: ${templateRoot} ${buildRoot}`);
+      throw error;
+    }
+  },
+  { timeout: sharedSetupTimeout },
+);
+
+test.after(async () => {
+  if (sharedSetupCertain && sharedTemplate) {
+    await verifySharedTemplate();
+    await removeOwned(sharedTemplate.root);
+  }
+});
+async function fixture(
+  root: string,
+  installer: string,
+  tiny: string,
+  launcherTemplates?: { coordinator: string; node: string },
+) {
   const release = join(root, "source");
   const payload = join(release, "payload");
   await mkdir(join(payload, "bin"), { recursive: true, mode: 0o755 });
@@ -168,21 +494,30 @@ async function fixture(root: string, installer: string, tiny: string) {
   ] as const) {
     const app = join(payload, "launchers", `${name}.app`);
     await mkdir(join(app, "Contents/MacOS"), { recursive: true, mode: 0o755 });
-    execFileSync(
-      "/usr/bin/xcrun",
-      [
-        "swiftc",
-        "-swift-version",
-        "5",
-        "-parse-as-library",
-        "-D",
-        define,
-        launcherSource,
-        "-o",
-        join(app, "Contents/MacOS/EllieService"),
-      ],
-      boundedCommand,
-    );
+    const executable = join(app, "Contents/MacOS/EllieService");
+    if (launcherTemplates) {
+      await copyFile(
+        define === "ELLIE_COORDINATOR" ? launcherTemplates.coordinator : launcherTemplates.node,
+        executable,
+      );
+      await chmod(executable, 0o755);
+    } else {
+      execFileSync(
+        "/usr/bin/xcrun",
+        [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          "-D",
+          define,
+          launcherSource,
+          "-o",
+          executable,
+        ],
+        boundedCommand,
+      );
+    }
     await writeFile(
       join(app, "Contents/Info.plist"),
       `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleExecutable</key><string>EllieService</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>`,
@@ -431,44 +766,14 @@ async function withFixture(
     if (completed) await removeOwned(root);
   });
   const installer = join(root, "installer");
-  const tinySource = join(root, "tiny.swift");
   const tiny = join(root, "tiny");
-  await writeFile(tinySource, "@main struct Tiny { static func main() {} }\n");
-  execFileSync(
-    "/usr/bin/xcrun",
-    [
-      "swiftc",
-      "-swift-version",
-      "5",
-      "-parse-as-library",
-      "-D",
-      "ELLIE_INSTALLER_TESTING",
-      "-D",
-      "ELLIE_AUTHORIZATION_TESTING",
-      "-D",
-      "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
-      authorizationSource,
-      authenticatedPayloadSource,
-      selectionSource,
-      lifecycleSource,
-      migrationSource,
-      source,
-      "-o",
-      installer,
-    ],
-    boundedCommand,
-  );
-  execFileSync(
-    "/usr/bin/codesign",
-    ["--force", "--sign", "-", "--identifier", "org.ellie.installer", installer],
-    boundedCommand,
-  );
-  execFileSync(
-    "/usr/bin/xcrun",
-    ["swiftc", "-parse-as-library", tinySource, "-o", tiny],
-    boundedCommand,
-  );
-  const { release, id } = await fixture(root, installer, tiny);
+  const coordinator = join(root, "coordinator-launcher");
+  const node = join(root, "node-launcher");
+  await copyTemplateArtifact("installer", installer);
+  await copyTemplateArtifact("tiny", tiny);
+  await copyTemplateArtifact("coordinator-launcher", coordinator);
+  await copyTemplateArtifact("node-launcher", node);
+  const { release, id } = await fixture(root, installer, tiny, { coordinator, node });
   const services = join(root, "Services");
   await mkdir(services, { mode: 0o700 });
   await action({ root, release, installer, services, id });
@@ -476,6 +781,36 @@ async function withFixture(
 }
 
 const options = { skip: !mac };
+test(
+  "compiled installer templates copy into isolated mutable fixture roots",
+  options,
+  async (t) => {
+    const first = await realpath(await mkdtemp(join(tmpdir(), "ellie-template-copy-a-")));
+    const second = await realpath(await mkdtemp(join(tmpdir(), "ellie-template-copy-b-")));
+    let completed = false;
+    t.after(async () => {
+      if (completed) {
+        await removeOwned(first);
+        await removeOwned(second);
+      }
+    });
+    const firstInstaller = join(first, "installer");
+    const secondInstaller = join(second, "installer");
+    await copyTemplateArtifact("installer", firstInstaller);
+    await copyTemplateArtifact("installer", secondInstaller);
+    const template = await verifySharedTemplate();
+    const expected = template.artifacts.installer;
+    assert.ok(expected);
+    const firstInfo = await lstat(firstInstaller, { bigint: true });
+    const secondInfo = await lstat(secondInstaller, { bigint: true });
+    assert.notEqual(firstInfo.dev === secondInfo.dev && firstInfo.ino === secondInfo.ino, true);
+    await writeFile(firstInstaller, "owned mutation", { mode: 0o755 });
+    assert.notEqual(digest(await readFile(firstInstaller)), expected.sha256);
+    assert.equal(digest(await readFile(secondInstaller)), expected.sha256);
+    await verifySharedTemplate();
+    completed = true;
+  },
+);
 test("installer stage diagnostics are compiled into test builds only", options, async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-diagnostic-")));
   t.after(() => removeOwned(root));
