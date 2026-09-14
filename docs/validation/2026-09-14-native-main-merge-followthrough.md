@@ -2,7 +2,7 @@
 
 The owner asked to continue after the [first merge batch](2026-09-14-main-merge-batch.md), which reduced 66 open PRs to 54. Reviewed passing PRs may merge into main with history preserved. Household deployment remains a separate gate. This record supersedes earlier current-state paragraphs while retaining their original failure evidence.
 
-Five further PRs are now merged into main. PR79 also merged into the release branch, leaving 48 open. All merges retained their original histories, passed coordinating review and final GitHub checks, and used an exact-head guard. Native source trees were also compared before each successive merge; changing the base introduced no untested source changes.
+Six further PRs are now merged into main. PR79, PR84 and PR86 also merged into the release branch, leaving 45 open before publication of the final native integration. All merges retained their original histories, passed coordinating review and final GitHub checks, and used an exact-head guard. Native source trees were also compared before each successive merge; changing the base introduced no untested source changes. The final integration section below supersedes intermediate pending statements in this chronological record.
 
 | PR  | Reviewed head                              | Main merge commit                          | UTC time |
 | --- | ------------------------------------------ | ------------------------------------------ | -------- |
@@ -11,6 +11,7 @@ Five further PRs are now merged into main. PR79 also merged into the release bra
 | 23  | `34d76ba8f109963cb4f4bcf3898ee23cdc0728b1` | `6c9f0a703b28bb44f8f51130d00292af88962aad` | 16:37:35 |
 | 24  | `94ef0c105d845fe5037117bd239ff5d40a389503` | `4cc12d27faecfe9cfe29f7aa2cdbcea0d868a26d` | 16:38:47 |
 | 27  | `5d842adb9ccdb84dee051b1172f17cca4e58fdca` | `a239d9f71125ba8642b24eb6df446bbf82c94436` | 16:39:14 |
+| 20  | `a66ccefa5a231ee7922b2df40ae50200e08891ee` | `e4e98bdf6b16d2168e85af862176c78114555789` | 16:54:55 |
 
 ## Main foundations
 
@@ -71,6 +72,20 @@ PR20 was updated with main `a239d9f`, preserving the latest validation records a
 The corrected runner retains WebDriver element handles, checks the exact page origin and then mutates only those handles. It applies this ordering to invitation entry, pairing submission, option selection, Open and logout. Before Open, it reads the select's effective `value` and requires exact equality with the explicitly authorized node ID. The command outcome becomes unknown only immediately before the one submitted click; lost responses never trigger replay. Fake-driver regressions change origin after target-property verification or refuse to commit selection, and assert zero Open clicks and session closure. No physical phone was used for this correction.
 
 Independent final review cleared source SHA-256 `434c27dc77eafcd91f202f8c923767508c8308ffb35141add59b62f006d45d91` and test SHA-256 `94b97687d071525ce960d964a52fbc177837ea8772da4ddf0819081934433b7d`. The final complete Node 24/Bun 1.4.2 gate passed 177 tests with one skip, lint, formatting, contracts, types and web build. Log `/tmp/ellie-pr20-main-smoke-final2-check.log`, hash `4f895bca76bdd1d3851509abc576469b7c8bd318ccab72b077233ce46fa2e773`. Earlier intermediate passes are not substituted for this final source. PR20 must pass fresh hosted checks before merging.
+
+## Final native integration
+
+PR84's final native run `34868365203` / job `104057816354` passed on merge `ddeb37949a8fc0dadfed4cdb58b224fa08d91020`, tree `e8edefd5b658749771011b90037796a556d158be`. It passed 315 Node tests with one skip, 158 Swift tests, two UI tests and app-hosted pinned HTTPS, speech, cancellation, Keychain and built-policy checks. Requests and responses matched exactly: session 1, inventory 2, command 1, logout 1, unexpected 0. Owned Simulator and derived-data cleanup completed. Log `/tmp/ellie-pr84-run34868365203-native104057816354.log`, SHA-256 `abbd4fca2614edff2a7c6c442ab86f951cd012f6c6f8316447f3f0936ab5dbde`. It merged into PR59 as `3718a294df0f320d7de49e06b34870590004e805` at 16:52:25 UTC with that exact tree.
+
+PR20's final workflow `34871127712` passed every check before its main merge. The prospective and actual main tree both equal `3cbbaf4ab5fbf020cefbac3d1c0d936f8bbfe2a9`. The optional phone runner's final acceptance remains synthetic WebDriver coverage, not physical phone automation.
+
+PR86's final native run `34870356733` / job `104064442580` passed on merge `83208e4ae63b8c6d67168787bbeaa71e3d2a11db`, parents `5816a536` and `11b865365960fd8cfc8d9fd4c1a34258cad431da`, tree `c78179aa08b9f51580ad3a78ab1f0b76db1729c5`. It passed 322 Node tests with one skip, 158 Swift tests, two UI tests and the same app-hosted gates and exact endpoint counts. Owned cleanup completed. Log `/tmp/ellie-pr86-11b8653-run34870356733-native104064442580.log`, SHA-256 `4e19a5ce5fc443a95a8f404b83b75bf1fd2816c50708be12f62c08762145b9d0`. All checks passed before merging into PR59 as `f79b871f8fc529c17744616d81ec2f657050b5e3` at 17:05:02 UTC, again with the same tested tree.
+
+The new `codex/native-main-integration` working branch was pushed at main `e4e98bd` before integration began. Its resolved merge with `11b8653` produced tree `e269cd6ba5af0f52003c9a6e3c979e443c06d639` before these documentation updates. Three SwiftUI conflicts resolved to the already-reviewed native source, retaining chores, weather, agenda, playlists and Devices. Three documentation conflicts preserve both earlier evidence and the current development-only limits. Independent exhaustive comparison confirmed every non-documentation path equals `11b8653` except the three phone-smoke paths, which equal main byte-for-byte. No new application or security logic was introduced by conflict resolution.
+
+The frozen install and full Node 24/Bun 1.4.2 gate passed on this combined source: 328 tests passed with one skip, plus lint, format, contracts, types and web build. Actual Mini Swift compilation passed in 41.48 seconds. Summary `/tmp/ellie-native-main-integration-validation.log`, SHA-256 `3439059831a1f77382d1332190dfe996dac7953a8cee27e804351f7e7d638c45`. Fresh hosted CI must pass on the published integration before its main merge. Physical MacBook evidence above applies to the unchanged native app source; authenticated capture adds separate native tooling and is covered by its hosted run.
+
+The preliminary ancestry audit matched all 46 then-open GitHub pull refs exactly. Only PR77, PR78, PR80 and PR40 contained heads outside the reviewed release/main union. Audit `/tmp/ellie-native-main-ancestry-candidates.json`, SHA-256 `624cb094b4c54c979a49b699334930a8c9a2c30e89ad3f91d21f82975ce96ea5`. This is a closure plan, not proof that anything has reached main: after the final integration merges, re-fetch every still-open head and prove it is ancestral to actual main before closing already-integrated prerequisite entries. Keep non-ancestors open and preserve all branches and histories.
 
 ## Acceptance limits
 

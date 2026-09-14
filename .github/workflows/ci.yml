@@ -44,6 +44,28 @@ jobs:
         run: bun run desktop:test
       - name: Build and verify native dashboard app
         run: bun run desktop:build
+      - name: Build native iPhone dashboard app
+        run: bun run ios:build
+      - name: Test native iPhone dashboard app
+        run: bun run ios:test
+      - name: Test native iPhone pinned HTTPS and Keychain
+        run: bun run test:ios-ats
+      - name: Preserve native iPhone transport failure result
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-iphone-transport-test-result
+          path: test-results/native-ios-ats.xcresult
+          retention-days: 3
+      - name: Preserve native iPhone failure result
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-iphone-test-result
+          path: |
+            test-results/native-ios.xcresult
+            test-results/native-ios-runner-diagnostic.txt
+          retention-days: 3
   command-center:
     runs-on: ubuntu-latest
     steps:

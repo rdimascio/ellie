@@ -10,6 +10,9 @@ import { VERSION } from "@ellie/protocol";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
 import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
+import { NativeAuth } from "../apps/server/src/native-auth.ts";
+import { HouseholdState } from "../apps/server/src/household-state.ts";
+import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import type { BrowserAuthState } from "../apps/server/src/browser-auth.ts";
 import type {
   BrowserControl,
@@ -32,12 +35,26 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     if (failBrowserSave) throw new Error("private persistence detail");
     browserState = structuredClone(next);
   });
+  let nativeState = NativeAuth.empty();
+  const nativeAuth = new NativeAuth(nativeState, async (next) => {
+    nativeState = structuredClone(next);
+  });
+  const household = HouseholdState.memory();
+  const speech = NativeSpeech.memory(nativeAuth, {
+    async *transcribe() {
+      yield { text: "synthetic", final: true };
+    },
+  });
   let current =
     options.initial ??
     ({
       status: "ready",
       origin: "https://coordinator.local:8444",
       auth: browserAuth,
+      nativeAuth,
+      household,
+      speech,
+      certificateSha256: "a".repeat(64),
     } satisfies BrowserControlSnapshot);
   const browser: BrowserControl = { current: () => current };
   const jobStore = new JobStore(join(dir, "jobs.sqlite"));
@@ -112,6 +129,8 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
 
   return {
     browserAuth,
+    nativeAuth,
+    speech,
     controllerToken,
     nodeToken,
     call,
@@ -124,12 +143,85 @@ async function fixture(options: { initial?: BrowserControlSnapshot; omitBrowser?
     persistedBrowserState() {
       return structuredClone(browserState);
     },
+    persistedNativeState() {
+      return structuredClone(nativeState);
+    },
     async close() {
       app.shutdown();
       await rm(dir, { recursive: true, force: true });
     },
   };
 }
+
+test("speech authority management is controller-only and preserves unrelated native grants", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Phone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const client = await f.nativeAuth.pair(invitation.code, "d".repeat(64));
+  const body = { clientId: client.id, capability: "speech.transcribe" };
+  assert.equal((await f.call(f.nodeToken, "POST", "/v1/speech/authorities", { body })).status, 403);
+  assert.deepEqual(
+    (await f.call(f.controllerToken, "POST", "/v1/speech/authorities", { body })).body,
+    { ok: true, grant: body },
+  );
+  assert.deepEqual((await f.call(f.controllerToken, "GET", "/v1/speech/authorities")).body, {
+    grants: [body],
+  });
+  assert.deepEqual(
+    (
+      await f.call(f.controllerToken, "POST", "/v1/speech/authorities/revoke", {
+        body: { clientId: client.id },
+      })
+    ).body,
+    { ok: true, revoked: true },
+  );
+  assert.ok(
+    f.nativeAuth
+      .authenticateBearer(`Bearer ${"d".repeat(64)}`)
+      ?.grants[0]?.capabilities.includes("app.open"),
+  );
+});
+
+test("household management is controller-only and grants only an active native client", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Phone",
+    grants: [{ target: "mac", capabilities: ["app.open"] }],
+  });
+  const paired = await f.nativeAuth.pair(invitation.code, "c".repeat(64));
+  const grant = { clientId: paired.id, profile: "shared", kind: "dashboards", access: "write" };
+  assert.equal(
+    (await f.call(f.nodeToken, "POST", "/v1/household/authorities", { body: grant })).status,
+    403,
+  );
+  assert.equal(
+    (
+      await f.call(f.controllerToken, "POST", "/v1/household/authorities", {
+        body: { ...grant, clientId: "missing" },
+      })
+    ).status,
+    404,
+  );
+  assert.deepEqual(
+    (await f.call(f.controllerToken, "POST", "/v1/household/authorities", { body: grant })).body,
+    { ok: true, grant },
+  );
+  assert.deepEqual((await f.call(f.controllerToken, "GET", "/v1/household/authorities")).body, {
+    grants: [grant],
+  });
+  assert.deepEqual(
+    (
+      await f.call(f.controllerToken, "POST", "/v1/household/authorities/revoke", {
+        body: { clientId: paired.id, profile: "shared", kind: "dashboards" },
+      })
+    ).body,
+    { ok: true, revoked: true },
+  );
+});
 
 test("browser management status exposes only fixed public state to the controller", async (t) => {
   const f = await fixture();
@@ -189,6 +281,49 @@ test("browser management status exposes only fixed public state to the controlle
   assert.deepEqual((await absent.call(absent.controllerToken, "GET", "/v1/browser")).body, {
     status: "disabled",
   });
+});
+
+test("only controller manages native invitations, clients and revocation", async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const specification = {
+    label: "Family iPhone",
+    grants: [{ target: "living-room-mini", capabilities: ["app.open"] }],
+  };
+  assert.equal(
+    (await f.call(f.nodeToken, "POST", "/v1/native/invitations", { body: specification })).status,
+    403,
+  );
+  const overQrCapacity = await f.call(f.controllerToken, "POST", "/v1/native/invitations", {
+    body: {
+      label: "x".repeat(64),
+      grants: Array.from({ length: 16 }, (_, index) => ({
+        target: `${String(index).padStart(2, "0")}${"x".repeat(97)}`,
+        capabilities: ["app.open"],
+      })),
+    },
+  });
+  assert.equal(overQrCapacity.status, 400);
+  assert.deepEqual(f.persistedNativeState(), NativeAuth.empty());
+  const issued = await f.call(f.controllerToken, "POST", "/v1/native/invitations", {
+    body: specification,
+  });
+  assert.equal(issued.status, 200);
+  const payload = issued.body as { invitation: string; origin: string; certificateSha256: string };
+  assert.equal(payload.origin, "https://coordinator.local:8444");
+  assert.equal(payload.certificateSha256, "a".repeat(64));
+  assert.match(payload.invitation, /^[a-f0-9]{64}$/);
+  assert.doesNotMatch(issued.text, /tokenHash/);
+  const client = await f.nativeAuth.pair(payload.invitation, "7".repeat(64));
+  const clients = await f.call(f.controllerToken, "GET", "/v1/native/clients");
+  assert.deepEqual(clients.body, [client]);
+  assert.doesNotMatch(clients.text, /tokenHash|7777777777/);
+  assert.equal(
+    (await f.call(f.controllerToken, "POST", "/v1/native/revoke", { body: { id: client.id } }))
+      .status,
+    200,
+  );
+  assert.deepEqual((await f.call(f.controllerToken, "GET", "/v1/native/clients")).body, []);
 });
 
 test("controller issues fixed browser invitations, lists public clients, and revokes durably", async (t) => {

@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "valid": [
+    {
+      "kind": "dashboards",
+      "value": {
+        "version": 1,
+        "dashboards": [
+          {
+            "id": "Home_1",
+            "name": "Private \ue000 board",
+            "widgets": [
+              {
+                "id": "clock_1",
+                "type": "clock",
+                "title": "Elsewhere",
+                "size": "small",
+                "config": { "timeZone": "Europe/London" }
+              },
+              {
+                "id": "playlist_1",
+                "type": "playlist",
+                "title": "Music",
+                "size": "wide",
+                "config": { "youtubePlaylistID": "PLC77007E23FF423C6" }
+              },
+              {
+                "id": "fixed_clock",
+                "type": "clock",
+                "title": "Fixed offset",
+                "size": "small",
+                "config": { "timeZone": "GMT+01:00" }
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "kind": "chores",
+      "value": {
+        "version": 1,
+        "householdTimeZone": "UTC",
+        "chores": [
+          {
+            "id": "00000000-0000-0000-0000-000000000000",
+            "title": "Water basil",
+            "member": "Sam",
+            "body": "Before lunch",
+            "dueDay": "2030-02-28"
+          },
+          {
+            "id": "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF",
+            "title": "Feed cat",
+            "member": "Jo",
+            "body": "",
+            "dueDay": "2030-03-01",
+            "completedDay": null
+          }
+        ]
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "kind": "dashboards",
+      "value": { "version": 1, "dashboards": [{ "id": "home.with-dot", "name": "Home", "widgets": [] }] }
+    },
+    {
+      "kind": "dashboards",
+      "value": { "version": 1, "dashboards": [{ "id": "home", "name": "Home", "widgets": [{ "id": "music", "type": ["playlist"], "title": "Music", "size": "small", "config": {} }] }] }
+    },
+    {
+      "kind": "dashboards",
+      "value": { "version": 1, "dashboards": [{ "id": "home", "name": "Home", "widgets": [{ "id": "music", "type": "playlist", "title": "Music", "size": ["wide"], "config": {} }] }] }
+    },
+    {
+      "kind": "dashboards",
+      "value": { "version": 1, "dashboards": [{ "id": "home", "name": "Home", "widgets": [{ "id": "music", "type": "playlist", "title": "Music", "size": "small", "config": { "youtubePlaylistID": "bad" } }] }] }
+    },
+    {
+      "kind": "dashboards",
+      "value": { "version": 1, "dashboards": [{ "id": "home", "name": "Home", "widgets": [{ "id": "weather", "type": "weather", "title": "Weather", "size": "small", "config": { "secret": "unexpected" } }] }] }
+    },
+    {
+      "kind": "dashboards",
+      "value": { "version": 1, "dashboards": [{ "id": "home", "name": "Home", "widgets": [{ "id": "clock", "type": "clock", "title": "Clock", "size": "small", "config": { "timeZone": "+01:00" } }] }] }
+    },
+    {
+      "kind": "chores",
+      "value": { "version": 1, "householdTimeZone": "UTC", "chores": [{ "id": "00000000-0000-0000-0000-000000000000", "title": "One", "member": "A", "body": "", "dueDay": "2030-02-28", "completedDay": false }] }
+    },
+    {
+      "kind": "dashboards",
+      "rawValue": "{\"version\":1,\"dashboards\":[{\"id\":\"home\",\"name\":\"Home\",\"widgets\":[{\"id\":\"note\",\"type\":\"note\",\"title\":\"Note\",\"size\":\"small\",\"config\":{\"text\":\"\\ud800\"}}]}]}"
+    },
+    {
+      "kind": "chores",
+      "value": { "version": 1, "householdTimeZone": "UTC", "chores": [{ "id": "00000000-0000-0000-0000-000000000000", "title": "One", "member": "A", "body": "", "dueDay": "0000-01-01" }] }
+    }
+  ]
+}

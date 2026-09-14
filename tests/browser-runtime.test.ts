@@ -13,7 +13,12 @@ import {
 } from "../apps/cli/src/browser-setup.ts";
 import { createBrowserRuntime } from "../apps/cli/src/browser-runtime.ts";
 import { BROWSER_AUTH_FILE } from "../apps/server/src/browser-auth.ts";
-import type { BrowserAssets, BrowserServer } from "../apps/server/src/browser-server.ts";
+import type {
+  BrowserAssets,
+  BrowserServer,
+  BrowserServerOptions,
+} from "../apps/server/src/browser-server.ts";
+import type { BrowserRemote } from "../apps/server/src/browser-remote.ts";
 
 class MemorySecrets implements MutableSecretStore {
   readonly values = new Map<string, string>();
@@ -93,11 +98,16 @@ function fakeFactory(
 const assets = new Map([
   ["/", { contentType: "text/html; charset=utf-8", body: Buffer.from("browser") }],
 ]) as BrowserAssets;
+const remote: BrowserRemote = {
+  nodes: async () => [],
+  openApp: async () => ({ ok: true, message: "synthetic" }),
+};
 
 test("absent browser setup stays disabled with zero side effects", async () => {
   const setup = await fixture(false);
   let assetLoads = 0;
   let factories = 0;
+  let remoteCreates = 0;
   try {
     const runtime = createBrowserRuntime({
       setup: setup.environment,
@@ -106,6 +116,10 @@ test("absent browser setup stays disabled with zero side effects", async () => {
         assetLoads += 1;
         return assets;
       },
+      createRemote: async () => {
+        remoteCreates++;
+        return { remote, close() {} };
+      },
       createServer: (options) => {
         factories += 1;
         return fakeFactory(new FakeHttpsServer(), [])(options);
@@ -113,6 +127,7 @@ test("absent browser setup stays disabled with zero side effects", async () => {
     });
     await runtime.start();
     assert.deepEqual(runtime.current(), { status: "disabled" });
+    assert.equal(remoteCreates, 0);
     assert.equal(setup.secrets.gets, 0);
     assert.equal(assetLoads, 0);
     assert.equal(factories, 0);
@@ -151,14 +166,89 @@ test("runtime initializes auth once, listens explicitly, and closes its listener
   }
 });
 
-test("a listener runtime error closes only that listener and marks it unavailable", async () => {
+test("runtime passes one managed remote to the listener and closes it on shutdown", async () => {
   const setup = await fixture();
   const server = new FakeHttpsServer();
+  const seen: BrowserServerOptions[] = [];
+  let remoteCreates = 0;
+  let remoteCloses = 0;
   try {
     const runtime = createBrowserRuntime({
       setup: setup.environment,
       bindHost: "127.0.0.1",
       loadAssets: async () => assets,
+      createRemote: async () => {
+        remoteCreates += 1;
+        return { remote, close: () => (remoteCloses += 1) };
+      },
+      createServer: (options) => fakeFactory(server, seen)(options),
+    });
+    await runtime.start();
+    assert.equal(runtime.current().status, "ready");
+    assert.equal(remoteCreates, 1);
+    assert.equal(seen[0]?.remote, remote);
+    await runtime.start();
+    assert.equal(remoteCreates, 1);
+    await runtime.shutdown();
+    assert.equal(remoteCloses, 1);
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("shutdown returns during remote credential loading and closes its late result", async () => {
+  const setup = await fixture();
+  let began!: () => void;
+  let release!: (value: { remote: BrowserRemote; close(): void }) => void;
+  const startedLoading = new Promise<void>((resolve) => (began = resolve));
+  const loading = new Promise<{ remote: BrowserRemote; close(): void }>(
+    (resolve) => (release = resolve),
+  );
+  let closes = 0;
+  let listeners = 0;
+  try {
+    const runtime = createBrowserRuntime({
+      setup: setup.environment,
+      bindHost: "127.0.0.1",
+      loadAssets: async () => assets,
+      createRemote: () => {
+        began();
+        return loading;
+      },
+      createServer: (options) => {
+        listeners += 1;
+        return fakeFactory(new FakeHttpsServer(), [])(options);
+      },
+    });
+    const starting = runtime.start();
+    await startedLoading;
+    assert.equal(
+      await Promise.race([
+        runtime.shutdown().then(() => true),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+      ]),
+      true,
+    );
+    release({ remote, close: () => (closes += 1) });
+    await starting;
+    assert.equal(closes, 1);
+    assert.equal(listeners, 0);
+    assert.deepEqual(runtime.current(), { status: "disabled" });
+  } finally {
+    await rm(setup.stateDir, { recursive: true, force: true });
+  }
+});
+
+test("a listener runtime error closes only that listener and marks it unavailable", async () => {
+  const setup = await fixture();
+  const server = new FakeHttpsServer();
+  let remoteCloses = 0;
+  try {
+    const runtime = createBrowserRuntime({
+      setup: setup.environment,
+      bindHost: "127.0.0.1",
+      loadAssets: async () => assets,
+      createRemote: async () => ({ remote, close: () => (remoteCloses += 1) }),
       createServer: fakeFactory(server, []),
     });
     await runtime.start();
@@ -169,6 +259,7 @@ test("a listener runtime error closes only that listener and marks it unavailabl
       reason: "listener_unavailable",
     });
     assert.ok(server.shutdowns >= 1);
+    assert.equal(remoteCloses, 1);
     await runtime.shutdown();
   } finally {
     await rm(setup.stateDir, { recursive: true, force: true });

@@ -1,0 +1,16 @@
+# Native selected playlist widget
+
+The macOS playlist widget stores one user-selected public YouTube playlist ID in dashboard schema v1 under `youtubePlaylistID`. Both native and browser validators accept the same bounded canonical form (`PL` followed by 11–78 ASCII letters, digits, `_`, or `-`), so native exports continue to round-trip through the browser editor. The native inspector also accepts canonical `https://youtube.com/playlist` and `/watch` links, rejects credentials, ports, duplicate `list` parameters, unrelated paths, and non-YouTube hosts, and persists only the ID. No account, cookie, API key, sample playlist, or playback history is stored.
+
+Configuration does not create a web view or contact YouTube. Pressing **Play Playlist** is the consent and playback action. It presents a media-only `WKWebView`; the surrounding dashboard and controls remain native SwiftUI. The player uses YouTube’s privacy-enhanced `youtube-nocookie.com` host with autoplay enabled only after that click. Its document implements YouTube’s recommended Referer and `origin` client-identity mechanism with an explicit local app origin. The dated physical check confirmed real playback using this identity; provider behavior can still change.
+
+Each playback uses `WKWebsiteDataStore.nonPersistent()`. Popups, downloads, external navigation, non-system credential challenges, camera and microphone capture are denied. A document-start script denies the browser geolocation API in every frame. System server-trust evaluation uses the platform default. Main-frame navigation is limited to Ellie’s exact local player document; subframe navigation is limited to `about:blank` and the exact HTTPS `www.youtube-nocookie.com/embed` path and its `/embed/` descendants. Navigation responses receive the same checks. A WebKit content rule list and document CSP restrict media network hosts before the player HTML loads. Temporary Blob media is permitted only for the exact `https://www.youtube-nocookie.com` origin. Script messages must come from the exact main-frame Ellie origin and have a small recognized payload. Closing the sheet or changing the playlist stops loading, removes the message handler, cancels the 15-second timeout, clears delegates, and replaces the document.
+
+The widget distinguishes network timeout, unavailable/private/restricted content, uploader-disabled embedding (IFrame errors 101 and 150), and WebKit process termination. Some playlist items can be skipped or unavailable because uploaders may disable embedding, make videos private, or apply age restrictions. The [dated physical UI check](validation/2026-09-13-native-playlists.md) confirms one public playlist; it does not guarantee availability of other playlists or uploader-restricted content.
+
+Official sources checked 2026-09-13:
+
+- [YouTube embedded player parameters](https://developers.google.com/youtube/player_parameters)
+- [YouTube IFrame Player API reference and error codes](https://developers.google.com/youtube/iframe_api_reference)
+- [YouTube embed, privacy-enhanced mode, and Referer guidance](https://support.google.com/youtube/answer/171780)
+- [Why playlist items may not appear in embeds](https://support.google.com/youtube/answer/97363)

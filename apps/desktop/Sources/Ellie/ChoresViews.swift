@@ -56,32 +56,40 @@ struct ChoresSheet: View {
         NavigationStack {
             VStack(spacing: 0) {
                 ChoresWeekChart(store: store).padding([.horizontal, .top], 24)
-                List {
-                    let ordered = orderedChores
-                    if ordered.isEmpty {
-                        ContentUnavailableView("No chores yet", systemImage: "checklist", description: Text("Add a task, person, and due day."))
-                            .frame(minHeight: 220)
-                    } else {
-                        ForEach(ordered) { chore in
-                            HStack(spacing: 12) {
-                                Button { store.setCompleted(id: chore.id, completed: chore.completedDay == nil) } label: {
-                                    Image(systemName: chore.completedDay == nil ? "circle" : "checkmark.circle.fill")
-                                        .foregroundStyle(chore.completedDay == nil ? Color.secondary : Color.green)
+                ScrollView {
+                    LazyVStack(spacing: 0) {
+                        let ordered = orderedChores
+                        if ordered.isEmpty {
+                            ContentUnavailableView("No chores yet", systemImage: "checklist", description: Text("Add a task, person, and due day."))
+                                .frame(minHeight: 220)
+                        } else {
+                            ForEach(ordered) { chore in
+                                HStack(spacing: 12) {
+                                    Button { store.setCompleted(id: chore.id, completed: chore.completedDay == nil) } label: {
+                                        Image(systemName: chore.completedDay == nil ? "circle" : "checkmark.circle.fill")
+                                            .foregroundStyle(chore.completedDay == nil ? Color.secondary : Color.green)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .accessibilityLabel(chore.completedDay == nil ? "Complete \(chore.title)" : "Undo completion of \(chore.title)")
+                                    .accessibilityIdentifier("chore-completion-\(chore.id)")
+                                    .focusable(interactions: .activate)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(chore.title).strikethrough(chore.completedDay != nil)
+                                        if !chore.body.isEmpty { Text(chore.body).font(.caption).lineLimit(2) }
+                                        Text("\(chore.member) · Due \(formatted(chore.dueDay))")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Button(role: .destructive) { deleting = chore } label: { Image(systemName: "trash") }
+                                        .buttonStyle(.borderless).help("Delete \(chore.title)")
+                                        .accessibilityLabel("Delete \(chore.title)")
+                                        .accessibilityIdentifier("chore-delete-\(chore.id)")
+                                        .focusable(interactions: .activate)
                                 }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(chore.completedDay == nil ? "Complete \(chore.title)" : "Undo completion of \(chore.title)")
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(chore.title).strikethrough(chore.completedDay != nil)
-                                    if !chore.body.isEmpty { Text(chore.body).font(.caption).lineLimit(2) }
-                                    Text("\(chore.member) · Due \(formatted(chore.dueDay))")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                Button(role: .destructive) { deleting = chore } label: { Image(systemName: "trash") }
-                                    .buttonStyle(.borderless).help("Delete \(chore.title)")
-                                    .accessibilityLabel("Delete \(chore.title)")
-                            }.padding(.vertical, 4)
-                            .accessibilityElement(children: .contain)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 8)
+                                if chore.id != ordered.last?.id { Divider().padding(.leading, 52) }
+                            }
                         }
                     }
                 }

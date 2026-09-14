@@ -28,3 +28,7 @@ test-results/
 # Native desktop build products
 apps/desktop/.build/
 dist/desktop/
+
+# Xcode personal workspace state
+xcuserdata/
+*.xcuserstate

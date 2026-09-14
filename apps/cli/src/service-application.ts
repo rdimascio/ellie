@@ -170,6 +170,8 @@ export class MacOSServiceApplication implements ServiceApplication {
     const staging = join(parent, `.ellie-${randomUUID()}.app`);
     const backup = join(parent, `.ellie-${randomUUID()}.previous.app`);
     let backedUp = false;
+    let completed = false;
+    let published: { dev: number; ino: number } | undefined;
     try {
       const resources = join(staging, "Contents/Resources");
       const executable = join(staging, "Contents/MacOS/EllieService");
@@ -232,27 +234,45 @@ export class MacOSServiceApplication implements ServiceApplication {
         backedUp = true;
       }
       try {
+        const stagedInfo = await lstat(staging);
         await rename(staging, app);
+        published = { dev: stagedInfo.dev, ino: stagedInfo.ino };
         // Public LaunchServices registration lets Settings resolve the app name/icon.
         // It does not grant or reset any privacy permission.
         if (this.register)
           await this.command(applicationExecutable(this.home, role), ["--register"]);
         await commit?.();
+        completed = true;
       } catch (error) {
-        // Preserve the previous application even if registration fails after publication.
-        // If restoration itself fails, keep the backup for manual recovery.
+        // A failed rename does not prove that the destination belongs to this
+        // installer. Remove only the exact managed application we published.
+        if (published) {
+          const current = await lstat(app).catch(() => undefined);
+          const managed = current ? await this.managed(role).catch(() => undefined) : undefined;
+          if (
+            current?.dev === published.dev &&
+            current.ino === published.ino &&
+            managed?.digest === input.digest
+          ) {
+            await rm(app, { recursive: true });
+            published = undefined;
+          }
+        }
         if (backedUp) {
-          backedUp = false;
-          await rm(app, { recursive: true, force: true });
-          await rename(backup, app);
-        } else {
-          await rm(app, { recursive: true, force: true });
+          try {
+            await lstat(app);
+          } catch (missing) {
+            if ((missing as NodeJS.ErrnoException).code === "ENOENT") {
+              await rename(backup, app);
+              backedUp = false;
+            }
+          }
         }
         throw error;
       }
     } finally {
       await rm(staging, { recursive: true, force: true });
-      if (backedUp) await rm(backup, { recursive: true, force: true });
+      if (completed && backedUp) await rm(backup, { recursive: true, force: true });
     }
   }
   async uninstall(role: ServiceRole): Promise<void> {

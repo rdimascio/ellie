@@ -1,15 +1,26 @@
 import { lstat } from "node:fs/promises";
+import { X509Certificate, createHash } from "node:crypto";
 import { join } from "node:path";
 import type { BrowserSetupEnvironment } from "./browser-setup.ts";
 import { BROWSER_CONFIG, loadBrowserServerIdentity } from "./browser-setup.ts";
 import { BrowserAuth } from "../../server/src/browser-auth.ts";
+import { NativeAuth } from "../../server/src/native-auth.ts";
 import type { BrowserControl } from "../../server/src/browser-management.ts";
+import { HouseholdState } from "../../server/src/household-state.ts";
+import { NativeSpeech, loadNativeSpeechConfiguration } from "../../server/src/native-speech.ts";
+import { WhisperCliSpeechInput, whisperCliAvailability } from "@ellie/speech";
 import { createBrowserServer } from "../../server/src/browser-server.ts";
 import type {
   BrowserAssets,
   BrowserServer,
   BrowserServerOptions,
 } from "../../server/src/browser-server.ts";
+import type { BrowserRemote } from "../../server/src/browser-remote.ts";
+
+export interface ManagedBrowserRemote {
+  remote: BrowserRemote;
+  close(): void;
+}
 
 type BrowserUnavailableReason = Extract<
   ReturnType<BrowserControl["current"]>,
@@ -20,6 +31,7 @@ export interface BrowserRuntimeOptions {
   setup: BrowserSetupEnvironment;
   bindHost: string;
   loadAssets: () => Promise<BrowserAssets>;
+  createRemote?: () => Promise<ManagedBrowserRemote>;
   createServer?: (options: BrowserServerOptions) => BrowserServer;
 }
 
@@ -68,9 +80,13 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   let snapshot: ReturnType<BrowserControl["current"]> = { status: "disabled" };
   let listener: BrowserServer | undefined;
   let auth: BrowserAuth | undefined;
+  let nativeAuth: NativeAuth | undefined;
+  let household: HouseholdState | undefined;
+  let speech: NativeSpeech | undefined;
+  let managedRemote: ManagedBrowserRemote | undefined;
   let stopped = false;
   let started: Promise<void> | undefined;
-  let phase: "identity" | "assets" | "auth" | "listener" = "identity";
+  let phase: "identity" | "assets" | "auth" | "remote" | "listener" = "identity";
 
   const closeListener = (target = listener): void => {
     try {
@@ -81,6 +97,20 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
   };
   const unavailable = (reason: BrowserUnavailableReason): void => {
     if (!stopped) snapshot = { status: "unavailable", reason };
+  };
+  const closeRemote = (target = managedRemote): void => {
+    try {
+      target?.close();
+    } catch {
+      // The pinned coordinator client owns no browser listener state.
+    }
+    if (target === managedRemote) managedRemote = undefined;
+  };
+  const closeAuthorities = async (): Promise<void> => {
+    await speech?.close();
+    await household?.close();
+    await auth?.close();
+    await nativeAuth?.close();
   };
 
   const run = async (): Promise<void> => {
@@ -114,6 +144,59 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       return;
     }
     if (stopped) return;
+    try {
+      nativeAuth = await NativeAuth.openOrInitialize(options.setup.stateDir);
+    } catch {
+      nativeAuth = undefined;
+    }
+    try {
+      household = await HouseholdState.openOrInitialize(options.setup.stateDir);
+    } catch {
+      household = undefined;
+    }
+    try {
+      const configuration = await loadNativeSpeechConfiguration(options.setup.stateDir);
+      if (nativeAuth && configuration)
+        speech = await NativeSpeech.open(
+          nativeAuth,
+          () =>
+            new WhisperCliSpeechInput({
+              ...configuration,
+              maxAudioBytes: 1_100_000,
+              maxAudioDurationMs: 30_000,
+              maxTranscriptBytes: 16_384,
+              timeoutMs: 35_000,
+            }),
+          options.setup.stateDir,
+          async () => (await whisperCliAvailability(configuration)).available,
+        );
+    } catch {
+      speech = undefined;
+    }
+
+    if (stopped) {
+      await closeAuthorities();
+      return;
+    }
+
+    phase = "remote";
+    if (options.createRemote) {
+      try {
+        const created = await options.createRemote();
+        if (stopped) {
+          closeRemote(created);
+          await closeAuthorities();
+          return;
+        }
+        managedRemote = created;
+      } catch {
+        managedRemote = undefined;
+      }
+    }
+    if (stopped) {
+      await closeAuthorities();
+      return;
+    }
 
     const origin = `https://${identity.config.hostname}:${identity.config.port}`;
     phase = "listener";
@@ -123,12 +206,17 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         cert: identity.cert,
         origin,
         auth,
+        nativeAuth,
+        household,
+        speech,
         assets,
+        remote: managedRemote?.remote,
       });
       listener = activeListener;
       activeListener.server.on("error", () => {
         if (stopped || listener !== activeListener) return;
         closeListener(activeListener);
+        closeRemote();
         unavailable("listener_unavailable");
       });
       await waitForListening(activeListener.server, identity.config.port, options.bindHost);
@@ -136,9 +224,21 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         closeListener(activeListener);
         return;
       }
-      snapshot = { status: "ready", origin, auth };
+      const certificateSha256 = createHash("sha256")
+        .update(new X509Certificate(identity.cert).raw)
+        .digest("hex");
+      snapshot = {
+        status: "ready",
+        origin,
+        auth,
+        nativeAuth,
+        household,
+        speech,
+        certificateSha256,
+      };
     } catch {
       closeListener();
+      closeRemote();
       unavailable("listener_unavailable");
     }
   };
@@ -154,10 +254,11 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
       stopped = true;
       snapshot = { status: "disabled" };
       closeListener();
-      if (phase === "identity" || phase === "assets") return;
+      if (phase === "identity" || phase === "assets" || phase === "remote") return;
       await started;
       closeListener();
-      await auth?.close();
+      closeRemote();
+      await closeAuthorities();
     },
   };
 }

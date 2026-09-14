@@ -23,6 +23,7 @@
         "@ellie/config": "*",
         "@ellie/macos": "*",
         "@ellie/protocol": "*",
+        "@ellie/speech": "*",
         "@ellie/transport": "*",
         "qrcode": "1.5.4",
       },
@@ -87,6 +88,7 @@
       "name": "@ellie/macos",
       "version": "0.1.0",
       "dependencies": {
+        "@ellie/config": "*",
         "@ellie/protocol": "*",
       },
     },

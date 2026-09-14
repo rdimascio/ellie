@@ -2,7 +2,11 @@ import { browserPairingQr } from "@ellie/protocol";
 import QRCode from "qrcode";
 
 export async function terminalBrowserPairingQr(code: string): Promise<string> {
-  const modules = QRCode.create(browserPairingQr(code), { errorCorrectionLevel: "M" }).modules;
+  return terminalPairingQr(browserPairingQr(code));
+}
+
+export async function terminalPairingQr(payload: string): Promise<string> {
+  const modules = QRCode.create(payload, { errorCorrectionLevel: "M" }).modules;
   const margin = 4;
   const width = modules.size + margin * 2;
   const rows: string[] = [];

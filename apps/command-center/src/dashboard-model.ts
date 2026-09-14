@@ -265,7 +265,14 @@ function validateWidget(value: unknown, label: string): DashboardWidget {
 
 function validateConfig(type: WidgetType, value: unknown, label: string): Record<string, string> {
   if (!isPlainObject(value)) fail(`Invalid ${label} config`);
-  const allowed = type === "clock" ? ["timeZone"] : type === "note" ? ["text"] : [];
+  const allowed =
+    type === "clock"
+      ? ["timeZone"]
+      : type === "note"
+        ? ["text"]
+        : type === "playlist"
+          ? ["youtubePlaylistID"]
+          : [];
   if (!hasOnlyKeys(value, allowed)) fail(`Invalid ${label} config`);
   const config: Record<string, string> = {};
   for (const [key, item] of Object.entries(value)) {
@@ -280,6 +287,8 @@ function validateConfig(type: WidgetType, value: unknown, label: string): Record
         fail(`Invalid ${label} time zone`);
       }
     }
+    if (key === "youtubePlaylistID" && !/^PL[A-Za-z0-9_-]{11,78}$/.test(item))
+      fail(`Invalid ${label} YouTube playlist id`);
     config[key] = item;
   }
   return config;
