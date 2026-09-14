@@ -26,6 +26,10 @@ import { servicePlist } from "../apps/cli/src/services.ts";
 const mac = process.platform === "darwin";
 const source = new URL("../packages/macos/native/ServicePayloadInstaller.swift", import.meta.url)
   .pathname;
+const authorizationSource = new URL(
+  "../packages/macos/native/ServicePayloadAuthorization.swift",
+  import.meta.url,
+).pathname;
 const selectionSource = new URL(
   "../packages/macos/native/ServicePayloadSelection.swift",
   import.meta.url,
@@ -43,6 +47,22 @@ const launcherSource = new URL(
   import.meta.url,
 ).pathname;
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+const boundedCommand = { timeout: 15_000, stdio: "pipe" as const };
+function authorizationRequirement(teamID: string) {
+  return `anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = "${teamID}" and identifier "org.ellie.service.authorization"`;
+}
+function mutateCodeResources(path: string, mode: "optional" | "unknown" | "hash2") {
+  execFileSync(
+    "/usr/bin/python3",
+    [
+      "-c",
+      "import plistlib,sys\np=sys.argv[1];m=sys.argv[2]\nwith open(p,'rb') as f: v=plistlib.load(f)\ne=v['files2']['Resources/manifest.json']\nif m=='optional': e['optional']=True\nelif m=='unknown': v['files2']['Resources/unknown']=dict(e)\nelif m=='hash2': e['hash2']=bytes(32)\nwith open(p,'wb') as f: plistlib.dump(v,f)",
+      path,
+      mode,
+    ],
+    boundedCommand,
+  );
+}
 function canonicalJSON(value: unknown): string {
   const sorted = (item: unknown): unknown => {
     if (Array.isArray(item)) return item.map(sorted);
@@ -58,6 +78,15 @@ function canonicalJSON(value: unknown): string {
 }
 const run = (file: string, args: string[]) =>
   spawnSync(file, args, { encoding: "utf8", timeout: 15_000, maxBuffer: 1024 * 1024 });
+function assertAuthorizationRejected(result: ReturnType<typeof run>) {
+  assert.equal(result.error, undefined);
+  assert.equal(result.signal, null);
+  assert.equal(result.status, 1);
+  assert.match(
+    result.stderr,
+    /^Ellie could not authenticate this service manifest envelope; no payload was installed or changed\.\n/,
+  );
+}
 const runWithUmask = (mask: "027" | "077", file: string, args: string[]) =>
   spawnSync("/bin/sh", ["-c", `umask ${mask}; exec "$@"`, "ellie-test", file, ...args], {
     encoding: "utf8",
@@ -108,37 +137,49 @@ async function fixture(root: string, installer: string, tiny: string) {
   });
   await cp(tiny, join(payload, "helpers/ellie-macos"));
   await chmod(join(payload, "helpers/ellie-macos"), 0o755);
-  execFileSync("/usr/bin/codesign", [
-    "--force",
-    "--sign",
-    "-",
-    "--identifier",
-    "org.ellie.helper",
-    join(payload, "helpers/ellie-macos"),
-  ]);
+  execFileSync(
+    "/usr/bin/codesign",
+    [
+      "--force",
+      "--sign",
+      "-",
+      "--identifier",
+      "org.ellie.helper",
+      join(payload, "helpers/ellie-macos"),
+    ],
+    boundedCommand,
+  );
   for (const [name, identifier, define] of [
     ["Ellie Coordinator", "org.ellie.assistant.coordinator.app", "ELLIE_COORDINATOR"],
     ["Ellie Node", "org.ellie.assistant.node.app", "ELLIE_NODE"],
   ] as const) {
     const app = join(payload, "launchers", `${name}.app`);
     await mkdir(join(app, "Contents/MacOS"), { recursive: true, mode: 0o755 });
-    execFileSync("/usr/bin/xcrun", [
-      "swiftc",
-      "-swift-version",
-      "5",
-      "-parse-as-library",
-      "-D",
-      define,
-      launcherSource,
-      "-o",
-      join(app, "Contents/MacOS/EllieService"),
-    ]);
+    execFileSync(
+      "/usr/bin/xcrun",
+      [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-parse-as-library",
+        "-D",
+        define,
+        launcherSource,
+        "-o",
+        join(app, "Contents/MacOS/EllieService"),
+      ],
+      boundedCommand,
+    );
     await writeFile(
       join(app, "Contents/Info.plist"),
       `<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${identifier}</string><key>CFBundleExecutable</key><string>EllieService</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>`,
       { mode: 0o644 },
     );
-    execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", "--identifier", identifier, app]);
+    execFileSync(
+      "/usr/bin/codesign",
+      ["--force", "--sign", "-", "--identifier", identifier, app],
+      boundedCommand,
+    );
   }
   const revision = "a".repeat(40);
   const nodeHash = "b".repeat(64);
@@ -205,6 +246,61 @@ async function refreshManifestFiles(release: string) {
   await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o644 });
 }
 
+async function authorizationBundle(
+  root: string,
+  release: string,
+  executable: string,
+  teamID = "ABCDEFGHIJ",
+) {
+  const app = join(root, "Ellie Service Authorization.app");
+  const contents = join(app, "Contents");
+  const resources = join(contents, "Resources");
+  await mkdir(join(contents, "MacOS"), { recursive: true, mode: 0o755 });
+  await mkdir(resources, { mode: 0o755 });
+  await cp(executable, join(contents, "MacOS/EllieServiceAuthorization"));
+  await chmod(join(contents, "MacOS/EllieServiceAuthorization"), 0o755);
+  await writeFile(
+    join(contents, "Info.plist"),
+    '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key><string>org.ellie.service.authorization</string><key>CFBundleExecutable</key><string>EllieServiceAuthorization</string><key>CFBundlePackageType</key><string>APPL</string></dict></plist>',
+    { mode: 0o644 },
+  );
+  const manifest = await readFile(join(release, "manifest.json"));
+  const sourceRecord = await readFile(join(release, "SOURCE.txt"));
+  const policyDigest = digest(
+    Buffer.from(
+      canonicalJSON({
+        authorizationIdentifier: "org.ellie.service.authorization",
+        authorizationVersion: 1,
+        digestAlgorithm: "sha256",
+        payloadVerification: "not-performed",
+        requiredResources: ["SOURCE.txt", "authorization.json", "manifest.json"],
+        requirement: authorizationRequirement(teamID),
+        scope: "manifest-envelope",
+        signatureSemantics: "security-framework-strict-all-architectures",
+        teamID,
+      }),
+    ),
+  );
+  await writeFile(join(resources, "manifest.json"), manifest, { mode: 0o644 });
+  await writeFile(join(resources, "SOURCE.txt"), sourceRecord, { mode: 0o644 });
+  await writeFile(
+    join(resources, "authorization.json"),
+    canonicalJSON({
+      manifestSHA256: digest(manifest),
+      policyDigest,
+      sourceSHA256: digest(sourceRecord),
+      version: 1,
+    }),
+    { mode: 0o644 },
+  );
+  execFileSync(
+    "/usr/bin/codesign",
+    ["--force", "--sign", "-", "--identifier", "org.ellie.service.authorization", app],
+    boundedCommand,
+  );
+  return app;
+}
+
 async function withFixture(
   t: test.TestContext,
   action: (value: {
@@ -216,38 +312,50 @@ async function withFixture(
   }) => Promise<void>,
 ) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-native-installer-")));
-  t.after(() => removeOwned(root));
+  let completed = false;
+  t.after(async () => {
+    if (completed) await removeOwned(root);
+  });
   const installer = join(root, "installer");
   const tinySource = join(root, "tiny.swift");
   const tiny = join(root, "tiny");
   await writeFile(tinySource, "@main struct Tiny { static func main() {} }\n");
-  execFileSync("/usr/bin/xcrun", [
-    "swiftc",
-    "-swift-version",
-    "5",
-    "-parse-as-library",
-    "-D",
-    "ELLIE_INSTALLER_TESTING",
-    selectionSource,
-    lifecycleSource,
-    migrationSource,
-    source,
-    "-o",
-    installer,
-  ]);
-  execFileSync("/usr/bin/codesign", [
-    "--force",
-    "--sign",
-    "-",
-    "--identifier",
-    "org.ellie.installer",
-    installer,
-  ]);
-  execFileSync("/usr/bin/xcrun", ["swiftc", "-parse-as-library", tinySource, "-o", tiny]);
+  execFileSync(
+    "/usr/bin/xcrun",
+    [
+      "swiftc",
+      "-swift-version",
+      "5",
+      "-parse-as-library",
+      "-D",
+      "ELLIE_INSTALLER_TESTING",
+      "-D",
+      "ELLIE_AUTHORIZATION_TESTING",
+      authorizationSource,
+      selectionSource,
+      lifecycleSource,
+      migrationSource,
+      source,
+      "-o",
+      installer,
+    ],
+    boundedCommand,
+  );
+  execFileSync(
+    "/usr/bin/codesign",
+    ["--force", "--sign", "-", "--identifier", "org.ellie.installer", installer],
+    boundedCommand,
+  );
+  execFileSync(
+    "/usr/bin/xcrun",
+    ["swiftc", "-parse-as-library", tinySource, "-o", tiny],
+    boundedCommand,
+  );
   const { release, id } = await fixture(root, installer, tiny);
   const services = join(root, "Services");
   await mkdir(services, { mode: 0o700 });
   await action({ root, release, installer, services, id });
+  completed = true;
 }
 
 const options = { skip: !mac };
@@ -263,6 +371,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-parse-as-library",
     "-D",
     "ELLIE_INSTALLER_TESTING",
+    authorizationSource,
     selectionSource,
     lifecycleSource,
     migrationSource,
@@ -275,6 +384,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-swift-version",
     "5",
     "-parse-as-library",
+    authorizationSource,
     selectionSource,
     lifecycleSource,
     migrationSource,
@@ -297,6 +407,147 @@ test("installer stage diagnostics are compiled into test builds only", options, 
   );
   assert.doesNotMatch(productionFailure.stderr, /diagnostic|stage=|category=/);
 });
+
+test(
+  "authenticated manifest envelope is sealed, exact, and never a payload approval",
+  options,
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer }) => {
+      const app = await authorizationBundle(root, release, installer);
+      const args = [
+        "inspect-authorization",
+        release,
+        app,
+        "--publisher-team-id",
+        "ABCDEFGHIJ",
+        "--test-allow-sealed-adhoc",
+      ];
+      const accepted = run(installer, args);
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.match(
+        accepted.stdout,
+        /^Authenticated copies manifestBytes \d+ manifestSHA256 [a-f0-9]{64} sourceBytes \d+ sourceSHA256 [a-f0-9]{64}\.\nAuthenticated manifest envelope version 1, policy [a-f0-9]{64}, manifest [a-f0-9]{64}; payload inventory was not verified and nothing was installed\.\n$/,
+      );
+      const manifestBytes = (await readFile(join(release, "manifest.json"))).length;
+      const sourceBytes = (await readFile(join(release, "SOURCE.txt"))).length;
+      assert.match(
+        accepted.stdout,
+        new RegExp(
+          `manifestBytes ${manifestBytes} manifestSHA256 ${digest(await readFile(join(release, "manifest.json")))} sourceBytes ${sourceBytes} sourceSHA256 ${digest(await readFile(join(release, "SOURCE.txt")))}`,
+        ),
+      );
+
+      const policyA = run(installer, ["test-authorization-policy", "ABCDEFGHIJ", "requirement-a"]);
+      const policyB = run(installer, ["test-authorization-policy", "ABCDEFGHIJ", "requirement-b"]);
+      assert.equal(policyA.status, 0, policyA.stderr);
+      assert.equal(policyB.status, 0, policyB.stderr);
+      assert.notEqual(policyA.stdout, policyB.stdout);
+
+      for (const invalidRelease of [
+        `${release}/.`,
+        `${release}//payload`,
+        `${release}/../source`,
+      ]) {
+        assertAuthorizationRejected(run(installer, [args[0]!, invalidRelease, ...args.slice(2)]));
+      }
+
+      const replacement = join(root, "Replacement Authorization.app");
+      await cp(app, replacement, { recursive: true });
+      assertAuthorizationRejected(run(installer, [...args, "--test-rebind-path", replacement]));
+
+      const production = join(root, "production-authorization-installer");
+      execFileSync(
+        "/usr/bin/xcrun",
+        [
+          "swiftc",
+          "-swift-version",
+          "5",
+          "-parse-as-library",
+          authorizationSource,
+          selectionSource,
+          lifecycleSource,
+          migrationSource,
+          source,
+          "-o",
+          production,
+        ],
+        boundedCommand,
+      );
+      const productionRejection = run(production, args.slice(0, 5));
+      assertAuthorizationRejected(productionRejection);
+      assert.equal(
+        productionRejection.stderr,
+        "Ellie could not authenticate this service manifest envelope; no payload was installed or changed.\n",
+      );
+      assertAuthorizationRejected(run(production, args));
+
+      const externalManifest = join(release, "manifest.json");
+      const originalManifest = await readFile(externalManifest);
+      await writeFile(externalManifest, Buffer.concat([originalManifest, Buffer.from(" ")]));
+      assertAuthorizationRejected(run(installer, args));
+      await writeFile(externalManifest, originalManifest);
+
+      const recordPath = join(app, "Contents/Resources/authorization.json");
+      const record = JSON.parse(await readFile(recordPath, "utf8"));
+      record.extra = true;
+      await writeFile(recordPath, canonicalJSON(record));
+      execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", app], boundedCommand);
+      assertAuthorizationRejected(run(installer, args));
+      delete record.extra;
+      await writeFile(recordPath, canonicalJSON(record));
+      execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", app], boundedCommand);
+
+      const infoPath = join(app, "Contents/Info.plist");
+      const originalInfo = await readFile(infoPath);
+      await writeFile(
+        infoPath,
+        originalInfo.toString().replace("<string>APPL</string>", "<string>BNDL</string>"),
+      );
+      execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", app], boundedCommand);
+      assertAuthorizationRejected(run(installer, args));
+      await writeFile(infoPath, originalInfo);
+      execFileSync("/usr/bin/codesign", ["--force", "--sign", "-", app], boundedCommand);
+
+      const parserArgs = [
+        "test-authorization-resources",
+        join(app, "Contents/_CodeSignature"),
+        join(app, "Contents/Resources"),
+      ];
+      assert.equal(run(installer, parserArgs).status, 0);
+      const codeResourcesPath = join(app, "Contents/_CodeSignature/CodeResources");
+      const originalCodeResources = await readFile(codeResourcesPath);
+      mutateCodeResources(codeResourcesPath, "optional");
+      assertAuthorizationRejected(run(installer, parserArgs));
+      await writeFile(codeResourcesPath, originalCodeResources);
+      mutateCodeResources(codeResourcesPath, "unknown");
+      assertAuthorizationRejected(run(installer, parserArgs));
+      await writeFile(codeResourcesPath, originalCodeResources);
+      mutateCodeResources(codeResourcesPath, "hash2");
+      assertAuthorizationRejected(run(installer, parserArgs));
+      await writeFile(codeResourcesPath, originalCodeResources);
+
+      const wrongPolicy = [...args];
+      wrongPolicy[4] = "KLMNOPQRST";
+      assertAuthorizationRejected(run(installer, wrongPolicy));
+      const malformedPolicy = [...args];
+      malformedPolicy[4] = "ABCDEFGHI";
+      assertAuthorizationRejected(run(installer, malformedPolicy));
+
+      const sourcePath = join(release, "SOURCE.txt");
+      const originalSource = await readFile(sourcePath);
+      await rename(sourcePath, `${sourcePath}.owned`);
+      await symlink(`${sourcePath}.owned`, sourcePath);
+      assertAuthorizationRejected(run(installer, args));
+      await rm(sourcePath);
+      await rename(`${sourcePath}.owned`, sourcePath);
+      assert.deepEqual(await readFile(sourcePath), originalSource);
+
+      const sealedManifest = join(app, "Contents/Resources/manifest.json");
+      await writeFile(sealedManifest, Buffer.concat([originalManifest, Buffer.from(" ")]));
+      assertAuthorizationRejected(run(installer, args));
+    });
+  },
+);
 
 test(
   "native installer inspects and publishes one immutable unselected release",

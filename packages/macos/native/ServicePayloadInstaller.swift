@@ -1110,6 +1110,17 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    if arguments.first == "inspect-authorization" {
+      do { try runAuthorizationInspection(arguments) } catch { failAuthorizationInspection(error) }
+    }
+    #if ELLIE_AUTHORIZATION_TESTING
+      if arguments.first == "test-authorization-policy" {
+        do { try runAuthorizationPolicyTest(arguments) } catch { failAuthorizationInspection(error) }
+      }
+      if arguments.first == "test-authorization-resources" {
+        do { try runAuthorizationResourcesTest(arguments) } catch { failAuthorizationInspection(error) }
+      }
+    #endif
     if arguments.first == "restore-legacy" || arguments.first == "recover-legacy-restore" {
       do { try runLegacyRestoreCommand(arguments) } catch { failLegacyRestoreCommand(error) }
     }
