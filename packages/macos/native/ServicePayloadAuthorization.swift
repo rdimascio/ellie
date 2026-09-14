@@ -100,6 +100,11 @@ private func authorizationPolicyDigest(teamID: String, requirementText: String? 
         signatureSemantics: "security-framework-strict-all-architectures", teamID: teamID)))
 }
 
+func authenticatedEnvelopePolicyDigest(teamID: String) throws -> String {
+  guard authorizationTeamID(teamID) else { throw AuthorizationFailure.rejected }
+  return try authorizationPolicyDigest(teamID: teamID)
+}
+
 private func authorizationRequirementText(teamID: String) -> String {
   "anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] exists and certificate leaf[field.1.2.840.113635.100.6.1.13] exists and certificate leaf[subject.OU] = \"\(teamID)\" and identifier \"\(authorizationIdentifier)\""
 }

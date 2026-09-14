@@ -182,6 +182,18 @@ private func payloadPolicyDigest(
   return payloadHash(bytes)
 }
 
+func authenticatedPayloadPolicyDigest(
+  teamID: String, architecture: String
+) throws -> String {
+  guard teamID.utf8.count == 10,
+    teamID.utf8.allSatisfy({ ($0 >= 48 && $0 <= 57) || ($0 >= 65 && $0 <= 90) }),
+    architecture == "arm64" || architecture == "x64"
+  else { throw InstallerFailure.rejected }
+  let envelopePolicyDigest = try authenticatedEnvelopePolicyDigest(teamID: teamID)
+  return try payloadPolicyDigest(
+    teamID: teamID, envelopePolicyDigest: envelopePolicyDigest, architecture: architecture)
+}
+
 private struct StrictJSONScanner {
   let bytes: [UInt8]
   var index = 0

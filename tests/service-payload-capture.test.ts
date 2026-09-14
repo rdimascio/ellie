@@ -26,6 +26,7 @@ const native = (name: string) =>
 const sources = [
   native("ServicePayloadAuthorization.swift"),
   native("ServicePayloadAuthenticatedInspection.swift"),
+  native("AuthenticatedActivationPolicy.swift"),
   native("AuthenticatedCandidateVerifier.swift"),
   native("ServicePayloadCapture.swift"),
   native("ServicePayloadSelection.swift"),

@@ -1141,6 +1141,13 @@ private struct ServicePayloadInstaller {
         }
       }
     #endif
+    #if ELLIE_ACTIVATION_POLICY_TESTING
+      if arguments.first == "test-authenticated-activation-policy" {
+        do { try runAuthenticatedActivationPolicyTest(arguments) } catch {
+          failAuthenticatedPayloadInspection(error)
+        }
+      }
+    #endif
     if arguments.first == "restore-legacy" || arguments.first == "recover-legacy-restore" {
       do { try runLegacyRestoreCommand(arguments) } catch { failLegacyRestoreCommand(error) }
     }
