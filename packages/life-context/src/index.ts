@@ -5,6 +5,7 @@ import {
   calendarDateKey,
   localParts,
   parseCalendarDate,
+  parseInstant,
   startOfLocalDay,
 } from "../../life-time/src/index.ts";
 
@@ -57,16 +58,8 @@ export function eventPreparationWindow(
     }
     return undefined;
   }
-  let at: number | undefined;
-  if (number(raw)) at = raw;
-  else if (typeof raw === "string") {
-    const match =
-      /^(\d{4}-\d{2}-\d{2})T([01]\d|2[0-3]):([0-5]\d)(?::[0-5]\d(?:\.\d{1,3})?)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(
-        raw,
-      );
-    if (match && parseCalendarDate(match[1])) at = Date.parse(raw);
-  }
-  return number(at) && at > now && at - now <= 48 * 60 * 60_000
+  const at = parseInstant(raw);
+  return at !== undefined && at > now && at - now <= 48 * 60 * 60_000
     ? { expiresAt: at, allDay: false, today: false }
     : undefined;
 }

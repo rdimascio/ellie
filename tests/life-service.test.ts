@@ -1159,7 +1159,12 @@ test("server close refuses to release stores while an HTTP handler remains activ
       request = fetch(`${running.url}/api/life/chat`, {
         method: "POST",
         headers: jsonHeaders(running.url, cookie),
-        body: JSON.stringify({ scope: "user:local", message: "wait" }),
+        body: JSON.stringify({
+          scope: "user:local",
+          message: "wait",
+          requestId: "slow-chat",
+          chatEpoch: 1,
+        }),
       }).catch(() => undefined);
     await entered;
     await assert.rejects(running.server.close(), /requests are still active/);
@@ -1845,6 +1850,130 @@ test("teaching routes require revisions and expose retained history", async () =
   }
 });
 
+test("chat requests persist once, recover by request id, page privately, and expose model status", async () => {
+  const f = await fixture();
+  let calls = 0;
+  try {
+    const source = f.life.ingestSource(
+        { userId: "local" },
+        {
+          title: "S".repeat(2_000),
+          scope: { type: "user", id: "local" },
+          format: "text",
+          content: "bounded evidence",
+        },
+      ),
+      token = "c".repeat(43),
+      running = await f.start(token, "local", {
+        harness: {
+          ...f.harness,
+          async chat(input) {
+            calls += 1;
+            return {
+              reply: "R".repeat(9_000),
+              conversationId: input.conversationId!,
+              actions: [{ label: "L".repeat(2_000), status: "completed" }],
+              evidence: [{ sourceId: source.id, title: source.title }],
+            };
+          },
+        },
+        modelStatus: async () => ({
+          mode: "local",
+          configured: true,
+          available: true,
+          model: "local-test",
+          checkedAt: 1_800_000_000_000,
+          capabilities: { chat: true, customApps: true },
+          reason: "ready",
+        }),
+      }),
+      cookie = await authenticate(running.url, token),
+      bootstrap = (await (
+        await fetch(`${running.url}/api/life/bootstrap`, { headers: { cookie } })
+      ).json()) as { chatEpoch: number };
+    assert.equal(bootstrap.chatEpoch, 1);
+    const payload = {
+      scope: "user:local",
+      message: "remember once",
+      requestId: "durable-request",
+      chatEpoch: bootstrap.chatEpoch,
+    };
+    const first = await fetch(`${running.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify(payload),
+    });
+    assert.equal(first.status, 200);
+    const firstBody = (await first.json()) as { conversationId: string; status: string };
+    assert.equal(firstBody.status, "completed");
+    const duplicate = await fetch(`${running.url}/api/life/chat`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify(payload),
+    });
+    assert.equal(duplicate.status, 200);
+    assert.equal(calls, 1);
+    const recovered = await fetch(`${running.url}/api/life/chat/requests/durable-request`, {
+      headers: { cookie },
+    });
+    assert.equal(recovered.status, 200);
+    assert.equal(((await recovered.json()) as { status: string }).status, "completed");
+    const list = (await (
+      await fetch(`${running.url}/api/life/conversations?scope=user:local`, {
+        headers: { cookie },
+      })
+    ).json()) as { chatEpoch: number; conversations: Array<{ id: string }> };
+    assert.equal(list.chatEpoch, 1);
+    assert.equal(list.conversations[0]?.id, firstBody.conversationId);
+    const detail = (await (
+      await fetch(`${running.url}/api/life/conversations/${firstBody.conversationId}`, {
+        headers: { cookie },
+      })
+    ).json()) as {
+      turns: Array<{
+        requestId: string;
+        assistant?: string;
+        actions: Array<{ label: string }>;
+        evidence: Array<{ title: string }>;
+      }>;
+    };
+    assert.equal(detail.turns[0]?.requestId, "durable-request");
+    assert.equal(detail.turns[0]?.assistant?.length, 8_000);
+    assert.equal(detail.turns[0]?.actions[0]?.label.length, 500);
+    assert.equal(detail.turns[0]?.evidence[0]?.title.length, 500);
+    assert.equal((await fetch(`${running.url}/api/life/model/status`)).status, 401);
+    const status = (await (
+      await fetch(`${running.url}/api/life/model/status`, { headers: { cookie } })
+    ).json()) as { model: string; reason: string; checkedAt: string };
+    assert.equal(status.model, "local-test");
+    assert.equal(status.reason, "ready");
+    assert.match(status.checkedAt, /^2027-/);
+    const revision = list.conversations[0] as unknown as { revision: number };
+    assert.equal(
+      (
+        await fetch(
+          `${running.url}/api/life/conversations/${firstBody.conversationId}?revision=${revision.revision}`,
+          { method: "DELETE", headers: jsonHeaders(running.url, cookie) },
+        )
+      ).status,
+      204,
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/chat`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify(payload),
+        })
+      ).status,
+      409,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    await f.close();
+  }
+});
+
 test("reviewed personal export and reset preserve shared data and memberships", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-personal-reset-"));
   await chmod(root, 0o700);
@@ -2152,13 +2281,18 @@ test("concurrent reset starts and completed retries cannot release a newer prefl
       { userId: "local" },
       { kind: "memory", title: "New private data", scope: { type: "user", id: "local" }, data: {} },
     );
-    const secondReview = await getReview();
     const chat = fetch(`${running.url}/api/life/chat`, {
       method: "POST",
       headers: jsonHeaders(running.url, cookie),
-      body: JSON.stringify({ scope: "user:local", message: "wait" }),
+      body: JSON.stringify({
+        scope: "user:local",
+        message: "wait",
+        requestId: "reset-chat",
+        chatEpoch: 2,
+      }),
     });
     await started;
+    const secondReview = await getReview();
     const secondReset = fetch(`${running.url}/api/life/personal-data/reset`, {
       method: "POST",
       headers: jsonHeaders(running.url, cookie),
@@ -2202,7 +2336,7 @@ test("concurrent reset starts and completed retries cannot release a newer prefl
     );
     release();
     await chat;
-    assert.equal((await secondReset).status, 200);
+    assert.equal((await secondReset).status, 409);
   } finally {
     release();
     await server.close();

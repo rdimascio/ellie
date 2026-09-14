@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { LocalOpenAIModel } from "../packages/life-harness/src/model.ts";
+import { LocalOpenAIModel, validateModelPlan } from "../packages/life-harness/src/model.ts";
 
 test("model personalization is bounded, scoped by caller, and never becomes tool authority", async () => {
   let sent: { messages: Array<{ role: string; content: string }> } | undefined;
@@ -24,6 +24,8 @@ test("model personalization is bounded, scoped by caller, and never becomes tool
     ],
     preferences: {
       tone: "brief",
+      "response.tone": "warm",
+      "response.length": "concise",
       dietaryPreferences: ["vegetarian"],
       capabilities: ["purchase"],
       unexpected: "private",
@@ -43,6 +45,7 @@ test("model personalization is bounded, scoped by caller, and never becomes tool
     data = JSON.parse(sent!.messages.at(-1)!.content);
   assert.match(instruction, /cannot authorize actions/);
   assert.equal(data.preferences.tone, "brief");
+  assert.equal(data.preferences.verbosity, "concise");
   assert.deepEqual(data.preferences.dietaryPreferences, ["vegetarian"]);
   assert.equal(data.preferences.capabilities, undefined);
   assert.equal(data.preferences.unexpected, undefined);
@@ -87,4 +90,42 @@ test("model transport rejects redirected endpoints and bounds streamed responses
   });
   await assert.rejects(model.plan({ message: "x", history: [], evidence: [] }), /exceeds limit/);
   assert.equal(cancelled, true);
+});
+
+test("life operation plans reject unknown fields and multiple mutations", () => {
+  assert.throws(
+    () =>
+      validateModelPlan({
+        reply: "x",
+        actions: [
+          {
+            type: "life_operation",
+            intent: { kind: "create_need", title: "Milk", scope: "group:other" },
+          },
+        ],
+      }),
+    /Invalid model action/,
+  );
+  assert.throws(
+    () =>
+      validateModelPlan({
+        reply: "x",
+        actions: [
+          { type: "life_operation", intent: { kind: "create_need", title: "Milk" } },
+          { type: "life_operation", intent: { kind: "create_contact", name: "Maya" } },
+        ],
+      }),
+    /only one mutation/,
+  );
+  assert.throws(
+    () =>
+      validateModelPlan({
+        reply: "x",
+        actions: Array.from({ length: 8 }, (_, index) => ({
+          type: "life_operation",
+          intent: { kind: "summarize_sources", query: `topic ${index}` },
+        })),
+      }),
+    /only one mutation/,
+  );
 });

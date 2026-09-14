@@ -2,6 +2,7 @@ import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { LocalModelReadiness, validateLocalModelConfiguration } from "./model-status.ts";
 
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
@@ -12,18 +13,6 @@ export interface LifeApplicationOptions {
   modelUrl?: string;
   model?: string;
   assetsDir?: string;
-}
-
-function validateModelEndpoint(value: string): void {
-  const url = new URL(value),
-    host = url.hostname.replace(/^\[|\]$/g, "");
-  if (
-    url.protocol !== "http:" ||
-    !["127.0.0.1", "::1"].includes(host) ||
-    url.username ||
-    url.password
-  )
-    throw new Error("--model-url must be an unauthenticated HTTP loopback URL.");
 }
 
 async function prepareStateDirectory(input: string): Promise<string> {
@@ -79,7 +68,11 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
     );
   if ((options.modelUrl && !options.model) || (!options.modelUrl && options.model))
     throw new Error("--model-url and --model must be provided together.");
-  if (options.modelUrl) validateModelEndpoint(options.modelUrl);
+  const modelConfiguration =
+    options.modelUrl && options.model
+      ? { endpoint: options.modelUrl, model: options.model }
+      : undefined;
+  if (modelConfiguration) validateLocalModelConfiguration(modelConfiguration);
   const stateDir = await prepareStateDirectory(options.stateDir);
   const [
     core,
@@ -127,7 +120,8 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
   }
   const lifeStore = store,
     taskRuntime = tasks,
-    pluginStore = plugins;
+    pluginStore = plugins,
+    readiness = new LocalModelReadiness(modelConfiguration);
   try {
     const mlb = new pluginPackage.MLBAdapter(),
       model =
@@ -167,6 +161,7 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
       mlb,
       context,
       preparationMonitor,
+      modelStatus: () => readiness.status(),
       port: options.port,
       userId: options.userId,
       extractor: (input) => ingestPackage.extractDocument(input, { signal: input.signal }),
@@ -191,6 +186,7 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
         if (closed) return;
         if (closeInFlight) return closeInFlight;
         closeInFlight = (async () => {
+          readiness.close();
           await server.close();
           await taskRuntime.close();
           if (!pluginsClosed) {
@@ -211,6 +207,7 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
       },
     };
   } catch (error) {
+    readiness.close();
     await taskRuntime.close().catch(() => {});
     try {
       pluginStore.close();

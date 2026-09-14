@@ -18,7 +18,7 @@ cd /Users/ryan/ellie-life-harness
 PATH=/Users/ryan/.volta/tools/image/node/24.21.0/bin:$PATH bun run life
 ```
 
-Open the one-use link printed by the launcher. The sign-in token is removed from the browser address immediately after the client reads it. The local service binds to `127.0.0.1:7440`; `--port 0` selects an available port. Data defaults to `~/.ellie-life`. Stop the foreground process with Control-C. Restarting preserves records, installed apps, scores, settings and scheduled work; browser sessions and conversational context start fresh.
+Open the one-use link printed by the launcher. The sign-in token is removed from the browser address immediately after the client reads it. The local service binds to `127.0.0.1:7440`; `--port 0` selects an available port. Data defaults to `~/.ellie-life`. Stop the foreground process with Control-C. Restarting preserves records, installed apps, scores, settings, scheduled work and private conversation history. Browser authentication starts fresh. Interrupted chat requests remain visible as uncertain and are not automatically replayed.
 
 For a separate state directory:
 
@@ -57,6 +57,8 @@ Place-linked suggestions currently depend on explicit fresh context signals, inc
 
 In Settings, use **Inspect my data** to review the private records, sources, guidance, background work, apps and storage held by Ellie. **Download my archive** collects the personal store exports after checking their revisions. Shared group records, apps and tasks are excluded; your own values stored inside a shared app are included. A change during export requires a fresh review so the file cannot silently mix revisions.
 
+Chat history belongs to its author, including conversations using a group context. History supports reopening and deleting conversations; transcripts are stored in the private service database, not browser local storage. Archives include your conversations in currently accessible spaces. Reset deletes all of your conversations, including those whose group access was later revoked. Historical messages can retain quoted or remembered text after a life record is changed; delete the conversation or reset personal data to remove those transcripts. Changed source or settings context is excluded from future model history.
+
 **Review reset** shows the scope before you explicitly reset your private data. Reset pauses new mutations, settles active requests and private background work, and journals progress across the three stores. It preserves shared group content and memberships, and removes your own storage in shared apps. If work cannot stop immediately, the status remains pending and can be retried. A restarted service restores the pending pause. Previously downloaded files, device backups and external systems are outside this local reset.
 
 ## Optional local model
@@ -68,6 +70,8 @@ bun run life:start --model-url http://127.0.0.1:8080/v1 --model YOUR_INSTALLED_M
 ```
 
 Use your runner's literal loopback address and exact model ID. The launcher does not install a model, start a runner, or enable cloud processing. Model replies and generated UI need behavioral evaluation; a successful HTTP response or syntax check is not a guarantee of useful output. Built-in capabilities remain available if no model is configured.
+
+The [model readiness check](life-model-status.md) reports whether the configured local runner lists that exact model. It makes a bounded inventory request without sending a prompt and distinguishes a missing model from an unavailable runner or an unsupported inventory endpoint.
 
 ## Verify
 

@@ -1,14 +1,39 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { api, ApiError, establishSessionFromFragment, parsePluginBridgeRequest } from "./api";
-import type { Bootstrap, LifeRecord, PluginSummary, TeachingGuide, TeachingSource } from "./types";
+import type {
+  Bootstrap,
+  ConversationSummary,
+  ConversationTurn,
+  LifeRecord,
+  ModelStatus,
+  PluginSummary,
+  TeachingGuide,
+  TeachingSource,
+} from "./types";
 import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
 
 type View = "chat" | "today" | "world" | "space" | "activity" | "settings";
 type Message = {
+  id: string;
   role: "you" | "ellie";
   text: string;
   prompt?: string;
   actions?: { label: string; status: string }[];
+  status?: "pending" | "interrupted" | "completed";
+  outdated?: boolean;
+};
+const newRequestId = () =>
+  typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const conversationScope = (value: ConversationSummary["scope"]) => `${value.type}:${value.id}`;
+const setChatUrl = (conversationId?: string, requestId?: string) => {
+  const url = new URL(location.href);
+  if (conversationId) url.searchParams.set("conversation", conversationId);
+  else url.searchParams.delete("conversation");
+  if (requestId) url.searchParams.set("request", requestId);
+  else url.searchParams.delete("request");
+  history.replaceState(null, "", `${url.pathname}${url.search}`);
 };
 const icons: Record<View, string> = {
   chat: "✦",
@@ -59,12 +84,27 @@ export function App() {
     [busy, setBusy] = useState(""),
     [messages, setMessages] = useState<Message[]>([]),
     [conversation, setConversation] = useState<string>(),
+    [conversationMeta, setConversationMeta] = useState<ConversationSummary>(),
+    [uncertainRequest, setUncertainRequest] = useState<{
+      id: string;
+      scope: string;
+      status?: "pending" | "interrupted";
+    }>(),
+    [olderTurns, setOlderTurns] = useState<{
+      hasMore: boolean;
+      nextCursor?: string;
+    }>({ hasMore: false }),
     [expanded, setExpanded] = useState<PluginSummary | null>(null);
   const [notice, setNotice] = useState("");
   const scopeGeneration = useRef(0);
   const desiredScope = useRef("");
   const requestEpoch = useRef(0);
   const refreshRunning = useRef(false);
+  const chatEpoch = useRef(0);
+  const chatRequest = useRef<AbortController | undefined>(undefined);
+  const chatInFlight = useRef("");
+  const restoredUrl = useRef(false);
+  const observedChatEpoch = useRef<number | undefined>(undefined);
   const loadRef = useRef<(scope?: string, quiet?: boolean) => Promise<void>>(async () => {});
   const load = async (scope?: string, quiet = false) => {
     const epoch = ++requestEpoch.current;
@@ -99,6 +139,21 @@ export function App() {
   }, [notice]);
   const scope = data?.scope ?? "";
   useEffect(() => {
+    if (!data) return;
+    if (observedChatEpoch.current !== undefined && observedChatEpoch.current !== data.chatEpoch) {
+      ++chatEpoch.current;
+      chatRequest.current?.abort();
+      chatInFlight.current = "";
+      setMessages([]);
+      setConversation(undefined);
+      setConversationMeta(undefined);
+      setUncertainRequest(undefined);
+      setBusy("");
+      setChatUrl();
+    }
+    observedChatEpoch.current = data.chatEpoch;
+  }, [data?.chatEpoch]);
+  useEffect(() => {
     if (!scope) return;
     const refresh = async () => {
       if (document.visibilityState !== "visible" || refreshRunning.current) return;
@@ -131,25 +186,230 @@ export function App() {
         : [],
     [data],
   );
+  const mapTurns = (turns: ConversationTurn[]): Message[] =>
+    [...turns].reverse().flatMap((turn) => [
+      {
+        id: `${turn.id}-user`,
+        role: "you" as const,
+        text: turn.user,
+        status: turn.status,
+      },
+      ...(turn.assistant
+        ? [
+            {
+              id: `${turn.id}-ellie`,
+              role: "ellie" as const,
+              text: turn.assistant,
+              prompt: turn.user,
+              status: turn.status,
+              outdated: turn.outdated,
+              actions: turn.actions,
+            },
+          ]
+        : []),
+    ]);
+  async function openConversation(id: string, preserveRequest?: { id: string; scope: string }) {
+    const epoch = ++chatEpoch.current;
+    chatRequest.current?.abort();
+    const controller = new AbortController();
+    chatRequest.current = controller;
+    setBusy("conversation");
+    try {
+      const detail = await api.conversations.detail(id, undefined, controller.signal);
+      if (epoch !== chatEpoch.current) return;
+      const detailScope = conversationScope(detail.conversation.scope);
+      if (detailScope !== desiredScope.current) {
+        scopeGeneration.current += 1;
+        desiredScope.current = detailScope;
+        setLoading(true);
+        await load(detailScope);
+        if (epoch !== chatEpoch.current) return;
+      }
+      setConversation(id);
+      setConversationMeta(detail.conversation);
+      setMessages(mapTurns(detail.turns));
+      setOlderTurns(detail.page);
+      const pending =
+        preserveRequest &&
+        detail.turns.some(
+          (turn) => turn.requestId === preserveRequest.id && turn.status !== "completed",
+        )
+          ? { ...preserveRequest, scope: detailScope }
+          : undefined;
+      setUncertainRequest(pending);
+      setChatUrl(id, pending?.id);
+    } catch (e) {
+      if (!controller.signal.aborted && epoch === chatEpoch.current)
+        setError(e instanceof Error ? e.message : "That conversation could not be opened.");
+    } finally {
+      if (epoch === chatEpoch.current) setBusy("");
+    }
+  }
+  useEffect(() => {
+    if (!data || restoredUrl.current) return;
+    restoredUrl.current = true;
+    const params = new URLSearchParams(location.search);
+    const requestId = params.get("request") ?? undefined;
+    const conversationId = params.get("conversation") ?? undefined;
+    const recovery = requestId ? { id: requestId, scope: data.scope } : undefined;
+    if (recovery) setUncertainRequest(recovery);
+    if (conversationId) void openConversation(conversationId, recovery);
+  }, [data]);
+  useEffect(() => () => chatRequest.current?.abort(), []);
   async function send(message: string) {
-    if (!message.trim() || !data) return;
+    if (!message.trim() || !data || chatInFlight.current) return;
     const generation = scopeGeneration.current;
-    setMessages((m) => [...m, { role: "you", text: message.trim() }]);
+    const epoch = ++chatEpoch.current;
+    chatRequest.current?.abort();
+    const controller = new AbortController();
+    chatRequest.current = controller;
+    const requestId = newRequestId();
+    chatInFlight.current = requestId;
+    const originalConversation = conversation;
+    setMessages((m) => [
+      ...m,
+      {
+        id: `${requestId}-user`,
+        role: "you",
+        text: message.trim(),
+        status: "pending",
+      },
+    ]);
+    setUncertainRequest({ id: requestId, scope });
+    setChatUrl(originalConversation, requestId);
     setBusy("chat");
     try {
-      const r = await api.chat(message.trim(), scope, conversation);
-      if (generation !== scopeGeneration.current) return;
+      const r = await api.chat(
+        message.trim(),
+        scope,
+        requestId,
+        data.chatEpoch,
+        originalConversation,
+        controller.signal,
+      );
+      if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
       setConversation(r.conversationId);
-      setMessages((m) => [
-        ...m,
-        { role: "ellie", text: r.reply, prompt: message.trim(), actions: r.actions },
-      ]);
+      setMessages((current) => {
+        const next = current.map((item) =>
+          item.id === `${requestId}-user` ? { ...item, status: r.status } : item,
+        );
+        return r.reply
+          ? [
+              ...next,
+              {
+                id: `${r.turnId}-ellie`,
+                role: "ellie" as const,
+                text: r.reply,
+                prompt: message.trim(),
+                actions: r.actions,
+                status: r.status,
+              },
+            ]
+          : next;
+      });
+      if (r.status === "completed") {
+        setUncertainRequest(undefined);
+        setChatUrl(r.conversationId);
+      } else {
+        const pending = { id: requestId, scope };
+        setUncertainRequest(pending);
+        setChatUrl(r.conversationId, requestId);
+      }
+      if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
       await load(scope);
+      if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
+      await openConversation(
+        r.conversationId,
+        r.status === "completed" ? undefined : { id: requestId, scope },
+      );
     } catch (e) {
-      if (generation === scopeGeneration.current)
-        setError(e instanceof Error ? e.message : "Ellie could not send that message.");
+      if (generation === scopeGeneration.current && epoch === chatEpoch.current) {
+        setUncertainRequest({ id: requestId, scope });
+        setChatUrl(originalConversation, requestId);
+        if (!controller.signal.aborted)
+          setNotice("The connection ended before Ellie confirmed the outcome.");
+      }
     } finally {
-      if (generation === scopeGeneration.current) setBusy("");
+      if (chatInFlight.current === requestId) chatInFlight.current = "";
+      if (generation === scopeGeneration.current && epoch === chatEpoch.current) setBusy("");
+    }
+  }
+  async function checkChatOutcome() {
+    if (!uncertainRequest) return;
+    const { id: requestId, scope: requestScope } = uncertainRequest;
+    const epoch = ++chatEpoch.current;
+    const controller = new AbortController();
+    chatRequest.current?.abort();
+    chatInFlight.current = "";
+    chatRequest.current = controller;
+    setBusy("chat");
+    try {
+      const result = await api.chatRequest(requestId, controller.signal);
+      if (epoch !== chatEpoch.current) return;
+      setConversation(result.conversationId);
+      setChatUrl(result.conversationId, result.status === "completed" ? undefined : requestId);
+      if (result.status === "completed") {
+        setUncertainRequest(undefined);
+        await openConversation(result.conversationId);
+      } else {
+        const recovery = {
+          id: requestId,
+          scope: requestScope,
+          status: result.status,
+        } as const;
+        setUncertainRequest(recovery);
+        await openConversation(result.conversationId, recovery);
+        setNotice(
+          result.status === "pending"
+            ? "Ellie is still working on that request."
+            : "The request was interrupted. Check Today and Activity before sending it again.",
+        );
+      }
+    } catch (e) {
+      if (!controller.signal.aborted && epoch === chatEpoch.current)
+        setNotice(
+          e instanceof ApiError && e.status === 404
+            ? "The outcome is unknown. Check Today and Activity before sending a new request."
+            : e instanceof Error
+              ? e.message
+              : "The outcome could not be checked.",
+        );
+    } finally {
+      if (epoch === chatEpoch.current) setBusy("");
+    }
+  }
+  function newConversation() {
+    ++chatEpoch.current;
+    chatRequest.current?.abort();
+    chatInFlight.current = "";
+    setMessages([]);
+    setConversation(undefined);
+    setConversationMeta(undefined);
+    setBusy("");
+    setOlderTurns({ hasMore: false });
+    setChatUrl(undefined, uncertainRequest?.id);
+  }
+  async function loadOlderConversationTurns() {
+    if (!conversation || !olderTurns.nextCursor || busy) return;
+    const epoch = chatEpoch.current;
+    const controller = new AbortController();
+    chatRequest.current = controller;
+    setBusy("conversation");
+    try {
+      const detail = await api.conversations.detail(
+        conversation,
+        olderTurns.nextCursor,
+        controller.signal,
+      );
+      if (epoch !== chatEpoch.current) return;
+      setMessages((current) => [...mapTurns(detail.turns), ...current]);
+      setConversationMeta(detail.conversation);
+      setOlderTurns(detail.page);
+    } catch (cause) {
+      if (!controller.signal.aborted && epoch === chatEpoch.current)
+        setError(cause instanceof Error ? cause.message : "Older turns could not be loaded.");
+    } finally {
+      if (epoch === chatEpoch.current) setBusy("");
     }
   }
   async function taskAction(id: string, action: "pause" | "resume" | "cancel" | "run") {
@@ -212,9 +472,15 @@ export function App() {
             value={scope}
             onChange={(e) => {
               scopeGeneration.current += 1;
+              chatEpoch.current += 1;
+              chatRequest.current?.abort();
+              chatInFlight.current = "";
               desiredScope.current = e.target.value;
               setMessages([]);
               setConversation(undefined);
+              setConversationMeta(undefined);
+              setBusy("");
+              setChatUrl(undefined, uncertainRequest?.id);
               setLoading(true);
               void load(e.target.value);
             }}
@@ -259,6 +525,14 @@ export function App() {
             scope={scope}
             busy={busy === "chat"}
             send={send}
+            active={conversationMeta}
+            openConversation={openConversation}
+            newConversation={newConversation}
+            uncertainRequest={uncertainRequest}
+            checkOutcome={checkChatOutcome}
+            olderTurns={olderTurns}
+            loadOlder={loadOlderConversationTurns}
+            notify={setNotice}
           />
         )}{" "}
         {view === "today" && <Today data={data} refresh={() => load(scope)} notify={setNotice} />}{" "}
@@ -419,6 +693,14 @@ function Chat({
   scope,
   busy,
   send,
+  active,
+  openConversation,
+  newConversation,
+  uncertainRequest,
+  checkOutcome,
+  olderTurns,
+  loadOlder,
+  notify,
 }: {
   name: string;
   messages: Message[];
@@ -427,7 +709,20 @@ function Chat({
   scope: string;
   busy: boolean;
   send: (s: string) => void;
+  active?: ConversationSummary;
+  openConversation: (id: string) => Promise<void>;
+  newConversation: () => void;
+  uncertainRequest?: {
+    id: string;
+    scope: string;
+    status?: "pending" | "interrupted";
+  };
+  checkOutcome: () => Promise<void>;
+  olderTurns: { hasMore: boolean; nextCursor?: string };
+  loadOlder: () => Promise<void>;
+  notify: (value: string) => void;
 }) {
+  const [historyOpen, setHistoryOpen] = useState(false);
   const end = useRef<HTMLDivElement>(null);
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth" });
@@ -438,13 +733,51 @@ function Chat({
       when: agendaDate(record, timeZone),
     }))
     .filter(
-      (item): item is { record: LifeRecord; when: { value: string | number; allDay: boolean } } =>
-        Boolean(item.when),
+      (
+        item,
+      ): item is {
+        record: LifeRecord;
+        when: { value: string | number; allDay: boolean };
+      } => Boolean(item.when),
     )
     .sort((a, b) => compareAgenda(a, b, timeZone))
     .slice(0, 2);
   return (
     <section className="conversation">
+      <div className="conversation-bar">
+        <div>
+          <strong>{active?.title || "New conversation"}</strong>
+          <span>
+            Private · using {scope.startsWith("group:") ? "shared group" : "your"} context
+          </span>
+        </div>
+        <ModelReadiness />
+        <button onClick={() => setHistoryOpen(true)}>History</button>
+        <button onClick={newConversation} disabled={!messages.length && !active}>
+          New
+        </button>
+      </div>
+      {uncertainRequest && (
+        <div className="request-recovery" role="status">
+          <div>
+            <strong>
+              {uncertainRequest.status === "interrupted"
+                ? "That request was interrupted"
+                : "Let’s check what happened"}
+            </strong>
+            <p>
+              {uncertainRequest.status === "interrupted"
+                ? "Its outcome may be incomplete. Inspect Today and Activity before sending a new request."
+                : "The last connection ended without a final result. Check its saved status before sending the same request again."}
+            </p>
+          </div>
+          {uncertainRequest.status !== "interrupted" && (
+            <button onClick={() => void checkOutcome()} disabled={busy}>
+              Check outcome
+            </button>
+          )}
+        </div>
+      )}
       <div className="hello">
         <span className="ellie-mark">e</span>
         <h1>{messages.length ? "I’m here." : `Hi ${name}. What shall we carry forward?`}</h1>
@@ -454,7 +787,7 @@ function Chat({
             <div className="suggestions">
               {["What should I know today?", "Remember a preference", "Help me plan something"].map(
                 (x) => (
-                  <button key={x} onClick={() => send(x)}>
+                  <button key={x} disabled={busy} onClick={() => send(x)}>
                     {x}
                   </button>
                 ),
@@ -477,11 +810,19 @@ function Chat({
         )}
       </div>
       <div className="messages" aria-live="polite">
-        {messages.map((m, i) => (
-          <article key={i} className={m.role}>
+        {olderTurns.hasMore && (
+          <button className="load-more" disabled={busy} onClick={() => void loadOlder()}>
+            Load older turns
+          </button>
+        )}
+        {messages.map((m) => (
+          <article key={m.id} className={m.role}>
             <span>{m.role === "ellie" ? "e" : "You"}</span>
             <div>
               <p>{m.text}</p>
+              {m.outdated && (
+                <small>Some cited source details have changed since this reply.</small>
+              )}
               {m.actions?.map((a, j) => (
                 <small key={j}>
                   {a.label}: {a.status}
@@ -502,7 +843,256 @@ function Chat({
         <div ref={end} />
       </div>
       <Composer onSend={send} busy={busy} />
+      {historyOpen && (
+        <ConversationHistory
+          scope={scope}
+          activeId={active?.id}
+          close={() => setHistoryOpen(false)}
+          open={async (id) => {
+            await openConversation(id);
+            setHistoryOpen(false);
+          }}
+          deleted={(id) => {
+            notify("Conversation deleted");
+            if (active?.id === id) newConversation();
+          }}
+        />
+      )}
     </section>
+  );
+}
+
+function ModelReadiness() {
+  const [status, setStatus] = useState<ModelStatus>();
+  const [loading, setLoading] = useState(false);
+  const activeRequest = useRef<AbortController | undefined>(undefined);
+  const load = () => {
+    activeRequest.current?.abort();
+    const controller = new AbortController();
+    activeRequest.current = controller;
+    setLoading(true);
+    void api
+      .modelStatus(controller.signal)
+      .then(setStatus)
+      .catch(() => setStatus(undefined))
+      .finally(() => setLoading(false));
+    return controller;
+  };
+  useEffect(() => {
+    load();
+    return () => activeRequest.current?.abort();
+  }, []);
+  const text = !status
+    ? "Model status unavailable"
+    : status.mode === "deterministic"
+      ? "Built-in help ready"
+      : status.available
+        ? `${status.model || "Local model"} ready`
+        : status.reason === "probe-unsupported"
+          ? "Local model configured · availability unverified"
+          : status.reason === "model-not-installed"
+            ? "Local model needs installation"
+            : status.reason === "runner-unreachable"
+              ? "Local model runner unavailable"
+              : "Local model not configured";
+  return (
+    <div className="model-readiness" title={text}>
+      <i className={status?.available || status?.mode === "deterministic" ? "ready" : ""} />
+      <span>{text}</span>
+      <button
+        aria-label="Refresh model status"
+        disabled={loading}
+        onClick={() => {
+          load();
+        }}
+      >
+        ↻
+      </button>
+      {status?.reason === "not-configured" && (
+        <details>
+          <summary>Setup</summary>
+          <code>bun run life:start --model-url LOOPBACK_MODEL_URL --model MODEL_ID</code>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function ConversationHistory({
+  scope,
+  activeId,
+  close,
+  open,
+  deleted,
+}: {
+  scope: string;
+  activeId?: string;
+  close: () => void;
+  open: (id: string) => Promise<void>;
+  deleted: (id: string) => void;
+}) {
+  const [items, setItems] = useState<ConversationSummary[]>([]);
+  const [page, setPage] = useState<{ hasMore: boolean; nextCursor?: string }>({
+    hasMore: false,
+  });
+  const [busy, setBusy] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const loadEpoch = useRef(0);
+  const dialog = useRef<HTMLElement>(null);
+  const load = async (cursor?: string, signal?: AbortSignal) => {
+    const epoch = ++loadEpoch.current;
+    setBusy("list");
+    setLoading(true);
+    try {
+      const result = await api.conversations.list(scope, cursor, signal);
+      if (epoch !== loadEpoch.current) return;
+      setItems((current) =>
+        cursor ? [...current, ...result.conversations] : result.conversations,
+      );
+      setPage(result.page);
+    } catch (cause) {
+      if (
+        epoch === loadEpoch.current &&
+        !(cause instanceof DOMException && cause.name === "AbortError")
+      )
+        setError(
+          cause instanceof Error ? cause.message : "Conversation history could not be loaded.",
+        );
+    } finally {
+      if (epoch === loadEpoch.current) setBusy("");
+      if (epoch === loadEpoch.current) setLoading(false);
+    }
+  };
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(undefined, controller.signal);
+    return () => {
+      ++loadEpoch.current;
+      controller.abort();
+    };
+  }, [scope]);
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    dialog.current?.focus();
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+      if (event.key === "Tab" && dialog.current) {
+        const controls = [...dialog.current.querySelectorAll<HTMLElement>("button:not(:disabled)")];
+        if (!controls.length) return;
+        const first = controls[0]!;
+        const last = controls.at(-1)!;
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+    window.addEventListener("keydown", escape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", escape);
+    };
+  }, []);
+  return (
+    <div
+      className="backdrop"
+      role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && close()}
+    >
+      <section
+        ref={dialog}
+        className="modal conversation-history"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="history-title"
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <span>Your private daybook</span>
+            <h1 id="history-title">Conversation history</h1>
+          </div>
+          <button onClick={close} aria-label="Close conversation history">
+            ×
+          </button>
+        </header>
+        {error && (
+          <p className="settings-error" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="history-list">
+          {items.map((item) => (
+            <article
+              key={item.id}
+              data-conversation-id={item.id}
+              className={item.id === activeId ? "active" : ""}
+            >
+              <button className="history-open" onClick={() => void open(item.id)}>
+                <strong>{item.title}</strong>
+                <span>
+                  {new Intl.DateTimeFormat(undefined, {
+                    dateStyle: "medium",
+                  }).format(new Date(item.updatedAt))}{" "}
+                  · {item.turnCount} {item.turnCount === 1 ? "turn" : "turns"}
+                  {item.pending ? " · Working" : ""}
+                </span>
+              </button>
+              <button
+                className="history-delete"
+                aria-label={`Delete ${item.title}`}
+                disabled={item.pending || busy === item.id}
+                title={
+                  item.pending
+                    ? "A conversation cannot be deleted while Ellie is working."
+                    : "Delete conversation"
+                }
+                onClick={async () => {
+                  if (!confirm(`Delete “${item.title}”? This removes its private transcript.`))
+                    return;
+                  setBusy(item.id);
+                  setError("");
+                  try {
+                    await api.conversations.delete(item.id, item.revision);
+                    setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+                    deleted(item.id);
+                  } catch (cause) {
+                    setError(
+                      cause instanceof Error ? cause.message : "Conversation could not be deleted.",
+                    );
+                  } finally {
+                    setBusy("");
+                  }
+                }}
+              >
+                Remove
+              </button>
+            </article>
+          ))}
+          {loading && <p className="history-loading">Opening your daybook…</p>}
+          {!items.length && !loading && (
+            <Empty
+              title="No saved conversations yet"
+              body="A conversation appears here after you send its first message."
+            />
+          )}
+        </div>
+        {page.hasMore && (
+          <button
+            className="load-more"
+            disabled={busy === "list"}
+            onClick={() => void load(page.nextCursor)}
+          >
+            Load older conversations
+          </button>
+        )}
+      </section>
+    </div>
   );
 }
 function ResponseFeedback({
@@ -587,7 +1177,10 @@ function Today({
         return need?.data.completed === true || need?.data.cancelled === true;
       });
     })
-    .map((record) => ({ record, when: agendaDate(record, data.profile.timeZone) }))
+    .map((record) => ({
+      record,
+      when: agendaDate(record, data.profile.timeZone),
+    }))
     .filter(
       (
         item,
@@ -879,7 +1472,9 @@ function World({
             const requestedScope = data.scope;
             setLoadingRecords(true);
             try {
-              const next = await api.records(requestedScope, { cursor: page.nextCursor });
+              const next = await api.records(requestedScope, {
+                cursor: page.nextCursor,
+              });
               if (worldScope.current !== requestedScope) return;
               setExtras((current) => [
                 ...current,
@@ -1434,7 +2029,11 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
                   aria-label={`Cancel ${item.file.name}`}
                   onClick={() => {
                     if (item.status === "uploading") controller.current?.abort();
-                    else updateItem(item.id, { status: "cancelled", error: "Cancelled" });
+                    else
+                      updateItem(item.id, {
+                        status: "cancelled",
+                        error: "Cancelled",
+                      });
                   }}
                 >
                   Cancel
@@ -1443,7 +2042,11 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
               {item.status === "error" && (
                 <button
                   onClick={() =>
-                    updateItem(item.id, { status: "queued", progress: 0, error: undefined })
+                    updateItem(item.id, {
+                      status: "queued",
+                      progress: 0,
+                      error: undefined,
+                    })
                   }
                 >
                   Retry
@@ -1457,7 +2060,10 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
         <Modal
           title={`Review ${importing.format === "ics" ? "calendar" : "contacts"}`}
           close={() => {
-            updateItem(importing.queueId, { status: "cancelled", error: "Review cancelled" });
+            updateItem(importing.queueId, {
+              status: "cancelled",
+              error: "Review cancelled",
+            });
             setImporting(null);
           }}
         >
@@ -1499,7 +2105,10 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
           <div className="modal-actions">
             <button
               onClick={() => {
-                updateItem(importing.queueId, { status: "cancelled", error: "Review cancelled" });
+                updateItem(importing.queueId, {
+                  status: "cancelled",
+                  error: "Review cancelled",
+                });
                 setImporting(null);
               }}
             >
@@ -1523,7 +2132,10 @@ function SourceUpload({ scope, done }: { scope: string; done: () => Promise<void
                     },
                     abort.signal,
                   );
-                  updateItem(importing.queueId, { status: "done", progress: 1 });
+                  updateItem(importing.queueId, {
+                    status: "done",
+                    progress: 1,
+                  });
                   setImporting(null);
                   await done();
                 } catch (error) {
@@ -1625,7 +2237,11 @@ function RecordModal({
                   void mutate(() =>
                     api.patchRecord(record.id, {
                       expectedRevision: record.revision,
-                      data: { ...record.data, completed: true, completedAt: Date.now() },
+                      data: {
+                        ...record.data,
+                        completed: true,
+                        completedAt: Date.now(),
+                      },
                     }),
                   )
                 }
@@ -1643,7 +2259,11 @@ function RecordModal({
                   void mutate(() =>
                     api.patchRecord(record.id, {
                       expectedRevision: record.revision,
-                      data: { ...record.data, cancelled: true, cancelledAt: Date.now() },
+                      data: {
+                        ...record.data,
+                        cancelled: true,
+                        cancelledAt: Date.now(),
+                      },
                     }),
                   )
                 }
@@ -1663,7 +2283,11 @@ function RecordModal({
               disabled={busy}
               onClick={() =>
                 void mutate(() =>
-                  api.patchRecord(record.id, { title, body, expectedRevision: record.revision }),
+                  api.patchRecord(record.id, {
+                    title,
+                    body,
+                    expectedRevision: record.revision,
+                  }),
                 )
               }
             >
@@ -2318,7 +2942,10 @@ function Settings({
   const [invalid, setInvalid] = useState("");
   const settingsScopes = [
     { id: "default", name: "Default" },
-    ...data.groups.map((group) => ({ id: `group:${group.id}`, name: group.name })),
+    ...data.groups.map((group) => ({
+      id: `group:${group.id}`,
+      name: group.name,
+    })),
     { id: `user:${data.profile.id}`, name: "Personal" },
   ];
   const [settingsScope, setSettingsScope] = useState(
@@ -2331,6 +2958,21 @@ function Settings({
       return next;
     });
   const origin = (key: string) => origins[key] ?? "effective";
+  const proactive =
+    typeof values.proactiveSuggestions === "boolean"
+      ? values.proactiveSuggestions
+      : typeof values.proactive === "boolean"
+        ? values.proactive
+        : true;
+  const quietHours =
+    values.quietHours && typeof values.quietHours === "object"
+      ? (values.quietHours as {
+          enabled?: boolean;
+          start?: number;
+          end?: number;
+        })
+      : undefined;
+  const quietHoursEnabled = Boolean(quietHours && quietHours.enabled !== false);
   const changed = () =>
     Object.fromEntries(
       Object.entries(values).filter(
@@ -2339,6 +2981,10 @@ function Settings({
     );
   return (
     <Page title="Settings" lede="Preferences for this scope. More specific choices take priority.">
+      <div className="settings-model">
+        <span>Conversation model</span>
+        <ModelReadiness />
+      </div>
       <div className="setting-scope">
         <div>
           <span>Preference layer</span>
@@ -2386,12 +3032,15 @@ function Settings({
             placeholder="America/Los_Angeles"
           />
         </Setting>
-        <Setting label="Proactive suggestions" origin={origin("proactive")}>
+        <Setting
+          label="Proactive suggestions"
+          origin={origins.proactiveSuggestions ?? origin("proactive")}
+        >
           <label className="switch">
             <input
               type="checkbox"
-              checked={values.proactive !== false}
-              onChange={(event) => update("proactive", event.target.checked)}
+              checked={proactive}
+              onChange={(event) => update("proactiveSuggestions", event.target.checked)}
             />
             <span>Let Ellie surface timely, useful suggestions</span>
           </label>
@@ -2400,14 +3049,27 @@ function Settings({
           <label className="switch">
             <input
               type="checkbox"
-              checked={values.quietHours != null}
+              checked={quietHoursEnabled}
               onChange={(event) =>
-                update("quietHours", event.target.checked ? { start: 22, end: 7 } : null)
+                update(
+                  "quietHours",
+                  event.target.checked
+                    ? {
+                        enabled: true,
+                        start: quietHours?.start ?? 22,
+                        end: quietHours?.end ?? 7,
+                      }
+                    : {
+                        enabled: false,
+                        start: quietHours?.start ?? 22,
+                        end: quietHours?.end ?? 7,
+                      },
+                )
               }
             />
             <span>Hold proactive notifications overnight</span>
           </label>
-          {values.quietHours != null && typeof values.quietHours === "object" && (
+          {quietHoursEnabled && (
             <div className="hours">
               <label>
                 From{" "}
@@ -2415,10 +3077,11 @@ function Settings({
                   type="number"
                   min="0"
                   max="23"
-                  value={Number((values.quietHours as { start?: number }).start ?? 22)}
+                  value={Number(quietHours?.start ?? 22)}
                   onChange={(event) =>
                     update("quietHours", {
-                      ...(values.quietHours as object),
+                      ...quietHours,
+                      enabled: true,
                       start: Number(event.target.value),
                     })
                   }
@@ -2430,10 +3093,11 @@ function Settings({
                   type="number"
                   min="0"
                   max="23"
-                  value={Number((values.quietHours as { end?: number }).end ?? 7)}
+                  value={Number(quietHours?.end ?? 7)}
                   onChange={(event) =>
                     update("quietHours", {
-                      ...(values.quietHours as object),
+                      ...quietHours,
+                      enabled: true,
                       end: Number(event.target.value),
                     })
                   }

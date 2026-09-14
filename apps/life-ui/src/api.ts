@@ -10,6 +10,9 @@ import type {
   TeachingSource,
   PersonalDataReview,
   PersonalResetStatus,
+  ConversationSummary,
+  ConversationTurn,
+  ModelStatus,
 } from "./types";
 export class ApiError extends Error {
   constructor(
@@ -19,6 +22,13 @@ export class ApiError extends Error {
     super(message);
   }
 }
+export type ChatResponse = {
+  reply?: string;
+  conversationId: string;
+  turnId: string;
+  status: "completed" | "pending" | "interrupted";
+  actions?: { label: string; status: string }[];
+};
 export type PluginBridgeRequest = {
   id: string;
   method: "storage.get" | "storage.set" | "mlb.snapshot";
@@ -49,12 +59,18 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
     credentials: "same-origin",
-    headers: { ...(init.body ? { "content-type": "application/json" } : {}), ...init.headers },
+    headers: {
+      ...(init.body ? { "content-type": "application/json" } : {}),
+      ...init.headers,
+    },
   });
   if (!response.ok) {
     let message = `Request failed (${response.status})`;
     try {
-      const value = (await response.json()) as { error?: string; message?: string };
+      const value = (await response.json()) as {
+        error?: string;
+        message?: string;
+      };
       message = value.message ?? value.error ?? message;
     } catch {}
     throw new ApiError(message, response.status);
@@ -66,28 +82,74 @@ export async function establishSessionFromFragment() {
   const token = params.get("token");
   if (!token) return false;
   history.replaceState(null, "", location.pathname + location.search);
-  await request("/api/life/session", { method: "POST", body: JSON.stringify({ token }) });
+  await request("/api/life/session", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
   return true;
 }
 export const api = {
   bootstrap: (scope?: string) =>
     request<Bootstrap>(`/api/life/bootstrap${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),
-  chat: (message: string, scope: string, conversationId?: string) =>
-    request<{
-      reply: string;
-      conversationId: string;
-      actions?: { label: string; status: string }[];
-    }>("/api/life/chat", {
+  chat: (
+    message: string,
+    scope: string,
+    requestId: string,
+    chatEpoch: number,
+    conversationId?: string,
+    signal?: AbortSignal,
+  ) =>
+    request<ChatResponse>("/api/life/chat", {
       method: "POST",
-      body: JSON.stringify({ message, scope, conversationId }),
+      body: JSON.stringify({
+        message,
+        scope,
+        requestId,
+        chatEpoch,
+        conversationId,
+      }),
+      signal,
     }),
+  chatRequest: (requestId: string, signal?: AbortSignal) =>
+    request<ChatResponse>(`/api/life/chat/requests/${encodeURIComponent(requestId)}`, { signal }),
+  conversations: {
+    list: (scope: string, cursor?: string, signal?: AbortSignal) => {
+      const query = new URLSearchParams({ scope, limit: "50" });
+      if (cursor) query.set("cursor", cursor);
+      return request<{
+        conversations: ConversationSummary[];
+        chatEpoch: number;
+        page: { hasMore: boolean; nextCursor?: string };
+      }>(`/api/life/conversations?${query}`, { signal });
+    },
+    detail: (id: string, cursor?: string, signal?: AbortSignal) => {
+      const query = new URLSearchParams({ limit: "100" });
+      if (cursor) query.set("cursor", cursor);
+      return request<{
+        conversation: ConversationSummary;
+        turns: ConversationTurn[];
+        page: { hasMore: boolean; nextCursor?: string };
+      }>(`/api/life/conversations/${encodeURIComponent(id)}?${query}`, {
+        signal,
+      });
+    },
+    delete: (id: string, revision: number) =>
+      request<void>(`/api/life/conversations/${encodeURIComponent(id)}?revision=${revision}`, {
+        method: "DELETE",
+      }),
+  },
+  modelStatus: (signal?: AbortSignal) => request<ModelStatus>("/api/life/model/status", { signal }),
   createRecord: (value: {
     kind: LifeKind;
     title: string;
     body?: string;
     scope: Scope;
     data: Record<string, unknown>;
-  }) => request<LifeRecord>("/api/life/records", { method: "POST", body: JSON.stringify(value) }),
+  }) =>
+    request<LifeRecord>("/api/life/records", {
+      method: "POST",
+      body: JSON.stringify(value),
+    }),
   patchRecord: (id: string, value: Record<string, unknown>) =>
     request<LifeRecord>(`/api/life/records/${encodeURIComponent(id)}`, {
       method: "PATCH",
@@ -127,7 +189,12 @@ export const api = {
       encoding?: "base64";
     },
     signal?: AbortSignal,
-  ) => request("/api/life/sources", { method: "POST", body: JSON.stringify(value), signal }),
+  ) =>
+    request("/api/life/sources", {
+      method: "POST",
+      body: JSON.stringify(value),
+      signal,
+    }),
   sourceBinary: (
     file: File,
     scope: string,
@@ -192,11 +259,20 @@ export const api = {
       xhr.send(file);
     }),
   settings: (scope: string, values: Record<string, unknown>) =>
-    request("/api/life/settings", { method: "POST", body: JSON.stringify({ scope, values }) }),
+    request("/api/life/settings", {
+      method: "POST",
+      body: JSON.stringify({ scope, values }),
+    }),
   feedback: (text: string, scope: string, runId?: string) =>
-    request("/api/life/feedback", { method: "POST", body: JSON.stringify({ text, scope, runId }) }),
+    request("/api/life/feedback", {
+      method: "POST",
+      body: JSON.stringify({ text, scope, runId }),
+    }),
   task: (id: string, action: "pause" | "resume" | "cancel" | "run") =>
-    request(`/api/life/tasks/${encodeURIComponent(id)}/${action}`, { method: "POST", body: "{}" }),
+    request(`/api/life/tasks/${encodeURIComponent(id)}/${action}`, {
+      method: "POST",
+      body: "{}",
+    }),
   taskDetail: (id: string) =>
     request<TaskDetail>(`/api/life/tasks/${encodeURIComponent(id)}/detail`),
   buildPlugin: (requestText: string, scope: string) =>
@@ -217,7 +293,9 @@ export const api = {
       body: JSON.stringify({ expectedVersion, targetVersion }),
     }),
   deletePlugin: (id: string) =>
-    request<void>(`/api/life/plugins/${encodeURIComponent(id)}`, { method: "DELETE" }),
+    request<void>(`/api/life/plugins/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
   learning: {
     record: (value: {
       scope: string;
@@ -226,7 +304,10 @@ export const api = {
       example: { prompt: string; response: string; preferredResponse?: string };
       trainingEligible: false;
     }) =>
-      request<LifeRecord>("/api/life/learning", { method: "POST", body: JSON.stringify(value) }),
+      request<LifeRecord>("/api/life/learning", {
+        method: "POST",
+        body: JSON.stringify(value),
+      }),
     list: (scope: string) =>
       request<{ records: LifeRecord[]; windowLimit: number; hasMore: boolean }>(
         `/api/life/learning?scope=${encodeURIComponent(scope)}`,
@@ -265,7 +346,11 @@ export const api = {
           warnings: string[];
         }>;
         warnings: string[];
-      }>("/api/life/import/preview", { method: "POST", body: JSON.stringify(value), signal }),
+      }>("/api/life/import/preview", {
+        method: "POST",
+        body: JSON.stringify(value),
+        signal,
+      }),
     commit: (
       value: {
         scope: string;
@@ -278,7 +363,11 @@ export const api = {
       },
       signal?: AbortSignal,
     ) =>
-      request("/api/life/import/commit", { method: "POST", body: JSON.stringify(value), signal }),
+      request("/api/life/import/commit", {
+        method: "POST",
+        body: JSON.stringify(value),
+        signal,
+      }),
   },
   notification: (id: string, action: "dismiss" | "complete", expectedRevision: number) =>
     request(`/api/life/notifications/${encodeURIComponent(id)}/${action}`, {
@@ -303,7 +392,10 @@ export const api = {
       sources?: TeachingSource[];
       enabled?: boolean;
     }) =>
-      request<TeachingGuide>("/api/life/teaching", { method: "POST", body: JSON.stringify(value) }),
+      request<TeachingGuide>("/api/life/teaching", {
+        method: "POST",
+        body: JSON.stringify(value),
+      }),
     revise: (
       id: string,
       expectedRevision: number,
@@ -312,7 +404,11 @@ export const api = {
     ) =>
       request<TeachingGuide>(`/api/life/teaching/${encodeURIComponent(id)}/revise`, {
         method: "POST",
-        body: JSON.stringify({ expectedRevision, instructions, ...(sources ? { sources } : {}) }),
+        body: JSON.stringify({
+          expectedRevision,
+          instructions,
+          ...(sources ? { sources } : {}),
+        }),
       }),
     enabled: (id: string, expectedRevision: number, enabled: boolean) =>
       request<TeachingGuide>(`/api/life/teaching/${encodeURIComponent(id)}/enabled`, {
@@ -335,10 +431,12 @@ export const api = {
     ) => {
       const query = new URLSearchParams({ reviewToken, store, limit: "100" });
       if (cursor) query.set("cursor", cursor);
-      return request<{ format: string; generation: number; items: unknown[]; nextCursor?: string }>(
-        `/api/life/personal-data/export?${query}`,
-        { signal },
-      );
+      return request<{
+        format: string;
+        generation: number;
+        items: unknown[];
+        nextCursor?: string;
+      }>(`/api/life/personal-data/export?${query}`, { signal });
     },
     reset: (reviewToken: string) =>
       request<PersonalResetStatus>("/api/life/personal-data/reset", {

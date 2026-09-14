@@ -96,13 +96,21 @@ const tasks = new TaskRuntime({
 });
 const mlb = new MLBAdapter();
 let customBuild = 0;
+let releaseSlowChat: (() => void) | undefined;
+let markSlowChatStarted: (() => void) | undefined;
 const harness = createLifeHarness({
   store,
   plugins,
   tasks,
   mlb,
   model: {
-    async plan() {
+    async plan(input) {
+      if (/hold this reply/i.test(input.message)) {
+        markSlowChatStarted?.();
+        await new Promise<void>((resolve) => {
+          releaseSlowChat = resolve;
+        });
+      }
       return { reply: "Fixture summary of the cited source.", actions: [] };
     },
     async build() {
@@ -114,6 +122,15 @@ const harness = createLifeHarness({
       };
     },
   },
+});
+const fixtureModelStatus = async () => ({
+  mode: "local" as const,
+  configured: true,
+  available: true,
+  model: "e2e-fixture-model",
+  checkedAt: Date.now(),
+  capabilities: { chat: true, customApps: true },
+  reason: "ready" as const,
 });
 const sharedTask = tasks.schedule({
   owner: `group:${sharedGroup.id}`,
@@ -133,6 +150,7 @@ let server = createLifeServer({
   tasks,
   harness,
   mlb,
+  modelStatus: fixtureModelStatus,
   extractor: ({ signal, ...input }) => extractDocument(input, { signal }),
   port: 0,
   userId: "e2e-user",
@@ -148,18 +166,137 @@ try {
   const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
   if (artifactDir) await mkdir(artifactDir, { recursive: true });
   const errors: string[] = [];
+  const chatPosts: Array<Record<string, unknown>> = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/life/chat")
+      chatPosts.push(request.postDataJSON() as Record<string, unknown>);
+  });
   await page.goto(listening.launchUrl);
   await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
   assert.equal(new URL(page.url()).hash, "", "launch token fragment is stripped");
 
-  await page.getByRole("button", { name: "Remember a preference" }).click();
   await page.getByLabel("Message Ellie").fill("remember that I prefer morning appointments");
   await page.getByRole("button", { name: "Send message" }).click();
+  await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
+  const rememberedConversation = new URL(page.url()).searchParams.get("conversation");
+  assert.ok(rememberedConversation, "completed chat keeps its conversation id in the URL");
+  const firstChat = structuredClone(chatPosts.at(-1)!);
+  const beforeReplay = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/life/conversations/${id}`);
+    return ((await response.json()) as { conversation: { turnCount: number } }).conversation
+      .turnCount;
+  }, rememberedConversation);
+  const replay = await page.evaluate(async (body) => {
+    const response = await fetch("/api/life/chat", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    return { status: response.status, value: await response.json() };
+  }, firstChat);
+  assert.equal(replay.status, 200);
+  assert.equal((replay.value as { status: string }).status, "completed");
+  assert.equal(
+    await page.evaluate(async (id) => {
+      const response = await fetch(`/api/life/conversations/${id}`);
+      return ((await response.json()) as { conversation: { turnCount: number } }).conversation
+        .turnCount;
+    }, rememberedConversation),
+    beforeReplay,
+    "replaying the same request id does not create another turn",
+  );
+  await page.reload();
   await page
-    .getByText(/remember/i)
-    .last()
+    .locator(".messages article.you p")
+    .getByText("remember that I prefer morning appointments", { exact: true })
     .waitFor();
+  await page.getByRole("button", { name: "History" }).click();
+  await page.getByRole("heading", { name: "Conversation history" }).waitFor();
+  await page
+    .locator(".history-list")
+    .getByText(/morning appointments/i)
+    .waitFor();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-chat-history.png"), fullPage: false });
+  await page.getByRole("button", { name: "Close conversation history" }).click();
+  const slowStarted = new Promise<void>((resolve) => {
+    markSlowChatStarted = resolve;
+  });
+  await page.getByLabel("Message Ellie").fill("hold this reply while I open a new conversation");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await slowStarted;
+  const slowRequest = chatPosts.at(-1)?.requestId;
+  assert.equal(typeof slowRequest, "string");
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByRole("heading", { name: /What shall we carry forward/ }).waitFor();
+  if (artifactDir)
+    await page.screenshot({ path: join(artifactDir, "life-chat-status.png"), fullPage: false });
+  releaseSlowChat?.();
+  await page.waitForFunction(async (requestId) => {
+    const response = await fetch(`/api/life/chat/requests/${requestId}`);
+    return response.ok && (await response.json()).status === "completed";
+  }, slowRequest);
+  await page.getByRole("button", { name: "Check outcome" }).click();
+  await page
+    .locator(".messages article.ellie p")
+    .getByText("Fixture summary of the cited source.", { exact: true })
+    .waitFor();
+  assert.match(page.url(), /conversation=/);
+  const recoveredConversation = new URL(page.url()).searchParams.get("conversation");
+  assert.ok(recoveredConversation);
+  await page.getByRole("button", { name: "History" }).click();
+  const activeHistory = page.locator(
+    `.history-list article[data-conversation-id="${recoveredConversation}"]`,
+  );
+  await activeHistory.waitFor();
+  page.once("dialog", (dialog) => void dialog.accept());
+  await activeHistory.locator(".history-delete").click();
+  await page.getByText("Conversation deleted").waitFor();
+  await page.getByRole("button", { name: "Close conversation history" }).click();
+  await page.getByRole("heading", { name: /What shall we carry forward/ }).waitFor();
+  await page.getByRole("button", { name: "History" }).click();
+  assert.equal(
+    await page
+      .locator(".history-list")
+      .getByText(/hold this reply/i)
+      .count(),
+    0,
+    "deleted conversation is absent from scoped history",
+  );
+  await page.getByRole("button", { name: "Close conversation history" }).click();
+  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
+  await page.getByLabel("Message Ellie").fill("remember that family tea is at four");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
+  const groupConversation = new URL(page.url()).searchParams.get("conversation");
+  assert.ok(groupConversation);
+  await page.reload();
+  await page
+    .locator(".messages article.you p")
+    .getByText("remember that family tea is at four", { exact: true })
+    .waitFor();
+  await page.getByText("Private · using shared group context").waitFor();
+  const scopedHistories = await page.evaluate(async (groupScope) => {
+    const [personal, group] = await Promise.all([
+      fetch("/api/life/conversations?scope=user:e2e-user"),
+      fetch(`/api/life/conversations?scope=${encodeURIComponent(groupScope)}`),
+    ]);
+    return {
+      personal: (await personal.json()).conversations as Array<{ id: string }>,
+      group: (await group.json()).conversations as Array<{ id: string }>,
+    };
+  }, `group:${sharedGroup.id}`);
+  assert.equal(
+    scopedHistories.personal.some((item) => item.id === groupConversation),
+    false,
+  );
+  assert.equal(
+    scopedHistories.group.some((item) => item.id === groupConversation),
+    true,
+  );
+  await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByLabel("Sharing with").selectOption("user:e2e-user");
   await page.getByRole("button", { name: /Your world/ }).click();
   await page
     .getByText(/morning appointments/i)
@@ -572,7 +709,7 @@ try {
   await page.getByRole("button", { name: "Close" }).click();
   await page.getByText("37", { exact: true }).waitFor();
   await page.reload();
-  await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
+  await page.locator(".conversation").waitFor();
   await page.getByRole("button", { name: /Your space/ }).click();
   await page.getByText("37", { exact: true }).waitFor();
 
@@ -689,8 +826,8 @@ try {
   >;
   assert.equal(effective.tone, "direct");
   assert.equal(effective.verbosity, "brief");
-  assert.equal(effective.proactive, false);
-  assert.deepEqual(effective.quietHours, { start: 22, end: 7 });
+  assert.equal(effective.proactiveSuggestions, false);
+  assert.deepEqual(effective.quietHours, { enabled: true, start: 22, end: 7 });
   await page.getByRole("button", { name: /Activity/ }).click();
   await page.getByLabel("Help Ellie improve").fill("Show reminders a little earlier");
   await page.getByRole("button", { name: "Send feedback" }).click();
@@ -825,6 +962,7 @@ try {
     tasks,
     harness,
     mlb,
+    modelStatus: fixtureModelStatus,
     extractor: ({ signal, ...input }) => extractDocument(input, { signal }),
     port: 0,
     userId: "e2e-user",
@@ -838,6 +976,17 @@ try {
   await page.getByText("Reset in progress").waitFor();
   await page.getByRole("button", { name: "Retry now" }).click();
   await page.getByText("Private data reset complete").waitFor({ timeout: 15_000 });
+  const conversationsAfterReset = await page.evaluate(async (groupScope) => {
+    const [personal, group] = await Promise.all([
+      fetch("/api/life/conversations?scope=user:e2e-user"),
+      fetch(`/api/life/conversations?scope=${encodeURIComponent(groupScope)}`),
+    ]);
+    return {
+      personal: (await personal.json()).conversations.length as number,
+      group: (await group.json()).conversations.length as number,
+    };
+  }, `group:${sharedGroup.id}`);
+  assert.deepEqual(conversationsAfterReset, { personal: 0, group: 0 });
   assert.equal(
     store.listRecords(
       { userId: "e2e-user" },

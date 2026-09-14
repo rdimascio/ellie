@@ -19,6 +19,7 @@ import {
   nextWeekdayDate,
   parseCalendarDate,
   parseClock,
+  parseInstant,
   resolveZoned,
   startOfLocalDay,
   validateCalendarDate,
@@ -26,7 +27,11 @@ import {
 import type { OwnerScope, TaskRecord } from "../../task-runtime/src/index.ts";
 import { TaskRuntime } from "../../task-runtime/src/index.ts";
 import type { LifeModel, LifeModelPlan } from "./model.ts";
+import { validateModelPlan } from "./model.ts";
+import { LifeOperationInputError, LifeOperations } from "./operations.ts";
+import type { LifeIntent } from "./operations.ts";
 export * from "./model.ts";
+export * from "./operations.ts";
 
 export interface LifeHarnessOptions {
   store: LifeStore;
@@ -43,6 +48,8 @@ export interface ChatRequest {
   scope: LifeScope;
   message: string;
   conversationId?: string;
+  history?: Array<{ role: "user" | "assistant"; content: string }>;
+  isContextCurrent?: () => boolean;
 }
 export interface ChatAction {
   label: string;
@@ -69,6 +76,7 @@ export interface LifeHarness {
     actor: LifeActor;
     scope: LifeScope;
     request: string;
+    isContextCurrent?: () => boolean;
   }): Promise<LifePlugin>;
   revisePlugin(request: {
     actor: LifeActor;
@@ -76,6 +84,7 @@ export interface LifeHarness {
     id: string;
     request: string;
     expectedVersion: number;
+    isContextCurrent?: () => boolean;
   }): Promise<LifePlugin>;
 }
 
@@ -187,31 +196,27 @@ function eventWhen(record: LifeRecord, timeZone: string): EventWhen | undefined 
   const calendar = parseCalendarDate(raw);
   if (calendar) {
     const dateKey = calendarDateKey(calendar);
+    const start = startOfLocalDay(calendar, timeZone);
+    if (start === undefined) return;
     return {
-      sortAt:
-        startOfLocalDay(calendar, timeZone) ??
-        Date.UTC(calendar.year, calendar.month - 1, calendar.day, 12),
+      sortAt: start,
       dateKey,
       label: dateKey,
       allDay: true,
     };
   }
-  let instant: number | undefined;
-  if (typeof raw === "number" && Number.isFinite(raw)) instant = raw;
-  else if (
-    typeof raw === "string" &&
-    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/.test(raw)
-  ) {
-    const parsed = Date.parse(raw);
-    if (Number.isFinite(parsed)) instant = parsed;
-  }
+  const instant = parseInstant(raw);
   if (instant === undefined) return;
-  return {
-    sortAt: instant,
-    dateKey: calendarDateKey(localParts(instant, timeZone)),
-    label: new Date(instant).toLocaleString("en-US", { timeZone }),
-    allDay: false,
-  };
+  try {
+    return {
+      sortAt: instant,
+      dateKey: calendarDateKey(localParts(instant, timeZone)),
+      label: new Date(instant).toLocaleString("en-US", { timeZone }),
+      allDay: false,
+    };
+  } catch {
+    return;
+  }
 }
 
 function findNamed(
@@ -308,6 +313,12 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       })),
     }).root;
   };
+  const operations = new LifeOperations({
+    store: options.store,
+    tasks: options.tasks,
+    now,
+    enqueueSummary: enqueueBackgroundSummary,
+  });
   const rerunBackgroundSummary = (input: {
     actor: LifeActor;
     scope: LifeScope;
@@ -333,6 +344,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     actor: LifeActor;
     scope: LifeScope;
     request: string;
+    isContextCurrent?: () => boolean;
   }): Promise<LifePlugin> {
     // Reading the scope through LifeStore is the authority check, even when there are no records yet.
     options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
@@ -344,6 +356,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
     const generated = await options.model.build(input.request);
     options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
+    if (input.isContextCurrent?.() === false)
+      throw new Error("Conversation context changed while building the app.");
     return options.plugins.install(scopeOwner(input.scope), {
       ...generated,
       kind: "custom",
@@ -357,10 +371,13 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     id: string;
     request: string;
     expectedVersion: number;
+    isContextCurrent?: () => boolean;
   }): Promise<LifePlugin> {
     if (!input.request.trim() || input.request.length > 8_000)
       throw new TypeError("Plugin revision request is invalid.");
     options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
+    if (input.isContextCurrent?.() === false)
+      throw new Error("Conversation context changed while revising the app.");
     const owner = scopeOwner(input.scope),
       previous = options.plugins.get(owner, input.id);
     if (previous.kind !== "custom") {
@@ -386,6 +403,8 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       },
     });
     options.store.listRecords(input.actor, { scope: input.scope, limit: 1 });
+    if (input.isContextCurrent?.() === false)
+      throw new Error("Conversation context changed while revising the app.");
     return options.plugins.update(owner, input.id, input.expectedVersion, {
       ...generated,
       kind: "custom",
@@ -402,6 +421,18 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     });
     const conversationId = request.conversationId ?? randomUUID();
     const conversationKey = sessionId(request.actor, request.scope, conversationId);
+    const suppliedHistory = request.history?.map((turn) => {
+      if (
+        (turn.role !== "user" && turn.role !== "assistant") ||
+        typeof turn.content !== "string" ||
+        !turn.content.trim() ||
+        turn.content.length > 8_000
+      )
+        throw new TypeError("Conversation history is invalid.");
+      return { role: turn.role, content: turn.content };
+    });
+    if (suppliedHistory && suppliedHistory.length > 24)
+      throw new TypeError("Conversation history is invalid.");
     rememberSession(conversationKey, "user", message);
     const records: LifeRecord[] = [],
       tasks: TaskRecord[] = [],
@@ -438,6 +469,19 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       typeof settings.values.timeZone === "string"
         ? settings.values.timeZone
         : Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const runOperation = (intent: LifeIntent, label: string) => {
+      const outcome = operations.execute(request.actor, request.scope, intent, timeZone);
+      records.push(...outcome.records);
+      tasks.push(...outcome.tasks);
+      actions.push({
+        label,
+        status:
+          outcome.status === "clarify" || outcome.status === "rejected"
+            ? "skipped"
+            : outcome.status,
+      });
+      return finish(outcome.reply);
+    };
     const teachDirect = /^teach ellie:\s*(.+)$/is.exec(message);
     if (teachDirect) {
       const instructions = teachDirect[1]!.trim();
@@ -689,17 +733,10 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     }
 
     const saveEvent = (title: string, startAt: number) => {
-      if (startAt <= now())
-        return finish("That event time is in the past. Please give me a future date.");
-      const event = create({
-        kind: "event",
-        title: titleCase(title),
-        scope: request.scope,
-        data: { startAt, endAt: startAt + 3_600_000, timeZone },
-      });
-      actions.push({ label: `Create ${event.title}`, status: "completed" });
-      return finish(
-        `Added “${event.title}” for ${new Date(startAt).toLocaleString("en-US", { timeZone })}.`,
+      const display = titleCase(title);
+      return runOperation(
+        { kind: "create_event", title: display, start: { type: "instant", at: startAt } },
+        `Create ${display}`,
       );
     };
     const anchoredEvent =
@@ -803,6 +840,15 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         if (dueAt <= now())
           return finish("That reminder time is in the past. Please choose a future time.");
         const kind = /timer/i.test(reminderStart[1]!) ? "timer" : "reminder";
+        if (kind === "reminder")
+          return runOperation(
+            {
+              kind: "schedule_reminder",
+              title: parsed.text,
+              when: { type: "instant", at: dueAt },
+            },
+            `Schedule reminder: ${parsed.text}`,
+          );
         const record = create({
           kind,
           title: parsed.text,
@@ -892,26 +938,14 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
 
     const contactRequest = /^(?:add|remember)\s+(.+?)\s+as (?:a )?contact$/i.exec(message);
     if (contactRequest) {
-      const record = create({
-        kind: "contact",
-        title: clean(contactRequest[1]!),
-        scope: request.scope,
-        data: {},
-      });
-      actions.push({ label: `Add ${record.title}`, status: "completed" });
-      return finish(`Added ${record.title} as a contact.`);
+      const name = clean(contactRequest[1]!);
+      return runOperation({ kind: "create_contact", name }, `Add ${name}`);
     }
 
     const needRequest = /^(?:i need|add (?:a )?need(?: to)?|track)\s+(.+)$/i.exec(message);
     if (needRequest) {
-      const record = create({
-        kind: "need",
-        title: clean(needRequest[1]!),
-        scope: request.scope,
-        data: { completed: false },
-      });
-      actions.push({ label: `Track ${record.title}`, status: "completed" });
-      return finish(`I’m tracking “${record.title}”.`);
+      const title = clean(needRequest[1]!);
+      return runOperation({ kind: "create_need", title }, `Track ${title}`);
     }
 
     const remember = /^(?:please\s+)?remember(?: that)?\s+(.+)$/i.exec(message);
@@ -972,6 +1006,15 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
       if (!record) return finish(`I couldn’t find an open item named “${clean(completion[2]!)}”.`);
       const cancelled = completion[1]!.toLowerCase() === "cancel";
+      if (record.kind === "need")
+        return runOperation(
+          {
+            kind: "resolve_need",
+            operation: cancelled ? "cancel" : "complete",
+            title: record.title,
+          },
+          `${cancelled ? "Cancel" : "Complete"} ${record.title}`,
+        );
       const updated = options.store.updateRecord(request.actor, record.id, record.revision, {
         data: {
           ...record.data,
@@ -1029,16 +1072,17 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     );
     if (pref) {
       const value = pref[1]!.toLowerCase();
-      const key = value === "warm" ? "response.tone" : "response.length";
+      const key = value === "warm" ? "tone" : "verbosity";
       const record = options.store.recordFeedback(request.actor, {
         scope: request.scope,
         message,
         explicitPreference: {
           key,
-          value: value === "brief" ? "concise" : value,
+          value: value === "warm" ? "warm" : "brief",
         },
       });
       records.push(record);
+      invalidateContext(request.actor, request.scope);
       actions.push({ label: `Set ${key}`, status: "completed" });
       return finish(`Got it. I’ll keep my replies ${value}.`);
     }
@@ -1064,6 +1108,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         actor: request.actor,
         scope: request.scope,
         request: message,
+        isContextCurrent: request.isContextCurrent,
       });
       actions.push({ label: `Build ${plugin.name}`, status: "completed" });
       return finish(`Built “${plugin.name}”. It’s ready in your space.`);
@@ -1112,6 +1157,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         id: matches[0]!.id,
         request: clean(revision[2]!),
         expectedVersion: matches[0]!.version,
+        isContextCurrent: request.isContextCurrent,
       });
       actions.push({ label: `Revise ${plugin.name}`, status: "completed" });
       return finish(`Updated “${plugin.name}” to version ${plugin.version}.`);
@@ -1122,13 +1168,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     );
     if (background) {
       const query = clean(background[1]!);
-      const task = enqueueBackgroundSummary(request.actor, request.scope, query);
-      if (!task) return finish(`I couldn't find a scoped source to summarize for “${query}”.`);
-      tasks.push(task);
-      actions.push({ label: `Summarize ${query}`, status: "queued" });
-      return finish(
-        `I queued a background summary using sources already available in this space. I won’t claim internet research without a connector.`,
-      );
+      return runOperation({ kind: "summarize_sources", query }, `Summarize ${query}`);
     }
 
     if (/\b(remember|know|search|find)\b/i.test(lower)) {
@@ -1182,20 +1222,26 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       const generationKey = contextKey(request.actor, request.scope);
       const generation = contextGenerations.get(generationKey) ?? 0;
       const actorGeneration = actorGenerations.get(request.actor.userId) ?? 0;
-      const plan = await options.model.plan({
-        message,
-        evidence: found.map((item) => ({
-          sourceId: item.sourceId,
-          title: item.sourceTitle,
-          text: item.text,
-          ...(item.reference ? { reference: item.reference } : {}),
-        })),
-        history: sessions.get(conversationKey)?.slice(0, -1) ?? [],
-        ...modelContext(options.store, teaching, request.actor, request.scope, message),
-      });
+      const plan = validateModelPlan(
+        await options.model.plan({
+          message,
+          evidence: found.map((item) => ({
+            sourceId: item.sourceId,
+            title: item.sourceTitle,
+            text: item.text,
+            ...(item.reference ? { reference: item.reference } : {}),
+          })),
+          history: suppliedHistory ?? sessions.get(conversationKey)?.slice(0, -1) ?? [],
+          now: now(),
+          timeZone,
+          ...modelContext(options.store, teaching, request.actor, request.scope, message),
+        }),
+      );
+      options.store.listRecords(request.actor, { scope: request.scope, limit: 1 });
       if (
         (contextGenerations.get(generationKey) ?? 0) !== generation ||
-        (actorGenerations.get(request.actor.userId) ?? 0) !== actorGeneration
+        (actorGenerations.get(request.actor.userId) ?? 0) !== actorGeneration ||
+        request.isContextCurrent?.() === false
       )
         return {
           reply:
@@ -1213,8 +1259,11 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
         options.store,
         actions,
         records,
+        tasks,
         evidence,
         finish,
+        operations,
+        timeZone,
       );
     }
 
@@ -1388,19 +1437,21 @@ function registerHandlers(
           references,
         } satisfies SourceSummaryResult;
       }
-      const plan = await model.plan(
-        {
-          message: `Summarize: ${input.query}`,
-          evidence: found.map((item) => ({
-            sourceId: item.sourceId,
-            title: item.sourceTitle,
-            text: item.text,
-            ...(item.reference ? { reference: item.reference } : {}),
-          })),
-          history: [],
-          tone: inferTone(input.query),
-        },
-        context.signal,
+      const plan = validateModelPlan(
+        await model.plan(
+          {
+            message: `Summarize: ${input.query}`,
+            evidence: found.map((item) => ({
+              sourceId: item.sourceId,
+              title: item.sourceTitle,
+              text: item.text,
+              ...(item.reference ? { reference: item.reference } : {}),
+            })),
+            history: [],
+            tone: inferTone(input.query),
+          },
+          context.signal,
+        ),
       );
       const afterModel = currentSource(store, input);
       if (!afterModel)
@@ -1456,18 +1507,20 @@ function registerHandlers(
       }));
       let summary = available.map((result) => `${result.title}: ${result.summary}`).join("\n\n");
       if (model && available.length) {
-        const plan = await model.plan(
-          {
-            message: `Combine these source summaries for: ${input.query}`,
-            evidence: available.map((result) => ({
-              sourceId: result.sourceId,
-              title: result.title!,
-              text: result.summary!,
-            })),
-            history: [],
-            tone: inferTone(input.query),
-          },
-          context.signal,
+        const plan = validateModelPlan(
+          await model.plan(
+            {
+              message: `Combine these source summaries for: ${input.query}`,
+              evidence: available.map((result) => ({
+                sourceId: result.sourceId,
+                title: result.title!,
+                text: result.summary!,
+              })),
+              history: [],
+              tone: inferTone(input.query),
+            },
+            context.signal,
+          ),
         );
         const allStillCurrent = available.every((result) =>
           currentSource(store, {
@@ -1530,21 +1583,33 @@ function applyModelPlan(
   store: LifeStore,
   actions: ChatAction[],
   records: LifeRecord[],
+  tasks: TaskRecord[],
   evidence: ChatResponse["evidence"],
   finish: (reply: string) => ChatResponse,
+  operations: LifeOperations,
+  timeZone: string,
 ): ChatResponse {
   let reply = plan.reply;
+  const outcomeReplies: string[] = [];
   for (const action of plan.actions) {
-    if (action.type === "reply") reply = action.text;
-    else if (action.type === "create_memory" && explicitlyRequestsRemembering(request.message)) {
-      create({
-        kind: "memory",
-        title: action.title,
-        body: action.body,
-        scope: request.scope,
-        data: { explicit: true, proposedByLocalModel: true },
-      });
-      actions.push({ label: "Save memory", status: "completed" });
+    if (action.type === "reply") {
+      if (!outcomeReplies.length) reply = action.text;
+    } else if (action.type === "create_memory") {
+      if (!explicitlyRequestsRemembering(request.message)) {
+        outcomeReplies.push(
+          "I need a direct request in your current message before I save a memory.",
+        );
+      } else {
+        const saved = create({
+          kind: "memory",
+          title: action.title,
+          body: action.body,
+          scope: request.scope,
+          data: { explicit: true, proposedByLocalModel: true },
+        });
+        actions.push({ label: "Save memory", status: "completed" });
+        outcomeReplies.push(`Saved “${saved.title}” to memory.`);
+      }
     } else if (action.type === "search_sources") {
       const found = store.search(request.actor, {
         query: retrievalQuery(action.query),
@@ -1558,7 +1623,117 @@ function applyModelPlan(
           ...(item.reference ? { reference: item.reference } : {}),
         })),
       );
+    } else if (action.type === "life_operation") {
+      if (!authorizesIntent(request.message, action.intent)) {
+        outcomeReplies.push(
+          "I need a direct request in your current message before I change saved life data.",
+        );
+        continue;
+      }
+      let outcome;
+      try {
+        outcome = operations.execute(request.actor, request.scope, action.intent, timeZone);
+      } catch (error) {
+        if (error instanceof LifeOperationInputError) {
+          outcomeReplies.push(`${error.message} No changes were saved.`);
+          continue;
+        }
+        throw error;
+      }
+      records.push(...outcome.records);
+      tasks.push(...outcome.tasks);
+      actions.push({
+        label: operationLabel(action.intent),
+        status:
+          outcome.status === "clarify" || outcome.status === "rejected"
+            ? "skipped"
+            : outcome.status,
+      });
+      outcomeReplies.push(outcome.reply);
     }
   }
-  return finish(reply);
+  return finish((outcomeReplies.length ? outcomeReplies.join("\n") : reply).slice(0, 8_000));
+}
+
+function authorizesIntent(message: string, intent: LifeIntent): boolean {
+  const value = message.trim(),
+    requestText = value.replace(/\?$/, "").trim();
+  if (intent.kind === "query" || intent.kind === "clarify") return true;
+  if (
+    /^(?:what|why|how|where|when|who|is|are|do|does|did|never|for example|example|quote)\b/i.test(
+      requestText,
+    )
+  )
+    return false;
+  const polite = String.raw`(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?)?`;
+  const overlaps = (wanted: string) =>
+    wanted
+      .toLocaleLowerCase()
+      .split(/[^\p{L}\p{N}]+/u)
+      .some((word) => word.length >= 3 && requestText.toLocaleLowerCase().includes(word));
+  switch (intent.kind) {
+    case "schedule_reminder":
+      return (
+        (new RegExp(
+          `^(?:please\\s+)?${polite}(?:remind|make sure|don't let me forget)\\b`,
+          "i",
+        ).test(requestText) ||
+          (new RegExp(`^(?:please\\s+)?${polite}(?:set|schedule)\\b`, "i").test(requestText) &&
+            /\b(?:reminder|timer)\b/i.test(requestText))) &&
+        overlaps(intent.title)
+      );
+    case "create_event":
+      return (
+        new RegExp(`^(?:please\\s+)?${polite}(?:schedule|add|create|put)\\b`, "i").test(
+          requestText,
+        ) &&
+        /\b(?:calendar|event|appointment|meeting|session)\b/i.test(requestText) &&
+        overlaps(intent.title)
+      );
+    case "create_need":
+      return (
+        new RegExp(`^(?:please\\s+)?${polite}(?:i need|add|create|track|put)\\b`, "i").test(
+          requestText,
+        ) && overlaps(intent.title)
+      );
+    case "resolve_need":
+      return (
+        new RegExp(`^(?:please\\s+)?${polite}(?:complete|finish|cancel|mark)\\b`, "i").test(
+          requestText,
+        ) && overlaps(intent.title)
+      );
+    case "create_contact":
+      return (
+        new RegExp(`^(?:please\\s+)?${polite}(?:add|save|remember|create)\\b`, "i").test(
+          requestText,
+        ) && overlaps(intent.name)
+      );
+    case "summarize_sources":
+      return (
+        new RegExp(
+          `^(?:please\\s+)?${polite}(?:summarize|research|work on|review|analyze)\\b`,
+          "i",
+        ).test(requestText) && overlaps(intent.query)
+      );
+  }
+}
+function operationLabel(intent: LifeIntent): string {
+  switch (intent.kind) {
+    case "schedule_reminder":
+      return `Schedule reminder: ${intent.title}`;
+    case "create_event":
+      return `Create event: ${intent.title}`;
+    case "create_need":
+      return `Track need: ${intent.title}`;
+    case "resolve_need":
+      return `${intent.operation === "cancel" ? "Cancel" : "Complete"} need: ${intent.title}`;
+    case "create_contact":
+      return `Add contact: ${intent.name}`;
+    case "query":
+      return `Show ${intent.view}`;
+    case "summarize_sources":
+      return `Summarize ${intent.query}`;
+    case "clarify":
+      return "Clarify request";
+  }
 }

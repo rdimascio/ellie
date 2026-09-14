@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-export const LIFE_SCHEMA_VERSION = 2;
+export const LIFE_SCHEMA_VERSION = 3;
 export const LIFE_RECORD_KINDS = [
   "memory",
   "contact",
@@ -98,7 +98,9 @@ export interface NotificationUpdateResult {
 }
 export type PersonalLifeExportItem =
   | { type: "record"; record: LifeRecord }
-  | { type: "setting"; key: string; value: unknown; updatedAt: number };
+  | { type: "setting"; key: string; value: unknown; updatedAt: number }
+  | { type: "conversation"; conversation: ConversationSummary }
+  | { type: "conversation-turn"; conversationId: string; turn: ConversationTurn };
 export interface PersonalLifeSummary {
   generation: number;
   records: number;
@@ -106,6 +108,8 @@ export interface PersonalLifeSummary {
   feedback: number;
   guidance: number;
   settings: number;
+  conversations: number;
+  conversationTurns: number;
   bytes: number;
 }
 export interface PersonalLifeExportPage {
@@ -124,6 +128,49 @@ export interface PersonalResetJournal {
   pluginGeneration: number;
   requestedAt: number;
   updatedAt: number;
+}
+export interface ConversationSummary {
+  id: string;
+  scope: LifeScope;
+  title: string;
+  revision: number;
+  turnCount: number;
+  pending: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface ConversationEvidence {
+  sourceId: string;
+  sourceRevision: number;
+  title: string;
+  reference?: string;
+}
+export interface ConversationResult {
+  reply: string;
+  actions: Array<{ label: string; status: string }>;
+  recordIds: string[];
+  taskIds: string[];
+  evidence: ConversationEvidence[];
+}
+export interface ConversationTurn {
+  id: string;
+  requestId: string;
+  user: string;
+  assistant?: string;
+  status: "pending" | "completed" | "interrupted";
+  outdated: boolean;
+  evidence: ConversationEvidence[];
+  actions: Array<{ label: string; status: string }>;
+  createdAt: number;
+  updatedAt: number;
+}
+export interface ConversationPage<T> {
+  items: T[];
+  hasMore: boolean;
+  nextCursor?: string;
+}
+export interface ConversationIndex extends ConversationPage<ConversationSummary> {
+  chatEpoch: number;
 }
 export type SourceFormat = "text" | "markdown" | "html" | "email" | "transcript" | "binary";
 export type TextSourceFormat = Exclude<SourceFormat, "binary">;
@@ -361,6 +408,12 @@ export class LifeStore {
       if (version > LIFE_SCHEMA_VERSION) throw new Error("newer schema");
       if (version === 0) this.migrate();
       else if (version === 1) this.migrateV2();
+      else if (version === 2) this.migrateV3();
+      this.db
+        .prepare(
+          "UPDATE conversation_turns SET status='interrupted',updated_at=? WHERE status='pending'",
+        )
+        .run(this.clock());
     } catch (error) {
       try {
         this.db!.close();
@@ -407,6 +460,26 @@ export class LifeStore {
     CREATE TRIGGER IF NOT EXISTS settings_personal_update AFTER UPDATE ON settings WHEN OLD.level='user' OR NEW.level='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(OLD.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
     CREATE TRIGGER IF NOT EXISTS settings_personal_delete AFTER DELETE ON settings WHEN OLD.level='user' BEGIN INSERT INTO personal_generations(user_id,generation) VALUES(OLD.scope_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
     PRAGMA user_version=2;`),
+    );
+    this.migrateV3();
+  }
+  private migrateV3(): void {
+    this.transaction(() =>
+      this.db.exec(`
+    CREATE TABLE conversations(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,title TEXT NOT NULL,revision INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL) STRICT;
+    CREATE INDEX conversations_user ON conversations(user_id,updated_at,id);
+    CREATE TABLE conversation_turns(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,user_id TEXT NOT NULL,request_id TEXT NOT NULL,user_content TEXT NOT NULL,assistant_content TEXT,status TEXT NOT NULL CHECK(status IN('pending','completed','interrupted')),result_json TEXT,evidence_json TEXT NOT NULL,context_fingerprint TEXT,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,UNIQUE(user_id,request_id)) STRICT;
+    CREATE TABLE chat_state(user_id TEXT PRIMARY KEY,epoch INTEGER NOT NULL CHECK(epoch>=1)) STRICT;
+    CREATE TABLE conversation_request_tombstones(user_id TEXT NOT NULL,epoch INTEGER NOT NULL,request_hash TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(user_id,epoch,request_hash)) STRICT;
+    CREATE INDEX conversation_turns_page ON conversation_turns(conversation_id,created_at,id);
+    CREATE TRIGGER conversations_generation_insert AFTER INSERT ON conversations BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversations_generation_update AFTER UPDATE ON conversations BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversations_generation_delete AFTER DELETE ON conversations BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversation_turns_generation_insert AFTER INSERT ON conversation_turns BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversation_turns_generation_update AFTER UPDATE ON conversation_turns BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER conversation_turns_generation_delete AFTER DELETE ON conversation_turns BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    UPDATE conversation_turns SET status='interrupted',updated_at=${this.clock()} WHERE status='pending';
+    PRAGMA user_version=3;`),
     );
   }
   private actor(actor: LifeActor): string {
@@ -1561,6 +1634,565 @@ export class LifeStore {
       };
     });
   }
+  private contextFingerprintFor(actor: LifeActor, requested: LifeScope): string {
+    const scope = this.scope(actor, requested),
+      digest = createHash("sha256"),
+      user = this.actor(actor);
+    digest.update(`${scope.type}\0${scope.id}\0`);
+    const records = this.db
+      .prepare(
+        "SELECT id,revision,updated_at FROM records WHERE scope_type=? AND scope_id=? ORDER BY id",
+      )
+      .all(scope.type, scope.id) as Array<Record<string, unknown>>;
+    for (const row of records) digest.update(`${row.id}\0${row.revision}\0${row.updated_at}\0`);
+    const settings = this.db
+      .prepare(
+        "SELECT level,scope_id,key,value_json,updated_at FROM settings WHERE level='default' OR (level='user' AND scope_id=?) OR (level='group' AND scope_id=?) ORDER BY level,scope_id,key",
+      )
+      .all(user, scope.type === "group" ? scope.id : "") as Array<Record<string, unknown>>;
+    for (const row of settings)
+      digest.update(
+        `${row.level}\0${row.scope_id}\0${row.key}\0${row.value_json}\0${row.updated_at}\0`,
+      );
+    return digest.digest("hex");
+  }
+  chatEpoch(actor: LifeActor): number {
+    const user = this.actor(actor);
+    return Number(
+      (
+        this.db.prepare("SELECT epoch FROM chat_state WHERE user_id=?").get(user) as
+          | Record<string, unknown>
+          | undefined
+      )?.epoch ?? 1,
+    );
+  }
+  private conversationRow(row: Record<string, unknown>): ConversationSummary {
+    return {
+      id: String(row.id),
+      scope: { type: String(row.scope_type) as LifeScope["type"], id: String(row.scope_id) },
+      title: String(row.title),
+      revision: Number(row.revision),
+      turnCount: Number(row.turn_count ?? 0),
+      pending: Boolean(row.pending),
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+  private accessibleConversation(actor: LifeActor, idInput: string): ConversationSummary {
+    const user = this.actor(actor),
+      id = identifier(idInput, "conversationId"),
+      row = this.db
+        .prepare(
+          "SELECT c.*,(SELECT count(*) FROM conversation_turns t WHERE t.conversation_id=c.id) turn_count,EXISTS(SELECT 1 FROM conversation_turns t WHERE t.conversation_id=c.id AND t.status='pending') pending FROM conversations c WHERE c.id=? AND c.user_id=?",
+        )
+        .get(id, user) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Conversation unavailable.");
+    const conversation = this.conversationRow(row);
+    this.scope(actor, conversation.scope);
+    return conversation;
+  }
+  beginConversationTurn(
+    actor: LifeActor,
+    input: {
+      scope: LifeScope;
+      conversationId?: string;
+      requestId: string;
+      message: string;
+      chatEpoch: number;
+    },
+  ): {
+    conversation: ConversationSummary;
+    turn: ConversationTurn;
+    status: "new" | "pending" | "completed" | "interrupted";
+    contextFingerprint: string;
+    result?: ConversationResult;
+  } {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      requestId = identifier(input.requestId, "requestId"),
+      message = text(input.message, "message", 8000);
+    if (!Number.isSafeInteger(input.chatEpoch) || input.chatEpoch !== this.chatEpoch(actor))
+      throw new LifeConflictError("Chat state changed; refresh before sending again.");
+    const prior = this.db
+      .prepare(
+        "SELECT t.*,c.scope_type,c.scope_id,c.title,c.revision,c.created_at conversation_created,c.updated_at conversation_updated FROM conversation_turns t JOIN conversations c ON c.id=t.conversation_id WHERE t.user_id=? AND t.request_id=?",
+      )
+      .get(user, requestId) as Record<string, unknown> | undefined;
+    if (prior) {
+      if (
+        String(prior.user_content) !== message ||
+        prior.scope_type !== scope.type ||
+        prior.scope_id !== scope.id ||
+        (input.conversationId !== undefined &&
+          String(prior.conversation_id) !== input.conversationId)
+      )
+        throw new LifeConflictError("Request id belongs to a different chat turn.");
+      const conversation = this.accessibleConversation(actor, String(prior.conversation_id)),
+        turn = this.turn(actor, prior, conversation);
+      return {
+        conversation,
+        turn,
+        status: turn.status,
+        contextFingerprint: String(prior.context_fingerprint ?? ""),
+        ...(prior.result_json
+          ? { result: JSON.parse(String(prior.result_json)) as ConversationResult }
+          : {}),
+      };
+    }
+    const requestHash = createHash("sha256").update(requestId).digest("hex");
+    if (
+      this.db
+        .prepare(
+          "SELECT 1 found FROM conversation_request_tombstones WHERE user_id=? AND epoch=? AND request_hash=?",
+        )
+        .get(user, input.chatEpoch, requestHash)
+    )
+      throw new LifeConflictError("This retired chat request cannot be replayed.");
+    return this.transaction(() => {
+      this.db.prepare("INSERT OR IGNORE INTO chat_state VALUES(?,?)").run(user, input.chatEpoch);
+      let conversation: ConversationSummary;
+      if (input.conversationId)
+        conversation = this.accessibleConversation(actor, input.conversationId);
+      else {
+        const count = Number(
+          this.db.prepare("SELECT count(*) count FROM conversations WHERE user_id=?").get(user)
+            ?.count,
+        );
+        if (count >= 100)
+          throw new LifeConflictError("Delete an older conversation before starting another.");
+        const id = this.makeId(),
+          at = this.clock(),
+          title = message.slice(0, 80);
+        this.db
+          .prepare("INSERT INTO conversations VALUES(?,?,?,?,?,?,?,?)")
+          .run(id, user, scope.type, scope.id, title, 1, at, at);
+        conversation = {
+          id,
+          scope,
+          title,
+          revision: 1,
+          turnCount: 0,
+          pending: false,
+          createdAt: at,
+          updatedAt: at,
+        };
+      }
+      if (conversation.scope.type !== scope.type || conversation.scope.id !== scope.id)
+        throw new LifeAccessError("Conversation belongs to another space.");
+      if (conversation.pending)
+        throw new LifeConflictError("This conversation already has a pending turn.");
+      const usage = this.db
+        .prepare(
+          "SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) bytes,sum(status='pending') pending FROM conversation_turns WHERE user_id=?",
+        )
+        .get(user) as Record<string, unknown>;
+      if (
+        Number(usage.bytes) +
+          Number(usage.pending) * 600_000 +
+          Buffer.byteLength(message) +
+          600_000 >
+        20 * 1024 * 1024
+      )
+        throw new LifeConflictError(
+          "Conversation history limit reached; delete an older conversation.",
+        );
+      if (conversation.turnCount >= 200)
+        throw new LifeConflictError("This conversation has reached its retained turn limit.");
+      const id = this.makeId(),
+        at = this.clock(),
+        fingerprint = this.contextFingerprintFor(actor, scope);
+      this.db
+        .prepare("INSERT INTO conversation_turns VALUES(?,?,?,?,?,?,?,?,?,?,?,?)")
+        .run(
+          id,
+          conversation.id,
+          user,
+          requestId,
+          message,
+          null,
+          "pending",
+          null,
+          "[]",
+          fingerprint,
+          at,
+          at,
+        );
+      this.db
+        .prepare("UPDATE conversations SET revision=revision+1,updated_at=? WHERE id=?")
+        .run(at, conversation.id);
+      conversation = this.accessibleConversation(actor, conversation.id);
+      return {
+        conversation,
+        turn: {
+          id,
+          requestId,
+          user: message,
+          status: "pending",
+          outdated: false,
+          evidence: [],
+          actions: [],
+          createdAt: at,
+          updatedAt: at,
+        },
+        status: "new" as const,
+        contextFingerprint: fingerprint,
+      };
+    });
+  }
+  private evidenceCurrent(
+    actor: LifeActor,
+    scope: LifeScope,
+    evidence: ConversationEvidence[],
+  ): boolean {
+    return evidence.every((item) => {
+      const source = this.db
+        .prepare("SELECT kind,scope_type,scope_id,revision FROM records WHERE id=?")
+        .get(item.sourceId) as Record<string, unknown> | undefined;
+      return Boolean(
+        source &&
+        source.kind === "source" &&
+        source.scope_type === scope.type &&
+        source.scope_id === scope.id &&
+        Number(source.revision) === item.sourceRevision,
+      );
+    });
+  }
+  currentSourceReference(
+    actor: LifeActor,
+    requestedScope: LifeScope,
+    idInput: string,
+  ): { sourceId: string; sourceRevision: number; title: string } | undefined {
+    const scope = this.scope(actor, requestedScope),
+      id = identifier(idInput, "sourceId"),
+      row = this.db
+        .prepare(
+          "SELECT id,revision,title FROM records WHERE id=? AND kind='source' AND scope_type=? AND scope_id=?",
+        )
+        .get(id, scope.type, scope.id) as Record<string, unknown> | undefined;
+    return row
+      ? { sourceId: String(row.id), sourceRevision: Number(row.revision), title: String(row.title) }
+      : undefined;
+  }
+  private turn(
+    actor: LifeActor,
+    row: Record<string, unknown>,
+    conversation: ConversationSummary,
+    currentFingerprint?: string,
+  ): ConversationTurn {
+    const evidence = JSON.parse(String(row.evidence_json)) as ConversationEvidence[],
+      fingerprint = currentFingerprint ?? this.contextFingerprintFor(actor, conversation.scope),
+      result = row.result_json
+        ? (JSON.parse(String(row.result_json)) as ConversationResult)
+        : undefined;
+    return {
+      id: String(row.id),
+      requestId: String(row.request_id),
+      user: String(row.user_content),
+      ...(row.assistant_content === null ? {} : { assistant: String(row.assistant_content) }),
+      status: String(row.status) as ConversationTurn["status"],
+      outdated:
+        String(row.context_fingerprint ?? "") !== fingerprint ||
+        !this.evidenceCurrent(actor, conversation.scope, evidence),
+      evidence,
+      actions: result?.actions ?? [],
+      createdAt: Number(row.created_at),
+      updatedAt: Number(row.updated_at),
+    };
+  }
+  completeConversationTurn(
+    actor: LifeActor,
+    input: {
+      conversationId: string;
+      turnId: string;
+      requestId: string;
+      result: ConversationResult;
+    },
+  ): { conversation: ConversationSummary; turn: ConversationTurn; result: ConversationResult } {
+    const conversation = this.accessibleConversation(actor, input.conversationId),
+      turnId = identifier(input.turnId, "turnId"),
+      requestId = identifier(input.requestId, "requestId"),
+      reply = text(input.result.reply, "reply", 8000);
+    if (
+      !Array.isArray(input.result.actions) ||
+      input.result.actions.length > 20 ||
+      !Array.isArray(input.result.recordIds) ||
+      input.result.recordIds.length > 100 ||
+      !Array.isArray(input.result.taskIds) ||
+      input.result.taskIds.length > 100 ||
+      !Array.isArray(input.result.evidence) ||
+      input.result.evidence.length > 50
+    )
+      throw new TypeError("Conversation result is invalid");
+    const result: ConversationResult = {
+      reply,
+      actions: input.result.actions.map((a) => ({
+        label: text(a.label, "action.label", 500),
+        status: text(a.status, "action.status", 50),
+      })),
+      recordIds: input.result.recordIds.map((v) => identifier(v, "recordId")),
+      taskIds: input.result.taskIds.map((v) => identifier(v, "taskId")),
+      evidence: input.result.evidence.map((e) => ({
+        sourceId: identifier(e.sourceId, "sourceId"),
+        sourceRevision: Number(e.sourceRevision),
+        title: text(e.title, "evidence.title", 500),
+        ...(e.reference ? { reference: text(e.reference, "evidence.reference", 1000) } : {}),
+      })),
+    };
+    if (
+      result.evidence.some((e) => !Number.isSafeInteger(e.sourceRevision) || e.sourceRevision < 1)
+    )
+      throw new TypeError("Evidence revision is invalid");
+    const encoded = JSON.stringify(result);
+    if (Buffer.byteLength(encoded) > 256_000)
+      throw new TypeError("Conversation result is too large");
+    return this.transaction(() => {
+      const row = this.db
+        .prepare(
+          "SELECT * FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=? AND request_id=?",
+        )
+        .get(turnId, conversation.id, this.actor(actor), requestId) as
+        | Record<string, unknown>
+        | undefined;
+      if (!row) throw new LifeAccessError("Conversation turn unavailable.");
+      if (row.status === "completed")
+        return {
+          conversation: this.accessibleConversation(actor, conversation.id),
+          turn: this.turn(actor, row, conversation),
+          result: JSON.parse(String(row.result_json)) as ConversationResult,
+        };
+      if (row.status !== "pending")
+        throw new LifeConflictError("Interrupted turns cannot be replayed automatically.");
+      const at = this.clock(),
+        fingerprint = this.contextFingerprintFor(actor, conversation.scope);
+      this.db
+        .prepare(
+          "UPDATE conversation_turns SET assistant_content=?,status='completed',result_json=?,evidence_json=?,context_fingerprint=?,updated_at=? WHERE id=? AND status='pending'",
+        )
+        .run(reply, encoded, JSON.stringify(result.evidence), fingerprint, at, turnId);
+      this.db
+        .prepare("UPDATE conversations SET revision=revision+1,updated_at=? WHERE id=?")
+        .run(at, conversation.id);
+      const current = this.accessibleConversation(actor, conversation.id),
+        updated = this.db
+          .prepare("SELECT * FROM conversation_turns WHERE id=?")
+          .get(turnId) as Record<string, unknown>;
+      return { conversation: current, turn: this.turn(actor, updated, current), result };
+    });
+  }
+  interruptConversationTurn(
+    actor: LifeActor,
+    input: { conversationId: string; turnId: string; requestId: string },
+  ): ConversationTurn {
+    const user = this.actor(actor),
+      conversationId = identifier(input.conversationId, "conversationId"),
+      owned = this.db
+        .prepare(
+          "SELECT c.*,(SELECT count(*) FROM conversation_turns t WHERE t.conversation_id=c.id) turn_count,EXISTS(SELECT 1 FROM conversation_turns t WHERE t.conversation_id=c.id AND t.status='pending') pending FROM conversations c WHERE c.id=? AND c.user_id=?",
+        )
+        .get(conversationId, user) as Record<string, unknown> | undefined,
+      turnId = identifier(input.turnId, "turnId"),
+      requestId = identifier(input.requestId, "requestId"),
+      at = this.clock();
+    if (!owned) throw new LifeAccessError("Conversation unavailable.");
+    this.db
+      .prepare(
+        "UPDATE conversation_turns SET status='interrupted',updated_at=? WHERE id=? AND conversation_id=? AND user_id=? AND request_id=? AND status='pending'",
+      )
+      .run(at, turnId, conversationId, user, requestId);
+    const row = this.db
+      .prepare("SELECT * FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=?")
+      .get(turnId, conversationId, user) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Conversation turn unavailable.");
+    return this.turn(actor, row, this.accessibleConversation(actor, conversationId));
+  }
+  listConversations(
+    actor: LifeActor,
+    input: { scope: LifeScope; cursor?: string; limit?: number },
+  ): ConversationPage<ConversationSummary> {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      limit = input.limit ?? 50;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50)
+      throw new TypeError("Conversation limit is invalid");
+    let cursor: { user: string; scope: string; updatedAt: number; id: string } | undefined;
+    if (input.cursor)
+      try {
+        cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString());
+        if (
+          cursor?.user !== user ||
+          cursor.scope !== `${scope.type}:${scope.id}` ||
+          !Number.isSafeInteger(cursor.updatedAt)
+        )
+          throw new Error();
+      } catch {
+        throw new TypeError("Conversation cursor is invalid");
+      }
+    const rows = this.db
+      .prepare(
+        `SELECT c.*,(SELECT count(*) FROM conversation_turns t WHERE t.conversation_id=c.id) turn_count,EXISTS(SELECT 1 FROM conversation_turns t WHERE t.conversation_id=c.id AND t.status='pending') pending FROM conversations c WHERE user_id=? AND scope_type=? AND scope_id=?${cursor ? " AND (updated_at<? OR (updated_at=? AND id<?))" : ""} ORDER BY updated_at DESC,id DESC LIMIT ?`,
+      )
+      .all(
+        user,
+        scope.type,
+        scope.id,
+        ...(cursor ? [cursor.updatedAt, cursor.updatedAt, cursor.id] : []),
+        limit + 1,
+      ) as Array<Record<string, unknown>>;
+    const items = rows.slice(0, limit).map((row) => this.conversationRow(row)),
+      result: ConversationPage<ConversationSummary> = { items, hasMore: rows.length > limit };
+    if (result.hasMore && items.length) {
+      const last = items.at(-1)!;
+      result.nextCursor = Buffer.from(
+        JSON.stringify({
+          user,
+          scope: `${scope.type}:${scope.id}`,
+          updatedAt: last.updatedAt,
+          id: last.id,
+        }),
+      ).toString("base64url");
+    }
+    return result;
+  }
+  getConversation(
+    actor: LifeActor,
+    id: string,
+    input: { cursor?: string; limit?: number } = {},
+  ): { conversation: ConversationSummary; turns: ConversationPage<ConversationTurn> } {
+    const conversation = this.accessibleConversation(actor, id),
+      limit = input.limit ?? 100;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100)
+      throw new TypeError("Turn limit is invalid");
+    let cursor: { conversationId: string; createdAt: number; id: string } | undefined;
+    if (input.cursor)
+      try {
+        cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString());
+        if (cursor?.conversationId !== conversation.id || !Number.isSafeInteger(cursor.createdAt))
+          throw new Error();
+      } catch {
+        throw new TypeError("Turn cursor is invalid");
+      }
+    const rows = this.db
+        .prepare(
+          `SELECT * FROM conversation_turns WHERE conversation_id=?${cursor ? " AND (created_at<? OR (created_at=? AND id<?))" : ""} ORDER BY created_at DESC,id DESC LIMIT ?`,
+        )
+        .all(
+          conversation.id,
+          ...(cursor ? [cursor.createdAt, cursor.createdAt, cursor.id] : []),
+          limit + 1,
+        ) as Array<Record<string, unknown>>,
+      pageRows = rows.slice(0, limit),
+      fingerprint = this.contextFingerprintFor(actor, conversation.scope),
+      items = pageRows.map((row) => this.turn(actor, row, conversation, fingerprint)),
+      turns: ConversationPage<ConversationTurn> = { items, hasMore: rows.length > limit };
+    if (turns.hasMore && pageRows.length) {
+      const last = pageRows.at(-1)!;
+      turns.nextCursor = Buffer.from(
+        JSON.stringify({
+          conversationId: conversation.id,
+          createdAt: Number(last.created_at),
+          id: String(last.id),
+        }),
+      ).toString("base64url");
+    }
+    return { conversation, turns };
+  }
+  getConversationRequest(
+    actor: LifeActor,
+    requestIdInput: string,
+  ):
+    | { conversation: ConversationSummary; turn: ConversationTurn; result?: ConversationResult }
+    | undefined {
+    const user = this.actor(actor),
+      requestId = identifier(requestIdInput, "requestId"),
+      row = this.db
+        .prepare("SELECT * FROM conversation_turns WHERE user_id=? AND request_id=?")
+        .get(user, requestId) as Record<string, unknown> | undefined;
+    if (!row) return;
+    const conversation = this.accessibleConversation(actor, String(row.conversation_id));
+    return {
+      conversation,
+      turn: this.turn(actor, row, conversation),
+      ...(row.result_json
+        ? { result: JSON.parse(String(row.result_json)) as ConversationResult }
+        : {}),
+    };
+  }
+  conversationHistory(
+    actor: LifeActor,
+    id: string,
+    limit = 12,
+    currentFingerprint?: string,
+  ): Array<{ role: "user" | "assistant"; content: string }> {
+    const conversation = this.accessibleConversation(actor, id);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 12)
+      throw new TypeError("History limit is invalid");
+    const rows = this.db
+        .prepare(
+          "SELECT * FROM conversation_turns WHERE conversation_id=? ORDER BY created_at DESC,id DESC LIMIT 200",
+        )
+        .all(conversation.id) as Array<Record<string, unknown>>,
+      current = currentFingerprint ?? this.contextFingerprintFor(actor, conversation.scope),
+      valid: Record<string, unknown>[] = [];
+    for (const row of rows) {
+      if (row.status !== "completed") continue;
+      if (
+        String(row.context_fingerprint) !== current ||
+        !this.evidenceCurrent(actor, conversation.scope, JSON.parse(String(row.evidence_json)))
+      )
+        break;
+      valid.push(row);
+      if (valid.length >= Math.ceil(limit / 2)) break;
+    }
+    return valid
+      .reverse()
+      .flatMap((row) => [
+        { role: "user" as const, content: String(row.user_content) },
+        { role: "assistant" as const, content: String(row.assistant_content) },
+      ])
+      .slice(-limit);
+  }
+  conversationContextFingerprint(actor: LifeActor, id: string): string {
+    const conversation = this.accessibleConversation(actor, id);
+    return this.contextFingerprintFor(actor, conversation.scope);
+  }
+  deleteConversation(actor: LifeActor, id: string, expectedRevision: number): void {
+    const conversation = this.accessibleConversation(actor, id);
+    if (!Number.isSafeInteger(expectedRevision) || conversation.revision !== expectedRevision)
+      throw new LifeConflictError("Conversation changed.");
+    if (conversation.pending)
+      throw new LifeConflictError("A pending conversation cannot be deleted.");
+    const user = this.actor(actor),
+      epoch = this.chatEpoch(actor);
+    this.transaction(() => {
+      const requests = this.db
+        .prepare("SELECT request_id FROM conversation_turns WHERE conversation_id=?")
+        .all(conversation.id) as Array<{ request_id: string }>;
+      const retained = Number(
+        this.db
+          .prepare(
+            "SELECT count(*) count FROM conversation_request_tombstones WHERE user_id=? AND epoch=?",
+          )
+          .get(user, epoch)?.count,
+      );
+      if (retained + requests.length > 20_000)
+        throw new LifeConflictError(
+          "Personal chat reset is required before deleting more history.",
+        );
+      const insert = this.db.prepare(
+        "INSERT OR IGNORE INTO conversation_request_tombstones VALUES(?,?,?,?)",
+      );
+      for (const request of requests)
+        insert.run(
+          user,
+          epoch,
+          createHash("sha256").update(request.request_id).digest("hex"),
+          this.clock(),
+        );
+      this.db
+        .prepare("DELETE FROM conversations WHERE id=? AND user_id=? AND revision=?")
+        .run(conversation.id, user, expectedRevision);
+    });
+  }
   personalSummary(actor: LifeActor): PersonalLifeSummary {
     const user = this.actor(actor),
       row = this.db
@@ -1571,9 +2203,11 @@ export class LifeStore {
           sum(kind='feedback') feedback,
           sum(kind='routine' AND json_extract(data_json,'$.type')='teaching-guide-v1') guidance,
           (SELECT count(*) FROM settings WHERE level='user' AND scope_id=?) settings,
-          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?) bytes
+          (SELECT count(*) FROM conversations WHERE user_id=?) conversations,
+          (SELECT count(*) FROM conversation_turns WHERE user_id=?) conversation_turns,
+          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?) bytes
           FROM records WHERE scope_type='user' AND scope_id=?`)
-        .get(user, user, user, user) as Record<string, unknown>;
+        .get(user, user, user, user, user, user, user) as Record<string, unknown>;
     return {
       generation: Number(row.generation ?? 0),
       records: Number(row.records),
@@ -1581,6 +2215,8 @@ export class LifeStore {
       feedback: Number(row.feedback),
       guidance: Number(row.guidance),
       settings: Number(row.settings),
+      conversations: Number(row.conversations),
+      conversationTurns: Number(row.conversation_turns),
       bytes: Number(row.bytes),
     };
   }
@@ -1606,7 +2242,7 @@ export class LifeStore {
           cursor?.user !== user ||
           cursor.generation !== generation ||
           !Number.isSafeInteger(cursor.updatedAt) ||
-          !["record", "setting"].includes(cursor.type) ||
+          !["record", "setting", "conversation", "conversation-turn"].includes(cursor.type) ||
           typeof cursor.key !== "string"
         )
           throw new Error();
@@ -1618,9 +2254,15 @@ export class LifeStore {
       .prepare(`SELECT type,key,updated_at FROM (
         SELECT 'record' type,id key,updated_at FROM records WHERE scope_type='user' AND scope_id=?
         UNION ALL SELECT 'setting' type,key,updated_at FROM settings WHERE level='user' AND scope_id=?
+        UNION ALL SELECT 'conversation' type,id key,updated_at FROM conversations WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=scope_id AND m.user_id=?))
+        UNION ALL SELECT 'conversation-turn' type,t.id key,t.updated_at FROM conversation_turns t JOIN conversations c ON c.id=t.conversation_id WHERE t.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
       ) WHERE (? IS NULL OR updated_at<? OR (updated_at=? AND (type<? OR (type=? AND key<?))))
       ORDER BY updated_at DESC,type DESC,key DESC LIMIT ?`)
       .all(
+        user,
+        user,
+        user,
+        user,
         user,
         user,
         cursor?.key ?? null,
@@ -1630,7 +2272,11 @@ export class LifeStore {
         cursor?.type ?? "",
         cursor?.key ?? "",
         limit + 1,
-      ) as Array<{ type: "record" | "setting"; key: string; updated_at: number }>;
+      ) as Array<{
+      type: "record" | "setting" | "conversation" | "conversation-turn";
+      key: string;
+      updated_at: number;
+    }>;
     const pageRows: typeof rows = [],
       recordStatement = this.db.prepare(
         "SELECT * FROM records WHERE id=? AND scope_type='user' AND scope_id=?",
@@ -1638,6 +2284,11 @@ export class LifeStore {
       settingStatement = this.db.prepare(
         "SELECT value_json,updated_at FROM settings WHERE level='user' AND scope_id=? AND key=?",
       ),
+      conversationStatement = this.db.prepare(
+        "SELECT c.*,(SELECT count(*) FROM conversation_turns t WHERE t.conversation_id=c.id) turn_count,EXISTS(SELECT 1 FROM conversation_turns t WHERE t.conversation_id=c.id AND t.status='pending') pending FROM conversations c WHERE c.id=? AND c.user_id=?",
+      ),
+      turnStatement = this.db.prepare("SELECT * FROM conversation_turns WHERE id=? AND user_id=?"),
+      fingerprintByScope = new Map<string, string>(),
       items: PersonalLifeExportItem[] = [];
     let pageBytes = 0;
     for (const row of rows.slice(0, limit)) {
@@ -1646,7 +2297,7 @@ export class LifeStore {
         const record = recordStatement.get(row.key, user) as Record<string, unknown> | undefined;
         if (!record) throw new LifeConflictError("Personal data changed; review a fresh export.");
         item = { type: "record", record: this.record(record) };
-      } else {
+      } else if (row.type === "setting") {
         const setting = settingStatement.get(user, row.key) as Record<string, unknown> | undefined;
         if (!setting) throw new LifeConflictError("Personal data changed; review a fresh export.");
         item = {
@@ -1654,6 +2305,26 @@ export class LifeStore {
           key: row.key,
           value: JSON.parse(String(setting.value_json)),
           updatedAt: Number(setting.updated_at),
+        };
+      } else if (row.type === "conversation") {
+        const found = conversationStatement.get(row.key, user) as
+          | Record<string, unknown>
+          | undefined;
+        if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        item = { type: "conversation", conversation: this.conversationRow(found) };
+      } else {
+        const found = turnStatement.get(row.key, user) as Record<string, unknown> | undefined;
+        if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        const conversation = this.accessibleConversation(actor, String(found.conversation_id));
+        const scopeKey = `${conversation.scope.type}:${conversation.scope.id}`,
+          fingerprint =
+            fingerprintByScope.get(scopeKey) ??
+            this.contextFingerprintFor(actor, conversation.scope);
+        fingerprintByScope.set(scopeKey, fingerprint);
+        item = {
+          type: "conversation-turn",
+          conversationId: conversation.id,
+          turn: this.turn(actor, found, conversation, fingerprint),
         };
       }
       const itemBytes = Buffer.byteLength(JSON.stringify(item));
@@ -1804,6 +2475,14 @@ export class LifeStore {
     )
       throw new LifeConflictError("Personal data changed; review reset again.");
     this.transaction(() => {
+      const epoch = this.chatEpoch(actor);
+      this.db
+        .prepare(
+          "INSERT INTO chat_state VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET epoch=epoch+1",
+        )
+        .run(user, epoch + 1);
+      this.db.prepare("DELETE FROM conversation_request_tombstones WHERE user_id=?").run(user);
+      this.db.prepare("DELETE FROM conversations WHERE user_id=?").run(user);
       const sources = this.db
         .prepare("SELECT id FROM records WHERE kind='source' AND scope_type='user' AND scope_id=?")
         .all(user) as Array<{ id: string }>;

@@ -49,7 +49,12 @@ export interface TaskSummary {
 export interface TaskDetail {
   task: TaskSummary;
   children: TaskSummary[];
-  progress: Array<{ message?: string; current?: number; total?: number; at?: string }>;
+  progress: Array<{
+    message?: string;
+    current?: number;
+    total?: number;
+    at?: string;
+  }>;
   result?: {
     status: "complete";
     summary: string;
@@ -103,6 +108,7 @@ export interface Bootstrap {
   settings: Record<string, unknown>;
   notifications: NotificationSummary[];
   capabilities: Record<string, unknown>;
+  chatEpoch: number;
 }
 export interface TeachingSource {
   id: string;
@@ -139,6 +145,8 @@ export interface PersonalDataReview {
     pluginVersions: number;
     pluginStorageKeys: number;
     sharedPluginStorageKeys: number;
+    conversations?: number;
+    conversationTurns?: number;
   };
   bytes: number;
   truncated?: boolean;
@@ -151,4 +159,45 @@ export interface PersonalResetStatus {
   unknownTaskIds?: string[];
   counts?: Record<string, number>;
   error?: string;
+}
+export interface ConversationSummary {
+  id: string;
+  scope: Scope;
+  title: string;
+  revision: number;
+  turnCount: number;
+  pending: boolean;
+  createdAt: string | number;
+  updatedAt: string | number;
+}
+export interface ConversationTurn {
+  id: string;
+  requestId: string;
+  user: string;
+  assistant?: string;
+  status: "pending" | "completed" | "interrupted";
+  outdated: boolean;
+  evidence: Array<{
+    sourceId: string;
+    sourceRevision: number;
+    title: string;
+    reference?: string;
+  }>;
+  actions: Array<{ label: string; status: string }>;
+  createdAt: string | number;
+  updatedAt: string | number;
+}
+export interface ModelStatus {
+  mode: "deterministic" | "local";
+  configured: boolean;
+  available: boolean;
+  model?: string;
+  checkedAt: string | number;
+  capabilities: { chat: boolean; customApps: boolean };
+  reason:
+    | "not-configured"
+    | "runner-unreachable"
+    | "model-not-installed"
+    | "probe-unsupported"
+    | "ready";
 }

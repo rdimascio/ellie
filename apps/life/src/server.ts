@@ -25,6 +25,7 @@ import {
 } from "../../../packages/life-import/src/index.ts";
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
 import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
+import type { ModelStatus } from "./model-status.ts";
 import type { LifePlugin, PluginStore } from "../../../packages/life-plugins/src/index.ts";
 import {
   PluginError,
@@ -61,10 +62,15 @@ export interface LifeHarnessLike {
     scope: LifeScope;
     message: string;
     conversationId?: string;
+    history?: Array<{ role: "user" | "assistant"; content: string }>;
+    isContextCurrent?: () => boolean;
   }): Promise<{
     reply: string;
     conversationId: string;
     actions?: Array<{ label: string; status: string }>;
+    records?: LifeRecord[];
+    taskIds?: string[];
+    evidence?: Array<{ sourceId: string; title: string; reference?: string }>;
   }>;
   buildPlugin?(input: { actor: LifeActor; scope: LifeScope; request: string }): Promise<LifePlugin>;
   revisePlugin?(input: {
@@ -98,6 +104,7 @@ export interface LifeServerOptions {
   mlb?: MlbLike;
   context?: ContextLike;
   preparationMonitor?: { start(): void; stop(): void };
+  modelStatus?: () => Promise<ModelStatus>;
   host?: "127.0.0.1";
   port?: number;
   userId?: string;
@@ -137,6 +144,11 @@ function bounded(value: unknown, label: string, limit: number): string {
   if (typeof value !== "string" || value.length < 1 || value.length > limit)
     throw new HttpError(400, `${label} is invalid.`);
   return value;
+}
+function presentation(value: unknown, limit: number, fallback: string): string {
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  if (value.length <= limit) return value;
+  return `${value.slice(0, Math.max(0, limit - 1))}…`;
 }
 function jsonObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
@@ -604,6 +616,8 @@ export class LifeHttpServer {
         return await this.personalDataResetRetry(request, path, response);
       if (path === "/api/life/bootstrap" && request.method === "GET")
         return await this.bootstrap(url, response);
+      if (path === "/api/life/model/status" && request.method === "GET")
+        return await this.modelStatus(response);
       if (path === "/api/life/groups" && request.method === "POST")
         return await this.group(request, response);
       if (path === "/api/life/records" && request.method === "POST")
@@ -652,6 +666,14 @@ export class LifeHttpServer {
         return await this.teachingMutation(request, response, path);
       if (path === "/api/life/chat" && request.method === "POST")
         return await this.chat(request, response);
+      if (/^\/api\/life\/chat\/requests\/[^/]+$/.test(path) && request.method === "GET")
+        return this.chatRequest(path, response);
+      if (path === "/api/life/conversations" && request.method === "GET")
+        return this.conversations(url, response);
+      if (/^\/api\/life\/conversations\/[^/]+$/.test(path) && request.method === "GET")
+        return this.conversation(path, url, response);
+      if (/^\/api\/life\/conversations\/[^/]+$/.test(path) && request.method === "DELETE")
+        return this.conversationDelete(path, url, response);
       if (path === "/api/life/signals" && request.method === "POST")
         return await this.signal(request, response);
       if (
@@ -750,6 +772,8 @@ export class LifeHttpServer {
         feedback: life.feedback,
         guidance: life.guidance,
         userSettings: life.settings,
+        conversations: life.conversations,
+        conversationTurns: life.conversationTurns,
         tasks: tasks.tasks,
         watches: tasks.watches,
         watchEvents: tasks.watchEvents,
@@ -1098,7 +1122,21 @@ export class LifeHttpServer {
         ...(notificationPage.nextCursor ? { nextCursor: notificationPage.nextCursor } : {}),
       },
       capabilities: { sources: true, plugins: true, tasks: true },
+      chatEpoch: this.options.store.chatEpoch(this.actor),
     });
+  }
+  private async modelStatus(response: ServerResponse): Promise<void> {
+    const status = this.options.modelStatus
+      ? await this.options.modelStatus()
+      : {
+          mode: "deterministic" as const,
+          configured: false,
+          available: true,
+          checkedAt: this.now(),
+          capabilities: { chat: true, customApps: false },
+          reason: "not-configured" as const,
+        };
+    this.send(response, 200, { ...status, checkedAt: new Date(status.checkedAt).toISOString() });
   }
   private async group(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = jsonObject(await this.body(request));
@@ -1580,16 +1618,190 @@ export class LifeHttpServer {
   private async chat(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const body = jsonObject(await this.body(request)),
       scope = this.scope(body.scope),
-      result = await this.options.harness.chat({
+      message = bounded(body.message, "message", 8000),
+      requestId = identifier(body.requestId, "requestId"),
+      chatEpoch = Number(body.chatEpoch),
+      conversationId =
+        body.conversationId === undefined
+          ? undefined
+          : identifier(body.conversationId, "conversationId"),
+      begun = this.options.store.beginConversationTurn(this.actor, {
+        scope,
+        message,
+        requestId,
+        chatEpoch,
+        ...(conversationId ? { conversationId } : {}),
+      });
+    if (begun.status !== "new") {
+      this.send(
+        response,
+        200,
+        this.conversationChatEnvelope(begun.conversation, begun.turn, begun.result),
+      );
+      return;
+    }
+    const fingerprint = begun.contextFingerprint,
+      history = this.options.store.conversationHistory(
+        this.actor,
+        begun.conversation.id,
+        12,
+        fingerprint,
+      );
+    try {
+      const result = await this.options.harness.chat({
         actor: this.actor,
         scope,
-        message: bounded(body.message, "message", 100_000),
-        ...(body.conversationId === undefined
-          ? {}
-          : { conversationId: identifier(body.conversationId, "conversationId") }),
+        message,
+        conversationId: begun.conversation.id,
+        history,
+        isContextCurrent: () => {
+          try {
+            return (
+              this.options.store.conversationContextFingerprint(
+                this.actor,
+                begun.conversation.id,
+              ) === fingerprint
+            );
+          } catch {
+            return false;
+          }
+        },
       });
-    this.recheckOwner(owner(scope));
-    this.send(response, 200, result);
+      this.recheckOwner(owner(scope));
+      const evidence =
+          result.evidence?.slice(0, 50).flatMap((item) => {
+            const source = this.options.store.currentSourceReference(
+              this.actor,
+              scope,
+              item.sourceId,
+            );
+            return source
+              ? [
+                  {
+                    ...source,
+                    title: presentation(source.title, 500, "Source"),
+                    ...(item.reference
+                      ? { reference: presentation(item.reference, 1000, "Reference") }
+                      : {}),
+                  },
+                ]
+              : [];
+          }) ?? [],
+        completed = this.options.store.completeConversationTurn(this.actor, {
+          conversationId: begun.conversation.id,
+          turnId: begun.turn.id,
+          requestId,
+          result: {
+            reply: presentation(result.reply, 8000, "Done."),
+            actions: (result.actions ?? []).slice(0, 20).map((action) => ({
+              label: presentation(action.label, 500, "Completed"),
+              status: presentation(action.status, 50, "completed"),
+            })),
+            recordIds: (result.records ?? []).slice(0, 100).map((record) => record.id),
+            taskIds: (result.taskIds ?? []).slice(0, 100),
+            evidence,
+          },
+        });
+      this.send(
+        response,
+        200,
+        this.conversationChatEnvelope(completed.conversation, completed.turn, completed.result),
+      );
+    } catch (error) {
+      try {
+        this.options.store.interruptConversationTurn(this.actor, {
+          conversationId: begun.conversation.id,
+          turnId: begun.turn.id,
+          requestId,
+        });
+      } catch {}
+      throw error;
+    }
+  }
+  private conversationChatEnvelope(
+    conversation: import("../../../packages/life-core/src/index.ts").ConversationSummary,
+    turn: import("../../../packages/life-core/src/index.ts").ConversationTurn,
+    result?: import("../../../packages/life-core/src/index.ts").ConversationResult,
+  ): Record<string, unknown> {
+    return {
+      status: turn.status,
+      conversationId: conversation.id,
+      turnId: turn.id,
+      ...(result
+        ? {
+            reply: result.reply,
+            actions: result.actions,
+            records: result.recordIds.flatMap((id) => {
+              const record = this.options.store.getRecord(this.actor, id);
+              return record ? [serializeRecord(record)] : [];
+            }),
+            taskIds: result.taskIds,
+            evidence: result.evidence,
+          }
+        : {}),
+    };
+  }
+  private chatRequest(path: string, response: ServerResponse): void {
+    const requestId = identifier(decodeURIComponent(path.split("/").at(-1)!), "requestId"),
+      found = this.options.store.getConversationRequest(this.actor, requestId);
+    if (!found) throw new HttpError(404, "Chat request not found.");
+    this.send(
+      response,
+      200,
+      this.conversationChatEnvelope(found.conversation, found.turn, found.result),
+    );
+  }
+  private conversationSummary(
+    value: import("../../../packages/life-core/src/index.ts").ConversationSummary,
+  ): Record<string, unknown> {
+    return {
+      ...value,
+      createdAt: new Date(value.createdAt).toISOString(),
+      updatedAt: new Date(value.updatedAt).toISOString(),
+    };
+  }
+  private conversationTurn(
+    value: import("../../../packages/life-core/src/index.ts").ConversationTurn,
+  ): Record<string, unknown> {
+    return {
+      ...value,
+      createdAt: new Date(value.createdAt).toISOString(),
+      updatedAt: new Date(value.updatedAt).toISOString(),
+    };
+  }
+  private conversations(url: URL, response: ServerResponse): void {
+    const page = this.options.store.listConversations(this.actor, {
+      scope: this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
+      ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+      ...(url.searchParams.get("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+    });
+    this.send(response, 200, {
+      conversations: page.items.map((item) => this.conversationSummary(item)),
+      chatEpoch: this.options.store.chatEpoch(this.actor),
+      page: { hasMore: page.hasMore, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) },
+    });
+  }
+  private conversation(path: string, url: URL, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!), "conversationId"),
+      result = this.options.store.getConversation(this.actor, id, {
+        ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+        ...(url.searchParams.get("limit") ? { limit: Number(url.searchParams.get("limit")) } : {}),
+      });
+    this.send(response, 200, {
+      conversation: this.conversationSummary(result.conversation),
+      turns: result.turns.items.map((item) => this.conversationTurn(item)),
+      page: {
+        hasMore: result.turns.hasMore,
+        ...(result.turns.nextCursor ? { nextCursor: result.turns.nextCursor } : {}),
+      },
+    });
+  }
+  private conversationDelete(path: string, url: URL, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!), "conversationId"),
+      conversation = this.options.store.getConversation(this.actor, id).conversation;
+    this.options.store.deleteConversation(this.actor, id, Number(url.searchParams.get("revision")));
+    this.options.harness.invalidateContext?.(this.actor, conversation.scope);
+    this.send(response, 204);
   }
   private async signal(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (!this.options.context) throw new HttpError(503, "Context suggestions are unavailable.");

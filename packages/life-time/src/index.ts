@@ -92,6 +92,28 @@ export function parseCalendarDate(value: unknown): LocalDate | undefined {
     return undefined;
   }
 }
+/** An epoch millisecond or strict offset-bearing ISO value; never normalize an invalid date. */
+export function parseInstant(value: unknown): number | undefined {
+  if (typeof value === "number")
+    return Number.isSafeInteger(value) && Math.abs(value) <= 8.64e15 ? value : undefined;
+  if (typeof value !== "string") return undefined;
+  const match =
+    /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,3}))?)?(Z|([+-])(\d{2}):(\d{2}))$/.exec(
+      value,
+    );
+  if (!match) return undefined;
+  const date = parseCalendarDate(match[1]),
+    hour = Number(match[2]),
+    minute = Number(match[3]),
+    second = Number(match[4] ?? 0),
+    millisecond = Number((match[5] ?? "").padEnd(3, "0")),
+    offsetHour = Number(match[8] ?? 0),
+    offsetMinute = Number(match[9] ?? 0);
+  if (!date || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59)
+    return undefined;
+  const offset = (offsetHour * 60 + offsetMinute) * 60_000 * (match[7] === "-" ? -1 : 1);
+  return utc(date, hour, minute, second) + millisecond - offset;
+}
 export function localParts(
   epochMs: number,
   zone: string,

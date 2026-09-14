@@ -706,3 +706,190 @@ test("personal export pages bound large source payloads without losing the next 
     await rm(f.dir, { recursive: true, force: true });
   }
 });
+
+test("durable conversations are private, idempotent, context-safe, and restart pending as interrupted", async () => {
+  const f = await fixture();
+  try {
+    let store = f.open(1_000);
+    const source = store.ingestSource(alice, {
+      title: "Notes",
+      scope: { type: "user", id: "alice" },
+      format: "text",
+      content: "Garden plans",
+    });
+    const begun = store.beginConversationTurn(alice, {
+      scope: { type: "user", id: "alice" },
+      requestId: "request-1",
+      chatEpoch: 1,
+      message: "What are the plans?",
+    });
+    const completed = store.completeConversationTurn(alice, {
+      conversationId: begun.conversation.id,
+      turnId: begun.turn.id,
+      requestId: "request-1",
+      result: {
+        reply: "Garden plans",
+        actions: [],
+        recordIds: [],
+        taskIds: [],
+        evidence: [{ sourceId: source.id, sourceRevision: source.revision, title: source.title }],
+      },
+    });
+    const duplicate = store.beginConversationTurn(alice, {
+      scope: { type: "user", id: "alice" },
+      conversationId: begun.conversation.id,
+      requestId: "request-1",
+      chatEpoch: 1,
+      message: "What are the plans?",
+    });
+    assert.equal(duplicate.status, "completed");
+    assert.equal(duplicate.result?.reply, "Garden plans");
+    assert.throws(
+      () =>
+        store.beginConversationTurn(alice, {
+          scope: { type: "user", id: "alice" },
+          requestId: "request-1",
+          chatEpoch: 1,
+          message: "Different",
+        }),
+      LifeConflictError,
+    );
+    assert.equal(store.conversationHistory(alice, begun.conversation.id).length, 2);
+    store.updateRecord(alice, source.id, source.revision, { body: "Changed plans" });
+    assert.equal(store.conversationHistory(alice, begun.conversation.id).length, 0);
+    assert.equal(
+      store.getConversation(alice, begun.conversation.id).turns.items[0]?.outdated,
+      true,
+    );
+    const beforeSetting = store.conversationContextFingerprint(alice, begun.conversation.id);
+    store.setSettings(alice, { level: "user", values: { tone: "concise" } });
+    assert.notEqual(
+      store.conversationContextFingerprint(alice, begun.conversation.id),
+      beforeSetting,
+      "same-clock setting changes must invalidate restored model context",
+    );
+    assert.throws(() => store.getConversation(bob, begun.conversation.id), LifeAccessError);
+    const pending = store.beginConversationTurn(alice, {
+      scope: { type: "user", id: "alice" },
+      conversationId: begun.conversation.id,
+      requestId: "request-2",
+      chatEpoch: 1,
+      message: "Pending",
+    });
+    store.close();
+    store = f.open(1_001);
+    assert.equal(store.getConversationRequest(alice, "request-2")?.turn.status, "interrupted");
+    assert.throws(
+      () =>
+        store.completeConversationTurn(alice, {
+          conversationId: begun.conversation.id,
+          turnId: pending.turn.id,
+          requestId: "request-2",
+          result: { reply: "late", actions: [], recordIds: [], taskIds: [], evidence: [] },
+        }),
+      /cannot be replayed/,
+    );
+    const summary = store.personalSummary(alice);
+    assert.equal(summary.conversations, 1);
+    assert.equal(summary.conversationTurns, 2);
+    assert.ok(
+      store
+        .exportPersonalPage(alice, { expectedGeneration: summary.generation, limit: 100 })
+        .items.some((item) => item.type === "conversation-turn"),
+    );
+    for (let index = 3; index <= 200; index += 1) {
+      const added = store.beginConversationTurn(alice, {
+        scope: { type: "user", id: "alice" },
+        conversationId: begun.conversation.id,
+        requestId: `request-${index}`,
+        chatEpoch: 1,
+        message: "retained",
+      });
+      store.interruptConversationTurn(alice, {
+        conversationId: begun.conversation.id,
+        turnId: added.turn.id,
+        requestId: `request-${index}`,
+      });
+    }
+    assert.throws(
+      () =>
+        store.beginConversationTurn(alice, {
+          scope: { type: "user", id: "alice" },
+          conversationId: begun.conversation.id,
+          requestId: "request-201",
+          chatEpoch: 1,
+          message: "must not prune replay protection",
+        }),
+      /retained turn limit/,
+    );
+    assert.equal(
+      store.beginConversationTurn(alice, {
+        scope: { type: "user", id: "alice" },
+        conversationId: begun.conversation.id,
+        requestId: "request-1",
+        chatEpoch: 1,
+        message: "What are the plans?",
+      }).status,
+      "completed",
+    );
+    const current = store.getConversation(alice, begun.conversation.id).conversation;
+    store.deleteConversation(alice, begun.conversation.id, current.revision);
+    assert.equal(store.personalSummary(alice).conversations, 0);
+    assert.throws(
+      () =>
+        store.beginConversationTurn(alice, {
+          scope: { type: "user", id: "alice" },
+          requestId: "request-1",
+          chatEpoch: 1,
+          message: "What are the plans?",
+        }),
+      /cannot be replayed/,
+    );
+    store.deletePersonal(alice, { preserveMemberships: true });
+    assert.equal(store.chatEpoch(alice), 2);
+    assert.throws(
+      () =>
+        store.beginConversationTurn(alice, {
+          scope: { type: "user", id: "alice" },
+          requestId: "request-after-reset",
+          chatEpoch: 1,
+          message: "old page",
+        }),
+      /refresh/,
+    );
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("revoked group conversation contexts stay private and reset still deletes them", async () => {
+  const f = await fixture();
+  try {
+    const store = f.open();
+    store.createGroup(alice, { id: "chat-group", name: "Chat group" });
+    store.setGroupMember(alice, "chat-group", { userId: "bob", role: "member" });
+    const begun = store.beginConversationTurn(bob, {
+      scope: { type: "group", id: "chat-group" },
+      requestId: "group-request",
+      chatEpoch: 1,
+      message: "private transcript in shared context",
+    });
+    store.interruptConversationTurn(bob, {
+      conversationId: begun.conversation.id,
+      turnId: begun.turn.id,
+      requestId: "group-request",
+    });
+    assert.throws(() => store.getConversation(alice, begun.conversation.id), LifeAccessError);
+    store.setGroupMember(alice, "chat-group", { userId: "bob", remove: true });
+    assert.throws(() => store.getConversation(bob, begun.conversation.id), LifeAccessError);
+    assert.equal(store.exportPersonalPage(bob).items.length, 0);
+    assert.equal(store.personalSummary(bob).conversations, 1);
+    store.deletePersonal(bob, { preserveMemberships: true });
+    assert.equal(store.personalSummary(bob).conversations, 0);
+    assert.equal(store.chatEpoch(bob), 2);
+    store.close();
+  } finally {
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});

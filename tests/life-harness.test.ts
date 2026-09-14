@@ -8,6 +8,7 @@ import { LifeStore } from "../packages/life-core/src/index.ts";
 import { MLBAdapter, PluginStore } from "../packages/life-plugins/src/index.ts";
 import {
   createLifeHarness,
+  LifeOperations,
   LocalOpenAIModel,
   validateModelPlan,
 } from "../packages/life-harness/src/index.ts";
@@ -223,26 +224,374 @@ test("model plans reject unlisted tools and generated plugins receive storage on
   }
 });
 
+test("model-translated reminder executes through the validated life operation", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.store.setUserSetting(actor, "timeZone", "America/Los_Angeles");
+    let request: Parameters<LifeModel["plan"]>[0] | undefined;
+    const model: LifeModel = {
+      async plan(input) {
+        request = input;
+        return {
+          reply: "I did it.",
+          actions: [
+            {
+              type: "life_operation",
+              intent: {
+                kind: "schedule_reminder",
+                title: "Call Maya",
+                when: { type: "instant", at: Date.UTC(2026, 8, 13, 17) },
+              },
+            },
+            { type: "reply", text: "Later unverified overwrite." },
+            { type: "life_operation", intent: { kind: "query", view: "upcoming" } },
+          ],
+        };
+      },
+    };
+    const response = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Make sure I call Maya in an hour",
+      history: [{ role: "assistant", content: "What would you like to remember?" }],
+    });
+    assert.equal(request?.now, Date.UTC(2026, 8, 13, 16));
+    assert.equal(request?.timeZone, "America/Los_Angeles");
+    assert.deepEqual(request?.history, [
+      { role: "assistant", content: "What would you like to remember?" },
+    ]);
+    assert.equal(
+      response.records.some((record) => record.kind === "reminder"),
+      true,
+    );
+    assert.equal(response.taskIds.length, 1);
+    assert.match(response.reply, /I'll remind you/);
+    assert.match(response.reply, /Upcoming: Call Maya/);
+    assert.doesNotMatch(response.reply, /I did it/);
+    assert.doesNotMatch(response.reply, /Later unverified/);
+    const polite = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Could you remind me to call Maya?",
+    });
+    assert.equal(polite.taskIds.length, 1);
+    assert.match(polite.reply, /I'll remind you/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("reminder operation compensates its record when task admission fails", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.tasks.beginPersonalDeletion("user:alice", "freeze-reminders");
+    const operations = new LifeOperations({
+      store: f.store,
+      tasks: f.tasks,
+      now: () => Date.UTC(2026, 8, 13, 16),
+    });
+    assert.throws(
+      () =>
+        operations.execute(
+          actor,
+          scope,
+          {
+            kind: "schedule_reminder",
+            title: "Call Maya",
+            when: { type: "instant", at: Date.UTC(2026, 8, 13, 17) },
+          },
+          "America/Los_Angeles",
+        ),
+      /frozen/,
+    );
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"], limit: 20 }).length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("contact operation validates birthday before creating any record", async () => {
+  const f = await fixture();
+  try {
+    const operations = new LifeOperations({ store: f.store, tasks: f.tasks, now: Date.now });
+    assert.throws(
+      () =>
+        operations.execute(
+          actor,
+          scope,
+          {
+            kind: "create_contact",
+            name: "Maya",
+            birthday: { month: 2, day: 30 },
+          },
+          "America/Los_Angeles",
+        ),
+      /invalid/i,
+    );
+    assert.equal(
+      f.store.listRecords(actor, { scope, kinds: ["contact", "birthday"], limit: 20 }).length,
+      0,
+    );
+    assert.throws(
+      () =>
+        operations.execute(
+          actor,
+          scope,
+          {
+            kind: "create_event",
+            title: "Impossible",
+            start: { type: "instant", at: Number.MAX_SAFE_INTEGER },
+          },
+          "America/Los_Angeles",
+        ),
+      /invalid/i,
+    );
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["event"], limit: 20 }).length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("model life operations require current direct authority and current context", async () => {
+  const f = await fixture();
+  try {
+    const proposed: LifeModel = {
+      async plan() {
+        return {
+          reply: "Saved.",
+          actions: [
+            { type: "life_operation", intent: { kind: "create_need", title: "Buy fertilizer" } },
+          ],
+        };
+      },
+    };
+    const harness = f.make(proposed);
+    const query = await harness.chat({
+      actor,
+      scope,
+      message: "Does this source say I need fertilizer?",
+    });
+    assert.match(query.reply, /direct request/i);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["need"], limit: 20 }).length, 0);
+    const stale = await harness.chat({
+      actor,
+      scope,
+      message: "Add fertilizer to my needs",
+      isContextCurrent: () => false,
+    });
+    assert.match(stale.reply, /context changed/i);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["need"], limit: 20 }).length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("modeled need completion clarifies ambiguous scoped matches", async () => {
+  const f = await fixture();
+  try {
+    for (const title of ["Buy milk", "Buy milk for office"])
+      f.store.createRecord(actor, { kind: "need", title, scope, data: { completed: false } });
+    const model: LifeModel = {
+      async plan() {
+        return {
+          reply: "Done.",
+          actions: [
+            {
+              type: "life_operation",
+              intent: { kind: "resolve_need", operation: "complete", title: "milk" },
+            },
+          ],
+        };
+      },
+    };
+    const response = await f.make(model).chat({ actor, scope, message: "Finish the milk need" });
+    assert.match(response.reply, /more than one/i);
+    assert.equal(
+      f.store
+        .listRecords(actor, { scope, kinds: ["need"], limit: 20 })
+        .every((row) => row.data.completed !== true),
+      true,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("model intents execute bounded event, need, contact, query, and summary operations", async () => {
+  const f = await fixture(Date.UTC(2026, 8, 13, 16));
+  try {
+    f.store.ingestSource(actor, {
+      title: "Project material",
+      scope,
+      format: "text",
+      content: "The project launches Tuesday.",
+    });
+    const model: LifeModel = {
+      async plan(input) {
+        const intent = input.message.startsWith("Put")
+          ? {
+              kind: "create_event" as const,
+              title: "Planning session",
+              start: { type: "instant" as const, at: Date.UTC(2026, 8, 14, 18) },
+            }
+          : input.message.startsWith("Create")
+            ? {
+                kind: "create_need" as const,
+                title: "Renew passport",
+                budget: 200,
+                currency: "usd",
+              }
+            : input.message.startsWith("Save")
+              ? {
+                  kind: "create_contact" as const,
+                  name: "Maya",
+                  interests: ["gardening"],
+                  birthday: { month: 10, day: 30 },
+                }
+              : input.message.startsWith("Show")
+                ? { kind: "query" as const, view: "upcoming" as const }
+                : { kind: "summarize_sources" as const, query: "project launch" };
+        return { reply: "Unverified model prose.", actions: [{ type: "life_operation", intent }] };
+      },
+    };
+    const harness = f.make(model);
+    for (const message of [
+      "Put a planning session on my calendar",
+      "Create something I should track for the passport",
+      "Save Maya in my people",
+    ])
+      await harness.chat({ actor, scope, message });
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["event"], limit: 20 }).length, 1);
+    assert.equal(
+      f.store.listRecords(actor, { scope, kinds: ["need"], limit: 20 })[0]?.data.budget,
+      200,
+    );
+    assert.deepEqual(
+      f.store.listRecords(actor, { scope, kinds: ["contact"], limit: 20 })[0]?.data.interests,
+      ["gardening"],
+    );
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["birthday"], limit: 20 }).length, 1);
+    const query = await harness.chat({ actor, scope, message: "Show my commitments" });
+    assert.match(query.reply, /Planning session/);
+    assert.doesNotMatch(query.reply, /Unverified/);
+    const summary = await harness.chat({ actor, scope, message: "Review my project material" });
+    assert.equal(summary.taskIds.length, 1);
+    assert.match(summary.reply, /queued/i);
+  } finally {
+    await f.close();
+  }
+});
+
 test("model memory writes require a direct non-negated remember request", async () => {
   const f = await fixture();
   const model: LifeModel = {
     async plan() {
       return {
         reply: "proposed",
-        actions: [{ type: "create_memory", title: "Name", body: "The name is Riley" }],
+        actions: [
+          { type: "create_memory", title: "Name", body: "The name is Riley" },
+          { type: "reply", text: "Later model claim" },
+        ],
       };
     },
   };
   try {
     const harness = f.make(model);
-    await harness.chat({ actor, scope, message: "Do you remember my name?" });
+    const unauthorized = await harness.chat({
+      actor,
+      scope,
+      message: "Do you remember my name?",
+    });
+    assert.match(unauthorized.reply, /direct request/i);
+    assert.doesNotMatch(unauthorized.reply, /Later model claim|proposed/);
     await harness.chat({ actor, scope, message: "Can you remember my name?" });
     await harness.chat({ actor, scope, message: "Could you remember my name?" });
     await harness.chat({ actor, scope, message: "Don't remember this" });
     assert.equal(f.store.listRecords(actor, { scope, kinds: ["memory"] }).length, 0);
 
-    await harness.chat({ actor, scope, message: "Could you please remember that name for me?" });
+    const saved = await harness.chat({
+      actor,
+      scope,
+      message: "Could you please remember that name for me?",
+    });
     assert.equal(f.store.listRecords(actor, { scope, kinds: ["memory"] }).length, 1);
+    assert.match(saved.reply, /Saved “Name”/);
+    assert.doesNotMatch(saved.reply, /Later model claim/);
+  } finally {
+    await f.close();
+  }
+});
+
+test("invalid modeled local time returns an actionable no-change result", async () => {
+  const f = await fixture();
+  try {
+    const model: LifeModel = {
+      async plan() {
+        return {
+          reply: "Scheduled.",
+          actions: [
+            {
+              type: "life_operation",
+              intent: {
+                kind: "schedule_reminder",
+                title: "Call Maya",
+                when: {
+                  type: "local",
+                  date: { year: 2026, month: 10, day: 1 },
+                  clock: { hour: 25, minute: 0 },
+                },
+              },
+            },
+          ],
+        };
+      },
+    };
+    const response = await f.make(model).chat({
+      actor,
+      scope,
+      message: "Could you remind me to call Maya?",
+    });
+    assert.match(response.reply, /clock time is invalid.*No changes were saved/i);
+    assert.equal(f.store.listRecords(actor, { scope, kinds: ["reminder"], limit: 20 }).length, 0);
+  } finally {
+    await f.close();
+  }
+});
+
+test("a post-write runtime TypeError is propagated as a partial outcome", async () => {
+  const f = await fixture();
+  try {
+    const need = f.store.createRecord(actor, {
+      kind: "need",
+      title: "Renew passport",
+      scope,
+      data: { completed: false, taskId: "malformed-linked-task" },
+    });
+    f.tasks.cancel = (() => {
+      throw new TypeError("injected post-write cancellation failure");
+    }) as typeof f.tasks.cancel;
+    const model: LifeModel = {
+      async plan() {
+        return {
+          reply: "Completed.",
+          actions: [
+            {
+              type: "life_operation",
+              intent: {
+                kind: "resolve_need",
+                operation: "complete",
+                title: "Renew passport",
+              },
+            },
+          ],
+        };
+      },
+    };
+    await assert.rejects(
+      f.make(model).chat({ actor, scope, message: "Mark my passport need as done" }),
+      /post-write cancellation failure/,
+    );
+    assert.equal(f.store.getRecord(actor, need.id)?.data.completed, true);
   } finally {
     await f.close();
   }
@@ -639,6 +988,27 @@ test("model context includes scoped settings and valid memories only", async () 
   }
 });
 
+test("explicit conversational preferences use canonical model and UI keys", async () => {
+  const f = await fixture();
+  try {
+    let preferences: Record<string, unknown> | undefined;
+    const model: LifeModel = {
+      async plan(input) {
+        preferences = input.preferences;
+        return { reply: "Brief response.", actions: [] };
+      },
+    };
+    const harness = f.make(model);
+    await harness.chat({ actor, scope, message: "Please be brief" });
+    assert.equal(f.store.resolveSettings(actor).values.verbosity, "brief");
+    await harness.chat({ actor, scope, message: "How should I plan my week?" });
+    assert.equal(preferences?.verbosity, "brief");
+    assert.equal(preferences?.["response.length"], undefined);
+  } finally {
+    await f.close();
+  }
+});
+
 test("explicit teaching creates controllable guidance for model context", async () => {
   const f = await fixture();
   let guidance: Parameters<LifeModel["plan"]>[0]["adoptedGuidance"];
@@ -954,6 +1324,12 @@ test("upcoming and today queries find events beyond unrelated record limits", as
       scope,
       data: { startAt: "2026-09-13T18:30:00+02:00" },
     });
+    f.store.createRecord(actor, {
+      kind: "event",
+      title: "Impossible rollover event",
+      scope,
+      data: { startAt: "2027-02-30T10:00:00Z" },
+    });
     for (let index = 0; index < 501; index++)
       f.store.createRecord(actor, {
         kind: "source",
@@ -967,6 +1343,7 @@ test("upcoming and today queries find events beyond unrelated record limits", as
     assert.match(upcoming.reply, /Buried appointment/);
     assert.match(upcoming.reply, /Imported all-day event/);
     assert.match(upcoming.reply, /Imported offset event/);
+    assert.doesNotMatch(upcoming.reply, /Impossible rollover/);
     const today = await harness.chat({ actor, scope, message: "What's on today?" });
     assert.match(today.reply, /Imported all-day event/);
     assert.match(today.reply, /Imported offset event/);

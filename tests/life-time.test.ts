@@ -9,6 +9,7 @@ import {
   nextWeekdayDate,
   parseCalendarDate,
   parseClock,
+  parseInstant,
   resolveZoned,
   startOfLocalDay,
   validateCalendarDate,
@@ -17,6 +18,41 @@ import {
 
 const code = (expected: string) => (error: unknown) =>
   error instanceof CalendarTimeError && error.code === expected;
+
+test("instant parsing rejects calendar rollover and preserves explicit offsets and milliseconds", () => {
+  for (const value of [
+    "2026-02-30T09:00:00Z",
+    "2026-02-29T09:00:00-07:00",
+    "2026-13-01T09:00Z",
+    "2026-09-14T24:00Z",
+    "2026-09-14T23:60Z",
+    "2026-09-14T23:59:60Z",
+    "2026-09-14T09:00+24:00",
+    "2026-09-14T09:00+01:60",
+    "2026-09-14T09:00",
+    "2026-09-14",
+    "2026-09-14T09:00Z ",
+    NaN,
+    Infinity,
+    Number.MAX_SAFE_INTEGER,
+    1.25,
+  ])
+    assert.equal(parseInstant(value), undefined, String(value));
+  assert.equal(parseInstant(0), 0);
+  assert.equal(parseInstant("2028-02-29T09:00:00.1+05:45"), Date.parse("2028-02-29T03:15:00.100Z"));
+  assert.equal(
+    parseInstant("2028-02-29T09:00:00.001-07:00"),
+    Date.parse("2028-02-29T16:00:00.001Z"),
+  );
+  assert.equal(
+    new Date(parseInstant("0050-01-03T09:00:00Z")!).toISOString(),
+    "0050-01-03T09:00:00.000Z",
+  );
+  assert.equal(
+    parseInstant("2026-11-01T01:30-08:00")! - parseInstant("2026-11-01T01:30-07:00")!,
+    3_600_000,
+  );
+});
 
 test("calendar dates preserve actual years, leap rules, and local day arithmetic", () => {
   assert.deepEqual(parseCalendarDate("0099-02-28"), { year: 99, month: 2, day: 28 });
