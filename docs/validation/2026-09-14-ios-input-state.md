@@ -52,3 +52,17 @@ and remote log were removed and their absence confirmed. The retained local log 
 `/tmp/ellie-ios-predicate-review-final.log`, SHA-256
 `33cafc025bbe4052ce034e5647920b0a593b6c94347b49c1d52fda0e34f1b887`. This remains synthetic
 Simulator acceptance and does not reproduce or identify the intermittent hosted-runner cause.
+
+The next exact-head hosted run supplied stronger evidence about the predicate wrapper. After the
+first `Reme` chunk, its sole predicate evaluation observed the exact matching string, but the static
+`XCTWaiter` call still returned a non-completed result. A separate value read after the wait also
+returned `Reme`. The activity timing and retained result do not establish why XCTest reported the
+non-completed wait.
+
+The per-chunk check now reads the element value once immediately after each four-character
+`typeText` call and requires the exact cumulative string before continuing. This removes the
+redundant two-second predicate-wait wrapper without retrying input or changing the overall runner
+bound. The keyboard gate, final SwiftUI character-count gate, Save, exact saved label, relaunch
+persistence, create, rename and delete workflows remain unchanged. Full-Xcode validation of this
+exact source is pending the coordinated hosted gate; this local checkout has Command Line Tools
+only.
