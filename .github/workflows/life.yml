@@ -25,6 +25,9 @@ jobs:
       - run: bun run life:test:connections
         env:
           ELLIE_E2E_ARTIFACT_DIR: test-results/life/connections
+      - run: bun run life:test:native
+        env:
+          ELLIE_E2E_ARTIFACT_DIR: test-results/life/native
       - name: Preserve life browser artifacts
         if: failure()
         uses: actions/upload-artifact@v4

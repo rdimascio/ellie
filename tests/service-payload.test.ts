@@ -131,7 +131,9 @@ test("materializes the finite production workspace closure and complete license 
       version: "1.0.0",
       exports: "./index.ts",
       dependencies:
-        name === "cli" ? { "@ellie/protocol": "*", qrcode: "1.0.0" } : { "@ellie/protocol": "*" },
+        name === "cli"
+          ? { "@ellie/protocol": "*", "@ellie/life": "*", qrcode: "1.0.0" }
+          : { "@ellie/protocol": "*" },
     });
   }
   await packageFile(join(source, "packages/protocol"), {
@@ -139,8 +141,22 @@ test("materializes the finite production workspace closure and complete license 
     version: "1.0.0",
     exports: "./index.ts",
   });
+  await packageFile(join(source, "apps/life"), {
+    name: "@ellie/life",
+    version: "1.0.0",
+    exports: { "./embedded": "./index.ts" },
+    dependencies: { "@ellie/life-core": "*" },
+  });
+  await packageFile(join(source, "packages/life-core"), {
+    name: "@ellie/life-core",
+    version: "1.0.0",
+    exports: "./index.ts",
+  });
   await mkdir(join(source, "apps/command-center/dist"), { recursive: true });
   await writeFile(join(source, "apps/command-center/dist/index.html"), "fixture\n");
+  await mkdir(join(source, "apps/life-ui/dist/assets"), { recursive: true });
+  await writeFile(join(source, "apps/life-ui/dist/index.html"), "Life fixture\n");
+  await writeFile(join(source, "apps/life-ui/dist/assets/main.js"), "export {};\n");
   await packageFile(join(source, "node_modules/qrcode"), {
     name: "qrcode",
     version: "1.0.0",
@@ -171,9 +187,31 @@ test("materializes the finite production workspace closure and complete license 
     "export {};",
   );
   assert.match(
+    await readFile(join(payload, "lib/ellie/node_modules/@ellie/life/embedded.js"), "utf8"),
+    /apps\/life\/index\.ts/,
+  );
+  assert.equal(
+    await readFile(join(payload, "lib/ellie/packages/life-core/index.ts"), "utf8"),
+    "export {};\n",
+  );
+  assert.equal(
+    await readFile(join(payload, "lib/ellie/apps/life-ui/dist/index.html"), "utf8"),
+    "Life fixture\n",
+  );
+  assert.equal(
+    await readFile(join(payload, "lib/ellie/apps/life-ui/dist/assets/main.js"), "utf8"),
+    "export {};\n",
+  );
+  assert.match(
     await readFile(join(payload, "LICENSES/THIRD-PARTY-NOTICES.txt"), "utf8"),
     /helper@1\.0\.0/,
   );
+
+  await rm(join(source, "apps/life-ui/dist"), { recursive: true });
+  await assert.rejects(stageApplication(source, join(directory, "missing-life-assets")), {
+    code: "ENOENT",
+  });
+  await mkdir(join(source, "apps/life-ui/dist"), { recursive: true });
 
   await writeFile(
     join(source, "packages/protocol/package.json"),

@@ -572,6 +572,7 @@ export async function stageApplication(source, destination, metadata = {}) {
     await copyTree(join(source, area), join(root, area));
   }
   await copyTree(join(source, "apps/command-center/dist"), join(root, "apps/command-center/dist"));
+  await copyTree(join(source, "apps/life-ui/dist"), join(root, "apps/life-ui/dist"));
   await copyTree(join(source, "package.json"), join(root, "package.json"));
   await copyTree(join(source, "bun.lock"), join(root, "bun.lock"));
   await copyTree(join(source, "LICENSE"), join(destination, "LICENSES/Ellie-LICENSE"));
@@ -923,12 +924,14 @@ export async function buildServicePayload(options) {
       cache: bunCache,
       environmentRoot: buildEnvironment,
     });
-    command(bun, ["run", "demo:build"], {
-      cwd: buildSource,
-      env: isolatedEnvironment(buildEnvironment, bun, bunCache),
-      stdio: "ignore",
-      timeout: 180_000,
-    });
+    for (const build of ["demo:build", "life:build"]) {
+      command(bun, ["run", build], {
+        cwd: buildSource,
+        env: isolatedEnvironment(buildEnvironment, bun, bunCache),
+        stdio: "ignore",
+        timeout: 180_000,
+      });
+    }
     const name = `EllieServices-0.1.0-dev-${revision.slice(0, 8)}-macos-${architecture}`;
     const stagedOutput = join(scratch, "output");
     const release = join(stagedOutput, name);
