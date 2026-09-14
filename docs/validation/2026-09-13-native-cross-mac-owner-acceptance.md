@@ -12,6 +12,23 @@ Artifact:
 
 Before handoff, the production certificate generator reproduced the original native trust failure on pristine `0838a00c`. The limited legacy certificate compatibility fix passed 158 Swift tests and the full Node gate (249 passed, one platform skip). A separate QA app bundle on the MacBook used the exact production transport code with normal ATS policy, read one synthetic node and rejected a wrong certificate pin before any additional HTTP request. That synthetic app-bundle check is separate from the owner acceptance above.
 
-The owner also noticed a disconnected mini in the inventory. Current coordinator code retains registrations until revocation or coordinator process termination; native status treats contact older than 60 seconds as offline and disables Open. Clarification remains pending about whether the owner saw a separate offline registration or the successful target itself becoming offline. No registration was deleted, revoked or re-paired to alter the list.
+The owner also noticed a disconnected mini in the inventory. Current coordinator code retains registrations until revocation or coordinator process termination; native status treats contact older than 60 seconds as offline and disables Open. The follow-up test below confirms that the offline row was disabled while the online target remained usable. The reason for the retained extra registration is not established. No registration was deleted, revoked or re-paired to alter the list.
 
-This acceptance does not establish physical microphone input, native iPhone enrollment or commands, browser-site interaction, Apple Watch, unattended service installation, restart/login/sleep/wake reliability, signed distribution or notarization. The archive contains the native interface; the background services still use the existing checkout and Node installation. Current native CI failures are tracked separately in the delivery queue and must pass before merging the affected stack.
+In a follow-up on September 13 (Pacific time), the owner replied “all passed” to the
+following physical test of this same preview and existing services:
+
+1. Close the terminal tabs opened specifically to run Ellie.
+2. Quit and reopen the native app, return to Devices, and connect if prompted with the
+   existing identity.
+3. Select the online Mac, choose Safari and confirm that Safari actually opens on the mini.
+4. Select the offline row and confirm that its Open button is disabled.
+5. Keep the mini awake, sleep the MacBook for 30 seconds, wake it, allow up to 60 seconds
+   for reconnection, and successfully open Safari on the mini again.
+
+This is owner-reported acceptance of terminal-independent operation, app relaunch,
+disabled offline controls and one MacBook sleep/wake cycle with subsequent cross-Mac
+execution. The timings were requested test criteria, not instrumented measurements.
+The coordinator host slept while the node host remained awake; node-host sleep, reboot,
+login, service-process restart and in-flight cancellation were not part of this test.
+
+This acceptance does not establish physical microphone input, native iPhone enrollment or commands, browser-site interaction, Apple Watch, packaged service installation or migration, repeated sleep/wake reliability, signed distribution or notarization. The archive contains the native interface; the background services still use the existing checkout and Node installation. Current candidate CI is tracked separately in the delivery queue. This result does not transfer hardware acceptance to the newer packaged artifacts.

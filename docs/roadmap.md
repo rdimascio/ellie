@@ -17,7 +17,7 @@ The repository currently provides a developer milestone, not a household product
 - Portable certificate generation and basic independent-worker admission, reservation, and scheduling are implemented with regression coverage.
 - A canonical registry drives the four desktop operations, their types, validation, and capability policy. Generated JSON Schema and OpenAPI document the existing protocol and seventeen coordinator route paths; drift checks run in CI.
 - A safe macOS smoke runner builds and signs only a temporary helper and records manual acceptance separately. The operator has validated a MacBook coordinator and LAN-paired Mac mini for foreground app opening, window tiling, Netflix, and Messages beside Arc. Direct model inference, same-Mac scheduling, one LAN request, distinct two-worker placement, and inference cancellation have bounded hardware validation. Sustained load, runner or network interruption, sleep/wake, and distributed MLX remain unvalidated. See [the dated inference record](validation/2026-09-12-inference.md).
-- Per-user GUI LaunchAgents provide source-checkout service lifecycle commands and bounded redacted logs. Role-specific diagnostics inspect configuration, Keychain, certificates, helper permissions, service state, and connectivity. Dedicated Ellie app identities and icons are implemented. Two-Mac native commands, queued cancellation, delivered-job crash recovery, and coordinator endpoint reconnection have partial physical acceptance; sleep/wake and active native cancellation remain pending. See [the dated service validation record](validation/2026-09-12-services.md).
+- Per-user GUI LaunchAgents provide source-checkout service lifecycle commands and bounded redacted logs. Role-specific diagnostics inspect configuration, Keychain, certificates, helper permissions, service state, and connectivity. Dedicated Ellie app identities and icons are implemented. Two-Mac native commands, queued cancellation, delivered-job crash recovery, and coordinator endpoint reconnection have partial physical acceptance. The owner also passed one MacBook sleep/wake cycle with subsequent Safari execution on the awake mini, using the existing native preview and checkout-backed services. Node-host sleep, repeated cycles and active native cancellation remain pending; see [the owner acceptance record](validation/2026-09-13-native-cross-mac-owner-acceptance.md). See [the dated service validation record](validation/2026-09-12-services.md).
 
 A synthetic phone/TV command-center prototype is available for interface testing. An opt-in authenticated phone app-control demo has user-reported physical acceptance. A shared household dashboard, TV client, calendar/routine engine, household profile store, full voice path, MCP server, packaged installer, analytics service and automatic updater remain future work. The development workflow uses Bun for package management and scripts, Oxlint and Oxfmt for source checks, TypeScript for type checking, Node.js 24 for production and test execution, and the existing Swift helper for native macOS behavior.
 
@@ -27,7 +27,7 @@ The maintained [delivery queue](delivery-queue.md) now drives ongoing work on ed
 
 ## Foundation sequence and current queue
 
-The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery, all four desktop tools, and bounded local and LAN inference scenarios have partial physical acceptance. Physical sleep/wake, login/reboot, sustained inference, and repeatable installed-worker acceptance remain pending. Bounded hardware checks are recorded separately from release acceptance. The synthetic command-center demo is implemented as the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
+The first three implementation slices were merged in PR #1 with passing CI. The durable job safety, LaunchAgent lifecycle/logs, diagnostics, app identities, and self-test slices were merged in PRs #2–#7. Two-Mac service recovery, all four desktop tools, and bounded local and LAN inference scenarios have partial physical acceptance. One coordinator-host sleep/wake cycle followed by a desktop command has owner-reported acceptance. Node-host sleep, repeated cycles, login/reboot, sustained inference, and repeatable installed-worker acceptance remain pending. Bounded hardware checks are recorded separately from release acceptance. The synthetic command-center demo is implemented as the next interface slice. Each change should preserve the deterministic fast path and use synthetic public fixtures.
 
 ### 1. Foundation and macOS smoke gate
 
@@ -67,7 +67,7 @@ The first three implementation slices were merged in PR #1 with passing CI. The 
 
 ### 4. Minimal SQLite job state and cancellation
 
-**Status:** implemented with payload-free lifecycle metadata, fail-closed delivery commits, restart recovery, cancellation propagation, and bounded reconnect behavior. A bounded inference cancellation completed on hardware; physical sleep/wake and native desktop cancellation validation remain pending.
+**Status:** implemented with payload-free lifecycle metadata, fail-closed delivery commits, restart recovery, cancellation propagation, and bounded reconnect behavior. A bounded inference cancellation completed on hardware; in-flight job recovery across physical sleep/wake and native desktop cancellation validation remain pending.
 
 **Depends on:** the implemented operation registry (slice 3).
 
@@ -80,7 +80,7 @@ The first three implementation slices were merged in PR #1 with passing CI. The 
 
 ### 5. LaunchAgent lifecycle and doctor
 
-**Status:** merged source-checkout LaunchAgents, diagnostics, branded app identities, and safe service testing. Real two-Mac Accessibility, Keychain, native commands, queued cancellation, delivered-job recovery, coordinator endpoint outage, and coordinator uninstall/reinstall passed. Physical sleep/wake, login/reboot, and active native cancellation remain pending; see the dated service validation record.
+**Status:** merged source-checkout LaunchAgents, diagnostics, branded app identities, and safe service testing. Real two-Mac Accessibility, Keychain, native commands, queued cancellation, delivered-job recovery, coordinator endpoint outage, and coordinator uninstall/reinstall passed. The owner also passed terminal-closed operation, native app relaunch and one MacBook sleep/wake cycle followed by Safari execution on the awake mini. Node-host sleep, repeated cycles, login/reboot, active native cancellation and the newer packaged installation remain pending; see [the owner acceptance record](validation/2026-09-13-native-cross-mac-owner-acceptance.md).
 
 **Depends on:** physical-Mac acceptance (slice 1) and job state/cancellation (slice 4).
 
