@@ -1,4 +1,3 @@
-import CryptoKit
 import Darwin
 import Foundation
 
@@ -10,18 +9,10 @@ private let captureRecoveryError =
   "Ellie authenticated candidate capture requires recovery; retained evidence was preserved."
 private let captureCleanupError =
   "Ellie authenticated candidate capture cleanup was incomplete; retained evidence was preserved."
-private let captureScope = "authenticated-candidate-capture"
 private let captureStagePattern = "\\.capture-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-private let captureDigestPattern = "[0-9a-f]{64}"
 private let captureMaximumNamespaceBytes: UInt64 = 8 * 1024 * 1024 * 1024
 private let captureMaximumDescendants = 65_536
-#if ELLIE_AUTHENTICATED_PAYLOAD_TESTING
-  private let captureAllowsAdHoc = true
-#else
-  private let captureAllowsAdHoc = false
-#endif
 
-enum CaptureFailure: Error { case rejected, busy, recoveryRequired, cleanupIncomplete }
 #if ELLIE_INSTALLER_TESTING
   private var captureDiagnostic = "argument-validation"
   private var captureHoldLockMilliseconds = 0
@@ -42,96 +33,12 @@ struct CapturedAuthenticatedCandidate {
   let sourceSHA256: String
 }
 
-private struct CaptureBinding: Codable, Equatable {
-  let authorizationRecordSHA256: String
-  let authorizationVersion: Int
-  let envelopePolicyDigest: String
-  let manifestSHA256: String
-  let payloadPolicyDigest: String
-  let publisherTeamID: String
-  let releaseID: String
-  let scope: String
-  let sourceSHA256: String
-  let version: Int
-}
-
 private struct NamespaceUsage {
   var top = 0
   var stages = 0
   var published = 0
   var descendants = 0
   var bytes: UInt64 = 0
-}
-
-private struct CaptureIdentity {
-  let device: dev_t
-  let inode: ino_t
-  let owner: uid_t
-}
-
-private func captureIdentity(_ fd: Int32) throws -> CaptureIdentity {
-  var info = stat()
-  guard fstat(fd, &info) == 0 else { throw CaptureFailure.rejected }
-  return CaptureIdentity(device: info.st_dev, inode: info.st_ino, owner: info.st_uid)
-}
-
-private func sameIdentity(_ lhs: CaptureIdentity, _ rhs: CaptureIdentity) -> Bool {
-  lhs.device == rhs.device && lhs.inode == rhs.inode && lhs.owner == rhs.owner
-}
-
-private func captureHash(_ data: Data) -> String {
-  SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-}
-
-private func canonicalBinding(_ value: CaptureBinding) throws -> Data {
-  let encoder = JSONEncoder()
-  encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-  var data = try encoder.encode(value)
-  data.append(0x0a)
-  guard data.count <= 4 * 1024 else { throw CaptureFailure.rejected }
-  return data
-}
-
-private func binding(from inspection: AuthenticatedPayloadInspection, teamID: String)
-  -> CaptureBinding
-{
-  CaptureBinding(
-    authorizationRecordSHA256: inspection.envelope.authorizationRecordSHA256,
-    authorizationVersion: inspection.envelope.version,
-    envelopePolicyDigest: inspection.envelope.policyDigest,
-    manifestSHA256: inspection.inventory.manifestSHA256,
-    payloadPolicyDigest: inspection.inventory.payloadPolicyDigest,
-    publisherTeamID: teamID, releaseID: inspection.inventory.releaseID, scope: captureScope,
-    sourceSHA256: inspection.envelope.sourceSHA256, version: 1)
-}
-
-private func decodeBinding(_ data: Data) throws -> CaptureBinding {
-  guard data.count <= 4 * 1024,
-    let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-    Set(object.keys) == [
-      "authorizationRecordSHA256", "authorizationVersion", "envelopePolicyDigest",
-      "manifestSHA256", "payloadPolicyDigest", "publisherTeamID", "releaseID", "scope",
-      "sourceSHA256", "version",
-    ]
-  else { throw CaptureFailure.recoveryRequired }
-  let value = try JSONDecoder().decode(CaptureBinding.self, from: data)
-  guard try canonicalBinding(value) == data, value.version == 1, value.authorizationVersion == 1,
-    value.scope == captureScope,
-    exactMatch(value.publisherTeamID, "[A-Z0-9]{10}", maximum: 10),
-    exactMatch(value.releaseID, "[0-9]+\\.[0-9]+\\.[0-9]+-[a-f0-9]{40}-(arm64|x64)", maximum: 128),
-    [value.authorizationRecordSHA256, value.envelopePolicyDigest, value.manifestSHA256,
-      value.payloadPolicyDigest, value.sourceSHA256]
-      .allSatisfy({ exactMatch($0, captureDigestPattern, maximum: 64) })
-  else { throw CaptureFailure.recoveryRequired }
-  return value
-}
-
-private func captureDirectory(_ parent: Int32, _ name: String, modes: Set<mode_t>) throws -> Int32 {
-  let fd = try openDirectory(at: parent, name)
-  var info = stat()
-  guard fstat(fd, &info) == 0, info.st_uid == getuid(), modes.contains(info.st_mode & 0o7777)
-  else { closeFD(fd); throw CaptureFailure.rejected }
-  return fd
 }
 
 private func captureFileInfo(_ parent: Int32, _ name: String) throws -> stat {
@@ -325,11 +232,11 @@ private func scanNamespace(_ namespace: Int32) throws -> NamespaceUsage {
     if published {
       let bindingData = try readFile(at: child, "binding.json", mode: 0o444, maximum: 4 * 1024)
       let candidateBinding = try decodeBinding(bindingData)
-      let (_, digest, verified) = try verifyCandidate(
+      let verified = try verifyCapturedCandidate(
         namespace: namespace, name: name, teamID: candidateBinding.publisherTeamID,
         expected: candidateBinding, allowPrivateRoot: true)
-      closeFD(verified)
-      guard digest == name else { throw CaptureFailure.rejected }
+      closeFD(verified.root)
+      guard verified.candidateID == name else { throw CaptureFailure.rejected }
     }
   }
   guard usage.top <= 161, usage.stages <= 32, usage.published <= 128 else {
@@ -384,29 +291,6 @@ private func openNamespace(servicesRoot: String, create: Bool) throws -> (Int32,
     closeFD(namespace); closeFD(services); throw CaptureFailure.rejected
   }
   return (services, namespace)
-}
-
-private func rebindCandidateChain(
-  servicesRoot: String, heldServices: Int32, heldNamespace: Int32, candidateName: String,
-  heldCandidate: Int32, candidateModes: Set<mode_t> = [0o555]
-) throws {
-  let expectedServices = try captureIdentity(heldServices)
-  let expectedNamespace = try captureIdentity(heldNamespace)
-  let expectedCandidate = try captureIdentity(heldCandidate)
-  let services = try openAbsoluteDirectory(servicesRoot); defer { closeFD(services) }
-  guard sameIdentity(try captureIdentity(services), expectedServices) else {
-    throw CaptureFailure.recoveryRequired
-  }
-  let namespace = try captureDirectory(services, "authenticated-candidates", modes: [0o700])
-  defer { closeFD(namespace) }
-  guard sameIdentity(try captureIdentity(namespace), expectedNamespace) else {
-    throw CaptureFailure.recoveryRequired
-  }
-  let candidate = try captureDirectory(namespace, candidateName, modes: candidateModes)
-  defer { closeFD(candidate) }
-  guard sameIdentity(try captureIdentity(candidate), expectedCandidate) else {
-    throw CaptureFailure.recoveryRequired
-  }
 }
 
 private func removeProvenStage(namespace: Int32, name: String, expected: CaptureIdentity) throws {
@@ -522,38 +406,6 @@ private func writePath(root: Int32, path: String, data: Data, mode: mode_t, coun
     failAfter: nil)
 }
 
-private func verifyCandidate(
-  namespace: Int32, name: String, teamID: String, expected: CaptureBinding? = nil,
-  allowPrivateRoot: Bool
-) throws -> (CaptureBinding, String, Int32) {
-  let root = try captureDirectory(namespace, name, modes: allowPrivateRoot ? [0o555, 0o700] : [0o555])
-  do {
-    guard try directoryNames(root, maximum: 4) == ["authorization", "binding.json", "release"] else {
-      throw CaptureFailure.recoveryRequired
-    }
-    let data = try readFile(at: root, "binding.json", mode: 0o444, maximum: 4 * 1024)
-    let stored = try decodeBinding(data)
-    guard stored.publisherTeamID == teamID, expected == nil || stored == expected! else {
-      throw CaptureFailure.recoveryRequired
-    }
-    let release = try captureDirectory(root, "release", modes: [0o555]); defer { closeFD(release) }
-    let authorization = try captureDirectory(root, "authorization", modes: [0o555]); defer { closeFD(authorization) }
-    let app = try captureDirectory(authorization, "Ellie Service Authorization.app", modes: [0o555])
-    defer { closeFD(app) }
-    let inspected = try verifyCapturedAuthenticatedPayload(
-      releasePath: try pathFromFD(release), authorizationPath: try pathFromFD(app),
-      publisherTeamID: teamID, testAllowAdHoc: captureAllowsAdHoc)
-    guard binding(from: inspected, teamID: teamID) == stored else {
-      throw CaptureFailure.recoveryRequired
-    }
-    let digest = captureHash(data)
-    guard exactMatch(digest, captureDigestPattern, maximum: 64) else {
-      throw CaptureFailure.recoveryRequired
-    }
-    return (stored, digest, root)
-  } catch { closeFD(root); throw error }
-}
-
 private func candidateResult(_ binding: CaptureBinding, id: String) -> CapturedAuthenticatedCandidate {
   CapturedAuthenticatedCandidate(
     candidateID: id, releaseID: binding.releaseID,
@@ -618,15 +470,15 @@ private func capture(
   let usage = try scanNamespace(namespace)
   var existingInfo = stat()
   if fstatat(namespace, candidateID, &existingInfo, AT_SYMLINK_NOFOLLOW) == 0 {
-    let (stored, digest, root) = try verifyCandidate(
+    let verified = try verifyCapturedCandidate(
       namespace: namespace, name: candidateID, teamID: teamID, expected: intended,
       allowPrivateRoot: false)
-    defer { closeFD(root) }
-    guard digest == candidateID else { throw CaptureFailure.recoveryRequired }
+    defer { closeFD(verified.root) }
+    guard verified.candidateID == candidateID else { throw CaptureFailure.recoveryRequired }
     try rebindCandidateChain(
       servicesRoot: resolvedServicesRoot, heldServices: services, heldNamespace: namespace,
-      candidateName: candidateID, heldCandidate: root)
-    return candidateResult(stored, id: digest)
+      candidateName: candidateID, heldCandidate: verified.root)
+    return candidateResult(verified.binding, id: verified.candidateID)
   }
   guard errno == ENOENT, usage.stages < 32, usage.published < 128, usage.top + 1 <= 161
   else { throw CaptureFailure.rejected }
@@ -697,32 +549,32 @@ private func capture(
     try rebindAuthenticatedPayloadSource(inspected, path: releasePath)
     try rebindAuthorizationSource(inspected.envelope, path: authorizationPath)
     captureCheckpoint("verify-stage")
-    let (checked, digest, checkedRoot) = try verifyCandidate(namespace: namespace, name: stageName, teamID: teamID, expected: intended, allowPrivateRoot: true)
-    defer { closeFD(checkedRoot) }
-    guard digest == candidateID, checked == intended else { throw CaptureFailure.recoveryRequired }
+    let checked = try verifyCapturedCandidate(namespace: namespace, name: stageName, teamID: teamID, expected: intended, allowPrivateRoot: true)
+    defer { closeFD(checked.root) }
+    guard checked.candidateID == candidateID, checked.binding == intended else { throw CaptureFailure.recoveryRequired }
     try rebindCandidateChain(
       servicesRoot: resolvedServicesRoot, heldServices: services, heldNamespace: namespace,
-      candidateName: stageName, heldCandidate: checkedRoot, candidateModes: [0o700])
+      candidateName: stageName, heldCandidate: checked.root, candidateModes: [0o700])
     trigger("before-rename")
     if renameatx_np(namespace, stageName, namespace, candidateID, UInt32(RENAME_EXCL)) != 0 {
       guard errno == EEXIST else { throw CaptureFailure.rejected }
-      let (_, existingDigest, existingRoot) = try verifyCandidate(namespace: namespace, name: candidateID, teamID: teamID, expected: intended, allowPrivateRoot: true)
-      defer { closeFD(existingRoot) }
-      guard existingDigest == candidateID else { throw CaptureFailure.recoveryRequired }
-      let (_, repeatedStageDigest, repeatedStageRoot) = try verifyCandidate(
+      let existing = try verifyCapturedCandidate(namespace: namespace, name: candidateID, teamID: teamID, expected: intended, allowPrivateRoot: true)
+      defer { closeFD(existing.root) }
+      guard existing.candidateID == candidateID else { throw CaptureFailure.recoveryRequired }
+      let repeatedStage = try verifyCapturedCandidate(
         namespace: namespace, name: stageName, teamID: teamID, expected: intended,
         allowPrivateRoot: true)
-      guard repeatedStageDigest == candidateID,
-        sameIdentity(try captureIdentity(repeatedStageRoot), stageIdentity!)
-      else { closeFD(repeatedStageRoot); throw CaptureFailure.cleanupIncomplete }
-      closeFD(repeatedStageRoot)
+      guard repeatedStage.candidateID == candidateID,
+        sameIdentity(repeatedStage.rootIdentity, stageIdentity!)
+      else { closeFD(repeatedStage.root); throw CaptureFailure.cleanupIncomplete }
+      closeFD(repeatedStage.root)
       guard let stageIdentity else { throw CaptureFailure.cleanupIncomplete }
       try removeProvenStage(namespace: namespace, name: stageName, expected: stageIdentity)
-      if fchmod(existingRoot, 0o555) != 0 { throw CaptureFailure.recoveryRequired }
-      guard fsync(existingRoot) == 0, fsync(namespace) == 0 else { throw CaptureFailure.recoveryRequired }
+      if fchmod(existing.root, 0o555) != 0 { throw CaptureFailure.recoveryRequired }
+      guard fsync(existing.root) == 0, fsync(namespace) == 0 else { throw CaptureFailure.recoveryRequired }
       try rebindCandidateChain(
         servicesRoot: resolvedServicesRoot, heldServices: services, heldNamespace: namespace,
-        candidateName: candidateID, heldCandidate: existingRoot)
+        candidateName: candidateID, heldCandidate: existing.root)
       return candidateResult(intended, id: candidateID)
     }
     renamed = true
@@ -731,12 +583,12 @@ private func capture(
       throw CaptureFailure.recoveryRequired
     }
     trigger("after-root-seal")
-    let (_, finalDigest, finalRoot) = try verifyCandidate(namespace: namespace, name: candidateID, teamID: teamID, expected: intended, allowPrivateRoot: false)
-    defer { closeFD(finalRoot) }
-    guard finalDigest == candidateID else { throw CaptureFailure.recoveryRequired }
+    let final = try verifyCapturedCandidate(namespace: namespace, name: candidateID, teamID: teamID, expected: intended, allowPrivateRoot: false)
+    defer { closeFD(final.root) }
+    guard final.candidateID == candidateID else { throw CaptureFailure.recoveryRequired }
     try rebindCandidateChain(
       servicesRoot: resolvedServicesRoot, heldServices: services, heldNamespace: namespace,
-      candidateName: candidateID, heldCandidate: finalRoot)
+      candidateName: candidateID, heldCandidate: final.root)
     trigger("after-final-namespace-fsync")
     return candidateResult(intended, id: candidateID)
   } catch {
@@ -756,49 +608,49 @@ private func recover(target: String, teamID: String, servicesRoot: String?)
   defer { closeFD(namespace); closeFD(services) }
   let lock = try lockNamespace(namespace); defer { closeFD(lock) }
   _ = try scanNamespace(namespace)
-  let (stored, digest, root) = try verifyCandidate(namespace: namespace, name: target, teamID: teamID, allowPrivateRoot: true)
-  defer { closeFD(root) }
-  let targetIdentity = try captureIdentity(root)
+  let verified = try verifyCapturedCandidate(namespace: namespace, name: target, teamID: teamID, allowPrivateRoot: true)
+  defer { closeFD(verified.root) }
+  let targetIdentity = verified.rootIdentity
   try rebindCandidateChain(
     servicesRoot: resolvedServicesRoot, heldServices: services, heldNamespace: namespace,
-    candidateName: target, heldCandidate: root, candidateModes: [0o555, 0o700])
+    candidateName: target, heldCandidate: verified.root, candidateModes: [0o555, 0o700])
   if exactMatch(target, captureStagePattern, maximum: 45) {
     var info = stat()
-    if fstatat(namespace, digest, &info, AT_SYMLINK_NOFOLLOW) == 0 {
-      let (_, existingDigest, existingRoot) = try verifyCandidate(namespace: namespace, name: digest, teamID: teamID, expected: stored, allowPrivateRoot: true)
-      defer { closeFD(existingRoot) }
-      guard existingDigest == digest else { throw CaptureFailure.recoveryRequired }
-      let (_, repeatedDigest, repeatedRoot) = try verifyCandidate(
-        namespace: namespace, name: target, teamID: teamID, expected: stored,
+    if fstatat(namespace, verified.candidateID, &info, AT_SYMLINK_NOFOLLOW) == 0 {
+      let existing = try verifyCapturedCandidate(namespace: namespace, name: verified.candidateID, teamID: teamID, expected: verified.binding, allowPrivateRoot: true)
+      defer { closeFD(existing.root) }
+      guard existing.candidateID == verified.candidateID else { throw CaptureFailure.recoveryRequired }
+      let repeated = try verifyCapturedCandidate(
+        namespace: namespace, name: target, teamID: teamID, expected: verified.binding,
         allowPrivateRoot: true)
-      guard repeatedDigest == digest,
-        sameIdentity(try captureIdentity(repeatedRoot), targetIdentity)
-      else { closeFD(repeatedRoot); throw CaptureFailure.cleanupIncomplete }
-      closeFD(repeatedRoot)
+      guard repeated.candidateID == verified.candidateID,
+        sameIdentity(repeated.rootIdentity, targetIdentity)
+      else { closeFD(repeated.root); throw CaptureFailure.cleanupIncomplete }
+      closeFD(repeated.root)
       try removeProvenStage(namespace: namespace, name: target, expected: targetIdentity)
-      if fchmod(existingRoot, 0o555) != 0 { throw CaptureFailure.recoveryRequired }
+      if fchmod(existing.root, 0o555) != 0 { throw CaptureFailure.recoveryRequired }
     } else {
       guard errno == ENOENT,
-        renameatx_np(namespace, target, namespace, digest, UInt32(RENAME_EXCL)) == 0
+        renameatx_np(namespace, target, namespace, verified.candidateID, UInt32(RENAME_EXCL)) == 0
       else { throw CaptureFailure.recoveryRequired }
-      guard fchmod(root, 0o555) == 0 else { throw CaptureFailure.recoveryRequired }
+      guard fchmod(verified.root, 0o555) == 0 else { throw CaptureFailure.recoveryRequired }
     }
   } else {
-    guard target == digest else { throw CaptureFailure.recoveryRequired }
-    guard fchmod(root, 0o555) == 0 else { throw CaptureFailure.recoveryRequired }
+    guard target == verified.candidateID else { throw CaptureFailure.recoveryRequired }
+    guard fchmod(verified.root, 0o555) == 0 else { throw CaptureFailure.recoveryRequired }
   }
-  let publishedRoot = try captureDirectory(namespace, digest, modes: [0o555])
+  let publishedRoot = try captureDirectory(namespace, verified.candidateID, modes: [0o555])
   defer { closeFD(publishedRoot) }
   guard fsync(publishedRoot) == 0, fsync(namespace) == 0 else {
     throw CaptureFailure.recoveryRequired
   }
-  let (_, finalDigest, finalRoot) = try verifyCandidate(namespace: namespace, name: digest, teamID: teamID, expected: stored, allowPrivateRoot: false)
-  defer { closeFD(finalRoot) }
-  guard finalDigest == digest else { throw CaptureFailure.recoveryRequired }
+  let final = try verifyCapturedCandidate(namespace: namespace, name: verified.candidateID, teamID: teamID, expected: verified.binding, allowPrivateRoot: false)
+  defer { closeFD(final.root) }
+  guard final.candidateID == verified.candidateID else { throw CaptureFailure.recoveryRequired }
   try rebindCandidateChain(
     servicesRoot: resolvedServicesRoot, heldServices: services, heldNamespace: namespace,
-    candidateName: digest, heldCandidate: finalRoot)
-  return candidateResult(stored, id: digest)
+    candidateName: verified.candidateID, heldCandidate: final.root)
+  return candidateResult(verified.binding, id: verified.candidateID)
 }
 
 func runAuthenticatedCaptureCommand(_ arguments: [String]) throws -> Never {
