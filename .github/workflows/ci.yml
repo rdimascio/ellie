@@ -38,3 +38,17 @@ jobs:
         run: |
           xcrun swiftc -swift-version 5 -parse-as-library packages/macos/native/Geometry.swift tests/GeometryTests.swift -o "$RUNNER_TEMP/ellie-geometry-tests"
           "$RUNNER_TEMP/ellie-geometry-tests"
+  command-center:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - run: bun run demo:build
+      - run: node node_modules/@playwright/test/cli.js install --with-deps chromium
+      - run: bun run demo:test

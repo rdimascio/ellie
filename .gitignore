@@ -21,3 +21,6 @@ pairing.json
 
 # Legacy LibreSSL init may have treated -keyout - as a literal filename.
 /-
+
+playwright-report/
+test-results/
