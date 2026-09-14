@@ -3,6 +3,8 @@ import SwiftUI
 struct NativeWidgetCard: View {
     @Environment(\.colorScheme) private var colorScheme
     let widget: DashboardWidget
+    @ObservedObject var choresStore: ChoresStore
+    let openChores: () -> Void
     let editing: Bool
     @ObservedObject var weatherStore: WeatherStore
     let configure: () -> Void
@@ -61,6 +63,8 @@ struct NativeWidgetCard: View {
                     .frame(minHeight: 155, alignment: .topLeading)
                 } else if widget.type == .weather {
                     NativeWeather(store: weatherStore, configure: configure)
+                } else if widget.type == .chores {
+                    ChoresWidgetContent(store: choresStore, open: openChores)
                 } else {
                     VStack(alignment: .leading, spacing: 14) {
                         Image(systemName: widget.type.symbol)
@@ -206,7 +210,7 @@ struct WidgetGallery: View {
                     .accessibilityLabel("Add \(kind.displayName)")
                 }
             }
-            Text("Clock and notes work on this Mac. Other widgets are ready for future connections.")
+            Text("Clock, notes, and local chores work on this Mac. Connected widgets need their providers.")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .padding(28).frame(width: 570)

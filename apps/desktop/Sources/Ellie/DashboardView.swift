@@ -27,7 +27,7 @@ extension WidgetKind {
         case .note: return "Keep a thought close by."
         case .weather: return "Current weather for a place you choose."
         case .calendar: return "Calendar connection coming next."
-        case .chores: return "Household chores coming next."
+        case .chores: return "Local tasks for your household."
         case .playlist: return "Selected playlists coming next."
         }
     }
@@ -37,6 +37,7 @@ extension WidgetKind {
 struct DashboardView: View {
     @ObservedObject var store: DashboardStore
     @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var choresStore: ChoresStore
     @State private var editing = false
     @State private var gallery = false
     @State private var newDashboard = false
@@ -44,6 +45,7 @@ struct DashboardView: View {
     @State private var deleting = false
     @State private var name = ""
     @State private var editedWidget: DashboardWidget?
+    @State private var showingChores = false
 
     var body: some View {
         NavigationSplitView {
@@ -160,6 +162,7 @@ struct DashboardView: View {
                 if store.error == nil { editedWidget = nil }
             }
         }
+        .sheet(isPresented: $showingChores) { ChoresSheet(store: choresStore) }
         .alert("New dashboard", isPresented: $newDashboard) {
             TextField("Name", text: $name)
             Button("Cancel", role: .cancel) { }
@@ -185,7 +188,9 @@ struct DashboardView: View {
             ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
                 HStack(alignment: .top, spacing: 18) {
                     ForEach(row) { widget in
-                        NativeWidgetCard(widget: widget, editing: editing, weatherStore: weatherStore,
+                        NativeWidgetCard(widget: widget, choresStore: choresStore,
+                            openChores: { showingChores = true }, editing: editing,
+                            weatherStore: weatherStore,
                             configure: { editedWidget = widget },
                             earlier: { store.moveWidget(id: widget.id, offset: -1) },
                             later: { store.moveWidget(id: widget.id, offset: 1) },

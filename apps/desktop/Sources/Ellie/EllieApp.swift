@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct EllieApp: App {
     @StateObject private var store: DashboardStore
     @StateObject private var weatherStore: WeatherStore
+    @StateObject private var choresStore: ChoresStore
 
     init() {
         let arguments = ProcessInfo.processInfo.arguments
@@ -16,14 +17,21 @@ struct EllieApp: App {
         } else {
             stateURL = nil
         }
+        let choresURL: URL?
+        if let index = arguments.firstIndex(of: "--chores-state-path"), index + 1 < arguments.count {
+            choresURL = URL(fileURLWithPath: arguments[index + 1])
+        } else {
+            choresURL = nil
+        }
         _store = StateObject(wrappedValue: DashboardStore(fileURL: stateURL))
         let weatherURL = stateURL?.deletingLastPathComponent().appendingPathComponent("weatherv1.json")
         _weatherStore = StateObject(wrappedValue: WeatherStore(fileURL: weatherURL))
+        _choresStore = StateObject(wrappedValue: ChoresStore(fileURL: choresURL))
     }
 
     var body: some Scene {
         WindowGroup("Ellie") {
-            DashboardView(store: store, weatherStore: weatherStore)
+            DashboardView(store: store, weatherStore: weatherStore, choresStore: choresStore)
                 .frame(minWidth: 720, minHeight: 520)
                 .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
         }
