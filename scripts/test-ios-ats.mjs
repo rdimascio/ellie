@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -11,6 +19,7 @@ import { createBrowserServer } from "../apps/server/src/browser-server.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
+import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const environment = {
@@ -19,7 +28,7 @@ const environment = {
 };
 const owned = mkdtempSync(join(tmpdir(), "ellie-ios-ats-"));
 const resultBundle = resolve(root, "test-results/native-ios-ats.xcresult");
-const processGroups = new Set();
+const unreapedChildren = new Set();
 let simulatorID,
   server,
   browserAuth,
@@ -28,13 +37,16 @@ let simulatorID,
   activeChild,
   interruptChild,
   requestedSignal,
-  succeeded = false;
+  succeeded = false,
+  cleanupCertain = true;
 let remoteNodeReads = 0,
   remoteAppOpens = 0,
   speechUploadRequests = 0;
-const diagnosticStartedAt = Date.now();
+const diagnosticStartedAt = performance.now();
 let diagnosticStage = "fixture-setup",
   diagnosticStageStartedAt = diagnosticStartedAt;
+const cleanupOutcomes = [];
+const platform = { xcode: "unknown", sdk: "unknown", runtime: "unknown", device: "unknown" };
 const endpointRequests = {
   session: 0,
   inventory: 0,
@@ -46,7 +58,7 @@ const endpointResponses = { ...endpointRequests };
 
 function enterDiagnosticStage(stage) {
   diagnosticStage = stage;
-  diagnosticStageStartedAt = Date.now();
+  diagnosticStageStartedAt = performance.now();
 }
 
 function endpointStage(request) {
@@ -78,50 +90,39 @@ function diagnosticSummary() {
       .join(",");
   return [
     `stage=${diagnosticStage}`,
-    `stageMs=${bounded(Date.now() - diagnosticStageStartedAt)}`,
-    `totalMs=${bounded(Date.now() - diagnosticStartedAt)}`,
+    `stageMs=${bounded(Math.round(performance.now() - diagnosticStageStartedAt))}`,
+    `totalMs=${bounded(Math.round(performance.now() - diagnosticStartedAt))}`,
     `requests=${counts(endpointRequests)}`,
     `responses=${counts(endpointResponses)}`,
+    `xcode=${platform.xcode}`,
+    `sdk=${platform.sdk}`,
+    `runtime=${platform.runtime}`,
+    `device=${platform.device}`,
+    `cleanup=${cleanupOutcomes.length ? cleanupOutcomes.join(",") : "not-started"}`,
   ].join(" ");
 }
 
-function terminate(child, signal) {
-  if (!Number.isInteger(child.pid) || child.pid <= 0) return;
+function groupAbsent(processGroup) {
+  if (!Number.isInteger(processGroup) || processGroup <= 1) return true;
   try {
-    process.kill(-child.pid, signal);
-  } catch {
-    child.kill(signal);
-  }
-}
-
-function terminateGroup(processGroup, signal) {
-  try {
-    process.kill(-processGroup, signal);
+    process.kill(-processGroup, 0);
+    return false;
   } catch (error) {
-    if (error?.code !== "ESRCH") throw error;
+    if (error?.code === "ESRCH") return true;
+    throw error;
   }
 }
 
-async function stopOwnedProcessGroups() {
-  await Promise.all([...processGroups].map(stopProcessGroup));
-}
-
-async function stopProcessGroup(processGroup) {
-  if (!Number.isInteger(processGroup) || processGroup <= 0) return;
-  terminateGroup(processGroup, "SIGKILL");
-  const deadline = Date.now() + 2_000;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(-processGroup, 0);
-    } catch (error) {
-      if (error?.code === "ESRCH") {
-        processGroups.delete(processGroup);
-        return;
-      }
-    }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 10));
-  }
-  throw new Error("An owned iOS test process group did not stop.");
+function signalDirectChild(child, signal) {
+  if (
+    !child ||
+    !Number.isInteger(child.pid) ||
+    child.pid <= 1 ||
+    child.exitCode !== null ||
+    child.signalCode !== null
+  )
+    return false;
+  return child.kill(signal);
 }
 
 function execute(file, args, { capture = false, timeout = 30_000, cleanup = false } = {}) {
@@ -130,19 +131,32 @@ function execute(file, args, { capture = false, timeout = 30_000, cleanup = fals
   return new Promise((resolvePromise, reject) => {
     let stdout = "",
       failure,
-      killTimer;
+      killTimer,
+      reapTimer,
+      settled = false;
     const child = spawn(file, args, {
       cwd: root,
       env: environment,
       detached: true,
       stdio: capture ? ["ignore", "pipe", "inherit"] : "inherit",
     });
-    if (Number.isInteger(child.pid) && child.pid > 0) processGroups.add(child.pid);
+    unreapedChildren.add(child);
     activeChild = child;
     function stop(message) {
+      if (settled) return;
       failure ??= new Error(message);
-      terminate(child, "SIGTERM");
-      killTimer ??= setTimeout(() => terminate(child, "SIGKILL"), 5_000);
+      signalDirectChild(child, "SIGTERM");
+      killTimer ??= setTimeout(() => signalDirectChild(child, "SIGKILL"), 5_000);
+      reapTimer ??= setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTimeout(killTimer);
+        cleanupCertain = false;
+        child.stdout?.destroy();
+        child.unref();
+        reject(new Error(`${file} direct child cleanup is uncertain.`));
+      }, 7_000);
     }
     interruptChild = () => stop("iOS transport test interrupted.");
     if (capture)
@@ -154,23 +168,59 @@ function execute(file, args, { capture = false, timeout = 30_000, cleanup = fals
     child.once("error", (error) => {
       failure ??= error;
     });
-    child.once("close", async (code, signal) => {
+    child.once("close", (code, signal) => {
       clearTimeout(timer);
       clearTimeout(killTimer);
-      try {
-        await stopProcessGroup(child.pid);
-      } catch (error) {
-        failure ??= error;
-      }
+      clearTimeout(reapTimer);
+      unreapedChildren.delete(child);
       if (activeChild === child) {
         activeChild = undefined;
         interruptChild = undefined;
+      }
+      if (settled) return;
+      settled = true;
+      try {
+        if (!groupAbsent(child.pid)) {
+          cleanupCertain = false;
+          failure ??= new Error(`${file} left process-group members; cleanup is uncertain.`);
+        }
+      } catch (error) {
+        cleanupCertain = false;
+        failure ??= error;
       }
       if (failure) reject(failure);
       else if (code !== 0) reject(new Error(`${file} exited with ${signal ?? code}.`));
       else resolvePromise(stdout.trim());
     });
   });
+}
+
+async function settleFixtureTeardown(operation, timeout = 10_000) {
+  let timer;
+  try {
+    await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("Fixture teardown exceeded its deadline.")),
+          timeout,
+        );
+      }),
+    ]);
+    cleanupOutcomes.push("fixture-teardown-complete");
+    return true;
+  } catch (error) {
+    cleanupCertain = false;
+    cleanupOutcomes.push(
+      error instanceof Error && error.message.includes("deadline")
+        ? "fixture-teardown-timeout"
+        : "fixture-teardown-failed",
+    );
+    console.warn("The synthetic ATS fixture did not close cleanly; owned evidence was retained.");
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
@@ -180,8 +230,14 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+let runFailure;
 try {
-  rmSync(resultBundle, { recursive: true, force: true });
+  try {
+    lstatSync(resultBundle);
+    throw new Error("A previous ATS result is retained; move or remove it before another run.");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
   mkdirSync(dirname(resultBundle), { recursive: true });
   enterDiagnosticStage("fixture-certificate");
   const cert = join(owned, "cert.pem"),
@@ -244,6 +300,7 @@ if (audio[44] >= 3) {
     process.exit(143);
   });
   appendFileSync(${JSON.stringify(invocationLog)}, marker + "\\n");
+  setTimeout(() => process.exit(70), 45_000);
   setInterval(() => {}, 1000);
 } else if (audio[44] === 2) {
   appendFileSync(${JSON.stringify(invocationLog)}, marker + "\\n");
@@ -454,25 +511,47 @@ if (audio[44] >= 3) {
   });
 
   enterDiagnosticStage("simulator-discovery");
-  const runtimes = JSON.parse(
-    await execute("xcrun", ["simctl", "list", "runtimes", "--json"], {
+  const xcodeVersion = await execute("xcodebuild", ["-version"], {
+    capture: true,
+    timeout: 15_000,
+  });
+  const xcodeMatch =
+    /^Xcode ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\nBuild version [A-Za-z0-9]{1,32}\n?$/.exec(xcodeVersion);
+  if (!xcodeMatch) throw new Error("Selected Xcode version output is invalid.");
+  parseAppleVersion(xcodeMatch[1]);
+  platform.xcode = xcodeMatch[1];
+  const sdkVersion = (
+    await execute("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-version"], {
       capture: true,
       timeout: 15_000,
-    }),
-  )
-    .runtimes.filter(
-      (item) =>
-        item.isAvailable &&
-        item.identifier?.startsWith("com.apple.CoreSimulator.SimRuntime.iOS-") &&
-        Number(item.version?.split(".")[0]) >= 17,
-    )
-    .sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
-  if (!runtimes.length)
-    throw new Error("No available iOS 17 or newer Simulator runtime was found.");
+    })
+  ).trim();
+  parseAppleVersion(sdkVersion);
+  platform.sdk = sdkVersion;
+  let runtimeInventory;
+  try {
+    runtimeInventory = JSON.parse(
+      await execute("xcrun", ["simctl", "list", "runtimes", "--json"], {
+        capture: true,
+        timeout: 15_000,
+      }),
+    );
+  } catch {
+    throw new Error("Simulator runtime inventory is invalid.");
+  }
+  const runtimes = runtimeInventory?.runtimes;
+  const selectedRuntime = selectCompatibleIOSRuntime(runtimes, sdkVersion);
+  platform.runtime = selectedRuntime.version;
   const compatible =
-    runtimes[0].supportedDeviceTypes?.filter((item) => item.productFamily === "iPhone") ?? [];
+    selectedRuntime.supportedDeviceTypes?.filter((item) => item.productFamily === "iPhone") ?? [];
   const device = compatible.find((item) => item.name === "iPhone 16") ?? compatible[0];
-  if (!device) throw new Error("The selected iOS runtime has no supported iPhone.");
+  if (
+    !device ||
+    typeof device.identifier !== "string" ||
+    !/^[A-Za-z0-9][A-Za-z0-9.-]{0,199}$/.test(device.identifier)
+  )
+    throw new Error("The selected iOS runtime has no valid supported iPhone.");
+  platform.device = device.identifier;
   enterDiagnosticStage("simulator-create");
   simulatorID = await execute(
     "xcrun",
@@ -481,7 +560,7 @@ if (audio[44] >= 3) {
       "create",
       `Ellie iOS ATS Tests ${randomUUID().slice(0, 8)}`,
       device.identifier,
-      runtimes[0].identifier,
+      selectedRuntime.identifier,
     ],
     { capture: true },
   );
@@ -569,28 +648,51 @@ if (audio[44] >= 3) {
   console.log(
     "iOS app-hosted pinned HTTPS, native speech, cancellation, rejection, Keychain and built-policy checks passed.",
   );
+} catch (error) {
+  runFailure = error;
+  console.error(error instanceof Error ? error.message : "ATS synthetic validation failed.");
 } finally {
   if (!succeeded) console.error(`ATS synthetic diagnostics: ${diagnosticSummary()}`);
   if (server) {
     server.shutdown();
   }
-  await nativeSpeech?.close();
-  await nativeAuth?.close();
-  await browserAuth?.close();
+  const teardownSettled = await settleFixtureTeardown(async () => {
+    await nativeSpeech?.close();
+    await nativeAuth?.close();
+    await browserAuth?.close();
+  });
   if (simulatorID) {
     for (const action of ["shutdown", "delete"]) {
       try {
         await execute("xcrun", ["simctl", action, simulatorID], { timeout: 15_000, cleanup: true });
+        cleanupOutcomes.push(`${action}-complete`);
       } catch {
+        cleanupCertain = false;
+        cleanupOutcomes.push(`${action}-failed`);
         console.warn(`The owned iOS simulator could not complete ${action}: ${simulatorID}`);
       }
     }
   }
-  await stopOwnedProcessGroups();
-  rmSync(owned, { recursive: true, force: true });
-  if (succeeded) rmSync(resultBundle, { recursive: true, force: true });
+  if (unreapedChildren.size) {
+    for (const child of unreapedChildren) signalDirectChild(child, "SIGKILL");
+    cleanupCertain = false;
+    cleanupOutcomes.push("child-cleanup-uncertain");
+  }
+  if (cleanupCertain) {
+    rmSync(owned, { recursive: true, force: true });
+    cleanupOutcomes.push("owned-removed");
+    if (succeeded) rmSync(resultBundle, { recursive: true, force: true });
+  } else {
+    cleanupOutcomes.push("owned-retained");
+    console.warn(`Owned ATS evidence was retained: ${owned}`);
+  }
+  if (!succeeded || !cleanupCertain)
+    console.error(`ATS cleanup diagnostics: ${diagnosticSummary()}`);
+  if (!teardownSettled) process.exit(1);
 }
 
-if (requestedSignal)
+if (!cleanupCertain) process.exitCode = 1;
+else if (requestedSignal)
   process.exitCode =
     128 + (requestedSignal === "SIGINT" ? 2 : requestedSignal === "SIGTERM" ? 15 : 1);
+else if (runFailure) process.exitCode = 1;
