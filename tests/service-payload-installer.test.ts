@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmod,
   cp,
@@ -19,6 +19,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, sep } from "node:path";
 import test from "node:test";
+import { MacOSServiceApplication } from "../apps/cli/src/service-application.ts";
+import { servicePlist } from "../apps/cli/src/services.ts";
 
 const mac = process.platform === "darwin";
 const source = new URL("../packages/macos/native/ServicePayloadInstaller.swift", import.meta.url)
@@ -29,6 +31,10 @@ const selectionSource = new URL(
 ).pathname;
 const lifecycleSource = new URL(
   "../packages/macos/native/ServicePayloadLifecycle.swift",
+  import.meta.url,
+).pathname;
+const migrationSource = new URL(
+  "../packages/macos/native/ServicePayloadMigration.swift",
   import.meta.url,
 ).pathname;
 const launcherSource = new URL(
@@ -204,6 +210,7 @@ async function withFixture(
     "ELLIE_INSTALLER_TESTING",
     selectionSource,
     lifecycleSource,
+    migrationSource,
     source,
     "-o",
     installer,
@@ -238,6 +245,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "ELLIE_INSTALLER_TESTING",
     selectionSource,
     lifecycleSource,
+    migrationSource,
     source,
     "-o",
     testing,
@@ -249,6 +257,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-parse-as-library",
     selectionSource,
     lifecycleSource,
+    migrationSource,
     source,
     "-o",
     production,
@@ -299,7 +308,8 @@ test(
         { cwd: destination, encoding: "utf8", timeout: 15_000 },
       );
       assert.equal(launched.status, 0, launched.stderr);
-      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      const restaged = run(installer, ["stage", release, "--test-services-root", services]);
+      assert.equal(restaged.status, 0, restaged.stderr);
     });
   },
 );
@@ -501,7 +511,8 @@ test(
       );
       assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o700);
 
-      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      const staged = run(installer, ["stage", release, "--test-services-root", services]);
+      assert.equal(staged.status, 0, staged.stderr);
       assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o555);
     });
   },
@@ -1240,6 +1251,309 @@ test(
       assert.notEqual(fifoLock.status, 0);
       assert.match(fifoLock.stderr, /requires selection recovery/);
       assert.ok(performance.now() - fifoStarted < 1_000);
+    });
+  },
+);
+
+test(
+  "native migration preparation snapshots exact stopped legacy services without changing them",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const home = join(root, "migration-home");
+      const checkout = join(root, "legacy-checkout");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(join(checkout, "packages/macos/native"), { recursive: true, mode: 0o700 });
+      await mkdir(join(checkout, "packages/macos/assets"), { recursive: true, mode: 0o700 });
+      await mkdir(join(checkout, "apps/cli/src"), { recursive: true, mode: 0o700 });
+      const repository = realpath(new URL("..", import.meta.url).pathname);
+      const repositoryPath = await repository;
+      await cp(
+        join(repositoryPath, "packages/macos/native/EllieService.swift"),
+        join(checkout, "packages/macos/native/EllieService.swift"),
+      );
+      await cp(
+        join(repositoryPath, "packages/macos/assets/Ellie.png"),
+        join(checkout, "packages/macos/assets/Ellie.png"),
+      );
+      await writeFile(join(checkout, "apps/cli/src/main.ts"), "// synthetic entrypoint\n", {
+        mode: 0o600,
+      });
+      await mkdir(join(home, "Library/Application Support/Ellie"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      await chmod(join(home, "Library"), 0o700);
+      await chmod(join(home, "Library/Application Support"), 0o700);
+      await chmod(join(home, "Library/Application Support/Ellie"), 0o700);
+      await mkdir(services, { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      const application = new MacOSServiceApplication(home, process.getuid!(), undefined, "", {
+        register: false,
+      });
+      for (const role of ["coordinator", "node"] as const) {
+        await application.install(role, checkout, process.execPath);
+        await writeFile(
+          join(home, `Library/LaunchAgents/org.ellie.assistant.${role}.plist`),
+          servicePlist(role, home, checkout, process.execPath),
+          { mode: 0o600 },
+        );
+      }
+      const migrationStage = run(installer, ["stage", release, "--test-services-root", services]);
+      assert.equal(migrationStage.status, 0, migrationStage.stderr);
+      const launchctl = join(root, "migration-launchctl.sh");
+      const loaded = join(root, "migration-loaded");
+      await writeFile(
+        launchctl,
+        `#!/bin/sh\nif [ "$1" = print ] && [ "$2" = gui/${process.getuid!()} ]; then exit 0; fi\nif [ "$1" = print ] && [ "$#" = 2 ]; then [ -f '${loaded.replaceAll("'", "'\\''")}' ] && [ "$2" = gui/${process.getuid!()}/org.ellie.assistant.coordinator ] && exit 0; exit 113; fi\nexit 64\n`,
+        { mode: 0o700 },
+      );
+      await chmod(launchctl, 0o700);
+      const appManifest = join(
+        home,
+        "Applications/Ellie Coordinator.app/Contents/Resources/ellie-build.json",
+      );
+      const plist = join(home, "Library/LaunchAgents/org.ellie.assistant.coordinator.plist");
+      const appBefore = await readFile(appManifest);
+      const plistBefore = await readFile(plist);
+      for (const fault of ["after-intent", "after-copy", "after-rename"]) {
+        const interrupted = run(installer, [
+          "prepare-migration",
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          launchctl,
+          "--test-migration-fault",
+          fault,
+        ]);
+        assert.notEqual(interrupted.status, 0);
+        assert.match(interrupted.stderr, /requires explicit recovery/);
+        const retryBeforeRecovery = run(installer, [
+          "prepare-migration",
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          launchctl,
+        ]);
+        assert.notEqual(retryBeforeRecovery.status, 0);
+        assert.match(retryBeforeRecovery.stderr, /requires explicit recovery/);
+        const recovery = run(installer, [
+          "recover-migration",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          launchctl,
+        ]);
+        assert.equal(recovery.status, 0, recovery.stderr);
+      }
+      const postRenameDetached = `${services}.migration-test-detached`;
+      const postRenameSwap = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "node",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+        "--test-migration-swap-after-rename",
+      ]);
+      assert.notEqual(postRenameSwap.status, 0);
+      assert.match(postRenameSwap.stderr, /requires explicit recovery/);
+      assert.equal(
+        await lstat(join(postRenameDetached, "migrations/migration-preparation.json")).then(
+          (value) => value.isFile(),
+        ),
+        true,
+      );
+      await rm(services, { recursive: true });
+      await rename(postRenameDetached, services);
+      const postRenameRecovery = run(installer, [
+        "recover-migration",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.equal(postRenameRecovery.status, 0, postRenameRecovery.stderr);
+      const prepared = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator,node",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.equal(prepared.status, 0, prepared.stderr);
+      const snapshotID = prepared.stdout.trim();
+      assert.match(snapshotID, /^legacy-v1-[a-f0-9]{64}$/);
+      const migrations = join(services, "migrations");
+      const snapshot = join(migrations, snapshotID);
+      const manifest = JSON.parse(await readFile(join(snapshot, "manifest.json"), "utf8"));
+      assert.deepEqual(manifest.roles, ["coordinator", "node"]);
+      assert.equal(manifest.version, 1);
+      assert.equal(manifest.files.length, 14);
+      assert.equal(typeof manifest.bindings[0].entrypointSHA256, "string");
+      await chmod(snapshot, 0o700);
+      const unsealedRetry = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator,node",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.notEqual(unsealedRetry.status, 0);
+      assert.match(unsealedRetry.stderr, /existing services were preserved/);
+      await chmod(snapshot, 0o555);
+      assert.equal(await readFile(appManifest).then((value) => value.equals(appBefore)), true);
+      assert.equal(await readFile(plist).then((value) => value.equals(plistBefore)), true);
+      assert.equal(
+        await lstat(join(services, "releases", id)).then((value) => value.isDirectory()),
+        true,
+      );
+      assert.equal(
+        await lstat(join(migrations, "migration-preparation.json"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      await writeFile(loaded, "loaded\n");
+      const loadedRefusal = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.notEqual(loadedRefusal.status, 0);
+      assert.match(loadedRefusal.stderr, /Both legacy service labels must be unloaded/);
+      await rm(loaded);
+
+      const transactionID = randomUUID();
+      const stageName = `.migration-stage-${transactionID}`;
+      await mkdir(join(migrations, stageName), { mode: 0o700 });
+      await writeFile(
+        join(migrations, "migration-preparation.json"),
+        `${JSON.stringify({
+          manifestSHA256: "0".repeat(64),
+          roles: ["coordinator"],
+          snapshotID: `legacy-v1-${"0".repeat(64)}`,
+          stageName,
+          transactionID,
+          version: 1,
+        })}\n`,
+        { mode: 0o600 },
+      );
+      const blockedByIntent = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.notEqual(blockedByIntent.status, 0);
+      assert.match(blockedByIntent.stderr, /requires explicit recovery/);
+      assert.equal(
+        await lstat(join(migrations, stageName)).then((value) => value.isDirectory()),
+        true,
+      );
+      const recovered = run(installer, [
+        "recover-migration",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.equal(recovered.status, 0, recovered.stderr);
+      assert.equal(
+        await lstat(join(migrations, stageName))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const malformedTransaction = randomUUID();
+      const malformedStage = `.migration-stage-${malformedTransaction}`;
+      const malformedManifest =
+        '{"bindings":[{"buildDigest":"' +
+        "0".repeat(64) +
+        `","checkout":"${checkout}","entrypointSHA256":"${"0".repeat(64)}","node":"${process.execPath}","nodeSHA256":"${"0".repeat(64)}","role":"coordinator"}],"files":[{"mode":384,"path":"roles/coordinator/launch-agent.plist","sha256":"${"0".repeat(64)}","size":18446744073709551615}],"roles":["coordinator"],"version":1}\n`;
+      const malformedHash = createHash("sha256").update(malformedManifest).digest("hex");
+      await mkdir(join(migrations, malformedStage), { mode: 0o700 });
+      await writeFile(join(migrations, malformedStage, "manifest.json"), malformedManifest, {
+        mode: 0o444,
+      });
+      await writeFile(
+        join(migrations, "migration-preparation.json"),
+        `${JSON.stringify({
+          manifestSHA256: malformedHash,
+          roles: ["coordinator"],
+          snapshotID: `legacy-v1-${malformedHash}`,
+          stageName: malformedStage,
+          transactionID: malformedTransaction,
+          version: 1,
+        })}\n`,
+        { mode: 0o600 },
+      );
+      const malformedRecovery = run(installer, [
+        "recover-migration",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.notEqual(malformedRecovery.status, 0);
+      assert.match(malformedRecovery.stderr, /requires explicit recovery/);
+      assert.equal(
+        await lstat(join(migrations, malformedStage)).then((value) => value.isDirectory()),
+        true,
+      );
+      await rm(join(migrations, malformedStage), { recursive: true });
+      await rm(join(migrations, "migration-preparation.json"));
+
+      const plistBackup = `${plist}.owned-backup`;
+      await rename(plist, plistBackup);
+      await symlink(plistBackup, plist);
+      const unsafePlist = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.notEqual(unsafePlist.status, 0);
+      assert.match(unsafePlist.stderr, /existing services were preserved/);
+      assert.deepEqual(await readFile(plistBackup), plistBefore);
+      await rm(plist);
+      await rename(plistBackup, plist);
+
+      await writeFile(join(checkout, "packages/macos/native/EllieService.swift"), "stale\n");
+      const stale = run(installer, [
+        "prepare-migration",
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        home,
+        "--test-launchctl",
+        launchctl,
+      ]);
+      assert.notEqual(stale.status, 0);
+      assert.match(stale.stderr, /no longer matches its recorded checkout build/);
+      assert.deepEqual(await readFile(appManifest), appBefore);
+      assert.deepEqual(await readFile(plist), plistBefore);
     });
   },
 );
