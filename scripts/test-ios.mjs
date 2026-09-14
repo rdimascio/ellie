@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const environment = {
@@ -27,6 +28,16 @@ let stage = "runner-setup",
   failureOutcome = "failed",
   failureStageMilliseconds;
 const cleanupOutcomes = [];
+const platform = {
+  xcode: "unknown",
+  sdk: "unknown",
+  runtime: "unknown",
+  device: "unknown",
+};
+
+function diagnosticValue(value) {
+  return typeof value === "string" && /^[A-Za-z0-9._-]{1,160}$/.test(value) ? value : "invalid";
+}
 
 function enterStage(value) {
   stage = value;
@@ -46,6 +57,10 @@ function diagnostic(outcome, result, stageMilliseconds = millisecondsSince(stage
     `totalMs=${millisecondsSince(runnerStarted)}`,
     `xcode=${xcodeStarted ? "started" : "not-started"}`,
     `result=${result}`,
+    `xcodeVersion=${diagnosticValue(platform.xcode)}`,
+    `sdkVersion=${diagnosticValue(platform.sdk)}`,
+    `runtime=${diagnosticValue(platform.runtime)}`,
+    `device=${diagnosticValue(platform.device)}`,
     `cleanup=${cleanupOutcomes.length ? cleanupOutcomes.join(",") : "not-started"}`,
   ].join(" ");
   console.error(line);
@@ -180,26 +195,37 @@ try {
   rmSync(resultBundle, { recursive: true, force: true });
   rmSync(diagnosticFile, { force: true });
   mkdirSync(dirname(resultBundle), { recursive: true });
+  const xcodeVersion = await execute("xcodebuild", ["-version"], {
+    capture: true,
+    timeout: 15_000,
+    label: "Xcode version discovery",
+  });
+  const xcodeMatch = /^Xcode ([0-9]+\.[0-9]+(?:\.[0-9]+)?)\nBuild version [A-Za-z0-9]+\n?$/.exec(
+    xcodeVersion,
+  );
+  if (!xcodeMatch) throw new Error("Selected Xcode version output is invalid.");
+  platform.xcode = xcodeMatch[1];
+  platform.sdk = (
+    await execute("xcrun", ["--sdk", "iphonesimulator", "--show-sdk-version"], {
+      capture: true,
+      timeout: 15_000,
+      label: "simulator SDK version discovery",
+    })
+  ).trim();
   const runtimes = JSON.parse(
     await execute("xcrun", ["simctl", "list", "runtimes", "--json"], {
       capture: true,
       timeout: 15_000,
       label: "simulator runtime discovery",
     }),
-  )
-    .runtimes.filter(
-      (item) =>
-        item.isAvailable &&
-        item.identifier?.startsWith("com.apple.CoreSimulator.SimRuntime.iOS-") &&
-        Number(item.version?.split(".")[0]) >= 17,
-    )
-    .sort((a, b) => b.version.localeCompare(a.version, undefined, { numeric: true }));
-  if (!runtimes.length)
-    throw new Error("No available iOS 17 or newer Simulator runtime was found.");
+  ).runtimes;
+  const selectedRuntime = selectCompatibleIOSRuntime(runtimes, platform.sdk);
+  platform.runtime = selectedRuntime.version;
   const compatible =
-    runtimes[0].supportedDeviceTypes?.filter((item) => item.productFamily === "iPhone") ?? [];
+    selectedRuntime.supportedDeviceTypes?.filter((item) => item.productFamily === "iPhone") ?? [];
   const device = compatible.find((item) => item.name === "iPhone 16") ?? compatible[0];
-  if (!device) throw new Error(`No iPhone device type supports iOS ${runtimes[0].version}.`);
+  if (!device) throw new Error(`No iPhone device type supports iOS ${selectedRuntime.version}.`);
+  platform.device = device.identifier;
   enterStage("simulator-create");
   simulatorID = (
     await execute(
@@ -209,7 +235,7 @@ try {
         "create",
         `Ellie iOS Tests ${randomUUID().slice(0, 8)}`,
         device.identifier,
-        runtimes[0].identifier,
+        selectedRuntime.identifier,
       ],
       { capture: true, timeout: 30_000, label: "simulator creation" },
     )

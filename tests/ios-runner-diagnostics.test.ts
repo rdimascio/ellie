@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -25,6 +25,10 @@ async function fixture(mode: "nonzero" | "overflow" | "timeout") {
     runner = shortened;
   }
   await writeFile(join(scripts, "test-ios.mjs"), runner);
+  await copyFile(
+    resolve("scripts/ios-runtime-selection.mjs"),
+    join(scripts, "ios-runtime-selection.mjs"),
+  );
   await writeFile(
     join(bin, "xcrun"),
     `#!/bin/sh
@@ -35,6 +39,8 @@ if [ "$1 $2 $3 $4" = "simctl list runtimes --json" ]; then
   else
     printf '%s\\n' '{"runtimes":[{"isAvailable":true,"identifier":"com.apple.CoreSimulator.SimRuntime.iOS-18-3","version":"18.3","supportedDeviceTypes":[{"productFamily":"iPhone","name":"iPhone","identifier":"test.iPhone"}]}]}'
   fi
+elif [ "$1 $2 $3" = "--sdk iphonesimulator --show-sdk-version" ]; then
+  printf '%s\n' '18.5'
 elif [ "$1 $2" = "simctl create" ]; then
   printf '%s\\n' 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
 elif [ "$1 $2" = "simctl bootstatus" ] && [ "$ELLIE_RUNNER_TEST_MODE" = "timeout" ]; then
@@ -46,6 +52,17 @@ fi
 `,
   );
   await chmod(join(bin, "xcrun"), 0o700);
+  await writeFile(
+    join(bin, "xcodebuild"),
+    `#!/bin/sh
+if [ "$1" = "-version" ]; then
+  printf '%s\n' 'Xcode 16.4' 'Build version 16F6'
+else
+  exit 0
+fi
+`,
+  );
+  await chmod(join(bin, "xcodebuild"), 0o700);
   return { bin, root };
 }
 
@@ -77,7 +94,7 @@ test("early process failure preserves a diagnostic without an xcresult", async (
   assert.equal(result.status, 1);
   assert.match(
     diagnostic,
-    /^iOS runner diagnostic: stage=simulator-discovery outcome=exit-status stageMs=\d+ totalMs=\d+ xcode=not-started result=not-created cleanup=not-started\n$/,
+    /^iOS runner diagnostic: stage=simulator-discovery outcome=exit-status stageMs=\d+ totalMs=\d+ xcode=not-started result=not-created xcodeVersion=16\.4 sdkVersion=18\.5 runtime=unknown device=unknown cleanup=not-started\n$/,
   );
 });
 
