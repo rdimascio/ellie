@@ -1008,7 +1008,11 @@ function Chat({
       )}
       <div className="hello">
         <span className="ellie-mark">e</span>
-        <h1>{messages.length ? "I’m here." : `Hi ${name}. What shall we carry forward?`}</h1>
+        <h1>
+          {messages.length
+            ? "I’m here."
+            : `${name === "You" ? "" : `Hi ${name}. `}What shall we carry forward?`}
+        </h1>
         {messages.length === 0 && (
           <>
             <p>Teach me something, make a plan, or ask what needs your attention.</p>
