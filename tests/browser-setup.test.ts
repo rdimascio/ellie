@@ -19,6 +19,7 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { X509Certificate } from "node:crypto";
+import { rootCertificates } from "node:tls";
 import type { MutableSecretStore } from "@ellie/config";
 import { generateBrowserTlsIdentity } from "../apps/cli/src/certificate.ts";
 import {
@@ -316,6 +317,13 @@ test("partial state and unavailable Keychain fail closed without generation", as
 test("a rollback failure reports partial state without touching an agent credential", async () => {
   const setup = await fixture();
   try {
+    setup.environment.generate = async (hostname: string) => ({
+      hostname,
+      rootCert: rootCertificates[0]!,
+      rootKey: "synthetic root key",
+      leafKey: "synthetic leaf key",
+      leafCert: "synthetic leaf certificate",
+    });
     setup.secrets.values.set("server.key", "agent identity");
     const originalAdd = setup.secrets.add.bind(setup.secrets);
     setup.secrets.add = async (account, value) => {
