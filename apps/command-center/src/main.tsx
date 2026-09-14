@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useReducer, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { DemoDevice, DemoState, View } from "./model.ts";
+import type { DemoDevice, DemoState } from "./model.ts";
 import {
   AGENDA,
   DEMO_ACTIONS,
@@ -12,6 +12,7 @@ import {
 } from "./model.ts";
 import type { Scenario } from "./model.ts";
 import ellieIcon from "../../../packages/macos/assets/Ellie.png";
+import { DashboardEditor } from "./dashboard-editor.tsx";
 import "./style.css";
 
 function DeviceIcon({ laptop = false }: { laptop?: boolean }) {
@@ -151,9 +152,10 @@ function Activity({
 }
 
 function App() {
+  const requestedView = new URLSearchParams(window.location.search).get("view");
   const initialView =
-    new URLSearchParams(window.location.search).get("view") === "tv" ? "tv" : "remote";
-  const [view, setView] = useState<View>(initialView);
+    requestedView === "tv" || requestedView === "dashboards" ? requestedView : "remote";
+  const [view, setView] = useState<"remote" | "tv" | "dashboards">(initialView);
   const [state, dispatch] = useReducer(reduceDemo, "ready", scenarioState);
   const device = state.devices.find((item) => item.id === state.selected);
   const waiting = state.jobs.find((job) => job.state === "queued");
@@ -189,7 +191,9 @@ function App() {
   }, [view]);
 
   return (
-    <div className={`app-shell ${view === "tv" ? "tv-mode" : "remote-mode"}`}>
+    <div
+      className={`app-shell ${view === "tv" ? "tv-mode" : view === "dashboards" ? "dashboard-mode" : "remote-mode"}`}
+    >
       <a className="skip-link" href="#main">
         Skip to content
       </a>
@@ -206,33 +210,40 @@ function App() {
           <button aria-pressed={view === "tv"} onClick={() => setView("tv")}>
             TV view
           </button>
+          <button aria-pressed={view === "dashboards"} onClick={() => setView("dashboards")}>
+            Dashboards
+          </button>
         </nav>
       </header>
-      <div className="demo-bar">
-        <div>
-          <strong>Interactive demo</strong>
-          <span>Sample home. Commands stay in this browser.</span>
+      {view !== "dashboards" && (
+        <div className="demo-bar">
+          <div>
+            <strong>Interactive demo</strong>
+            <span>Sample home. Commands stay in this browser.</span>
+          </div>
+          <label>
+            Demo scenario
+            <select
+              value={state.scenario}
+              onChange={(event) =>
+                dispatch({ type: "scenario", scenario: event.target.value as Scenario })
+              }
+            >
+              {Object.entries(SCENARIOS).map(([value, label]) => (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
-        <label>
-          Demo scenario
-          <select
-            value={state.scenario}
-            onChange={(event) =>
-              dispatch({ type: "scenario", scenario: event.target.value as Scenario })
-            }
-          >
-            {Object.entries(SCENARIOS).map(([value, label]) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </label>
-      </div>
+      )}
       <p className="visually-hidden" role="status" aria-live="polite" aria-atomic="true">
         {announcement}
       </p>
-      {view === "remote" ? (
+      {view === "dashboards" ? (
+        <DashboardEditor />
+      ) : view === "remote" ? (
         <main id="main" tabIndex={-1} className="remote-layout">
           <aside className="device-sidebar" aria-label="Household devices">
             <h2>Your Macs</h2>
@@ -416,7 +427,11 @@ function App() {
       )}
       <footer className="app-footer">
         <span>Made for the place you call home.</span>
-        <span>Prototype · No real household data</span>
+        <span>
+          {view === "dashboards"
+            ? "Saved locally · No connected services"
+            : "Prototype · No real household data"}
+        </span>
       </footer>
     </div>
   );

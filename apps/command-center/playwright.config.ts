@@ -21,7 +21,12 @@ export default defineConfig({
     },
     {
       name: "webkit-phone",
-      testMatch: ["**/pairing.spec.ts", "**/phone-remote.spec.ts", "**/qr-pairing.spec.ts"],
+      testMatch: [
+        "**/pairing.spec.ts",
+        "**/phone-remote.spec.ts",
+        "**/qr-pairing.spec.ts",
+        "**/dashboard-editor.spec.ts",
+      ],
       use: {
         browserName: "webkit",
         viewport: { width: 390, height: 844 },
