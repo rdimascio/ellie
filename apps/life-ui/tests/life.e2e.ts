@@ -1852,15 +1852,35 @@ try {
     await mobile.setViewportSize({ width: 390, height: 844 });
     await mobile.goto(listening.url);
     await mobile.locator(".mobile-head .brand").waitFor();
-    assert.equal(
-      await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
-      true,
-    );
+    const mobileOverflow = await mobile.evaluate(() => ({
+      viewportWidth: innerWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+      elements: [...document.querySelectorAll("body *")]
+        .map((element) => {
+          const bounds = element.getBoundingClientRect();
+          return {
+            tag: element.tagName.toLowerCase(),
+            className: String(element.className).slice(0, 120),
+            text: (element.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 120),
+            left: bounds.left,
+            right: bounds.right,
+            width: bounds.width,
+          };
+        })
+        .filter(({ left, right }) => left < -0.5 || right > innerWidth + 0.5)
+        .sort((a, b) => b.right - a.right)
+        .slice(0, 12),
+    }));
     await mobile.screenshot({
       animations: "disabled",
       path: join(artifactDir, "life-mobile.png"),
       fullPage: true,
     });
+    assert.equal(
+      mobileOverflow.scrollWidth <= mobileOverflow.viewportWidth,
+      true,
+      `mobile overflow: ${JSON.stringify(mobileOverflow)}`,
+    );
     const mobileOrb = mobile.getByRole("button", { name: "Talk to Ellie", exact: true });
     const mobileOrbBounds = await mobileOrb.boundingBox();
     assert.ok(mobileOrbBounds && Math.abs(mobileOrbBounds.x + mobileOrbBounds.width / 2 - 195) < 2);
