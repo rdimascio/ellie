@@ -35,6 +35,10 @@ const authenticatedPayloadSource = new URL(
   "../packages/macos/native/ServicePayloadAuthenticatedInspection.swift",
   import.meta.url,
 ).pathname;
+const activationPolicySource = new URL(
+  "../packages/macos/native/AuthenticatedActivationPolicy.swift",
+  import.meta.url,
+).pathname;
 const candidateVerifierSource = new URL(
   "../packages/macos/native/AuthenticatedCandidateVerifier.swift",
   import.meta.url,
@@ -273,6 +277,7 @@ test.before(
       const sources = [
         authorizationSource,
         authenticatedPayloadSource,
+        activationPolicySource,
         candidateVerifierSource,
         captureSource,
         selectionSource,
@@ -299,8 +304,11 @@ test.before(
         "ELLIE_AUTHORIZATION_TESTING",
         "-D",
         "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
+        "-D",
+        "ELLIE_ACTIVATION_POLICY_TESTING",
         authorizationSource,
         authenticatedPayloadSource,
+        activationPolicySource,
         candidateVerifierSource,
         captureSource,
         selectionSource,
@@ -382,7 +390,9 @@ test.before(
             "ELLIE_AUTHORIZATION_TESTING",
             "-D",
             "ELLIE_AUTHENTICATED_PAYLOAD_TESTING",
-            ...sources.slice(0, 7).map((path) => path.split("/").at(-1)),
+            "-D",
+            "ELLIE_ACTIVATION_POLICY_TESTING",
+            ...sources.slice(0, 8).map((path) => path.split("/").at(-1)),
             "-o",
             "installer",
           ],
@@ -823,10 +833,109 @@ test(
     completed = true;
   },
 );
+test(
+  "authenticated activation policy is canonical and derives closed policy digests",
+  options,
+  async (t) => {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-activation-policy-")));
+    let completed = false;
+    t.after(async () => {
+      if (completed) await removeOwned(root);
+    });
+    const installer = join(root, "installer");
+    await copyTemplateArtifact("installer", installer);
+    const readPolicy = (teamID: string, architecture: string) => {
+      const result = run(installer, ["test-authenticated-activation-policy", teamID, architecture]);
+      assert.equal(result.error, undefined);
+      assert.equal(result.signal, null);
+      assert.equal(result.status, 0, result.stderr);
+      const lines = result.stdout.trimEnd().split("\n");
+      assert.equal(lines.length, 2);
+      const [json, policyDigest] = lines;
+      assert.ok(json);
+      assert.ok(policyDigest);
+      const data = Buffer.from(`${json}\n`);
+      assert.equal(digest(data), policyDigest);
+      return { value: JSON.parse(json) as Record<string, unknown>, data, digest: policyDigest };
+    };
+    const teamID = "ABCDEFGHIJ";
+    const arm = readPolicy(teamID, "arm64");
+    assert.deepEqual(arm.value, {
+      authorizationFormatVersion: 1,
+      candidateBindingScope: "authenticated-candidate-capture",
+      candidateBindingVersion: 1,
+      digestAlgorithm: "sha256",
+      envelopePolicyDigest: arm.value.envelopePolicyDigest,
+      launcherVerification: "full-candidate-and-installed-role-v1",
+      payloadPolicyDigest: arm.value.payloadPolicyDigest,
+      publisherTeamID: teamID,
+      receiptVersion: 2,
+      roles: [
+        { bundleIdentifier: "org.ellie.assistant.coordinator.app", name: "coordinator" },
+        { bundleIdentifier: "org.ellie.assistant.node.app", name: "node" },
+      ],
+      scope: "authenticated-service-activation",
+      selectionJournalVersion: 2,
+      version: 1,
+    });
+    assert.deepEqual(arm.data, Buffer.from(canonicalJSON(arm.value)));
+    const envelope = run(installer, [
+      "test-authorization-policy",
+      teamID,
+      authorizationRequirement(teamID),
+    ]);
+    assert.equal(envelope.status, 0, envelope.stderr);
+    assert.equal(arm.value.envelopePolicyDigest, envelope.stdout.trim());
+    const changedRequirement = run(installer, [
+      "test-authorization-policy",
+      teamID,
+      `${authorizationRequirement(teamID)} and true`,
+    ]);
+    assert.equal(changedRequirement.status, 0, changedRequirement.stderr);
+    assert.notEqual(arm.value.envelopePolicyDigest, changedRequirement.stdout.trim());
+    const x64 = readPolicy(teamID, "x64");
+    const changedTeam = readPolicy("KLMNOPQRST", "arm64");
+    assert.equal(
+      arm.value.envelopePolicyDigest,
+      "4869431c87452a2a378b72ac62e018bca62d60caadef2f65bdfed50d70a16cb5",
+    );
+    assert.equal(
+      arm.value.payloadPolicyDigest,
+      "44768d525fb878543e723f7c41c93db5738837907cbb7d9bffd9e3861a8a3850",
+    );
+    assert.equal(arm.digest, "6430090b1b6c58f4888d16347e5d6cc511d97469d849e663d3e3f1621d98bdfd");
+    assert.equal(
+      x64.value.payloadPolicyDigest,
+      "08c4a1a060f69bc57eddcbee97f4fc48bed6799dac7dce6b874d61088bf26333",
+    );
+    assert.equal(x64.digest, "32f71a3ee92bea2fab4a01cfcc6b7fbff6c157f9dec4485d616a78ce3b7ab534");
+    assert.notEqual(arm.value.payloadPolicyDigest, x64.value.payloadPolicyDigest);
+    assert.notEqual(arm.digest, x64.digest);
+    assert.notEqual(arm.value.envelopePolicyDigest, changedTeam.value.envelopePolicyDigest);
+    assert.notEqual(arm.digest, changedTeam.digest);
+    for (const arguments_ of [
+      ["test-authenticated-activation-policy"],
+      ["test-authenticated-activation-policy", "ABCDEFGHI", "arm64"],
+      ["test-authenticated-activation-policy", "abcdefghiJ", "arm64"],
+      ["test-authenticated-activation-policy", "ABCDEFGHIJ\n", "arm64"],
+      ["test-authenticated-activation-policy", "ABCDEFGHÉJ", "arm64"],
+      ["test-authenticated-activation-policy", "ABCDEFGHIJ", ""],
+      ["test-authenticated-activation-policy", "ABCDEFGHIJ", "ARM64"],
+      ["test-authenticated-activation-policy", "ABCDEFGHIJ", "arm64", "extra"],
+    ]) {
+      const rejected = run(installer, arguments_);
+      assert.equal(rejected.error, undefined);
+      assert.equal(rejected.signal, null);
+      assert.equal(rejected.status, 1);
+    }
+    completed = true;
+  },
+);
 test("installer stage diagnostics are compiled into test builds only", options, async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-installer-diagnostic-")));
   t.after(() => removeOwned(root));
   const testing = join(root, "testing-installer");
+  const policyTesting = join(root, "policy-testing-installer");
   const production = join(root, "production-installer");
   execFileSync("/usr/bin/xcrun", [
     "swiftc",
@@ -837,6 +946,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "ELLIE_INSTALLER_TESTING",
     authorizationSource,
     authenticatedPayloadSource,
+    activationPolicySource,
     candidateVerifierSource,
     captureSource,
     selectionSource,
@@ -846,6 +956,29 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-o",
     testing,
   ]);
+  execFileSync(
+    "/usr/bin/xcrun",
+    [
+      "swiftc",
+      "-swift-version",
+      "5",
+      "-parse-as-library",
+      "-D",
+      "ELLIE_ACTIVATION_POLICY_TESTING",
+      authorizationSource,
+      authenticatedPayloadSource,
+      activationPolicySource,
+      candidateVerifierSource,
+      captureSource,
+      selectionSource,
+      lifecycleSource,
+      migrationSource,
+      source,
+      "-o",
+      policyTesting,
+    ],
+    boundedCommand,
+  );
   execFileSync("/usr/bin/xcrun", [
     "swiftc",
     "-swift-version",
@@ -853,6 +986,7 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "-parse-as-library",
     authorizationSource,
     authenticatedPayloadSource,
+    activationPolicySource,
     candidateVerifierSource,
     captureSource,
     selectionSource,
@@ -876,6 +1010,40 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     "Ellie service payload inspection or staging failed; existing installations were preserved.\n",
   );
   assert.doesNotMatch(productionFailure.stderr, /diagnostic|stage=|category=/);
+  const productionActivation = run(production, [
+    "test-authenticated-activation-policy",
+    "ABCDEFGHIJ",
+    "arm64",
+  ]);
+  assert.equal(productionActivation.status, 1);
+  assert.equal(productionActivation.stdout, "");
+  assert.equal(productionActivation.stderr, productionFailure.stderr);
+  for (const [architecture, payloadDigest, trustedDigest] of [
+    [
+      "arm64",
+      "8018ebd7d746542ef0a42cb70a0a0fad41f8218189c8b44592f0b23029571783",
+      "3497bc3e451d746bdbc0241fdef8cd93e262448811a96dacd41d8c6b3ddae064",
+    ],
+    [
+      "x64",
+      "1e70693bf0d7d7ec7193903287ed19e6dcbcd2499cf9fb57d85f8e3c2a9008dd",
+      "d4f01560545cdf7d2f41a008965a8e4c911d0bf67af2ee9ecf9f065171966d9c",
+    ],
+  ] as const) {
+    const policy = run(policyTesting, [
+      "test-authenticated-activation-policy",
+      "ABCDEFGHIJ",
+      architecture,
+    ]);
+    assert.equal(policy.status, 0, policy.stderr);
+    const lines = policy.stdout.trimEnd().split("\n");
+    assert.equal(lines.length, 2);
+    const [json, policyDigest] = lines;
+    assert.ok(json);
+    assert.ok(policyDigest);
+    assert.equal((JSON.parse(json) as Record<string, unknown>).payloadPolicyDigest, payloadDigest);
+    assert.equal(policyDigest, trustedDigest);
+  }
 });
 
 test(
@@ -935,6 +1103,7 @@ test(
           "-parse-as-library",
           authorizationSource,
           authenticatedPayloadSource,
+          activationPolicySource,
           candidateVerifierSource,
           captureSource,
           selectionSource,
