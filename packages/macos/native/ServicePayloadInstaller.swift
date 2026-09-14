@@ -1111,6 +1111,9 @@ private func stage(
 private struct ServicePayloadInstaller {
   static func main() {
     var arguments = Array(CommandLine.arguments.dropFirst())
+    #if ELLIE_POLICY_AUDIT_TESTING
+      if runCompiledActivationPolicyAudit(arguments) { return }
+    #endif
     if arguments.first == "inspect-authenticated-payload" {
       do { try runAuthenticatedPayloadInspection(arguments) } catch {
         failAuthenticatedPayloadInspection(error)
