@@ -1121,6 +1121,15 @@ h1 {
 @media (max-width: 360px) {
   .app-header {
     padding-inline: 14px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .view-switch {
+    width: 100%;
+  }
+  .view-switch button {
+    flex: 1;
+    padding-inline: 7px;
   }
   .remote-layout {
     padding-inline: 14px;
