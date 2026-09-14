@@ -29,6 +29,7 @@ import {
 } from "../../../packages/life-import/src/index.ts";
 import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
 import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
+import { LifeAutoMemory } from "../../../packages/life-auto-memory/src/index.ts";
 import { LifePlanError, LifePlans, type LifePlan } from "../../../packages/life-plans/src/index.ts";
 import { PluginBuildError } from "../../../packages/life-harness/src/build.ts";
 import {
@@ -91,6 +92,8 @@ export interface LifeHarnessLike {
     message: string;
     conversationId?: string;
     history?: Array<{ role: "user" | "assistant"; content: string }>;
+    automaticMemory?: { markdown: string; revision: string; partial: boolean };
+    automaticMemoryForgotten?: number;
     isContextCurrent?: () => boolean;
     pendingIntent?: PendingLifeIntent;
     conversationPreferences?: ConversationPreferenceState;
@@ -400,6 +403,7 @@ export class LifeHttpServer {
   private readonly teaching: LifeTeaching;
   private readonly plans: LifePlans;
   private readonly deliveries: ScheduledDeliveries;
+  private readonly automaticMemory: LifeAutoMemory;
   constructor(options: LifeServerOptions) {
     this.options = options;
     this.now = options.now ?? Date.now;
@@ -421,6 +425,9 @@ export class LifeHttpServer {
     this.tokenHash = digest(this.token);
     this.tokenCreatedAt = this.now();
     this.assertStateRoot();
+    this.automaticMemory = new LifeAutoMemory(options.store, {
+      directory: join(options.stateDir, "memory"),
+    });
   }
   recoverReminderReschedules(): { recovered: number; blocked: number } {
     let recovered = 0,
@@ -514,6 +521,19 @@ export class LifeHttpServer {
       port = this.options.port ?? 7440;
     if (host !== "127.0.0.1" || !Number.isInteger(port) || port < 0 || port > 65535)
       throw new Error("Invalid life listener.");
+    if (!this.personalResetActive) {
+      // Only retained, actor-owned conversations are backfilled. The store bounds
+      // history; each batch is bounded and inaccessible groups are excluded in SQL.
+      for (;;) {
+        const batch = this.automaticMemory.backfill(this.actor, { limit: 200 });
+        if (!batch.hasMore) break;
+        if (batch.captured === 0) throw new Error("Automatic memory backfill made no progress.");
+      }
+      this.automaticMemory.clearActor(this.actor);
+      this.automaticMemory.sync(this.actor, { type: "user", id: this.actor.userId });
+      for (const group of this.options.store.listGroups(this.actor))
+        this.automaticMemory.sync(this.actor, { type: "group", id: group.id });
+    }
     this.accepting = true;
     this.server = createServer((request, response) => {
       if (!this.accepting) {
@@ -881,6 +901,17 @@ export class LifeHttpServer {
         return await this.chat(request, response);
       if (/^\/api\/life\/chat\/requests\/[^/]+$/.test(path) && request.method === "GET")
         return this.chatRequest(path, response);
+      if (path === "/api/life/memory" && request.method === "GET") {
+        const scope = this.scope(url.searchParams.get("scope") ?? `user:${this.actor.userId}`),
+          memory = this.automaticMemory.context(this.actor, { scope, maxBytes: 16 * 1024 });
+        this.send(response, 200, {
+          summary: memory.summaryMarkdown,
+          entries: memory.entries,
+          partial: memory.partial,
+          revision: memory.revision,
+        });
+        return;
+      }
       if (path === "/api/life/conversations" && request.method === "GET")
         return this.conversations(url, response);
       if (
@@ -1147,6 +1178,7 @@ export class LifeHttpServer {
       journal = this.options.store.advancePersonalReset(this.actor, operationId, "life-deleted");
     }
     if (journal.state === "life-deleted") {
+      this.automaticMemory.clearActor(this.actor);
       this.options.harness.invalidateActorContext?.(this.actor);
       this.options.tasks.completePersonalDeletion(ownerId, operationId);
       journal = this.options.store.advancePersonalReset(this.actor, operationId, "completed");
@@ -2200,6 +2232,32 @@ export class LifeHttpServer {
         chatEpoch,
         ...(conversationId ? { conversationId } : {}),
       });
+    let automaticMemoryForgotten = 0;
+    try {
+      this.automaticMemory.captureTurn(this.actor, {
+        conversationId: begun.conversation.id,
+        turnId: begun.turn.id,
+      });
+      const forget =
+        /^(?:please\s+)?(?:forget|do not remember|don't remember)\s+(?:that\s+)?(.+?)[.!?]*$/i.exec(
+          message.trim(),
+        );
+      if (forget && begun.status === "new") {
+        this.automaticMemory.suppressTurn(this.actor, begun.turn.id);
+        const query = forget[1]!.trim();
+        if (query.length <= 500)
+          automaticMemoryForgotten = this.automaticMemory.forget(this.actor, { scope, query });
+      }
+      this.automaticMemory.sync(this.actor, scope);
+    } catch (error) {
+      if (begun.status === "new")
+        this.options.store.interruptConversationTurn(this.actor, {
+          conversationId: begun.conversation.id,
+          turnId: begun.turn.id,
+          requestId,
+        });
+      throw error;
+    }
     if (begun.status !== "new") {
       this.send(
         response,
@@ -2210,7 +2268,8 @@ export class LifeHttpServer {
     }
     const controller = new AbortController();
     this.pluginBuildControllers.add(controller);
-    const conversationPreferences = this.options.store.getConversationPreferences(
+    const memory = this.automaticMemory.context(this.actor, { scope, maxBytes: 16 * 1024 }),
+      conversationPreferences = this.options.store.getConversationPreferences(
         this.actor,
         begun.conversation.id,
       ),
@@ -2222,7 +2281,9 @@ export class LifeHttpServer {
             this.options.store.conversationContextFingerprint(this.actor, begun.conversation.id) ===
               fingerprint &&
             this.options.store.getConversationPreferences(this.actor, begun.conversation.id)
-              .revision === conversationPreferences.revision
+              .revision === conversationPreferences.revision &&
+            this.automaticMemory.context(this.actor, { scope, maxBytes: 16 * 1024 }).revision ===
+              memory.revision
           );
         } catch {
           return false;
@@ -2331,6 +2392,12 @@ export class LifeHttpServer {
         message,
         conversationId: begun.conversation.id,
         history,
+        automaticMemory: {
+          markdown: memory.summaryMarkdown,
+          revision: memory.revision,
+          partial: memory.partial,
+        },
+        ...(automaticMemoryForgotten ? { automaticMemoryForgotten } : {}),
         isContextCurrent: contextCurrent,
         ...(pendingIntent ? { pendingIntent } : {}),
         ...(recentOperation ? { recentOperation } : {}),
@@ -2610,6 +2677,7 @@ export class LifeHttpServer {
       conversation = this.options.store.getConversation(this.actor, id).conversation;
     this.options.store.deleteConversation(this.actor, id, Number(url.searchParams.get("revision")));
     this.options.harness.invalidateContext?.(this.actor, conversation.scope);
+    this.automaticMemory.sync(this.actor, conversation.scope);
     this.send(response, 204);
   }
   private async signal(request: IncomingMessage, response: ServerResponse): Promise<void> {

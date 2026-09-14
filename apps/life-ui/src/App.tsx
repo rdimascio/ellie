@@ -17,8 +17,9 @@ import type {
 } from "./types";
 import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
 import { deliveryLabel, occurrenceLabel } from "./delivery";
+import ellieIcon from "../../../packages/macos/assets/Ellie.png";
 
-type View = "chat" | "today" | "world" | "space" | "activity" | "settings";
+type View = "dashboard" | "chat" | "today" | "world" | "space" | "activity" | "settings";
 type Message = {
   id: string;
   role: "you" | "ellie";
@@ -28,6 +29,76 @@ type Message = {
   status?: "pending" | "interrupted" | "completed";
   outdated?: boolean;
   turnId?: string;
+};
+type LifeBoard = {
+  id: string;
+  name: string;
+  layout: Record<string, { order: number; wide: boolean }>;
+};
+type LifeBoards = { selectedId: string; boards: LifeBoard[] };
+const starterBoards = (): LifeBoards => ({
+  selectedId: "home",
+  boards: [{ id: "home", name: "Home", layout: {} }],
+});
+const parseBoards = (raw: string | null): LifeBoards => {
+  if (!raw || raw.length > 64 * 1024) return starterBoards();
+  try {
+    const value = JSON.parse(raw) as LifeBoards;
+    const plain = (item: unknown): item is Record<string, unknown> =>
+      Boolean(item) &&
+      typeof item === "object" &&
+      !Array.isArray(item) &&
+      Object.getPrototypeOf(item) === Object.prototype;
+    if (
+      !plain(value) ||
+      !Array.isArray(value.boards) ||
+      value.boards.length < 1 ||
+      value.boards.length > 12
+    )
+      return starterBoards();
+    const ids = new Set<string>();
+    const boards: LifeBoard[] = [];
+    for (const candidate of value.boards) {
+      if (
+        !plain(candidate) ||
+        typeof candidate.id !== "string" ||
+        !/^[a-zA-Z0-9_-]{1,80}$/.test(candidate.id)
+      )
+        return starterBoards();
+      if (
+        ids.has(candidate.id) ||
+        typeof candidate.name !== "string" ||
+        !candidate.name.trim() ||
+        candidate.name.length > 60 ||
+        !plain(candidate.layout)
+      )
+        return starterBoards();
+      ids.add(candidate.id);
+      const layoutEntries = Object.entries(candidate.layout);
+      if (layoutEntries.length > 128) return starterBoards();
+      const layout: LifeBoard["layout"] = Object.create(null) as LifeBoard["layout"];
+      for (const [key, entry] of layoutEntries) {
+        if (
+          key.length < 1 ||
+          key.length > 160 ||
+          !plain(entry) ||
+          !Number.isInteger(entry.order) ||
+          Math.abs(entry.order as number) > 10_000 ||
+          typeof entry.wide !== "boolean"
+        )
+          return starterBoards();
+        layout[key] = { order: entry.order as number, wide: entry.wide };
+      }
+      boards.push({ id: candidate.id, name: candidate.name.trim(), layout });
+    }
+    const selectedId =
+      typeof value.selectedId === "string" && ids.has(value.selectedId)
+        ? value.selectedId
+        : boards[0].id;
+    return { selectedId, boards };
+  } catch {
+    return starterBoards();
+  }
 };
 const newRequestId = () =>
   typeof crypto.randomUUID === "function"
@@ -43,6 +114,7 @@ const setChatUrl = (conversationId?: string, requestId?: string) => {
   history.replaceState(null, "", `${url.pathname}${url.search}`);
 };
 const icons: Record<View, string> = {
+  dashboard: "⌂",
   chat: "✦",
   today: "◷",
   world: "⌾",
@@ -51,14 +123,38 @@ const icons: Record<View, string> = {
   settings: "⚙",
 };
 const labels: Record<View, string> = {
+  dashboard: "Home",
   chat: "Ellie",
   today: "Today",
-  world: "Your world",
-  space: "Your space",
+  world: "Memory",
+  space: "Apps",
   activity: "Activity",
   settings: "Settings",
 };
 const timedKinds = new Set(["reminder", "timer", "event", "birthday", "holiday"]);
+const agendaEntries = (data: Bootstrap, records = data.agendaRecords ?? data.records) => {
+  const byId = new Map(data.records.map((record) => [record.id, record]));
+  return records
+    .filter((record) => {
+      if (!timedKinds.has(record.kind)) return false;
+      if (record.data.completed === true || record.data.cancelled === true) return false;
+      if (record.delivery?.status === "cancelled" || record.delivery?.status === "complete")
+        return false;
+      if (record.kind === "event" && record.data.type === "notification") return false;
+      if (record.relatedCompleted) return false;
+      return !record.relationships?.some((relation) => {
+        if (relation.type !== "need") return false;
+        const need = byId.get(relation.targetId);
+        return need?.data.completed === true || need?.data.cancelled === true;
+      });
+    })
+    .map((record) => ({ record, when: agendaDate(record, data.profile.timeZone) }))
+    .filter(
+      (item): item is { record: LifeRecord; when: { value: string | number; allDay: boolean } } =>
+        Boolean(item.when),
+    )
+    .sort((a, b) => compareAgenda(a, b, data.profile.timeZone));
+};
 const needsSourceReview = (record: LifeRecord) =>
   record.provenanceStatus === "needs-review" ||
   record.provenance?.some((item) => item.invalidatedAt !== undefined) === true;
@@ -84,11 +180,15 @@ const friendly = (value: string, zone?: string) => {
 
 export function App() {
   const [data, setData] = useState<Bootstrap | null>(null),
-    [view, setView] = useState<View>("chat"),
+    [view, setView] = useState<View>("dashboard"),
+    [conversationOpen, setConversationOpen] = useState(
+      () => new URLSearchParams(location.search).get("view") === "chat",
+    ),
     [loading, setLoading] = useState(true),
     [error, setError] = useState(""),
     [auth, setAuth] = useState(false),
     [busy, setBusy] = useState(""),
+    [composerDraft, setComposerDraft] = useState(""),
     [messages, setMessages] = useState<Message[]>([]),
     [conversation, setConversation] = useState<string>(),
     [conversationMeta, setConversationMeta] = useState<ConversationSummary>(),
@@ -108,7 +208,10 @@ export function App() {
       nextCursor?: string;
     }>({ hasMore: false }),
     [expanded, setExpanded] = useState<PluginSummary | null>(null),
-    [groupsOpen, setGroupsOpen] = useState(false);
+    [groupsOpen, setGroupsOpen] = useState(false),
+    [boards, setBoards] = useState<LifeBoards>(starterBoards),
+    [boardsKey, setBoardsKey] = useState(""),
+    [worldTab, setWorldTab] = useState("all");
   const [notice, setNotice] = useState("");
   const scopeGeneration = useRef(0);
   const desiredScope = useRef("");
@@ -121,6 +224,7 @@ export function App() {
   const chatInFlight = useRef("");
   const restoredUrl = useRef(false);
   const observedChatEpoch = useRef<number | undefined>(undefined);
+  const orbRef = useRef<HTMLButtonElement>(null);
   const loadRef = useRef<(scope?: string, quiet?: boolean) => Promise<void>>(async () => {});
   const load = async (scope?: string, quiet = false) => {
     const epoch = ++requestEpoch.current;
@@ -161,6 +265,39 @@ export function App() {
   );
   const scope = data?.scope ?? "";
   useEffect(() => {
+    const url = new URL(location.href);
+    if (conversationOpen) url.searchParams.set("view", "chat");
+    else url.searchParams.delete("view");
+    history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }, [conversationOpen]);
+  const boardStorageKey = data
+    ? `ellie.life.boards.v1:${data.profile.id}:${data.scope}`
+    : "ellie.life.boards.v1:loading";
+  useEffect(() => {
+    if (!data) return;
+    let raw: string | null = null;
+    try {
+      raw = localStorage.getItem(boardStorageKey);
+    } catch {
+      // Starter board remains usable without browser storage.
+    }
+    setBoards(parseBoards(raw));
+    setBoardsKey(boardStorageKey);
+  }, [boardStorageKey]);
+  const saveBoards = (next: LifeBoards) => {
+    if (boardsKey !== boardStorageKey) return;
+    setBoards(next);
+    try {
+      localStorage.setItem(boardStorageKey, JSON.stringify(next));
+    } catch {
+      setNotice("This board layout will last only while this page stays open.");
+    }
+  };
+  const showConversation = (open: boolean) => {
+    setConversationOpen(open);
+  };
+  const visibleBoards = boardsKey === boardStorageKey ? boards : starterBoards();
+  useEffect(() => {
     if (!data) return;
     if (observedChatEpoch.current !== undefined && observedChatEpoch.current !== data.chatEpoch) {
       ++chatEpoch.current;
@@ -168,6 +305,7 @@ export function App() {
       pendingIntentRequest.current?.abort();
       chatInFlight.current = "";
       setMessages([]);
+      setComposerDraft("");
       setConversation(undefined);
       setConversationMeta(undefined);
       setConversationPreferences({ preferences: {}, revision: 0 });
@@ -202,6 +340,57 @@ export function App() {
       document.removeEventListener("visibilitychange", visible);
     };
   }, [scope]);
+  useEffect(() => {
+    if (!conversationOpen || !data) return;
+    const background = [
+      ...document.querySelectorAll<HTMLElement>(
+        ".shell > aside, .shell > main > :not(.conversation-overlay), .shell > .bottom, .shell > .ellie-orb",
+      ),
+    ];
+    background.forEach((element) => {
+      element.inert = true;
+    });
+    requestAnimationFrame(() =>
+      document
+        .querySelector<HTMLElement>('.conversation-overlay [aria-label="Message Ellie"]')
+        ?.focus(),
+    );
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        if (document.querySelectorAll('[role="dialog"]').length > 1) return;
+        showConversation(false);
+        requestAnimationFrame(() => orbRef.current?.focus());
+        return;
+      }
+      if (event.key !== "Tab") return;
+      if (document.querySelectorAll('[role="dialog"]').length > 1) return;
+      const overlay = document.querySelector<HTMLElement>(".conversation-overlay");
+      const controls = overlay
+        ? [
+            ...overlay.querySelectorAll<HTMLElement>(
+              "button:not(:disabled), input, textarea, select, [tabindex='0']",
+            ),
+          ].filter((item) => item.getClientRects().length > 0)
+        : [];
+      if (!controls.length) return;
+      const first = controls[0],
+        last = controls.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        last.focus();
+        event.preventDefault();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        first.focus();
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      background.forEach((element) => {
+        element.inert = false;
+      });
+    };
+  }, [conversationOpen, data?.profile.id]);
   const scopeOptions = useMemo(
     () =>
       data
@@ -221,6 +410,7 @@ export function App() {
     chatInFlight.current = "";
     desiredScope.current = nextScope;
     setMessages([]);
+    setComposerDraft("");
     setConversation(undefined);
     setConversationMeta(undefined);
     setConversationPreferences({ preferences: {}, revision: 0 });
@@ -272,6 +462,7 @@ export function App() {
         await load(detailScope);
         if (epoch !== chatEpoch.current) return;
       }
+      if (id !== conversation) setComposerDraft("");
       setConversation(id);
       setConversationMeta(detail.conversation);
       setConversationPreferences(detail.conversationPreferences);
@@ -324,7 +515,7 @@ export function App() {
     [],
   );
   async function send(message: string) {
-    if (!message.trim() || !data || chatInFlight.current) return;
+    if (!message.trim() || !data || chatInFlight.current || busy === "conversation") return;
     const generation = scopeGeneration.current;
     const epoch = ++chatEpoch.current;
     chatRequest.current?.abort();
@@ -454,6 +645,7 @@ export function App() {
     pendingIntentRequest.current?.abort();
     chatInFlight.current = "";
     setMessages([]);
+    setComposerDraft("");
     setConversation(undefined);
     setConversationMeta(undefined);
     setConversationPreferences({ preferences: {}, revision: 0 });
@@ -526,18 +718,51 @@ export function App() {
         }
       />
     );
+  const feedback = (
+    <>
+      {error && (
+        <div className="error" role="alert">
+          <span>{error}</span>
+          <button onClick={() => setError("")} aria-label="Dismiss error">
+            ×
+          </button>
+        </div>
+      )}
+      {notice && (
+        <div className="toast" role="status">
+          {notice}
+        </div>
+      )}
+    </>
+  );
   return (
     <div className="shell">
       <aside>
         <Brand />
+        <DashboardBoards
+          value={visibleBoards}
+          change={saveBoards}
+          openHome={() => setView("dashboard")}
+        />
         <nav aria-label="Main navigation">
-          {(["chat", "today", "world", "space", "activity"] as View[]).map((v) => (
+          {(["dashboard"] as View[]).map((v) => (
             <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
-              <span>{icons[v]}</span>
+              <span aria-hidden="true">{icons[v]}</span>
               {labels[v]}
-              {v === "activity" && data.tasks.length > 0 ? <b>{data.tasks.length}</b> : null}
             </button>
           ))}
+          <details className="rail-more">
+            <summary>More</summary>
+            {(["today", "world", "space", "activity"] as View[]).map((v) => (
+              <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
+                <span aria-hidden="true">{icons[v]}</span>
+                {v === "world" ? "Memory" : v === "space" ? "Apps" : labels[v]}
+                {v === "activity" && data.tasks.length > 0 ? (
+                  <b aria-hidden="true">{data.tasks.length}</b>
+                ) : null}
+              </button>
+            ))}
+          </details>
         </nav>
         <div className="scope">
           <label htmlFor="scope">Sharing with</label>
@@ -563,80 +788,120 @@ export function App() {
             ⚙
           </button>
         </header>
-        {error && (
-          <div className="error" role="alert">
-            <span>{error}</span>
-            <button onClick={() => setError("")} aria-label="Dismiss error">
-              ×
-            </button>
-          </div>
-        )}
-        {notice && (
-          <div className="toast" role="status">
-            {notice}
-          </div>
-        )}
-        {view === "chat" && (
-          <Chat
-            name={data.profile.name}
-            messages={messages}
-            records={data.agendaRecords ?? data.records}
-            timeZone={data.profile.timeZone}
-            scope={scope}
-            busy={busy === "chat"}
-            send={send}
-            active={conversationMeta}
-            preferences={conversationPreferences}
-            savedSettings={data.settings}
-            openConversation={openConversation}
-            newConversation={newConversation}
-            uncertainRequest={uncertainRequest}
-            checkOutcome={checkChatOutcome}
-            pendingIntent={pendingIntent}
-            pendingIntentState={pendingIntentState}
-            clearPendingIntent={async () => {
-              if (!conversation || !pendingIntent || pendingIntent.state !== "awaiting-fields")
-                return;
-              const generation = scopeGeneration.current;
-              const epoch = chatEpoch.current;
-              const controller = new AbortController();
-              pendingIntentRequest.current?.abort();
-              pendingIntentRequest.current = controller;
-              setPendingIntentState("loading");
-              try {
-                await api.conversations.clearPendingIntent(
-                  conversation,
-                  pendingIntent.revision,
-                  controller.signal,
-                );
-                if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
-                setPendingIntent(null);
-                setPendingIntentState("idle");
-                setNotice("Draft cleared");
-              } catch (cause) {
-                if (controller.signal.aborted) return;
-                if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
-                if (cause instanceof ApiError && cause.status === 409) {
-                  setNotice("That draft changed. Ellie is checking its current status.");
-                  await openConversation(conversation);
-                  return;
-                }
-                setPendingIntentState("error");
-                setError(
-                  cause instanceof Error ? cause.message : "The draft could not be cleared.",
-                );
-              } finally {
-                if (pendingIntentRequest.current === controller)
-                  pendingIntentRequest.current = undefined;
-              }
+        {!conversationOpen && feedback}
+        {view === "dashboard" && (
+          <LifeDashboard
+            key={`${data.profile.id}:${data.scope}:${data.chatEpoch}`}
+            data={data}
+            openPlugin={setExpanded}
+            openView={setView}
+            openPlans={() => {
+              setWorldTab("plans");
+              setView("world");
             }}
-            olderTurns={olderTurns}
-            loadOlder={loadOlderConversationTurns}
-            notify={setNotice}
+            board={
+              visibleBoards.boards.find((board) => board.id === visibleBoards.selectedId) ??
+              visibleBoards.boards[0]
+            }
+            boards={visibleBoards.boards}
+            selectBoard={(id) => saveBoards({ ...visibleBoards, selectedId: id })}
+            changeBoard={(board) =>
+              saveBoards({
+                ...visibleBoards,
+                boards: visibleBoards.boards.map((item) => (item.id === board.id ? board : item)),
+              })
+            }
           />
         )}{" "}
+        {conversationOpen && (
+          <div
+            className="conversation-overlay"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Ellie conversation"
+          >
+            <button
+              className="conversation-close"
+              aria-label="Close conversation"
+              onClick={() => {
+                showConversation(false);
+                requestAnimationFrame(() => orbRef.current?.focus());
+              }}
+            >
+              ×
+            </button>
+            {feedback}
+            <Chat
+              name={data.profile.name}
+              messages={messages}
+              records={data.agendaRecords ?? data.records}
+              timeZone={data.profile.timeZone}
+              scope={scope}
+              busy={busy === "chat" || busy === "conversation"}
+              send={send}
+              draft={composerDraft}
+              setDraft={setComposerDraft}
+              active={conversationMeta}
+              preferences={conversationPreferences}
+              savedSettings={data.settings}
+              openConversation={openConversation}
+              newConversation={newConversation}
+              uncertainRequest={uncertainRequest}
+              checkOutcome={checkChatOutcome}
+              pendingIntent={pendingIntent}
+              pendingIntentState={pendingIntentState}
+              clearPendingIntent={async () => {
+                if (!conversation || !pendingIntent || pendingIntent.state !== "awaiting-fields")
+                  return;
+                const generation = scopeGeneration.current;
+                const epoch = chatEpoch.current;
+                const controller = new AbortController();
+                pendingIntentRequest.current?.abort();
+                pendingIntentRequest.current = controller;
+                setPendingIntentState("loading");
+                try {
+                  await api.conversations.clearPendingIntent(
+                    conversation,
+                    pendingIntent.revision,
+                    controller.signal,
+                  );
+                  if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
+                  setPendingIntent(null);
+                  setPendingIntentState("idle");
+                  setNotice("Draft cleared");
+                } catch (cause) {
+                  if (controller.signal.aborted) return;
+                  if (generation !== scopeGeneration.current || epoch !== chatEpoch.current) return;
+                  if (cause instanceof ApiError && cause.status === 409) {
+                    setNotice("That draft changed. Ellie is checking its current status.");
+                    await openConversation(conversation);
+                    return;
+                  }
+                  setPendingIntentState("error");
+                  setError(
+                    cause instanceof Error ? cause.message : "The draft could not be cleared.",
+                  );
+                } finally {
+                  if (pendingIntentRequest.current === controller)
+                    pendingIntentRequest.current = undefined;
+                }
+              }}
+              olderTurns={olderTurns}
+              loadOlder={loadOlderConversationTurns}
+              notify={setNotice}
+            />
+          </div>
+        )}{" "}
         {view === "today" && <Today data={data} refresh={() => load(scope)} notify={setNotice} />}{" "}
-        {view === "world" && <World data={data} refresh={() => load(scope)} notify={setNotice} />}{" "}
+        {view === "world" && (
+          <World
+            data={data}
+            refresh={() => load(scope)}
+            notify={setNotice}
+            initialTab={worldTab}
+            conversationRevision={`${conversationMeta?.id ?? ""}:${conversationMeta?.revision ?? 0}`}
+          />
+        )}{" "}
         {view === "space" && (
           <Space
             plugins={data.plugins}
@@ -711,10 +976,19 @@ export function App() {
           />
         )}{" "}
       </main>
+      <button
+        ref={orbRef}
+        className={`ellie-orb ${busy === "chat" ? "thinking" : ""} ${pendingIntent || uncertainRequest ? "attention" : ""}`}
+        aria-label="Talk to Ellie"
+        aria-expanded={conversationOpen}
+        onClick={() => showConversation(true)}
+      >
+        <span aria-hidden="true" />
+      </button>
       <nav className="bottom" aria-label="Main navigation">
-        {(["chat", "today", "world", "space", "activity"] as View[]).map((v) => (
+        {(["dashboard", "today", "world", "space"] as View[]).map((v) => (
           <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
-            <span>{icons[v]}</span>
+            <span aria-hidden="true">{icons[v]}</span>
             {labels[v].replace("Your ", "")}
           </button>
         ))}
@@ -743,10 +1017,315 @@ export function App() {
   );
 }
 
+function DashboardBoards({
+  value,
+  change,
+  openHome,
+}: {
+  value: LifeBoards;
+  change: (value: LifeBoards) => void;
+  openHome: () => void;
+}) {
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  return (
+    <section className="board-manager" aria-label="Your dashboards">
+      <div className="board-list">
+        {value.boards.map((board) => (
+          <div key={board.id} className={board.id === value.selectedId ? "selected" : ""}>
+            <button
+              aria-label={`Open ${board.name} dashboard`}
+              aria-pressed={board.id === value.selectedId}
+              onClick={() => {
+                change({ ...value, selectedId: board.id });
+                openHome();
+              }}
+            >
+              {board.name.slice(0, 1).toUpperCase()}
+            </button>
+            <input
+              aria-label={`Rename ${board.name} dashboard`}
+              value={board.name}
+              maxLength={60}
+              onChange={(event) => {
+                const nextName = event.target.value;
+                change({
+                  ...value,
+                  boards: value.boards.map((item) =>
+                    item.id === board.id ? { ...item, name: nextName } : item,
+                  ),
+                });
+              }}
+              onBlur={() => {
+                if (board.name.trim()) return;
+                change({
+                  ...value,
+                  boards: value.boards.map((item) =>
+                    item.id === board.id ? { ...item, name: "Untitled board" } : item,
+                  ),
+                });
+              }}
+            />
+            {value.boards.length > 1 && (
+              <button
+                className="delete-board"
+                aria-label={`Delete ${board.name} dashboard`}
+                onClick={() => {
+                  const remaining = value.boards.filter((item) => item.id !== board.id);
+                  change({
+                    boards: remaining,
+                    selectedId: value.selectedId === board.id ? remaining[0].id : value.selectedId,
+                  });
+                }}
+              >
+                ×
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+      {creating ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (!name.trim() || value.boards.length >= 12) return;
+            const board: LifeBoard = {
+              id: `board-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              name: name.trim(),
+              layout: {},
+            };
+            change({ boards: [...value.boards, board], selectedId: board.id });
+            setName("");
+            setCreating(false);
+            openHome();
+          }}
+        >
+          <input
+            autoFocus
+            aria-label="New dashboard name"
+            maxLength={60}
+            value={name}
+            placeholder="Kitchen board"
+            onChange={(event) => setName(event.target.value)}
+          />
+          <button disabled={!name.trim()}>Create</button>
+        </form>
+      ) : (
+        <button
+          className="new-board"
+          disabled={value.boards.length >= 12}
+          onClick={() => setCreating(true)}
+        >
+          ＋ New board
+        </button>
+      )}
+    </section>
+  );
+}
+
+function LifeDashboard({
+  data,
+  openPlugin,
+  openView,
+  openPlans,
+  board,
+  boards,
+  selectBoard,
+  changeBoard,
+}: {
+  data: Bootstrap;
+  openPlugin: (plugin: PluginSummary) => void;
+  openView: (view: View) => void;
+  openPlans: () => void;
+  board: LifeBoard;
+  boards: LifeBoard[];
+  selectBoard: (id: string) => void;
+  changeBoard: (board: LifeBoard) => void;
+}) {
+  const [now, setNow] = useState(() => new Date());
+  const [plans, setPlans] = useState<LifePlan[]>([]);
+  const [planError, setPlanError] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
+  const widgetKeys = [
+    "clock",
+    "agenda",
+    "plans",
+    ...data.plugins.map((p) => `plugin:${p.id}`),
+    "add",
+  ];
+  const layout = board.layout;
+  const layoutFor = (key: string) => layout[key] ?? { order: widgetKeys.indexOf(key), wide: false };
+  const changeLayout = (key: string, change: "back" | "forward" | "size") => {
+    const ordered = [...widgetKeys].sort((a, b) => layoutFor(a).order - layoutFor(b).order);
+    const index = ordered.indexOf(key);
+    const next = { ...layout };
+    if (change === "size") next[key] = { ...layoutFor(key), wide: !layoutFor(key).wide };
+    else {
+      const other = ordered[index + (change === "back" ? -1 : 1)];
+      if (!other) return;
+      next[key] = { ...layoutFor(key), order: layoutFor(other).order };
+      next[other] = { ...layoutFor(other), order: layoutFor(key).order };
+    }
+    changeBoard({ ...board, layout: next });
+  };
+  const widgetProps = (key: string) => ({
+    className: `life-widget ${layoutFor(key).wide ? "wide" : ""}`,
+    style: { order: layoutFor(key).order },
+  });
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(new Date()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+  useEffect(() => {
+    const request = new AbortController();
+    void api.plans
+      .list(data.scope, request.signal)
+      .then((result) => {
+        if (!request.signal.aborted) {
+          setPlans(result.plans);
+          setPlanError(false);
+        }
+      })
+      .catch(() => {
+        if (!request.signal.aborted) setPlanError(true);
+      });
+    return () => request.abort();
+  }, [data.scope, data.records]);
+  const agenda = agendaEntries(data).slice(0, 3);
+  return (
+    <div className="life-dashboard">
+      <header className="dashboard-title">
+        <div>
+          <span>{now.toLocaleDateString([], { weekday: "long" })}</span>
+          <h1>{board.name}</h1>
+        </div>
+        <div className="dashboard-title-actions">
+          <label className="mobile-board-select">
+            Board
+            <select value={board.id} onChange={(event) => selectBoard(event.target.value)}>
+              {boards.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button aria-pressed={customizing} onClick={() => setCustomizing((value) => !value)}>
+            {customizing ? "Done" : "Customize"}
+          </button>
+          <button onClick={() => openView("settings")}>Settings</button>
+        </div>
+      </header>
+      <div className="life-widget-grid">
+        <section
+          {...widgetProps("clock")}
+          className={`${widgetProps("clock").className} clock-widget`}
+        >
+          {customizing && <DashboardWidgetTools widget="clock" change={changeLayout} />}
+          <span className="widget-kicker">Right now</span>
+          <time dateTime={now.toISOString()}>
+            {now.toLocaleTimeString([], {
+              hour: "numeric",
+              minute: "2-digit",
+              timeZone: data.profile.timeZone,
+            })}
+          </time>
+          <p>
+            {now.toLocaleDateString([], {
+              month: "long",
+              day: "numeric",
+              timeZone: data.profile.timeZone,
+            })}
+          </p>
+        </section>
+        <section
+          {...widgetProps("agenda")}
+          className={`${widgetProps("agenda").className} agenda-widget`}
+        >
+          {customizing && <DashboardWidgetTools widget="agenda" change={changeLayout} />}
+          <button className="widget-open" onClick={() => openView("today")}>
+            <span className="widget-kicker">Coming up</span>
+            <h2>{agenda.length ? `${agenda.length} things in view` : "A clear day"}</h2>
+            {agenda.map(({ record }) => (
+              <span key={record.id}>{record.title}</span>
+            ))}
+            <small>Open agenda</small>
+          </button>
+        </section>
+        <section
+          {...widgetProps("plans")}
+          className={`${widgetProps("plans").className} plan-widget`}
+        >
+          {customizing && <DashboardWidgetTools widget="plans" change={changeLayout} />}
+          <button className="widget-open" onClick={openPlans}>
+            <span className="widget-kicker">Plans</span>
+            <h2>{plans.length ? `${plans.length} saved` : "No checklists yet"}</h2>
+            {planError && <span>Plans are temporarily unavailable.</span>}
+            {plans.slice(0, 2).map((plan) => (
+              <span key={plan.record.id}>
+                {plan.record.title} · {plan.completedSteps}/{plan.totalSteps}
+              </span>
+            ))}
+            <small>Open plans</small>
+          </button>
+        </section>
+        {data.plugins.map((plugin) => (
+          <section
+            {...widgetProps(`plugin:${plugin.id}`)}
+            className={`${widgetProps(`plugin:${plugin.id}`).className} plugin-widget`}
+            key={plugin.id}
+          >
+            {customizing && (
+              <DashboardWidgetTools widget={`plugin:${plugin.id}`} change={changeLayout} />
+            )}
+            <button className="widget-open" onClick={() => openPlugin(plugin)}>
+              <span className="widget-kicker">App</span>
+              <h2>{plugin.name}</h2>
+              <p>{plugin.description}</p>
+              <WidgetData plugin={plugin} />
+              <small>Open app</small>
+            </button>
+          </section>
+        ))}
+        <section {...widgetProps("add")} className={`${widgetProps("add").className} add-widget`}>
+          {customizing && <DashboardWidgetTools widget="add" change={changeLayout} />}
+          <button className="widget-open" onClick={() => openView("space")}>
+            <span>＋</span>
+            <strong>Add or make an app</strong>
+            <small>Tell Ellie what would be useful.</small>
+          </button>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function DashboardWidgetTools({
+  widget,
+  change,
+}: {
+  widget: string;
+  change: (widget: string, change: "back" | "forward" | "size") => void;
+}) {
+  return (
+    <div className="dashboard-widget-tools" aria-label="Widget layout controls">
+      <button aria-label="Move widget earlier" onClick={() => change(widget, "back")}>
+        ←
+      </button>
+      <button aria-label="Move widget later" onClick={() => change(widget, "forward")}>
+        →
+      </button>
+      <button aria-label="Resize widget" onClick={() => change(widget, "size")}>
+        ↔
+      </button>
+    </div>
+  );
+}
+
 function Brand() {
   return (
     <div className="brand">
-      <span aria-hidden>e</span>
+      <img src={ellieIcon} alt="" />
       <strong>Ellie</strong>
     </div>
   );
@@ -784,13 +1363,16 @@ function Page({
 function Composer({
   onSend,
   busy,
+  text,
+  setText,
   placeholder = "Tell Ellie what’s on your mind",
 }: {
   onSend: (s: string) => void;
   busy: boolean;
+  text: string;
+  setText: (value: string) => void;
   placeholder?: string;
 }) {
-  const [text, setText] = useState("");
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (text.trim()) {
@@ -897,6 +1479,8 @@ function Chat({
   scope,
   busy,
   send,
+  draft,
+  setDraft,
   active,
   preferences,
   savedSettings,
@@ -918,6 +1502,8 @@ function Chat({
   scope: string;
   busy: boolean;
   send: (s: string) => void;
+  draft: string;
+  setDraft: (value: string) => void;
   active?: ConversationSummary;
   preferences: ConversationPreferenceState;
   savedSettings: Record<string, unknown>;
@@ -1006,45 +1592,39 @@ function Chat({
           retry={() => openConversation(active.id)}
         />
       )}
-      <div className="hello">
-        <span className="ellie-mark">e</span>
-        <h1>
-          {messages.length
-            ? "I’m here."
-            : `${name === "You" ? "" : `Hi ${name}. `}What shall we carry forward?`}
-        </h1>
-        {messages.length === 0 && (
-          <>
-            <p>Teach me something, make a plan, or ask what needs your attention.</p>
-            <div className="suggestions">
-              {["What should I know today?", "List reminders", "Help me plan something"].map(
-                (x) => (
-                  <button key={x} disabled={busy} onClick={() => send(x)}>
-                    {x}
-                  </button>
-                ),
-              )}
-            </div>
-            <small className="schedule-example">
-              You can also say “Pause reminder [exact title]”, “Resume reminder [exact title]”, or
-              “Cancel reminder [exact title]”. These change future delivery only.
-            </small>
-            {upcoming.length > 0 && (
-              <div className="glance">
-                <span>On the horizon</span>
-                {upcoming.map(({ record, when }) => (
-                  <div key={record.id}>
-                    <strong>{record.title}</strong>
-                    <small>
-                      {when.allDay ? friendlyDay(when.value) : friendly(String(when.value))}
-                    </small>
-                  </div>
-                ))}
+      {messages.length === 0 && (
+        <div className="hello">
+          <span className="ellie-mark">e</span>
+          <h1>{name === "You" ? "" : `Hi ${name}. `}What can I help with?</h1>
+          {messages.length === 0 && (
+            <>
+              <p>Ask a question, make a plan, or tell me about your day.</p>
+              <div className="suggestions">
+                {["What should I know today?", "List reminders", "Help me plan something"].map(
+                  (x) => (
+                    <button key={x} disabled={busy} onClick={() => send(x)}>
+                      {x}
+                    </button>
+                  ),
+                )}
               </div>
-            )}
-          </>
-        )}
-      </div>
+              {upcoming.length > 0 && (
+                <div className="glance">
+                  <span>On the horizon</span>
+                  {upcoming.map(({ record, when }) => (
+                    <div key={record.id}>
+                      <strong>{record.title}</strong>
+                      <small>
+                        {when.allDay ? friendlyDay(when.value) : friendly(String(when.value))}
+                      </small>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
       <div className="messages" aria-live="polite">
         {olderTurns.hasMore && (
           <button className="load-more" disabled={busy} onClick={() => void loadOlder()}>
@@ -1080,6 +1660,8 @@ function Chat({
       </div>
       <Composer
         onSend={send}
+        text={draft}
+        setText={setDraft}
         busy={busy || pendingIntentState === "loading" || pendingIntent?.state === "executing"}
         placeholder={
           pendingIntent?.state === "awaiting-fields"
@@ -1482,34 +2064,7 @@ function Today({
     setAgendaError("");
   }, [data.scope]);
   const allAgenda = [...baseAgenda, ...agendaExtras];
-  const byId = new Map(data.records.map((record) => [record.id, record]));
-  const entries = allAgenda
-    .filter((record) => {
-      if (!timedKinds.has(record.kind)) return false;
-      if (record.data.completed === true || record.data.cancelled === true) return false;
-      if (record.delivery?.status === "cancelled" || record.delivery?.status === "complete")
-        return false;
-      if (record.kind === "event" && record.data.type === "notification") return false;
-      if (record.relatedCompleted) return false;
-      return !record.relationships?.some((relation) => {
-        if (relation.type !== "need") return false;
-        const need = byId.get(relation.targetId);
-        return need?.data.completed === true || need?.data.cancelled === true;
-      });
-    })
-    .map((record) => ({
-      record,
-      when: agendaDate(record, data.profile.timeZone),
-    }))
-    .filter(
-      (
-        item,
-      ): item is {
-        record: LifeRecord;
-        when: { value: string | number; allDay: boolean };
-      } => Boolean(item.when),
-    )
-    .sort((a, b) => compareAgenda(a, b, data.profile.timeZone));
+  const entries = agendaEntries(data, allAgenda);
   const groups = new Map<string, typeof entries>();
   for (const entry of entries) {
     const key = dayKey(entry.when.value, data.profile.timeZone);
@@ -1645,12 +2200,16 @@ function World({
   data,
   refresh,
   notify,
+  initialTab = "all",
+  conversationRevision,
 }: {
   data: Bootstrap;
   refresh: () => Promise<void>;
   notify: (s: string) => void;
+  initialTab?: string;
+  conversationRevision: string;
 }) {
-  const [tab, setTab] = useState("all"),
+  const [tab, setTab] = useState(initialTab),
     [editing, setEditing] = useState<LifeRecord | null>(null),
     [extras, setExtras] = useState<LifeRecord[]>([]),
     [page, setPage] = useState(data.recordsPage),
@@ -1669,6 +2228,7 @@ function World({
     setSearchResults(null);
     setEditing(null);
   }, [data.scope]);
+  useEffect(() => setTab(initialTab), [initialTab]);
   const groups = ["all", "memory", "contact", "need", "source", "plans", "guidance"];
   const records = [...data.records, ...extras].filter(
     (r) =>
@@ -1690,7 +2250,11 @@ function World({
     }
   };
   return (
-    <Page title="Your world" lede="What Ellie knows, where it came from, and who can see it.">
+    <Page
+      title="Memory"
+      lede="Ellie remembers useful context from your conversations automatically. Open details here when you need them."
+    >
+      <ConversationMemory scope={data.scope} revision={conversationRevision} />
       <div className="tabs">
         {groups.map((g) => (
           <button key={g} className={tab === g ? "active" : ""} onClick={() => setTab(g)}>
@@ -1746,9 +2310,9 @@ function World({
         </p>
       )}
       {tab === "guidance" ? (
-        <Guidance data={data} refresh={refresh} notify={notify} />
+        <Guidance key={conversationRevision} data={data} refresh={refresh} notify={notify} />
       ) : tab === "plans" ? (
-        <Plans scope={data.scope} />
+        <Plans scope={data.scope} revision={conversationRevision} />
       ) : searchResults ? (
         searchResults.length ? (
           <div className="record-list search-results">
@@ -1855,7 +2419,39 @@ function World({
     </Page>
   );
 }
-function Plans({ scope }: { scope: string }) {
+function ConversationMemory({ scope, revision }: { scope: string; revision: string }) {
+  const [memory, setMemory] = useState<Awaited<ReturnType<typeof api.memory>>>();
+  const [error, setError] = useState(false);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    const request = new AbortController();
+    setMemory(undefined);
+    setError(false);
+    void api
+      .memory(scope, request.signal)
+      .then((value) => !request.signal.aborted && setMemory(value))
+      .catch(() => !request.signal.aborted && setError(true));
+    return () => request.abort();
+  }, [scope, revision]);
+  return (
+    <details
+      className="conversation-memory"
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>From conversations {memory ? `· ${memory.entries} recent notes` : ""}</summary>
+      {open &&
+        (memory?.summary ? (
+          <p>{memory.summary}</p>
+        ) : (
+          <p>{error ? "Conversation memory is unavailable." : "Checking…"}</p>
+        ))}
+      {open && memory?.partial && (
+        <small>This is a compact selection of your conversation notes.</small>
+      )}
+    </details>
+  );
+}
+function Plans({ scope, revision }: { scope: string; revision: string }) {
   const [plans, setPlans] = useState<LifePlan[]>([]),
     [selected, setSelected] = useState<LifePlan | null>(null),
     [loading, setLoading] = useState(true),
@@ -1921,7 +2517,7 @@ function Plans({ scope }: { scope: string }) {
       generationRef.current++;
       requestRef.current?.abort();
     };
-  }, [scope]);
+  }, [scope, revision]);
   const toggle = async (stepId: string, completed: boolean) => {
     if (!selected || busy) return;
     const requestedScope = scope;
@@ -3003,8 +3599,10 @@ function WidgetData({ plugin }: { plugin: PluginSummary }) {
         {games.length ? (
           games.map((game, index) => (
             <p key={String(game.id ?? index)}>
-              <strong>{String(game.away ?? "Away")}</strong> at{" "}
-              <strong>{String(game.home ?? "Home")}</strong>
+              <span className="game-teams">
+                <strong>{String(game.away ?? "Away")}</strong> at{" "}
+                <strong>{String(game.home ?? "Home")}</strong>
+              </span>
               <span>{String(game.status ?? "Scheduled")}</span>
             </p>
           ))

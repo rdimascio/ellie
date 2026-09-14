@@ -108,6 +108,11 @@ export const api = {
   },
   bootstrap: (scope?: string) =>
     request<Bootstrap>(`/api/life/bootstrap${scope ? `?scope=${encodeURIComponent(scope)}` : ""}`),
+  memory: (scope: string, signal?: AbortSignal) =>
+    request<{ summary: string; entries: number; partial: boolean; revision: string }>(
+      `/api/life/memory?scope=${encodeURIComponent(scope)}`,
+      { signal },
+    ),
   chat: (
     message: string,
     scope: string,

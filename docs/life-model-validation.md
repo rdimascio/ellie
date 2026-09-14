@@ -71,3 +71,11 @@ The final run passed in 12.7 seconds using two model requests. It saved three un
 - Runner: [llama.cpp b10926](https://github.com/ggml-org/llama.cpp/releases/tag/b10926), `llama-b10926-bin-macos-arm64.tar.gz`, 11,154,497 bytes, SHA-256 `1f0b05fe9b1fd01bb0ce1feb7bb1414a89b273a75b6ac58eeff9e2888924d5ac`.
 
 Downloads were hash-verified before execution. The temporary runner used a 32,768-token context, one parallel slot, four CPU threads and Metal offload, bound only to 127.0.0.1 with a matching restricted CORS origin and web UI/agent features disabled. Temporary logs and provenance are in `/tmp/ellie-life-model-acceptance`; these files are not a durable release artifact.
+
+## Automatic conversation-memory acceptance
+
+The follow-up after the dashboard correction added `scripts/verify-life-auto-memory.mjs`. It starts isolated synthetic stores and the actual HTTP service against the pinned local model, submits an ordinary preference statement without a “remember” command, fully closes and reopens the service and stores, and asks for the preferences in a new conversation.
+
+The final run passed in **14.369 seconds with two inference requests**. The model recalled vegetarian meals, avoiding mushrooms and limiting dinner suggestions to two choices. The script verifies generated Markdown, context after restart, no explicit memory record requirement, and no task or app side effects. Synthetic output: `/tmp/ellie-real-memory-acceptance-final.log`.
+
+The model still offered unsolicited dinner ideas when acknowledging the initial statement, despite an instruction to keep the acknowledgment brief. In its readback it retained the two-choice preference but said no general response style was specified. These are limitations of this small model's response quality. The current summary pipeline uses deterministic extraction and bounded selection; this acceptance does not establish semantic consolidation, comprehensive factual accuracy or model-weight training.

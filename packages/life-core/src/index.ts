@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
-export const LIFE_SCHEMA_VERSION = 5;
+export const LIFE_SCHEMA_VERSION = 6;
 export const LIFE_RECORD_KINDS = [
   "memory",
   "contact",
@@ -107,7 +107,8 @@ export type PersonalLifeExportItem =
       state: ConversationPreferenceState;
     }
   | { type: "pending-intent"; pendingIntent: PendingLifeIntent }
-  | { type: "reminder-reschedule"; reschedule: ReminderRescheduleState };
+  | { type: "reminder-reschedule"; reschedule: ReminderRescheduleState }
+  | { type: "automatic-prompt-memory"; memory: AutomaticPromptMemory };
 export interface PersonalLifeSummary {
   generation: number;
   records: number;
@@ -120,6 +121,7 @@ export interface PersonalLifeSummary {
   conversationPreferences: number;
   pendingIntents: number;
   reminderReschedules: number;
+  automaticPromptMemories: number;
   bytes: number;
 }
 export interface PersonalLifeExportPage {
@@ -193,6 +195,24 @@ export interface ConversationPreferences {
 export interface ConversationPreferenceState {
   preferences: ConversationPreferences;
   revision: number;
+}
+export interface AutomaticPromptMemory {
+  id: string;
+  conversationId: string;
+  turnId: string;
+  scope: LifeScope;
+  chatEpoch: number;
+  prompt: string;
+  markdown: string;
+  summary: string;
+  category: "correction" | "fact" | "general" | "transient";
+  suppressed: boolean;
+  createdAt: number;
+}
+export interface AutomaticPromptMemoryPage {
+  items: AutomaticPromptMemory[];
+  hasMore: boolean;
+  nextCursor?: string;
 }
 export interface LifeGroup {
   id: string;
@@ -495,6 +515,7 @@ export class LifeStore {
       else if (version === 2) this.migrateV3();
       else if (version === 3) this.migrateV4();
       else if (version === 4) this.migrateV5();
+      else if (version === 5) this.migrateV6();
       this.db
         .prepare(
           "UPDATE conversation_turns SET status='interrupted',updated_at=? WHERE status='pending'",
@@ -606,6 +627,25 @@ export class LifeStore {
     CREATE TRIGGER conversation_preferences_generation_update AFTER UPDATE ON conversation_preferences BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
     CREATE TRIGGER conversation_preferences_generation_delete AFTER DELETE ON conversation_preferences BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
     PRAGMA user_version=5;`),
+    );
+    this.migrateV6();
+  }
+  private migrateV6(): void {
+    this.transaction(() =>
+      this.db.exec(`
+    CREATE TABLE automatic_prompt_memories(id TEXT PRIMARY KEY,conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,turn_id TEXT NOT NULL REFERENCES conversation_turns(id) ON DELETE CASCADE,user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,chat_epoch INTEGER NOT NULL,prompt TEXT NOT NULL,markdown TEXT NOT NULL,summary TEXT NOT NULL,category TEXT NOT NULL CHECK(category IN('correction','fact','general','transient')),suppressed INTEGER NOT NULL DEFAULT 0 CHECK(suppressed IN(0,1)),created_at INTEGER NOT NULL,UNIQUE(user_id,turn_id)) STRICT;
+    CREATE TABLE automatic_prompt_memory_cache(user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,max_entries INTEGER NOT NULL,max_bytes INTEGER NOT NULL,summary_markdown TEXT NOT NULL,journal_markdown TEXT NOT NULL,entries INTEGER NOT NULL,partial INTEGER NOT NULL,omitted INTEGER NOT NULL,revision TEXT NOT NULL,PRIMARY KEY(user_id,scope_type,scope_id)) STRICT;
+    CREATE TABLE automatic_prompt_memory_forget_generation(user_id TEXT NOT NULL,scope_type TEXT NOT NULL CHECK(scope_type IN('user','group')),scope_id TEXT NOT NULL,generation INTEGER NOT NULL,PRIMARY KEY(user_id,scope_type,scope_id)) STRICT;
+    CREATE INDEX automatic_prompt_memories_scope ON automatic_prompt_memories(user_id,scope_type,scope_id,created_at,id);
+    CREATE TRIGGER automatic_prompt_memories_generation_insert AFTER INSERT ON automatic_prompt_memories BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER automatic_prompt_memories_generation_update AFTER UPDATE ON automatic_prompt_memories BEGIN INSERT INTO personal_generations VALUES(NEW.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER automatic_prompt_memories_generation_delete AFTER DELETE ON automatic_prompt_memories BEGIN INSERT INTO personal_generations VALUES(OLD.user_id,1) ON CONFLICT(user_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER automatic_prompt_memories_cache_insert AFTER INSERT ON automatic_prompt_memories BEGIN DELETE FROM automatic_prompt_memory_cache WHERE user_id=NEW.user_id AND scope_type=NEW.scope_type AND scope_id=NEW.scope_id; END;
+    CREATE TRIGGER automatic_prompt_memories_cache_update AFTER UPDATE ON automatic_prompt_memories BEGIN DELETE FROM automatic_prompt_memory_cache WHERE user_id=OLD.user_id AND scope_type=OLD.scope_type AND scope_id=OLD.scope_id; DELETE FROM automatic_prompt_memory_cache WHERE user_id=NEW.user_id AND scope_type=NEW.scope_type AND scope_id=NEW.scope_id; END;
+    CREATE TRIGGER automatic_prompt_memories_cache_delete AFTER DELETE ON automatic_prompt_memories BEGIN DELETE FROM automatic_prompt_memory_cache WHERE user_id=OLD.user_id AND scope_type=OLD.scope_type AND scope_id=OLD.scope_id; END;
+    CREATE TRIGGER automatic_prompt_memories_forget_update AFTER UPDATE OF suppressed ON automatic_prompt_memories WHEN OLD.suppressed=0 AND NEW.suppressed=1 BEGIN INSERT INTO automatic_prompt_memory_forget_generation VALUES(NEW.user_id,NEW.scope_type,NEW.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
+    CREATE TRIGGER automatic_prompt_memories_forget_delete AFTER DELETE ON automatic_prompt_memories BEGIN INSERT INTO automatic_prompt_memory_forget_generation VALUES(OLD.user_id,OLD.scope_type,OLD.scope_id,1) ON CONFLICT(user_id,scope_type,scope_id) DO UPDATE SET generation=generation+1; END;
+    PRAGMA user_version=6;`),
     );
   }
   private actor(actor: LifeActor): string {
@@ -2029,6 +2069,12 @@ export class LifeStore {
       digest.update(
         `${row.level}\0${row.scope_id}\0${row.key}\0${row.value_json}\0${row.updated_at}\0`,
       );
+    const forgotten = this.db
+      .prepare(
+        "SELECT generation FROM automatic_prompt_memory_forget_generation WHERE user_id=? AND scope_type=? AND scope_id=?",
+      )
+      .get(user, scope.type, scope.id) as { generation?: number } | undefined;
+    digest.update(`forgotten\0${Number(forgotten?.generation ?? 0)}\0`);
     return digest.digest("hex");
   }
   chatEpoch(actor: LifeActor): number {
@@ -3239,6 +3285,282 @@ export class LifeStore {
       ])
       .slice(-limit);
   }
+  private automaticPromptMemory(row: Record<string, unknown>): AutomaticPromptMemory {
+    return {
+      id: String(row.id),
+      conversationId: String(row.conversation_id),
+      turnId: String(row.turn_id),
+      scope: { type: String(row.scope_type) as LifeScope["type"], id: String(row.scope_id) },
+      chatEpoch: Number(row.chat_epoch),
+      prompt: String(row.prompt),
+      markdown: String(row.markdown),
+      summary: String(row.summary),
+      category: String(row.category) as AutomaticPromptMemory["category"],
+      suppressed: Boolean(row.suppressed),
+      createdAt: Number(row.created_at),
+    };
+  }
+  captureAutomaticPromptMemory(
+    actor: LifeActor,
+    input: { conversationId: string; turnId: string },
+  ): AutomaticPromptMemory {
+    const user = this.actor(actor),
+      conversation = this.accessibleConversation(actor, input.conversationId),
+      turnId = identifier(input.turnId, "turnId"),
+      prior = this.db
+        .prepare("SELECT * FROM automatic_prompt_memories WHERE user_id=? AND turn_id=?")
+        .get(user, turnId) as Record<string, unknown> | undefined;
+    if (prior) {
+      if (String(prior.conversation_id) !== conversation.id)
+        throw new LifeConflictError("Prompt memory turn is already bound.");
+      return this.automaticPromptMemory(prior);
+    }
+    const row = this.db
+      .prepare("SELECT * FROM conversation_turns WHERE id=? AND conversation_id=? AND user_id=?")
+      .get(turnId, conversation.id, user) as Record<string, unknown> | undefined;
+    if (!row) throw new LifeAccessError("Conversation turn unavailable.");
+    const prompt = String(row.user_content),
+      normalized = prompt.replace(/\s+/g, " ").trim(),
+      lower = normalized.toLocaleLowerCase(),
+      forgetRequest = /^(?:please\s+)?(?:forget|do not remember|don't remember)\b/i.test(
+        normalized,
+      ),
+      category: AutomaticPromptMemory["category"] =
+        forgetRequest || /\b(in this conversation|for this (?:chat|conversation))\b/.test(lower)
+          ? "transient"
+          : /^(?:actually\b|correction\s*:|i meant\b)/i.test(normalized)
+            ? "correction"
+            : !/[?]\s*$/.test(normalized) &&
+                (/\b(?:i|i'm|my|we|our)\b/i.test(normalized) ||
+                  /\b(?:prefer|vegetarian|allergic|next time|too verbose|too brief|keep responses|same (?:widget|dashboard|layout))\b/i.test(
+                    normalized,
+                  ))
+              ? "fact"
+              : "general",
+      summary = category === "transient" ? "" : normalized,
+      createdAt = Number(row.created_at),
+      markdown = `## ${new Date(createdAt).toISOString()}\n\n${prompt}\n`;
+    this.db
+      .prepare("INSERT INTO automatic_prompt_memories VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        this.makeId(),
+        conversation.id,
+        turnId,
+        user,
+        conversation.scope.type,
+        conversation.scope.id,
+        this.chatEpoch(actor),
+        prompt,
+        markdown,
+        summary,
+        category,
+        forgetRequest ? 1 : 0,
+        createdAt,
+      );
+    return this.automaticPromptMemory(
+      this.db
+        .prepare("SELECT * FROM automatic_prompt_memories WHERE user_id=? AND turn_id=?")
+        .get(user, turnId) as Record<string, unknown>,
+    );
+  }
+  listAutomaticPromptMemories(
+    actor: LifeActor,
+    input: { scope: LifeScope; limit?: number; cursor?: string; uncapturedOnly?: boolean },
+  ): AutomaticPromptMemoryPage {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw new TypeError("Prompt memory limit is invalid.");
+    let cursor: { user: string; scope: string; sequence: number } | undefined;
+    if (input.cursor)
+      try {
+        cursor = JSON.parse(Buffer.from(input.cursor, "base64url").toString("utf8"));
+        if (
+          cursor?.user !== user ||
+          cursor.scope !== `${scope.type}:${scope.id}` ||
+          !Number.isSafeInteger(cursor.sequence)
+        )
+          throw new Error();
+      } catch {
+        throw new TypeError("Prompt memory cursor is invalid.");
+      }
+    const rows = this.db
+        .prepare(
+          `SELECT rowid memory_rowid,* FROM automatic_prompt_memories WHERE user_id=? AND scope_type=? AND scope_id=?${cursor ? " AND rowid<?" : ""} ORDER BY rowid DESC LIMIT ?`,
+        )
+        .all(user, scope.type, scope.id, ...(cursor ? [cursor.sequence] : []), limit + 1) as Record<
+        string,
+        unknown
+      >[],
+      page = rows.slice(0, limit),
+      result: AutomaticPromptMemoryPage = {
+        items: page.map((row) => this.automaticPromptMemory(row)),
+        hasMore: rows.length > limit,
+      };
+    if (result.hasMore && page.length) {
+      const last = page.at(-1)!;
+      result.nextCursor = Buffer.from(
+        JSON.stringify({
+          user,
+          scope: `${scope.type}:${scope.id}`,
+          sequence: Number(last.memory_rowid),
+        }),
+      ).toString("base64url");
+    }
+    return result;
+  }
+  automaticPromptSummaryMemories(
+    actor: LifeActor,
+    input: { scope: LifeScope; limit?: number },
+  ): AutomaticPromptMemory[] {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      limit = input.limit ?? 100;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200)
+      throw new TypeError("Prompt summary limit is invalid.");
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM automatic_prompt_memories WHERE user_id=? AND scope_type=? AND scope_id=?
+           AND suppressed=0 AND category<>'transient'
+           ORDER BY (category IN('fact','correction')) DESC,rowid DESC LIMIT ?`,
+        )
+        .all(user, scope.type, scope.id, limit) as Record<string, unknown>[]
+    ).map((row) => this.automaticPromptMemory(row));
+  }
+  automaticPromptMemoryCache(
+    actor: LifeActor,
+    input: { scope: LifeScope; maxEntries: number; maxBytes: number },
+  ):
+    | {
+        summaryMarkdown: string;
+        journalMarkdown: string;
+        entries: number;
+        partial: boolean;
+        omitted: number;
+        revision: string;
+      }
+    | undefined {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      row = this.db
+        .prepare(
+          "SELECT * FROM automatic_prompt_memory_cache WHERE user_id=? AND scope_type=? AND scope_id=? AND max_entries=? AND max_bytes=?",
+        )
+        .get(user, scope.type, scope.id, input.maxEntries, input.maxBytes) as
+        | Record<string, unknown>
+        | undefined;
+    if (!row) return;
+    return {
+      summaryMarkdown: String(row.summary_markdown),
+      journalMarkdown: String(row.journal_markdown),
+      entries: Number(row.entries),
+      partial: Boolean(row.partial),
+      omitted: Number(row.omitted),
+      revision: String(row.revision),
+    };
+  }
+  cacheAutomaticPromptMemory(
+    actor: LifeActor,
+    input: {
+      scope: LifeScope;
+      maxEntries: number;
+      maxBytes: number;
+      summaryMarkdown: string;
+      journalMarkdown: string;
+      entries: number;
+      partial: boolean;
+      omitted: number;
+      revision: string;
+    },
+  ): void {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope);
+    this.db
+      .prepare("INSERT OR REPLACE INTO automatic_prompt_memory_cache VALUES(?,?,?,?,?,?,?,?,?,?,?)")
+      .run(
+        user,
+        scope.type,
+        scope.id,
+        input.maxEntries,
+        input.maxBytes,
+        input.summaryMarkdown,
+        input.journalMarkdown,
+        input.entries,
+        input.partial ? 1 : 0,
+        input.omitted,
+        input.revision,
+      );
+  }
+  suppressAutomaticPromptMemory(actor: LifeActor, turnIdInput: string): void {
+    const user = this.actor(actor),
+      turnId = identifier(turnIdInput, "turnId"),
+      row = this.db
+        .prepare("SELECT * FROM automatic_prompt_memories WHERE user_id=? AND turn_id=?")
+        .get(user, turnId) as Record<string, unknown> | undefined;
+    if (!row) return;
+    this.scope(actor, {
+      type: String(row.scope_type) as LifeScope["type"],
+      id: String(row.scope_id),
+    });
+    this.db
+      .prepare("UPDATE automatic_prompt_memories SET suppressed=1 WHERE user_id=? AND turn_id=?")
+      .run(user, turnId);
+  }
+  forgetAutomaticPromptMemories(
+    actor: LifeActor,
+    input: { scope: LifeScope; query: string },
+  ): number {
+    const user = this.actor(actor),
+      scope = this.scope(actor, input.scope),
+      query = text(input.query, "forget query", 500).toLocaleLowerCase();
+    const result = this.db
+      .prepare(
+        `UPDATE automatic_prompt_memories SET suppressed=1 WHERE user_id=? AND scope_type=? AND scope_id=?
+         AND suppressed=0 AND summary<>'' AND instr(lower(summary),?)>0`,
+      )
+      .run(user, scope.type, scope.id, query);
+    return Number(result.changes);
+  }
+  backfillAutomaticPromptMemories(
+    actor: LifeActor,
+    limitInput = 100,
+  ): { captured: number; scanned: number; hasMore: boolean } {
+    const user = this.actor(actor);
+    if (!Number.isSafeInteger(limitInput) || limitInput < 1 || limitInput > 200)
+      throw new TypeError("Prompt memory backfill limit is invalid.");
+    const rows = this.db
+      .prepare(
+        `SELECT t.id turn_id,t.conversation_id FROM conversation_turns t
+         JOIN conversations c ON c.id=t.conversation_id
+         LEFT JOIN automatic_prompt_memories m ON m.user_id=t.user_id AND m.turn_id=t.id
+         WHERE t.user_id=? AND m.id IS NULL AND
+           ((c.scope_type='user' AND c.scope_id=?) OR
+            (c.scope_type='group' AND EXISTS(SELECT 1 FROM group_members gm WHERE gm.group_id=c.scope_id AND gm.user_id=?)))
+         ORDER BY t.rowid LIMIT ?`,
+      )
+      .all(user, user, user, limitInput + 1) as Array<{
+      turn_id: string;
+      conversation_id: string;
+    }>;
+    let captured = 0;
+    for (const row of rows.slice(0, limitInput))
+      try {
+        this.captureAutomaticPromptMemory(actor, {
+          conversationId: row.conversation_id,
+          turnId: row.turn_id,
+        });
+        captured++;
+      } catch (error) {
+        if (!(error instanceof LifeAccessError)) throw error;
+      }
+    return {
+      captured,
+      scanned: Math.min(rows.length, limitInput),
+      hasMore: rows.length > limitInput,
+    };
+  }
   recentConversationOperation(
     actor: LifeActor,
     id: string,
@@ -3337,9 +3659,12 @@ export class LifeStore {
           (SELECT count(*) FROM conversation_preferences WHERE user_id=?) conversation_preferences,
           (SELECT count(*) FROM pending_life_intents WHERE user_id=?) pending_intents,
           (SELECT count(*) FROM reminder_reschedules WHERE user_id=?) reminder_reschedules,
-          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(preferences_json AS BLOB))),0) FROM conversation_preferences WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(intent_json AS BLOB))+length(CAST(missing_json AS BLOB))+length(CAST(question AS BLOB))+length(CAST(coalesce(target_json,'') AS BLOB))+length(CAST(coalesce(outcome_json,'') AS BLOB))),0) FROM pending_life_intents WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(operation_id AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(replaces_task_id AS BLOB))+length(CAST(coalesce(replacement_task_id,'') AS BLOB))),0) FROM reminder_reschedules WHERE user_id=?) bytes
+          (SELECT count(*) FROM automatic_prompt_memories WHERE user_id=?) automatic_prompt_memories,
+          coalesce(sum(length(CAST(title AS BLOB))+length(CAST(coalesce(body,'') AS BLOB))+length(CAST(data_json AS BLOB))+length(CAST(relationships_json AS BLOB))+length(CAST(provenance_json AS BLOB))),0)+(SELECT coalesce(sum(length(CAST(key AS BLOB))+length(CAST(value_json AS BLOB))),0) FROM settings WHERE level='user' AND scope_id=?)+(SELECT coalesce(sum(length(CAST(user_content AS BLOB))+length(CAST(coalesce(assistant_content,'') AS BLOB))+length(CAST(coalesce(result_json,'') AS BLOB))+length(CAST(evidence_json AS BLOB))),0) FROM conversation_turns WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(preferences_json AS BLOB))),0) FROM conversation_preferences WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(intent_json AS BLOB))+length(CAST(missing_json AS BLOB))+length(CAST(question AS BLOB))+length(CAST(coalesce(target_json,'') AS BLOB))+length(CAST(coalesce(outcome_json,'') AS BLOB))),0) FROM pending_life_intents WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(operation_id AS BLOB))+length(CAST(record_id AS BLOB))+length(CAST(replaces_task_id AS BLOB))+length(CAST(coalesce(replacement_task_id,'') AS BLOB))),0) FROM reminder_reschedules WHERE user_id=?)+(SELECT coalesce(sum(length(CAST(prompt AS BLOB))+length(CAST(markdown AS BLOB))+length(CAST(summary AS BLOB))),0) FROM automatic_prompt_memories WHERE user_id=?) bytes
           FROM records WHERE scope_type='user' AND scope_id=?`)
         .get(
+          user,
+          user,
           user,
           user,
           user,
@@ -3366,6 +3691,7 @@ export class LifeStore {
       conversationPreferences: Number(row.conversation_preferences),
       pendingIntents: Number(row.pending_intents),
       reminderReschedules: Number(row.reminder_reschedules),
+      automaticPromptMemories: Number(row.automatic_prompt_memories),
       bytes: Number(row.bytes),
     };
   }
@@ -3399,6 +3725,7 @@ export class LifeStore {
             "conversation-preferences",
             "pending-intent",
             "reminder-reschedule",
+            "automatic-prompt-memory",
           ].includes(cursor.type) ||
           typeof cursor.key !== "string"
         )
@@ -3416,9 +3743,12 @@ export class LifeStore {
         UNION ALL SELECT 'conversation-preferences' type,p.conversation_id key,p.updated_at FROM conversation_preferences p JOIN conversations c ON c.id=p.conversation_id WHERE p.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
         UNION ALL SELECT 'pending-intent' type,p.id key,p.updated_at FROM pending_life_intents p JOIN conversations c ON c.id=p.conversation_id WHERE p.user_id=? AND (c.scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=c.scope_id AND m.user_id=?))
         UNION ALL SELECT 'reminder-reschedule' type,operation_id key,updated_at FROM reminder_reschedules r WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=r.scope_id AND m.user_id=?))
+        UNION ALL SELECT 'automatic-prompt-memory' type,id key,created_at updated_at FROM automatic_prompt_memories a WHERE user_id=? AND (scope_type='user' OR EXISTS(SELECT 1 FROM group_members m WHERE m.group_id=a.scope_id AND m.user_id=?))
       ) WHERE (? IS NULL OR updated_at<? OR (updated_at=? AND (type<? OR (type=? AND key<?))))
       ORDER BY updated_at DESC,type DESC,key DESC LIMIT ?`)
       .all(
+        user,
+        user,
         user,
         user,
         user,
@@ -3446,7 +3776,8 @@ export class LifeStore {
         | "conversation-turn"
         | "conversation-preferences"
         | "pending-intent"
-        | "reminder-reschedule";
+        | "reminder-reschedule"
+        | "automatic-prompt-memory";
       key: string;
       updated_at: number;
     }>;
@@ -3469,6 +3800,9 @@ export class LifeStore {
       ),
       rescheduleStatement = this.db.prepare(
         "SELECT * FROM reminder_reschedules WHERE operation_id=? AND user_id=?",
+      ),
+      automaticMemoryStatement = this.db.prepare(
+        "SELECT * FROM automatic_prompt_memories WHERE id=? AND user_id=?",
       ),
       fingerprintByScope = new Map<string, string>(),
       items: PersonalLifeExportItem[] = [];
@@ -3527,7 +3861,7 @@ export class LifeStore {
         if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
         this.accessibleConversation(actor, String(found.conversation_id));
         item = { type: "pending-intent", pendingIntent: this.pendingRow(found) };
-      } else {
+      } else if (row.type === "reminder-reschedule") {
         const found = rescheduleStatement.get(row.key, user) as Record<string, unknown> | undefined;
         if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
         this.scope(actor, {
@@ -3535,6 +3869,16 @@ export class LifeStore {
           id: String(found.scope_id),
         });
         item = { type: "reminder-reschedule", reschedule: this.rescheduleRow(found) };
+      } else {
+        const found = automaticMemoryStatement.get(row.key, user) as
+          | Record<string, unknown>
+          | undefined;
+        if (!found) throw new LifeConflictError("Personal data changed; review a fresh export.");
+        this.scope(actor, {
+          type: String(found.scope_type) as LifeScope["type"],
+          id: String(found.scope_id),
+        });
+        item = { type: "automatic-prompt-memory", memory: this.automaticPromptMemory(found) };
       }
       const itemBytes = Buffer.byteLength(JSON.stringify(item));
       if (items.length && pageBytes + itemBytes > 6_000_000) break;

@@ -6,7 +6,7 @@ The implementation is in `/Users/ryan/ellie-life-harness` on `codex/life-harness
 
 ## Use it
 
-The verified preview is already open in the Codex in-app browser at `http://127.0.0.1:49569/`. Its authenticated browser session and isolated local model are left running. The overnight heartbeat is paused.
+The verified preview is already open in the Codex in-app browser at `http://127.0.0.1:55869/`. Its authenticated browser session and isolated local model are left running. The overnight heartbeat is paused.
 
 The morning preview uses private state at `/Users/ryan/.ellie-life-preview` and the hash-verified local Qwen 4B model used for acceptance. Its browser launch link is issued when the preview starts. The link is single-use and expires after ten minutes; an established browser session lasts twelve hours.
 
@@ -31,7 +31,8 @@ The [runbook](life-runbook.md) covers model configuration, private data controls
 
 ## Working features
 
-- Durable private memory, contacts, birthdays, needs, events, timers, reminders, routines and named shared spaces.
+- Automatic private Markdown memory from every accepted prompt, with retained-conversation backfill, cached summaries and later-session context.
+- Durable contacts, birthdays, needs, events, timers, reminders, routines and named shared spaces.
 - Default, group, user and conversation preferences, with private chat history and feedback.
 - Teaching from text, HTML, email/transcripts, DOCX, PDF and PNG/JPEG; retrieval, citations, source invalidation and adopted guidance.
 - Calendar/contact import previews, saved checklists, completion/reopening and preparation notices.
@@ -42,7 +43,7 @@ The [runbook](life-runbook.md) covers model configuration, private data controls
 
 Start with a few conversations:
 
-1. “Remember that I prefer morning appointments.”
+1. “I prefer morning appointments.”
 2. “Remind me tomorrow at 10 to call Mum.”
 3. “Create a plan called Doctor visit: Confirm appointment; Gather forms; Prepare questions.”
 4. “Complete step 2 of plan Doctor visit.”
@@ -50,11 +51,11 @@ Start with a few conversations:
 6. “Build an arcade shooter with a high score widget.”
 7. “Build an MLB standings and today's games widget.”
 
-Your world exposes saved knowledge and plans; Your space holds apps; Today and Activity show commitments and work.
+The restored dashboard holds upcoming commitments, plans and generated app widgets. A glowing orb at the bottom center opens conversation above the board. Create or switch boards in the rail and use Customize to move or resize widgets. Detailed Memory, Apps and Activity tools are under More. Ellie generates [automatic Markdown memory](life-automatic-memory.md) from conversations; there is no upload or setup step for ordinary remembering.
 
 ## Evidence and remaining work
 
-The final integrated checks passed: **562 tests, 561 passed, one existing skip, zero failures**, plus lint, formatting, contracts, all TypeScript projects and both builds. Real authenticated browser acceptance passed. Actual local-model checks exercised conversational actions, app persistence, private improvement review and checklist creation/readback. Exact results and synthetic artifacts are recorded in the [overnight checkpoint](overnight-build.md) and [model validation report](life-model-validation.md).
+The final integrated checks passed: **568 tests, 567 passed, one existing skip, zero failures**, plus lint, formatting, contracts, all TypeScript projects and both builds. Real authenticated browser acceptance passed. Actual local-model checks exercised conversational actions, app persistence, private improvement review and checklist creation/readback. Exact results and synthetic artifacts are recorded in the [overnight checkpoint](overnight-build.md) and [model validation report](life-model-validation.md).
 
 This is not the entire unrestricted product vision. Native continuous location, notifications while the Mac is asleep, account connectors, multi-device identity/invitations/sync, arbitrary server-side plugins, cloud processing and model-weight training still need separate integrations. Current context suggestions use explicit fresh signals. Plans save checklist text; their steps do not execute automatically.
 

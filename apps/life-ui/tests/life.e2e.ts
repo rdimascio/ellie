@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { crc32 } from "node:zlib";
 import { createServer as createHttpServer } from "node:http";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { LifeStore } from "../../../packages/life-core/src/index.ts";
 import { createLifeHarness } from "../../../packages/life-harness/src/index.ts";
 import { extractDocument } from "../../../packages/life-ingest/src/index.ts";
@@ -297,6 +297,32 @@ try {
   let listening = await server.listen();
   const context = await browser.newContext({ viewport: { width: 1440, height: 950 } });
   const page = await context.newPage();
+  const closeChat = async () => {
+    const close = page.getByRole("button", { name: "Close conversation", exact: true });
+    if (await close.isVisible()) await close.click();
+  };
+  const openChat = async () => {
+    if (!(await page.locator(".conversation-overlay").isVisible()))
+      await page.getByRole("button", { name: "Talk to Ellie", exact: true }).click();
+    await page.getByLabel("Message Ellie").waitFor();
+  };
+  const selectScope = async (scope: string) => {
+    const wasOpen = await page.locator(".conversation-overlay").isVisible();
+    await closeChat();
+    await page.getByLabel("Sharing with").selectOption(scope);
+    if (wasOpen) await openChat();
+  };
+  const openSettings = async () => {
+    await closeChat();
+    await page.locator("aside .settings-link").click();
+  };
+  const openTool = async (name: "Today" | "Memory" | "Apps" | "Activity") => {
+    await closeChat();
+    const more = page.locator("aside details.rail-more");
+    if ((await more.getAttribute("open")) === null) await more.locator("summary").click();
+    await more.getByRole("button", { name, exact: true }).click();
+    if (name === "Memory") await page.getByRole("button", { name: "all", exact: true }).click();
+  };
   const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
   if (artifactDir) await mkdir(artifactDir, { recursive: true });
   const errors: string[] = [];
@@ -307,9 +333,55 @@ try {
       chatPosts.push(request.postDataJSON() as Record<string, unknown>);
   });
   await page.goto(listening.launchUrl);
-  await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   assert.equal(new URL(page.url()).hash, "", "launch token fragment is stripped");
+  assert.equal(await page.locator("aside details.rail-more").getAttribute("open"), null);
+  await page.getByRole("button", { name: "New board" }).click();
+  await page.getByLabel("New dashboard name").fill("Work");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await page.getByLabel("Rename Work dashboard").fill("Projects");
+  await page.getByRole("button", { name: "Customize" }).click();
+  const clockWidget = page.locator(".clock-widget");
+  await clockWidget.getByRole("button", { name: "Resize widget" }).click();
+  await clockWidget.getByRole("button", { name: "Move widget later" }).click();
+  const savedClockOrder = await clockWidget.evaluate((element) => ({
+    order: (element as HTMLElement).style.order,
+    wide: element.classList.contains("wide"),
+  }));
+  assert.equal(savedClockOrder.wide, true);
+  await page.getByRole("button", { name: "Done" }).click();
+  await page.reload();
+  await page.getByRole("heading", { name: "Projects", exact: true }).waitFor();
+  assert.equal(await page.getByRole("heading", { name: "Projects" }).count(), 1);
+  assert.deepEqual(
+    await page.locator(".clock-widget").evaluate((element) => ({
+      order: (element as HTMLElement).style.order,
+      wide: element.classList.contains("wide"),
+    })),
+    savedClockOrder,
+  );
+  await page.getByRole("button", { name: "Open Home dashboard" }).click();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await page.getByRole("button", { name: "Delete Projects dashboard" }).click();
+  assert.equal(await page.getByLabel("Rename Projects dashboard").count(), 0);
 
+  assert.equal(await page.locator(".chat-widget").count(), 0);
+  if (artifactDir)
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-orb-dashboard-empty.png"),
+      fullPage: false,
+    });
+  const orb = page.getByRole("button", { name: "Talk to Ellie", exact: true });
+  const orbBounds = await orb.boundingBox();
+  assert.ok(orbBounds && Math.abs(orbBounds.x + orbBounds.width / 2 - 720) < 2);
+  await openChat();
+  await page.getByLabel("Message Ellie").fill("an unsent thought");
+  await page.keyboard.press("Escape");
+  await page.locator(".conversation-overlay").waitFor({ state: "detached" });
+  await page.waitForFunction(() => document.activeElement?.matches(".ellie-orb"));
+  await openChat();
+  assert.equal(await page.getByLabel("Message Ellie").inputValue(), "an unsent thought");
   await page.getByLabel("Message Ellie").fill("remember that I prefer morning appointments");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
@@ -340,7 +412,11 @@ try {
     beforeReplay,
     "replaying the same request id does not create another turn",
   );
+  await closeChat();
   await page.reload();
+  await page.locator(".life-dashboard").waitFor();
+  assert.equal(await page.locator(".conversation-overlay").count(), 0);
+  await openChat();
   await page
     .locator(".messages article.you p")
     .getByText("remember that I prefer morning appointments", { exact: true })
@@ -352,8 +428,14 @@ try {
     .getByText(/morning appointments/i)
     .waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-chat-history.png"), fullPage: false });
-  await page.getByRole("button", { name: "Close conversation history" }).click();
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-chat-history.png"),
+      fullPage: false,
+    });
+  await page.keyboard.press("Escape");
+  await page.getByRole("heading", { name: "Conversation history" }).waitFor({ state: "detached" });
+  await page.locator(".conversation-overlay").waitFor();
   await page.getByRole("button", { name: "New", exact: true }).click();
   await page.getByLabel("Message Ellie").fill("Remind me to call Mum");
   await page.getByRole("button", { name: "Send message" }).click();
@@ -391,7 +473,11 @@ try {
     .filter({ hasText: /Draft reminder · call Mum/i })
     .waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-pending-draft.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-pending-draft.png"),
+      fullPage: false,
+    });
   await page.getByLabel("Message Ellie").fill("Today at 12:01 AM");
   await page.getByRole("button", { name: "Send message" }).click();
   await page
@@ -445,6 +531,7 @@ try {
   await page.waitForTimeout(150);
   if (artifactDir)
     await page.screenshot({
+      animations: "disabled",
       path: join(artifactDir, "life-reschedule-receipt.png"),
       fullPage: false,
     });
@@ -469,6 +556,7 @@ try {
   const fernConversation = new URL(page.url()).searchParams.get("conversation");
   assert.ok(fernConversation);
   await page.getByRole("button", { name: "New", exact: true }).click();
+  await page.getByLabel("Message Ellie").fill("this draft belongs to the new conversation");
   await page.getByRole("button", { name: "History" }).click();
   await page
     .locator(`.history-list article[data-conversation-id="${fernConversation}"] .history-open`)
@@ -477,6 +565,7 @@ try {
     .locator(".intent-strip")
     .filter({ hasText: /water the fern/i })
     .waitFor();
+  assert.equal(await page.getByLabel("Message Ellie").inputValue(), "");
   await page.getByLabel("Message Ellie").fill("sometime later");
   await page.getByRole("button", { name: "Send message" }).click();
   await page
@@ -504,9 +593,13 @@ try {
   const slowRequest = chatPosts.at(-1)?.requestId;
   assert.equal(typeof slowRequest, "string");
   await page.getByRole("button", { name: "New", exact: true }).click();
-  await page.getByRole("heading", { name: /What shall we carry forward/ }).waitFor();
+  await page.getByRole("heading", { name: /What can I help with/ }).waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-chat-status.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-chat-status.png"),
+      fullPage: false,
+    });
   releaseSlowChat?.();
   await page.waitForFunction(async (requestId) => {
     const response = await fetch(`/api/life/chat/requests/${requestId}`);
@@ -530,7 +623,7 @@ try {
   await activeHistory.locator(".history-delete").click();
   await page.getByText("Conversation deleted").waitFor();
   await page.getByRole("button", { name: "Close conversation history" }).click();
-  await page.getByRole("heading", { name: /What shall we carry forward/ }).waitFor();
+  await page.getByRole("heading", { name: /What can I help with/ }).waitFor();
   await page.getByRole("button", { name: "History" }).click();
   assert.equal(
     await page
@@ -541,6 +634,7 @@ try {
     "deleted conversation is absent from scoped history",
   );
   await page.getByRole("button", { name: "Close conversation history" }).click();
+  await closeChat();
   await page.getByRole("button", { name: "Manage shared spaces" }).click();
   await page.getByLabel("New space name").fill("Garden club");
   await page.getByRole("button", { name: "Create space" }).click();
@@ -555,6 +649,7 @@ try {
   });
   assert.ok(createdGroup);
   assert.equal(await page.getByLabel("Sharing with").inputValue(), `group:${createdGroup.id}`);
+  await openChat();
   await page.getByLabel("Message Ellie").fill("remember that garden club tea is at five");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
@@ -578,6 +673,7 @@ try {
     false,
     "personal records do not enter a newly selected shared space",
   );
+  await closeChat();
   await page.getByRole("button", { name: "Manage shared spaces" }).click();
   const managedGarden = page.locator(".group-list article").filter({ hasText: "Garden club" });
   await managedGarden.getByRole("button", { name: "Rename" }).click();
@@ -601,9 +697,27 @@ try {
   await page.getByText("That space was renamed elsewhere. Its current name is shown.").waitFor();
   await page.getByRole("dialog").getByText("Garden external", { exact: true }).waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-shared-spaces.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-shared-spaces.png"),
+      fullPage: false,
+    });
   await page.getByRole("button", { name: "Close", exact: true }).click();
-  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
+  await selectScope("user:e2e-user");
+  await closeChat();
+  await page.getByRole("button", { name: "Home", exact: true }).click();
+  await page.getByRole("button", { name: "New board" }).click();
+  await page.getByLabel("New dashboard name").fill("Private board");
+  await page.getByRole("button", { name: "Create", exact: true }).click();
+  await openChat();
+  await page.getByLabel("Message Ellie").fill("this unsent prompt stays private");
+  await selectScope(`group:${sharedGroup.id}`);
+  await page.getByLabel("Message Ellie").waitFor();
+  assert.equal(await page.getByLabel("Message Ellie").inputValue(), "");
+  assert.equal(await page.getByLabel("Rename Private board dashboard").count(), 0);
+  await selectScope("user:e2e-user");
+  await page.getByLabel("Rename Private board dashboard").waitFor();
+  await selectScope(`group:${sharedGroup.id}`);
   await page.getByLabel("Message Ellie").fill("remember that family tea is at four");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.waitForFunction(() => new URL(location.href).searchParams.has("conversation"));
@@ -618,6 +732,7 @@ try {
   await page.getByLabel("Length").selectOption("brief");
   await page.getByText(/keep this conversation brief/i).waitFor();
   await page.reload();
+  await expect(page.getByLabel("Length")).toHaveValue("brief");
   assert.equal(await page.getByLabel("Length").inputValue(), "brief");
   await page.getByText("This conversation", { exact: true }).waitFor();
   const privateFeedbackBefore = store.listRecords(
@@ -651,6 +766,7 @@ try {
   );
   if (artifactDir)
     await page.screenshot({
+      animations: "disabled",
       path: join(artifactDir, "life-conversation-style.png"),
       fullPage: false,
     });
@@ -688,12 +804,12 @@ try {
     .fill("Create a plan called Family picnic: Pick a park; Pack lunch; Bring a blanket");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText("Created plan “Family picnic” with 3 steps.").waitFor();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page.getByRole("button", { name: "plans", exact: true }).click();
   await page.getByRole("button", { name: /Family picnic.*0 of 3 complete/ }).waitFor();
   await page.getByText("Doctor visit", { exact: true }).waitFor({ state: "detached" });
-  await page.getByLabel("Sharing with").selectOption("user:e2e-user");
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await selectScope("user:e2e-user");
+  await openChat();
   await page
     .getByLabel("Message Ellie")
     .fill(
@@ -701,7 +817,7 @@ try {
     );
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText("Created plan “Doctor visit” with 3 steps.").waitFor();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page.getByRole("button", { name: "plans", exact: true }).click();
   const doctorPlanRow = page.getByRole("button", { name: /Doctor visit.*0 of 3 complete/ });
   await doctorPlanRow.waitFor();
@@ -751,23 +867,27 @@ try {
   await page.getByRole("button", { name: /Doctor visit.*2 of 3 complete/ }).click();
   await page.getByText(/Saved checklist · 2 of 3 complete/).waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-plans.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-plans.png"),
+      fullPage: false,
+    });
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.reload();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page.getByRole("button", { name: "plans", exact: true }).click();
   await page.getByRole("button", { name: /Doctor visit.*2 of 3 complete/ }).waitFor();
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await openChat();
   await page.getByRole("button", { name: "New", exact: true }).click();
   await page.getByLabel("Message Ellie").fill("Reopen step 2 of plan Doctor visit");
   await page.getByRole("button", { name: "Send message" }).click();
   await page
     .getByText(/Reopened step 2, “Gather forms”, in “Doctor visit” \(1\/3 complete\)/)
     .waitFor();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page.getByRole("button", { name: "plans", exact: true }).click();
   await page.getByRole("button", { name: /Doctor visit.*1 of 3 complete/ }).waitFor();
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await openChat();
   await page.getByLabel("Message Ellie").fill("Every day at 9 am remind me to stretch");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/Scheduled “stretch” every day at 09:00/).waitFor();
@@ -784,7 +904,7 @@ try {
   await page.getByLabel("Message Ellie").fill("Pause routine stretch");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/Paused future delivery for “stretch”/).waitFor();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   const routineRow = page.locator(".record-list button").filter({ hasText: "stretch" });
   await routineRow.getByText("Future delivery paused").waitFor();
   await routineRow.click();
@@ -792,14 +912,14 @@ try {
   await page.getByText("Resume future delivery").waitFor();
   await page.getByText(/do not freeze a timer countdown or undo notifications/i).waitFor();
   await page.getByRole("button", { name: "Close", exact: true }).click();
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await openChat();
   await page.getByLabel("Message Ellie").fill("Resume routine stretch");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/Resumed future delivery for “stretch”/).waitFor();
   await page.getByLabel("Message Ellie").fill("Cancel routine stretch");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/Cancelled future delivery for “stretch”/).waitFor();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page
     .locator(".record-list button")
     .filter({ hasText: "stretch" })
@@ -807,7 +927,11 @@ try {
     .waitFor();
   assert.equal(store.getRecord({ userId: "e2e-user" }, routine.id)?.data.completed, false);
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-delivery-status.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-delivery-status.png"),
+      fullPage: false,
+    });
   await page
     .getByText(/morning appointments/i)
     .first()
@@ -851,7 +975,11 @@ try {
     /missing|truncated|corrupt|could not be extracted/i,
   );
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-upload-queue.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-upload-queue.png"),
+      fullPage: false,
+    });
   await page
     .locator(".record-list strong")
     .getByText("garden-handbook.docx", { exact: true })
@@ -874,7 +1002,7 @@ try {
   assert.match(await page.getByLabel("Details").inputValue(), /untrusted source content/);
   await page.getByRole("button", { name: "Close" }).click();
   await page.getByRole("button", { name: "Clear", exact: true }).click();
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await openChat();
   await page.getByLabel("Message Ellie").fill("Summarize gate code in the background");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/queued a background summary/i).waitFor();
@@ -882,7 +1010,7 @@ try {
     .list({ owner: "user:e2e-user" })
     .find((task) => task.handler === "knowledge.aggregate");
   assert.ok(summaryRoot);
-  await page.getByRole("button", { name: /Activity/ }).click();
+  await openTool("Activity");
   await page.waitForFunction(async (taskId) => {
     const bootstrap = await (await fetch("/api/life/bootstrap")).json();
     return bootstrap.tasks.some(
@@ -896,7 +1024,11 @@ try {
   await page.getByText("Fixture summary of the cited source.").waitFor();
   await page.locator(".task-result strong").getByText("garden.txt", { exact: true }).waitFor();
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-task-result.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-task-result.png"),
+      fullPage: false,
+    });
   await page.getByRole("button", { name: "Close" }).click();
   const gardenSource = store
     .listRecords(
@@ -954,7 +1086,7 @@ try {
     },
     { previousId: summaryRoot.id, revision: revisedGarden.revision },
   );
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page.getByRole("button", { name: "guidance", exact: true }).click();
   const guideRow = page.locator(".guide-list button").filter({ hasText: "Garden answer style" });
   await guideRow.getByText(/Source changed — review needed/).waitFor();
@@ -972,7 +1104,11 @@ try {
     .getByLabel("Explicit instructions")
     .fill("Answer garden questions in three clear steps.");
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-guidance-review.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-guidance-review.png"),
+      fullPage: false,
+    });
   await page.getByRole("button", { name: "Adopt reviewed revision" }).click();
   await page.getByText("Guidance revised").waitFor();
   await page.getByRole("dialog").waitFor({ state: "detached" });
@@ -1036,7 +1172,7 @@ try {
     throw new Error(`Import failed: ${await importFailure.textContent()}`);
   await page.locator(".modal").waitFor({ state: "detached" });
   await page.locator(".record-list strong").filter({ hasText: "Pumpkin dinner" }).waitFor();
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await openChat();
   await page.getByLabel("Message Ellie").fill("search sources for garden gate code");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/2468/).waitFor();
@@ -1047,7 +1183,7 @@ try {
     .getByText(/scheduled/i)
     .last()
     .waitFor();
-  await page.getByRole("button", { name: "Today" }).click();
+  await openTool("Today");
   await page.getByText(/check the oven/i).waitFor();
 
   const dueAt = Date.now() + 1_500;
@@ -1087,17 +1223,17 @@ try {
   );
   assert.equal(await page.locator(".timeline").getByText("Notification: tea check").count(), 0);
 
-  await page.locator("aside nav button").filter({ hasText: "Ellie" }).click();
+  await openChat();
   await page
     .getByLabel("Message Ellie")
     .fill("Maya's birthday is October 30 and she loves gardening");
   await page.getByRole("button", { name: "Send message" }).click();
   await page.getByText(/opened a gift need/i).waitFor();
-  await page.getByRole("button", { name: /Your world/ }).click();
+  await openTool("Memory");
   await page.locator(".record-list button").filter({ hasText: "Gift for Maya" }).click();
   await page.getByRole("button", { name: "Mark complete" }).click();
   await page.getByText("Gift for Maya").waitFor();
-  await page.getByRole("button", { name: "Today" }).click();
+  await openTool("Today");
   await page
     .locator(".timeline")
     .getByText("Plan Maya's birthday gift")
@@ -1109,7 +1245,7 @@ try {
       .getAttribute("aria-label")) ?? "",
     /Oct 30/,
   );
-  await page.getByRole("button", { name: /Activity/ }).click();
+  await openTool("Activity");
   const birthdayTask = page.locator(".tasks article").filter({ hasText: /Maya|birthday gift/i });
   await birthdayTask.getByRole("button", { name: "Run now" }).click();
   await page.waitForFunction(async () => {
@@ -1128,7 +1264,7 @@ try {
     false,
   );
 
-  await page.getByRole("button", { name: /Your space/ }).click();
+  await openTool("Apps");
   const sdkCard = page.locator("article").filter({ hasText: "SDK water probe" });
   await sdkCard.getByRole("button", { name: "Open" }).click();
   let sdkFrame = page
@@ -1151,7 +1287,7 @@ try {
   await sdkFrame.getByLabel("Water count").filter({ hasText: "1" }).waitFor();
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.reload();
-  await page.getByRole("button", { name: /Your space/ }).click();
+  await openTool("Apps");
   await page
     .locator("article")
     .filter({ hasText: "SDK water probe" })
@@ -1165,6 +1301,7 @@ try {
   await sdkFrame.getByLabel("Water count").filter({ hasText: "2" }).waitFor();
   if (artifactDir)
     await page.screenshot({
+      animations: "disabled",
       path: join(artifactDir, "life-sdk-water-counter.png"),
       fullPage: false,
     });
@@ -1189,7 +1326,7 @@ try {
   await generatedCount().getByText("2", { exact: true }).waitFor();
   await page.getByRole("button", { name: "Close", exact: true }).click();
   await page.reload();
-  await page.getByRole("button", { name: /Your space/ }).click();
+  await openTool("Apps");
   await page
     .locator("article")
     .filter({ hasText: "Water Counter Widget" })
@@ -1233,6 +1370,7 @@ try {
   await generatedCount().getByText("0", { exact: true }).waitFor();
   if (artifactDir)
     await page.screenshot({
+      animations: "disabled",
       path: join(artifactDir, "life-generated-water-counter.png"),
       fullPage: false,
     });
@@ -1364,8 +1502,8 @@ try {
   await page.getByRole("button", { name: "Close" }).click();
   await page.getByText("37", { exact: true }).waitFor();
   await page.reload();
-  await page.locator(".conversation").waitFor();
-  await page.getByRole("button", { name: /Your space/ }).click();
+  await page.locator(".life-dashboard").waitFor();
+  await openTool("Apps");
   await page.getByText("37", { exact: true }).waitFor();
 
   const mlbResult = await page.evaluate(async () => {
@@ -1430,7 +1568,11 @@ try {
   await notebook.getByRole("button", { name: "Manage" }).click();
   await page.getByLabel("Revision to restore").selectOption("1");
   if (artifactDir)
-    await page.screenshot({ path: join(artifactDir, "life-plugin-manage.png"), fullPage: false });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-plugin-manage.png"),
+      fullPage: false,
+    });
   await page.getByRole("button", { name: "Restore selected" }).click();
   await page.getByText("Restored version 1 as a new revision").waitFor();
   await notebook.getByText("Notebook revision 1").waitFor();
@@ -1451,7 +1593,7 @@ try {
   await page.getByText("App removed").waitFor();
   await notebook.waitFor({ state: "detached" });
 
-  await page.getByRole("button", { name: /Settings/ }).click();
+  await openSettings();
   await page.locator(".setting-scope select").selectOption("user:e2e-user");
   await page
     .locator(".setting")
@@ -1483,7 +1625,7 @@ try {
   assert.equal(effective.verbosity, "brief");
   assert.equal(effective.proactiveSuggestions, false);
   assert.deepEqual(effective.quietHours, { enabled: true, start: 22, end: 7 });
-  await page.getByRole("button", { name: /Activity/ }).click();
+  await openTool("Activity");
   await page.getByLabel("Help Ellie improve").fill("Show reminders a little earlier");
   await page.getByRole("button", { name: "Send feedback" }).click();
   await page.getByRole("button", { name: "Send feedback" }).waitFor();
@@ -1524,6 +1666,7 @@ try {
   );
   if (artifactDir)
     await page.screenshot({
+      animations: "disabled",
       path: join(artifactDir, "life-improvement-review.png"),
       fullPage: false,
     });
@@ -1535,8 +1678,8 @@ try {
   );
   await improvementDialog.getByRole("button", { name: "Close", exact: true }).click();
   await page.reload();
-  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
-  await page.getByRole("button", { name: /Activity/ }).click();
+  await selectScope(`group:${sharedGroup.id}`);
+  await openTool("Activity");
   await page.getByText("Private improvement proposals").waitFor();
   await page
     .getByText("These remain personal even while you are viewing a shared space.")
@@ -1573,20 +1716,42 @@ try {
     .waitFor();
   assert.equal(await page.getByRole("dialog").getByText("Done without asking.").count(), 0);
   await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
-  await page.getByLabel("Sharing with").selectOption("user:e2e-user");
+  await selectScope("user:e2e-user");
 
   if (artifactDir) {
-    await page.screenshot({ path: join(artifactDir, "life-desktop.png"), fullPage: true });
+    await closeChat();
+    await page.getByRole("button", { name: "Home", exact: true }).click();
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-dashboard.png"),
+      fullPage: false,
+    });
+    await openChat();
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-orb-conversation.png"),
+      fullPage: false,
+    });
+    await closeChat();
     for (const [name, file] of [
       ["Today", "today"],
-      ["Your world", "world"],
-      ["Your space", "space"],
-      ["Settings", "settings"],
-    ]) {
-      await page.getByRole("button", { name: name! }).click();
-      await page.screenshot({ path: join(artifactDir, `life-${file}.png`), fullPage: true });
+      ["Memory", "world"],
+      ["Apps", "space"],
+    ] as const) {
+      await openTool(name);
+      await page.screenshot({
+        animations: "disabled",
+        path: join(artifactDir, `life-${file}.png`),
+        fullPage: true,
+      });
     }
-    await page.getByRole("button", { name: "Your space" }).click();
+    await openSettings();
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-settings.png"),
+      fullPage: true,
+    });
+    await openTool("Apps");
     await page
       .locator(".plugins article")
       .filter({ hasText: "Star arcade" })
@@ -1604,7 +1769,11 @@ try {
             requestAnimationFrame(() => requestAnimationFrame(() => resolveFrames())),
           ),
       );
-    await page.screenshot({ path: join(artifactDir, "life-arcade.png"), fullPage: true });
+    await page.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-arcade.png"),
+      fullPage: true,
+    });
     await page.getByRole("button", { name: "Close", exact: true }).click();
     const mobile = await context.newPage();
     await mobile.setViewportSize({ width: 390, height: 844 });
@@ -1614,7 +1783,33 @@ try {
       await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
       true,
     );
-    await mobile.screenshot({ path: join(artifactDir, "life-mobile.png"), fullPage: true });
+    await mobile.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-mobile.png"),
+      fullPage: true,
+    });
+    const mobileOrb = mobile.getByRole("button", { name: "Talk to Ellie", exact: true });
+    const mobileOrbBounds = await mobileOrb.boundingBox();
+    assert.ok(mobileOrbBounds && Math.abs(mobileOrbBounds.x + mobileOrbBounds.width / 2 - 195) < 2);
+    await mobileOrb.click();
+    await mobile.getByLabel("Message Ellie").waitFor();
+    assert.equal(
+      await mobile.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+      true,
+    );
+    await mobile.screenshot({
+      animations: "disabled",
+      path: join(artifactDir, "life-mobile-conversation.png"),
+      fullPage: false,
+    });
+    await mobile.getByRole("button", { name: "Close conversation", exact: true }).click();
+    await mobile.emulateMedia({ reducedMotion: "reduce" });
+    assert.equal(
+      await mobile
+        .locator(".ellie-orb")
+        .evaluate((element) => getComputedStyle(element).animationName),
+      "none",
+    );
   }
   store.createRecord(
     { userId: "e2e-user" },
@@ -1636,7 +1831,7 @@ try {
       },
     );
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-  await page.getByRole("button", { name: "Your world" }).click();
+  await openTool("Memory");
   await page.getByRole("button", { name: "Load more" }).waitFor();
   const firstPageCount = await page.locator(".record-list > button").count();
   assert.equal(firstPageCount, 100);
@@ -1645,10 +1840,10 @@ try {
     (count) => document.querySelectorAll(".record-list > button").length > count,
     firstPageCount,
   );
-  await page.getByRole("button", { name: "Today" }).click();
+  await openTool("Today");
   await page.getByText("Buried appointment").waitFor();
 
-  await page.getByRole("button", { name: "Settings" }).click();
+  await openSettings();
   await page.getByRole("button", { name: "Inspect my data" }).click();
   await page.getByText("Private records").waitFor();
   assert.ok(Number(await page.locator(".data-review dd").first().textContent()) > 0);
@@ -1674,6 +1869,7 @@ try {
   await page.getByLabel(/Type RESET MY PRIVATE DATA/).fill("RESET MY PRIVATE DATA");
   if (artifactDir)
     await page.screenshot({
+      animations: "disabled",
       path: join(artifactDir, "life-data-reset-review.png"),
       fullPage: false,
     });
@@ -1713,8 +1909,8 @@ try {
   });
   listening = await server.listen();
   await page.goto(listening.launchUrl);
-  await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
-  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await openSettings();
   await page.getByText("Reset in progress").waitFor();
   await page.getByRole("button", { name: "Retry now" }).click();
   await page.getByText("Private data reset complete").waitFor({ timeout: 15_000 });
@@ -1763,11 +1959,11 @@ try {
   assert.ok(store.listGroups({ userId: "e2e-user" }).some((group) => group.id === sharedGroup.id));
 
   await page.getByRole("button", { name: "Reload Ellie" }).click();
-  await page.getByRole("heading", { name: /Hi Ellie E2E/ }).waitFor();
-  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
-  await page.locator("aside nav button").filter({ hasText: "Your world" }).click();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await selectScope(`group:${sharedGroup.id}`);
+  await openTool("Memory");
   await page.getByText("Shared record survives reset").waitFor();
-  await page.getByRole("button", { name: "Your space" }).click();
+  await openTool("Apps");
   await page.getByText("Shared reset sentinel").waitFor();
   assert.deepEqual(errors, []);
   console.log(`life UI E2E passed at ${listening.url}`);

@@ -5,6 +5,7 @@
   "type": "module",
   "exports": "./src/server.ts",
   "dependencies": {
+    "@ellie/life-auto-memory": "workspace:*",
     "@ellie/life-context": "workspace:*",
     "@ellie/life-core": "workspace:*",
     "@ellie/life-harness": "workspace:*",

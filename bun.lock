@@ -42,6 +42,7 @@
       "name": "@ellie/life",
       "version": "0.1.0",
       "dependencies": {
+        "@ellie/life-auto-memory": "workspace:*",
         "@ellie/life-context": "workspace:*",
         "@ellie/life-core": "workspace:*",
         "@ellie/life-harness": "workspace:*",
@@ -106,6 +107,13 @@
     "packages/knowledge": {
       "name": "@ellie/knowledge",
       "version": "0.1.0",
+    },
+    "packages/life-auto-memory": {
+      "name": "@ellie/life-auto-memory",
+      "version": "0.1.0",
+      "dependencies": {
+        "@ellie/life-core": "workspace:*",
+      },
     },
     "packages/life-context": {
       "name": "@ellie/life-context",
@@ -248,6 +256,8 @@
     "@ellie/knowledge": ["@ellie/knowledge@workspace:packages/knowledge"],
 
     "@ellie/life": ["@ellie/life@workspace:apps/life"],
+
+    "@ellie/life-auto-memory": ["@ellie/life-auto-memory@workspace:packages/life-auto-memory"],
 
     "@ellie/life-context": ["@ellie/life-context@workspace:packages/life-context"],
 

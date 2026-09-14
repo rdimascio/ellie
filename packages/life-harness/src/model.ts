@@ -33,6 +33,8 @@ export interface LifeModelRequest {
   history: Array<{ role: "user" | "assistant"; content: string }>;
   preferences?: Record<string, unknown>;
   memories?: Array<{ id: string; text: string; explicit: boolean }>;
+  /** Host-generated, scoped summary of earlier user prompts. Never client-supplied. */
+  automaticMemory?: { markdown: string; revision: string; partial: boolean };
   world?: ModelWorldContext;
   adoptedGuidance?: Array<{
     id: string;

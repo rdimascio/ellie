@@ -70,6 +70,10 @@ export interface ChatRequest {
   message: string;
   conversationId?: string;
   history?: Array<{ role: "user" | "assistant"; content: string }>;
+  /** Trusted scoped Markdown generated from durable user prompts by the service. */
+  automaticMemory?: { markdown: string; revision: string; partial: boolean };
+  /** Receipt from the service's scoped automatic-memory suppression for this turn. */
+  automaticMemoryForgotten?: number;
   isContextCurrent?: () => boolean;
   signal?: AbortSignal;
   /** Trusted persisted state for this actor-private conversation. */
@@ -1915,14 +1919,23 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       );
     }
 
-    const forget = /^(?:please\s+)?forget\s+(.+)$/i.exec(message);
+    const forget =
+      /^(?:please\s+)?(?:forget|do not remember|don't remember)\s+(?:that\s+)?(.+)$/i.exec(message);
     if (forget) {
       const record = findNamed(
         all(["memory", "contact", "birthday", "need", "source"]),
         ["memory", "contact", "birthday", "need", "source"],
         forget[1]!,
       );
-      if (!record) return finish(`I couldn’t find “${clean(forget[1]!)}” in this space.`);
+      if (!record) {
+        if ((request.automaticMemoryForgotten ?? 0) > 0) {
+          actions.push({ label: "Forget automatic memory", status: "completed" });
+          return finish(
+            "Removed that from automatic memory. The original conversation remains in your history until you delete it.",
+          );
+        }
+        return finish(`I couldn’t find “${clean(forget[1]!)}” in this space.`);
+      }
       options.store.deleteRecord(request.actor, record.id, record.revision);
       invalidateContext(request.actor, request.scope);
       actions.push({ label: "Forget saved item", status: "completed" });
@@ -2181,6 +2194,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
             ...(item.reference ? { reference: item.reference } : {}),
           })),
           history: suppliedHistory ?? sessions.get(conversationKey)?.slice(0, -1) ?? [],
+          ...(request.automaticMemory ? { automaticMemory: request.automaticMemory } : {}),
           now: now(),
           timeZone,
           ...modelContext(

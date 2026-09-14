@@ -16,14 +16,21 @@ Someone says, “My friend's birthday is next Saturday. They love gardening. Hel
 
 The next useful step should survive the original conversation. The user should not have to recreate the context, manually connect several automations, or know which specialist agent to address.
 
-Chat is the primary control surface. A few supporting views make the work tangible:
+**User correction, September 14:** preserve Ellie's existing widget/dashboard layout. The life harness belongs behind the existing boards, configurable widget grid and expanded app views. It must not introduce a replacement management interface organized around Today, Your world and Your space.
 
-- **Today:** upcoming commitments, useful preparation, and a small number of timely suggestions.
-- **Your world:** people, places, memories, needs, and sources Ellie can explain, correct, export, or forget.
-- **Your space:** widgets, small apps, shared boards, and full-screen experiences.
-- **Activity:** what Ellie is doing, waiting on, watching, or asking the user to decide; includes pause, cancel, and undo where available.
+A floating, glowing orb at the bottom center is the primary control surface. It opens a focused conversation overlay above the dashboard; conversations are never dashboard widgets. Reminders, upcoming events, useful preparation, plans and generated apps appear as widgets automatically. Board selection, creation, naming, ordering and widget sizing remain familiar. Detailed memory, source, activity and preference controls are secondary inspection tools, tucked away until needed.
 
-Every important operation in those views should also work through conversation: “Why did you suggest that?”, “Only on weekends,” “Share this with the household,” “Stop watching that,” and “Undo the change.” Optional controls are useful; configuration expertise should not be required.
+Every important operation should also work through conversation: “Why did you suggest that?”, “Only on weekends,” “Share this with the household,” “Stop watching that,” and “Undo the change.” Conversation is sufficient for ordinary use; the user should not need to organize content or configure a memory pipeline.
+
+**Automatic conversation memory**
+
+Every accepted user prompt creates an internal Markdown memory journal entry, including deterministic commands and interrupted model requests. The host derives entries from the authoritative stored conversation; it never treats assistant-generated claims as user facts. Existing retained conversations are processed automatically when this capability starts.
+
+Ellie summarizes the retained statements, preferences, corrections and recent intentions into a bounded, cached Markdown context. The host injects this context into the system messages of later conversations in the same user and space. Capture, summarization, cache invalidation and file generation are internal implementation details. Users do not upload or maintain Markdown files to make Ellie remember.
+
+The current implementation uses whole, extractive observations with explicit omission information. It carries ordinary facts and feedback without a “remember” command, preserves qualifications, separates historical requests from completed work, and excludes conversation-only style from lasting summaries. Richer semantic consolidation can improve this without changing the user experience. Current instructions and explicit settings outrank historical observations; memory cannot grant tools or replay old actions.
+
+Corrections update later context. Forgetting suppresses matching automatic notes; deleting a conversation removes its derived notes and invalidates caches. Personal reset also removes generated Markdown. Shared-space conversations remain actor-private and are not copied into personal or other members' contexts. Original transcripts have their own visible deletion control.
 
 **High-level feature families**
 
