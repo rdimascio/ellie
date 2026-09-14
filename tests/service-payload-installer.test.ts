@@ -422,7 +422,8 @@ test.before(
           })),
         ),
       });
-      await writeFile(join(templateRoot, "build-key.json"), canonicalJSON(buildKey), {
+      const buildKeyBytes = Buffer.from(canonicalJSON(buildKey));
+      await writeFile(join(templateRoot, "build-key.json"), buildKeyBytes, {
         mode: 0o400,
       });
       await verifyOwnedDirectory(templateRoot, templateIdentity, 0o700, sharedTemplateNames);
@@ -431,6 +432,9 @@ test.before(
         artifacts[name] = await templateArtifact(templateRoot, name);
       for (const name of sharedTemplateNames)
         assert.equal(artifacts[name]?.mode, name === "build-key.json" ? 0o400 : 0o500);
+      assert.equal(artifacts["build-key.json"]?.sha256, digest(buildKeyBytes));
+      for (const output of buildKey.outputs)
+        assert.equal(artifacts[output.name]?.sha256, output.sha256);
       await chmod(templateRoot, 0o500);
       sharedTemplate = Object.freeze({
         root: templateRoot,
