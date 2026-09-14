@@ -16,6 +16,7 @@ import {
 } from "../packages/life-harness/src/index.ts";
 import type { LifeModel } from "../packages/life-harness/src/index.ts";
 import type { PendingLifeIntent } from "../packages/life-harness/src/index.ts";
+import { LifeLearning } from "../packages/life-learning/src/index.ts";
 import { TaskRuntime } from "../packages/task-runtime/src/index.ts";
 
 const actor = { userId: "alice" },
@@ -1298,6 +1299,59 @@ test("group creation refuses an ambiguous duplicate visible name", async () => {
     assert.match(result.reply, /more than one visible group/i);
     assert.equal(result.createdGroup, undefined);
     assert.equal(f.store.listGroups(actor).length, 2);
+  } finally {
+    await f.close();
+  }
+});
+
+test("chat reviews private feedback and requires explicit adoption before guidance is active", async () => {
+  const f = await fixture();
+  let guidanceInstructions: string[] = [];
+  const model: LifeModel = {
+    async plan(request) {
+      guidanceInstructions = request.adoptedGuidance?.map((guide) => guide.instructions) ?? [];
+      return { reply: "Modeled reply", actions: [] };
+    },
+    async suggestImprovement() {
+      return {
+        title: "Answer directly",
+        instructions: "Lead with the requested answer.",
+        rationale: "The private correction asks for a shorter opening.",
+      };
+    },
+    async previewImprovement() {
+      return { reply: "Dinner is at seven." };
+    },
+  };
+  try {
+    new LifeLearning(f.store).record(actor, {
+      scope,
+      message: "Lead with the answer",
+      rating: -1,
+      example: { prompt: "When is dinner?", response: "A long answer. Seven." },
+    });
+    const group = f.store.createGroup(actor, { name: "Family" }),
+      groupScope = { type: "group", id: group.id } as const,
+      harness = f.make(model);
+    const proposed = await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "Review my feedback and suggest an improvement",
+    });
+    assert.match(proposed.reply, /private feedback.*offline previews/i);
+    assert.equal(proposed.records[0]?.scope.type, "user");
+    await harness.chat({ actor, scope, message: "How should you answer me?" });
+    assert.deepEqual(guidanceInstructions, []);
+
+    const adopted = await harness.chat({
+      actor,
+      scope: groupScope,
+      message: "Adopt improvement Answer directly",
+    });
+    assert.match(adopted.reply, /active private guidance/i);
+    await harness.chat({ actor, scope, message: "How should you answer me now?" });
+    assert.deepEqual(guidanceInstructions, ["Lead with the requested answer."]);
+    assert.equal(harness.improvements.list(actor)[0]?.status, "adopted");
   } finally {
     await f.close();
   }

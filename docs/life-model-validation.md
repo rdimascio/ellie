@@ -38,6 +38,20 @@ The final gift response suggested relevant categories without claiming verified 
 
 An early generated water-counter app used `localStorage`, which is unavailable in the opaque plugin sandbox. After the SDK was introduced, a fresh generation and two plain-language revisions produced the unchanged fixture in `apps/life-ui/tests/fixtures/sdk-water-counter-v3.json`, using the trusted `window.ellie.storage` SDK. The real browser acceptance adds two glasses, verifies host storage, restores the value after closing and after a full page reload, persists Reset, retains the old count after an injected write failure, and keeps controls disabled until retry after an injected read failure. The generated app still parses stored values permissively and makes its retry message clickable rather than using a semantic button; this acceptance records tested behavior rather than a general quality guarantee.
 
+## Feedback-to-guidance acceptance
+
+The ninth slice used the same pinned local model through the actual private improvement engine. Reproduce with an already running local endpoint:
+
+```sh
+node scripts/verify-life-improvement.mjs http://127.0.0.1:39473/v1 ellie-life-qwen4b
+```
+
+The synthetic correction requested two brief vegetarian dinner ideas with about twenty minutes of preparation. A direct protocol probe produced a candidate and offline reply in 5.7 and 1.8 seconds. The first complete engine run then exposed a preview returned as a JSON string rather than the required object; validation rejected it before saving a proposal or adopting guidance. One bounded schema repair now shares the original model deadline.
+
+The final complete engine run passed in 14.1 seconds. It verified no active guidance before adoption, no preview-created tasks or apps, atomic adoption using the same record, an actual modeled chat reply receiving that guidance, and pause removing it from active guidance. The resulting reply offered vegetable tacos or chickpea stir-fry. The full synthetic result is `/tmp/ellie-life-model-acceptance/improvement-final-engine.log`.
+
+The candidate unnecessarily conditioned its rule on a future request repeating the dietary/time constraints, and it embedded an illustrative preferred answer. Both the preview and later reply reused that wording. This establishes the functional loop and its effect on model input; it does not establish a general quality improvement or a held-out evaluation. Those limitations are why the product shows the actual candidate and keeps adoption explicit.
+
 ## Pinned inputs
 
 - Base model: [Qwen/Qwen3-4B-Instruct-2507](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507).

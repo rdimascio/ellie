@@ -226,3 +226,18 @@ export interface ModelStatus {
     | "probe-unsupported"
     | "ready";
 }
+export interface ImprovementProposal {
+  record: LifeRecord;
+  status: "ready" | "adopted" | "dismissed" | "stale";
+  instructions: string;
+  rationale: string;
+  feedback: Array<{ id: string; revision: number }>;
+  previews: Array<{
+    feedbackId: string;
+    prompt: string;
+    recordedResponse: string;
+    preferredResponse?: string;
+    candidateResponse: string;
+  }>;
+  guideId?: string;
+}

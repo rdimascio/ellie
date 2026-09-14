@@ -215,3 +215,37 @@ test("modeled advice receives scoped world facts while record instructions canno
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("world context excludes paused guidance and unadopted improvement instructions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-model-world-")),
+    store = new LifeStore(join(root, "life.sqlite")),
+    actor = { userId: "alice" },
+    scope = { type: "user" as const, id: actor.userId };
+  try {
+    const rules = ["teaching-guide-v1", "learning-improvement-v1"].map((type) =>
+      store.createRecord(actor, {
+        kind: "routine",
+        scope,
+        title: "Dinner planning rule",
+        body: "Always discuss a private instruction.",
+        data: { type, enabled: false },
+      }),
+    );
+    store.createRecord(actor, {
+      kind: "routine",
+      scope,
+      title: "Dinner preparation",
+      body: "Check vegetables before making dinner.",
+      data: { enabled: true },
+      relationships: [{ type: "related", targetId: rules[0]!.id }],
+    });
+    const world = selectModelWorld(store, actor, scope, "Help plan dinner");
+    assert.equal(world.records.length, 1);
+    assert.equal(world.records[0]!.title, "Dinner preparation");
+    assert.deepEqual(world.records[0]!.relatedIds, []);
+    assert.equal(JSON.stringify(world).includes("private instruction"), false);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -48,6 +48,9 @@ The directory must be outside the source checkout, owned by the current OS user,
 - “List guidance.”
 - “Use Cooking handbook as guidance.” (For an uploaded source up to 4,000 characters.)
 - “Summarize orchids in the background.” (Uses matching uploaded sources.)
+- “Review my feedback and suggest an improvement.” (Uses recent private corrected examples.)
+- “List improvements.”
+- “Adopt improvement Two dinner options.” (Use the exact name of a reviewed proposal.)
 
 Use Your world to inspect and correct the resulting records, teach from files, or review a calendar/contact import. Source lists use compact previews; opening a record loads its full content. Your space holds playable and readable extensions with retained revision controls. Activity shows durable work, source-worker progress, cited summaries and feedback. Today shows current commitments and delivered notifications. Settings supports default, active group and user preferences; authority remains separate from those preferences.
 
@@ -56,6 +59,12 @@ Adopted guidance is versioned configuration. Pause or resume a listed guide thro
 While the service is running, Ellie checks timed events within 48 hours and all-day events today or in the next two local calendar days on startup and every fifteen minutes. Preparation appears in Today using your time zone, proactivity preference and quiet hours. Pending preparation notices are deduplicated; checking again does not create a pile of reminders for the same event. Postponing or cancelling the linked event hides notices that are no longer relevant.
 
 Place-linked suggestions currently depend on explicit fresh context signals, including “I'm shopping at …”. They do not imply continuous phone location, access to unrelated apps, a retailer account, or a price-feed subscription. A sleeping or stopped coordinator cannot deliver new browser notifications. Timers that must sound while the coordinator is asleep need a future native local-delivery integration.
+
+## Learn from corrections
+
+In Activity, choose one to three private feedback examples for an improvement review. This selection is separate from evaluation export. Ellie proposes an instruction and shows the original reply beside an offline candidate reply. Review the exact instruction, then choose **Adopt as guidance** or **Dismiss proposal**. Nothing runs during the preview and no guidance changes until adoption. Adopted private guidance can be revised, paused or rolled back in Your world. It applies in the personal space.
+
+A changed or deleted example blocks adoption of the old proposal and hides its replay. Existing adopted instructions remain your retained guidance until you edit, pause or delete them. Candidate replay output is private retained content and can be removed with its proposal or a personal reset. This is a user-reviewed improvement loop, not model-weight training or a quality score. See [private improvement review](life-improvement.md).
 
 ## Your personal data
 

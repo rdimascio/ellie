@@ -63,6 +63,23 @@ const PLUGIN_HOST_CSP =
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 export interface LifeHarnessLike {
+  improvements?: {
+    modelAvailable: boolean;
+    list(actor: LifeActor): ImprovementProposalLike[];
+    get(actor: LifeActor, id: string): ImprovementProposalLike;
+    propose(
+      actor: LifeActor,
+      input: {
+        feedback: Array<{ id: string; revision: number }>;
+        goal?: string;
+        signal?: AbortSignal;
+        isContextCurrent?: () => boolean;
+      },
+    ): Promise<ImprovementProposalLike>;
+    adopt(actor: LifeActor, id: string, expectedRevision: number): ImprovementProposalLike;
+    dismiss(actor: LifeActor, id: string, expectedRevision: number): ImprovementProposalLike;
+    settleActive(timeoutMs?: number): Promise<boolean>;
+  };
   chat(input: {
     actor: LifeActor;
     scope: LifeScope;
@@ -159,6 +176,21 @@ export interface LifeHarnessLike {
     scope: LifeScope;
     taskId: string;
   }): TaskRecord;
+}
+interface ImprovementProposalLike {
+  record: LifeRecord;
+  status: "ready" | "adopted" | "dismissed" | "stale";
+  instructions: string;
+  rationale: string;
+  feedback: Array<{ id: string; revision: number }>;
+  previews: Array<{
+    feedbackId: string;
+    prompt: string;
+    recordedResponse: string;
+    preferredResponse?: string;
+    candidateResponse: string;
+  }>;
+  guideId?: string;
 }
 export interface MlbLike {
   snapshot(date?: string): Promise<unknown>;
@@ -547,6 +579,11 @@ export class LifeHttpServer {
       if (!drained)
         throw new Error("Life requests are still active; retry close after they settle.");
     }
+    if (
+      this.options.harness.improvements &&
+      !(await this.options.harness.improvements.settleActive(this.options.closeDrainMs ?? 5_000))
+    )
+      throw new Error("Improvement reviews are still active; retry close after they settle.");
   }
   private headers(response: ServerResponse, extra: Record<string, string> = {}): void {
     for (const [key, value] of Object.entries({ ...BASE_HEADERS, ...extra }))
@@ -801,6 +838,17 @@ export class LifeHttpServer {
         return await this.learningSelection(request, response, path);
       if (path === "/api/life/learning/export" && request.method === "POST")
         return await this.learningExport(request, response);
+      if (path === "/api/life/improvements" && request.method === "GET")
+        return this.improvementsList(response);
+      if (path === "/api/life/improvements" && request.method === "POST")
+        return await this.improvementPropose(request, response);
+      if (/^\/api\/life\/improvements\/[^/]+$/.test(path) && request.method === "GET")
+        return this.improvementDetail(path, response);
+      if (
+        /^\/api\/life\/improvements\/[^/]+\/(adopt|dismiss)$/.test(path) &&
+        request.method === "POST"
+      )
+        return await this.improvementMutation(request, response, path);
       if (path === "/api/life/teaching" && request.method === "GET")
         return this.teachingList(url, response);
       if (path === "/api/life/teaching" && request.method === "POST")
@@ -1008,7 +1056,10 @@ export class LifeHttpServer {
   private async settleActorMutations(): Promise<boolean> {
     for (const controller of this.extractionControllers) controller.abort();
     for (const controller of this.pluginBuildControllers) controller.abort();
-    if (!this.mutationRequests.size) return true;
+    if (!this.mutationRequests.size)
+      return this.options.harness.improvements
+        ? await this.options.harness.improvements.settleActive(5_000)
+        : true;
     let timer: NodeJS.Timeout | undefined;
     const settled = await Promise.race([
       Promise.allSettled(this.mutationRequests).then(() => true),
@@ -1018,7 +1069,10 @@ export class LifeHttpServer {
       }),
     ]);
     if (timer) clearTimeout(timer);
-    return settled;
+    if (!settled) return false;
+    return this.options.harness.improvements
+      ? await this.options.harness.improvements.settleActive(5_000)
+      : true;
   }
   private async continuePersonalReset(
     operationId: string,
@@ -1754,6 +1808,164 @@ export class LifeHttpServer {
   private async learningRecord(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const record = this.recordLearning(jsonObject(await this.body(request)));
     this.send(response, 201, serializeRecord(record));
+  }
+  private improvements() {
+    if (!this.options.harness.improvements)
+      throw new HttpError(503, "Feedback improvement review is unavailable.");
+    return this.options.harness.improvements;
+  }
+  private improvementDto(value: ImprovementProposalLike): Record<string, unknown> {
+    const record = serializeRecord(value.record),
+      data = record.data;
+    if (data && typeof data === "object" && !Array.isArray(data)) {
+      const safeData = { ...(data as Record<string, unknown>) };
+      delete safeData.previews;
+      if (
+        safeData.improvementAudit &&
+        typeof safeData.improvementAudit === "object" &&
+        !Array.isArray(safeData.improvementAudit)
+      ) {
+        const audit = { ...(safeData.improvementAudit as Record<string, unknown>) };
+        delete audit.previews;
+        safeData.improvementAudit = audit;
+      }
+      record.data = safeData;
+    }
+    return {
+      ...value,
+      record,
+      ...(value.status === "stale" ? { previews: [] } : {}),
+    };
+  }
+  private improvementsList(response: ServerResponse): void {
+    const engine = this.improvements();
+    this.send(response, 200, {
+      proposals: engine.list(this.actor).map((proposal) => this.improvementDto(proposal)),
+      modelAvailable: engine.modelAvailable,
+    });
+  }
+  private improvementDetail(path: string, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!), "improvement id");
+    try {
+      this.send(response, 200, this.improvementDto(this.improvements().get(this.actor, id)));
+    } catch (error) {
+      throw this.improvementError(error);
+    }
+  }
+  private async improvementPropose(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): Promise<void> {
+    const body = jsonObject(await this.body(request));
+    if (Object.keys(body).some((key) => key !== "feedback" && key !== "goal"))
+      throw new HttpError(400, "Improvement request contains an unknown field.");
+    if (!Array.isArray(body.feedback) || body.feedback.length < 1 || body.feedback.length > 3)
+      throw new HttpError(400, "Select one through three feedback examples.");
+    const feedback = body.feedback.map((value) => {
+      const item = jsonObject(value);
+      if (Object.keys(item).some((key) => key !== "id" && key !== "revision"))
+        throw new HttpError(400, "Feedback selection is invalid.");
+      if (
+        typeof item.revision !== "number" ||
+        !Number.isSafeInteger(item.revision) ||
+        item.revision < 1
+      )
+        throw new HttpError(400, "Feedback revision is invalid.");
+      return {
+        id: identifier(item.id, "feedback id"),
+        revision: item.revision,
+      };
+    });
+    if (new Set(feedback.map(({ id }) => id)).size !== feedback.length)
+      throw new HttpError(400, "Feedback selection must be distinct.");
+    const controller = new AbortController(),
+      disconnect = () => {
+        if (!response.writableFinished)
+          controller.abort(new Error("Improvement review client disconnected."));
+      },
+      epoch = this.options.store.chatEpoch(this.actor),
+      isContextCurrent = () =>
+        !controller.signal.aborted &&
+        this.accepting &&
+        !this.personalResetActive &&
+        this.options.store.chatEpoch(this.actor) === epoch;
+    this.pluginBuildControllers.add(controller);
+    response.once("close", disconnect);
+    try {
+      const proposal = await this.improvements()
+        .propose(this.actor, {
+          feedback,
+          ...(body.goal === undefined ? {} : { goal: bounded(body.goal, "goal", 1_000) }),
+          signal: controller.signal,
+          isContextCurrent,
+        })
+        .catch((error: unknown) => {
+          throw this.improvementError(error);
+        });
+      if (!isContextCurrent())
+        throw new HttpError(409, "Private feedback changed before the proposal was saved.");
+      this.send(response, 201, this.improvementDto(proposal));
+    } finally {
+      response.off("close", disconnect);
+      this.pluginBuildControllers.delete(controller);
+    }
+  }
+  private async improvementMutation(
+    request: IncomingMessage,
+    response: ServerResponse,
+    path: string,
+  ): Promise<void> {
+    const parts = path.split("/"),
+      action = parts.at(-1),
+      id = identifier(decodeURIComponent(parts.at(-2)!), "improvement id"),
+      body = jsonObject(await this.body(request));
+    if (Object.keys(body).some((key) => key !== "expectedRevision"))
+      throw new HttpError(400, "Improvement mutation contains an unknown field.");
+    const revision = body.expectedRevision;
+    if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 1)
+      throw new HttpError(400, "expectedRevision is invalid.");
+    let proposal: ImprovementProposalLike;
+    try {
+      proposal =
+        action === "adopt"
+          ? this.improvements().adopt(this.actor, id, revision)
+          : this.improvements().dismiss(this.actor, id, revision);
+    } catch (error) {
+      throw this.improvementError(error);
+    }
+    this.options.harness.invalidateContext?.(this.actor, {
+      type: "user",
+      id: this.actor.userId,
+    });
+    this.send(response, 200, this.improvementDto(proposal));
+  }
+  private improvementError(error: unknown): Error {
+    if (error instanceof LifeAccessError || error instanceof LifeConflictError) return error;
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? String((error as { code: unknown }).code)
+        : "";
+    if (code === "model_unavailable")
+      return new HttpError(422, "Connect an available local model to propose an improvement.");
+    if (code === "busy")
+      return new HttpError(429, "Two improvement reviews are already running. Try again shortly.");
+    if (code === "capacity")
+      return new HttpError(429, "Delete an old improvement proposal before creating another.");
+    if (code === "timeout")
+      return new HttpError(504, "The local model took too long to review these examples.");
+    if (code === "cancelled") return new HttpError(408, "The improvement review was cancelled.");
+    if (code === "invalid_candidate")
+      return new HttpError(502, "The local model returned an invalid improvement proposal.");
+    if (code === "model_transport")
+      return new HttpError(
+        503,
+        "The local model runner is unavailable. Try again when it is ready.",
+      );
+    if (code === "stale" || code === "context_changed")
+      return new HttpError(409, "Private feedback changed. Refresh the examples and try again.");
+    if (code === "invalid_input") return new HttpError(400, "Feedback selection is invalid.");
+    if (code === "unavailable") return new HttpError(404, "Improvement proposal is unavailable.");
+    return error instanceof Error ? error : new Error("Improvement review failed.");
   }
   private learningList(url: URL, response: ServerResponse): void {
     const result = this.learning.list(

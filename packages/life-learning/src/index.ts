@@ -1,5 +1,6 @@
 import { LifeAccessError, LifeStore } from "../../life-core/src/index.ts";
 import type { LifeActor, LifeRecord, LifeScope } from "../../life-core/src/index.ts";
+export * from "./improvement.ts";
 
 export interface FeedbackExample {
   prompt: string;

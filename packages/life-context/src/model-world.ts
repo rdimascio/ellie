@@ -31,6 +31,7 @@ const families: LifeRecordKind[][] = [
   ["place", "routine"],
 ];
 const kinds = new Set(families.flat());
+const instructionTypes = new Set(["teaching-guide-v1", "learning-improvement-v1"]);
 const ignored = new Set(
   "about after again also and are can could for from have help how like me more my now please should some that the their them then there these they this today tomorrow want what when where which with would you your".split(
     " ",
@@ -78,6 +79,7 @@ const timeFields = ["dueAt", "deadlineAt", "startAt", "endAt", "startDate", "dat
 function project(record: LifeRecord): ModelWorldRecord | undefined {
   if (
     !kinds.has(record.kind) ||
+    instructionTypes.has(String(record.data.type)) ||
     record.title.length > 500 ||
     record.provenance.some((source) => source.invalidatedAt !== undefined)
   )
@@ -148,7 +150,10 @@ export function selectModelWorld(
     ),
     scored = pages
       .flatMap((page) => page.items)
-      .filter((record) => record.provenanceStatus === "valid")
+      .filter(
+        (record) =>
+          record.provenanceStatus === "valid" && !instructionTypes.has(String(record.data.type)),
+      )
       .map((record) => ({
         record,
         lexical:

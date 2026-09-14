@@ -6,6 +6,7 @@ import type {
   ConversationPreferenceState,
   ConversationTurn,
   Group,
+  ImprovementProposal,
   LifeRecord,
   ModelStatus,
   PendingIntent,
@@ -678,7 +679,14 @@ export function App() {
             busy={busy === "build"}
           />
         )}{" "}
-        {view === "activity" && <Activity data={data} busy={busy} act={taskAction} />}{" "}
+        {view === "activity" && (
+          <Activity
+            data={data}
+            busy={busy}
+            act={taskAction}
+            openGuidance={() => setView("world")}
+          />
+        )}{" "}
         {view === "settings" && (
           <Settings
             data={data}
@@ -2989,10 +2997,12 @@ function Activity({
   data,
   busy,
   act,
+  openGuidance,
 }: {
   data: Bootstrap;
   busy: string;
   act: (id: string, a: "pause" | "resume" | "cancel" | "run") => void;
+  openGuidance: () => void;
 }) {
   const [feedback, setFeedback] = useState("");
   const [sending, setSending] = useState(false);
@@ -3100,7 +3110,7 @@ function Activity({
           </button>
         </div>
       </form>
-      <LearningPanel scope={data.scope} />
+      <LearningPanel userId={data.profile.id} openGuidance={openGuidance} />
       {detailError && (
         <p className="settings-error" role="alert">
           {detailError}
@@ -3170,27 +3180,39 @@ function Activity({
     </Page>
   );
 }
-function LearningPanel({ scope }: { scope: string }) {
+function LearningPanel({ userId, openGuidance }: { userId: string; openGuidance: () => void }) {
   const [records, setRecords] = useState<LifeRecord[]>([]),
+    [proposals, setProposals] = useState<ImprovementProposal[]>([]),
+    [modelAvailable, setModelAvailable] = useState(true),
+    [improvementSelected, setImprovementSelected] = useState<Set<string>>(new Set()),
+    [goal, setGoal] = useState(""),
+    [review, setReview] = useState<ImprovementProposal | null>(null),
+    [working, setWorking] = useState(""),
     [error, setError] = useState("");
+  const proposalRequest = useRef<AbortController | undefined>(undefined);
+  const learningMounted = useRef(true);
   const load = async () => {
     try {
-      setRecords((await api.learning.list(scope)).records);
+      const [learning, improvements] = await Promise.all([
+        api.learning.list(`user:${userId}`),
+        api.improvements.list(),
+      ]);
+      setRecords(learning.records);
+      setProposals(improvements.proposals);
+      setModelAvailable(improvements.modelAvailable);
+      setError("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Feedback could not load.");
     }
   };
   useEffect(() => {
+    learningMounted.current = true;
     void load();
-  }, [scope]);
-  if (error)
-    return (
-      <div className="learning">
-        <h2>Response feedback</h2>
-        <p>{error}</p>
-      </div>
-    );
-  if (!records.length) return null;
+    return () => {
+      learningMounted.current = false;
+      proposalRequest.current?.abort();
+    };
+  }, [userId]);
   const selected = records.filter((record) => record.data.trainingEligible === true);
   return (
     <section className="learning">
@@ -3216,6 +3238,77 @@ function LearningPanel({ scope }: { scope: string }) {
           Download selected JSONL
         </button>
       </header>
+      <section className="improvement-builder">
+        <div>
+          <h3>Propose a private improvement</h3>
+          <p>
+            Choose one to three examples. Ellie previews them offline; no actions are run, model
+            weights do not change, and the preview does not prove the suggestion is better.
+          </p>
+        </div>
+        <label>
+          Optional goal
+          <input
+            value={goal}
+            maxLength={1000}
+            onChange={(event) => setGoal(event.target.value)}
+            placeholder="For example, ask one clear follow-up question"
+          />
+        </label>
+        <div>
+          <button
+            className="primary"
+            disabled={working === "propose" || improvementSelected.size < 1 || !modelAvailable}
+            onClick={() => {
+              const controller = new AbortController();
+              proposalRequest.current?.abort();
+              proposalRequest.current = controller;
+              setWorking("propose");
+              setError("");
+              const feedback = records
+                .filter((record) => improvementSelected.has(record.id))
+                .slice(0, 3)
+                .map((record) => ({ id: record.id, revision: record.revision }));
+              void api.improvements
+                .propose(feedback, goal, controller.signal)
+                .then(async (proposal) => {
+                  if (!learningMounted.current || proposalRequest.current !== controller) return;
+                  setReview(proposal);
+                  setImprovementSelected(new Set());
+                  await load();
+                })
+                .catch((cause) => {
+                  if (!learningMounted.current || proposalRequest.current !== controller) return;
+                  if (controller.signal.aborted) setError("Improvement request cancelled.");
+                  else
+                    setError(
+                      cause instanceof Error
+                        ? cause.message
+                        : "An improvement could not be proposed.",
+                    );
+                })
+                .finally(() => {
+                  if (learningMounted.current && proposalRequest.current === controller) {
+                    proposalRequest.current = undefined;
+                    setWorking("");
+                  }
+                });
+            }}
+          >
+            {working === "propose" ? "Preparing offline previews…" : "Propose improvement"}
+          </button>
+          {working === "propose" && (
+            <button type="button" onClick={() => proposalRequest.current?.abort()}>
+              Cancel
+            </button>
+          )}
+        </div>
+        {!modelAvailable && (
+          <p className="settings-error">
+            A local model with improvement previews must be configured and available first.
+          </p>
+        )}
+      </section>
       {records.map((record) => {
         const example = record.data.example as
           | { prompt?: string; response?: string; preferredResponse?: string }
@@ -3256,10 +3349,165 @@ function LearningPanel({ scope }: { scope: string }) {
               />{" "}
               Include in evaluation export
             </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={improvementSelected.has(record.id)}
+                disabled={!improvementSelected.has(record.id) && improvementSelected.size >= 3}
+                onChange={(event) =>
+                  setImprovementSelected((current) => {
+                    const next = new Set(current);
+                    if (event.target.checked) next.add(record.id);
+                    else next.delete(record.id);
+                    return next;
+                  })
+                }
+              />{" "}
+              Use privately for an improvement proposal
+            </label>
           </article>
         );
       })}
+      {proposals.length > 0 && (
+        <section className="improvement-list">
+          <h3>Private improvement proposals</h3>
+          <p>These remain personal even while you are viewing a shared space.</p>
+          {proposals.map((proposal) => (
+            <article key={proposal.record.id}>
+              <div>
+                <strong>{proposal.record.title}</strong>
+                <span>{proposal.status}</span>
+              </div>
+              <button onClick={() => setReview(proposal)}>Review</button>
+            </article>
+          ))}
+        </section>
+      )}
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+      {review && (
+        <ImprovementReview
+          proposal={review}
+          close={() => setReview(null)}
+          openGuidance={openGuidance}
+          changed={async (next) => {
+            setReview(next);
+            await load();
+          }}
+        />
+      )}
     </section>
+  );
+}
+function ImprovementReview({
+  proposal,
+  close,
+  changed,
+  openGuidance,
+}: {
+  proposal: ImprovementProposal;
+  close: () => void;
+  changed: (proposal: ImprovementProposal) => Promise<void>;
+  openGuidance: () => void;
+}) {
+  const [busy, setBusy] = useState(""),
+    [error, setError] = useState("");
+  const mutate = async (action: "adopt" | "dismiss") => {
+    setBusy(action);
+    setError("");
+    try {
+      const next = await api.improvements[action](proposal.record.id, proposal.record.revision);
+      await changed(next);
+    } catch (cause) {
+      if (cause instanceof ApiError && cause.status === 409) {
+        try {
+          await changed(await api.improvements.detail(proposal.record.id));
+          setError("This proposal changed. Its current review is shown.");
+        } catch (refreshError) {
+          setError(
+            refreshError instanceof Error ? refreshError.message : "Review could not refresh.",
+          );
+        }
+      } else
+        setError(cause instanceof Error ? cause.message : "The proposal could not be updated.");
+    } finally {
+      setBusy("");
+    }
+  };
+  return (
+    <Modal title={proposal.record.title} close={close} wide>
+      <p className="impact">
+        Private proposal · {proposal.status}. Reviewing or previewing runs no actions and does not
+        change model weights.
+      </p>
+      {proposal.status === "stale" ? (
+        <p className="settings-error">
+          A selected feedback example changed or was removed. Replay text is hidden and this
+          proposal cannot be adopted.
+        </p>
+      ) : (
+        <>
+          <section className="proposal-copy">
+            <h3>Proposed guidance</h3>
+            <p>{proposal.instructions}</p>
+            <h3>Why Ellie proposed it</h3>
+            <p>{proposal.rationale}</p>
+          </section>
+          <section className="preview-list">
+            <h3>Offline example preview · no actions were run</h3>
+            <p>Compare the replies yourself. This limited replay is not a quality score.</p>
+            {proposal.previews.map((preview) => (
+              <article key={preview.feedbackId}>
+                <p>
+                  <b>Example prompt</b>
+                  {preview.prompt}
+                </p>
+                <div>
+                  <blockquote>
+                    <b>Before</b>
+                    {preview.recordedResponse}
+                  </blockquote>
+                  <blockquote>
+                    <b>With proposed guidance</b>
+                    {preview.candidateResponse}
+                  </blockquote>
+                </div>
+                {preview.preferredResponse && (
+                  <p>
+                    <b>Your correction</b>
+                    {preview.preferredResponse}
+                  </p>
+                )}
+              </article>
+            ))}
+          </section>
+        </>
+      )}
+      {proposal.status === "ready" && (
+        <div className="modal-actions">
+          <button className="primary" disabled={Boolean(busy)} onClick={() => void mutate("adopt")}>
+            {busy === "adopt" ? "Adopting…" : "Adopt as guidance"}
+          </button>
+          <button disabled={Boolean(busy)} onClick={() => void mutate("dismiss")}>
+            {busy === "dismiss" ? "Dismissing…" : "Dismiss proposal"}
+          </button>
+        </div>
+      )}
+      {proposal.status === "adopted" && (
+        <div className="success-note">
+          <p>Adopted as private guidance. It did not change model weights.</p>
+          <button onClick={openGuidance}>Open guidance in Your world</button>
+        </div>
+      )}
+      {error && (
+        <p className="settings-error" role="alert">
+          {error}
+        </p>
+      )}
+    </Modal>
   );
 }
 function Settings({

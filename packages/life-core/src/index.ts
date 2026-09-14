@@ -889,6 +889,23 @@ export class LifeStore {
         .all(user, user, ...(requestedKinds ?? []), limit) as Record<string, unknown>[];
     return rows.map((r) => this.record(r));
   }
+  listImprovementRecords(actor: LifeActor, limitInput = 21): LifeRecord[] {
+    const user = this.actor(actor);
+    if (!Number.isSafeInteger(limitInput) || limitInput < 1 || limitInput > 21)
+      throw new TypeError("improvement record limit is invalid");
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM records
+           WHERE kind='routine' AND scope_type='user' AND scope_id=?
+             AND (json_extract(data_json,'$.type')='learning-improvement-v1'
+               OR (json_extract(data_json,'$.type')='teaching-guide-v1'
+                 AND json_extract(data_json,'$.improvementAudit.type')='learning-improvement-v1'))
+           ORDER BY updated_at DESC,id DESC LIMIT ?`,
+        )
+        .all(user, limitInput) as Record<string, unknown>[]
+    ).map((row) => this.record(row));
+  }
   listRecordSummaries(
     actor: LifeActor,
     query: { scope: LifeScope; kinds?: LifeRecordKind[]; limit?: number; cursor?: string },

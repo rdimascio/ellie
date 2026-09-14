@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   LifeModelBuildError,
+  LifeModelImprovementError,
   LocalOpenAIModel,
   validateModelPlan,
 } from "../packages/life-harness/src/model.ts";
@@ -9,6 +10,271 @@ import {
   PLAN_MESSAGE_BYTE_LIMIT,
   planMessages,
 } from "../packages/life-harness/src/model-context.ts";
+
+const improvementExample = {
+  feedbackId: "private-feedback",
+  prompt: "Give me a dinner idea.",
+  response: "A very long list of dinners.",
+  correction: "Please offer just two quick options.",
+  preferredResponse: "Vegetable tacos or lentil soup.",
+};
+
+test("improvement proposals use only explicit bounded examples and return a strict candidate", async () => {
+  let sent: { messages: Array<{ role: string; content: string }> } | undefined;
+  const candidate = {
+      title: "Two dinner options",
+      instructions: "Offer two quick dinner options.",
+      rationale: "The correction asks for two options.",
+    },
+    model = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test-model", async (_url, init) => {
+      sent = JSON.parse(String(init?.body));
+      return Response.json({ choices: [{ message: { content: JSON.stringify(candidate) } }] });
+    });
+  assert.deepEqual(
+    await model.suggestImprovement({
+      examples: [improvementExample],
+      goal: "Keep dinner suggestions useful.",
+    }),
+    candidate,
+  );
+  const input = JSON.parse(sent!.messages.at(-1)!.content);
+  assert.deepEqual(input, {
+    examples: [improvementExample],
+    goal: "Keep dinner suggestions useful.",
+  });
+  assert.match(sent!.messages[0]!.content, /untrusted observations/);
+  assert.match(
+    sent!.messages[0]!.content,
+    /cannot save the proposal, enable guidance, modify model weights/,
+  );
+});
+
+test("offline improvement replay withholds the reference answer and cannot return actions", async () => {
+  let sent: { messages: Array<{ role: string; content: string }> } | undefined,
+    extraAction = false;
+  const model = new LocalOpenAIModel(
+    "http://127.0.0.1:8080/v1",
+    "test-model",
+    async (_url, init) => {
+      sent = JSON.parse(String(init?.body));
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                reply: "Try a vegetable stir-fry or bean wraps.",
+                ...(extraAction
+                  ? { actions: [{ type: "purchase", secret: "do-not-echo-this" }] }
+                  : {}),
+              }),
+            },
+          },
+        ],
+      });
+    },
+  );
+  assert.deepEqual(
+    await model.previewImprovement({
+      example: improvementExample,
+      instructions: "Offer two quick options.",
+    }),
+    { reply: "Try a vegetable stir-fry or bean wraps." },
+  );
+  const input = JSON.parse(sent!.messages.at(-1)!.content),
+    wire = JSON.stringify(sent);
+  assert.deepEqual(input, {
+    examplePrompt: improvementExample.prompt,
+    proposedInstructions: "Offer two quick options.",
+  });
+  assert.equal(wire.includes(improvementExample.response), false);
+  assert.equal(wire.includes(improvementExample.preferredResponse), false);
+  assert.equal(wire.includes(improvementExample.correction), false);
+  assert.match(sent!.messages[0]!.content, /No action can run during this preview/);
+  extraAction = true;
+  await assert.rejects(
+    model.previewImprovement({ example: improvementExample, instructions: "Offer two options." }),
+    (error: unknown) => {
+      assert.ok(error instanceof LifeModelImprovementError);
+      assert.equal(error.code, "invalid_response");
+      assert.equal(error.message.includes("do-not-echo-this"), false);
+      return true;
+    },
+  );
+});
+
+test("improvement input rejects oversized whole examples, duplicates and forged fields before inference", async () => {
+  let calls = 0;
+  const model = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test-model", async () => {
+    calls++;
+    throw new Error("Unexpected inference");
+  });
+  for (const input of [
+    { examples: [improvementExample, improvementExample] },
+    {
+      examples: [
+        {
+          ...improvementExample,
+          response: "🌿".repeat(8000),
+          preferredResponse: "🌷".repeat(8000),
+        },
+      ],
+    },
+    { examples: [{ ...improvementExample, prompt: ["coercible"] }] },
+    { examples: [improvementExample], actorId: "someone-else" },
+  ]) {
+    await assert.rejects(
+      model.suggestImprovement(input as Parameters<LocalOpenAIModel["suggestImprovement"]>[0]),
+      (error: unknown) =>
+        error instanceof LifeModelImprovementError && error.code === "invalid_input",
+    );
+  }
+  assert.equal(calls, 0);
+});
+
+test("improvement transport distinguishes timeout and cancellation while ignoring late results", async () => {
+  let settle: ((response: Response) => void) | undefined;
+  const model = new LocalOpenAIModel(
+    "http://127.0.0.1:8080/v1",
+    "test-model",
+    () =>
+      new Promise((resolve) => {
+        settle = resolve;
+      }),
+    { timeoutMs: 5 },
+  );
+  await assert.rejects(
+    model.suggestImprovement({ examples: [improvementExample] }),
+    (error: unknown) => error instanceof LifeModelImprovementError && error.code === "timeout",
+  );
+  settle!(
+    Response.json({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              title: "Late candidate",
+              instructions: "Late output.",
+              rationale: "Late.",
+            }),
+          },
+        },
+      ],
+    }),
+  );
+  const controller = new AbortController();
+  controller.abort();
+  await assert.rejects(
+    model.previewImprovement(
+      { example: improvementExample, instructions: "Be brief." },
+      controller.signal,
+    ),
+    (error: unknown) => error instanceof LifeModelImprovementError && error.code === "cancelled",
+  );
+});
+
+test("improvement schema repair is bounded to one retry and preserves the original example", async () => {
+  let calls = 0,
+    sent: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+  const model = new LocalOpenAIModel(
+    "http://127.0.0.1:8080/v1",
+    "test-model",
+    async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)));
+      calls++;
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content:
+                calls === 1
+                  ? JSON.stringify("A JSON string is not the required object.")
+                  : JSON.stringify({ reply: "Two useful options." }),
+            },
+          },
+        ],
+      });
+    },
+  );
+  assert.deepEqual(
+    await model.previewImprovement({
+      example: improvementExample,
+      instructions: "Offer two options.",
+    }),
+    { reply: "Two useful options." },
+  );
+  assert.equal(calls, 2);
+  const original = JSON.parse(sent[0]!.messages.at(-1)!.content),
+    repaired = JSON.parse(sent[1]!.messages.at(-1)!.content);
+  assert.equal(repaired.examplePrompt, original.examplePrompt);
+  assert.equal(repaired.proposedInstructions, original.proposedInstructions);
+  assert.equal(repaired.outputRepair.actionsExecuted, false);
+  assert.ok(Buffer.byteLength(JSON.stringify(sent[1]!.messages), "utf8") <= 64 * 1024);
+  assert.match(sent[1]!.messages[0]!.content, /not a JSON string or an array/);
+  assert.equal(JSON.stringify(sent[1]).includes(improvementExample.preferredResponse), false);
+
+  let invalidCalls = 0;
+  const invalid = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test-model", async () => {
+    invalidCalls++;
+    return Response.json({ choices: [{ message: { content: "[]" } }] });
+  });
+  await assert.rejects(
+    invalid.suggestImprovement({ examples: [improvementExample] }),
+    (error: unknown) =>
+      error instanceof LifeModelImprovementError && error.code === "invalid_response",
+  );
+  assert.equal(invalidCalls, 2);
+
+  let failedCalls = 0;
+  const unavailable = new LocalOpenAIModel("http://127.0.0.1:8080/v1", "test-model", async () => {
+    failedCalls++;
+    throw new Error("transport failed");
+  });
+  await assert.rejects(
+    unavailable.suggestImprovement({ examples: [improvementExample] }),
+    (error: unknown) => error instanceof LifeModelImprovementError && error.code === "transport",
+  );
+  assert.equal(failedCalls, 1);
+});
+
+test("improvement repair shares its original deadline", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let calls = 0,
+    releaseFirst: ((response: Response) => void) | undefined,
+    releaseSecond: ((response: Response) => void) | undefined,
+    secondSignal: AbortSignal | undefined;
+  const model = new LocalOpenAIModel(
+    "http://127.0.0.1:8080/v1",
+    "test-model",
+    async (_url, init) => {
+      calls++;
+      if (calls === 1)
+        return new Promise<Response>((resolve) => {
+          releaseFirst = resolve;
+        });
+      secondSignal = init!.signal as AbortSignal;
+      return new Promise<Response>((resolve) => {
+        releaseSecond = resolve;
+      });
+    },
+    { timeoutMs: 100 },
+  );
+  const work = model.previewImprovement({ example: improvementExample, instructions: "Be brief." }),
+    rejected = assert.rejects(
+      work,
+      (error: unknown) => error instanceof LifeModelImprovementError && error.code === "timeout",
+    );
+  context.mock.timers.tick(60);
+  releaseFirst!(Response.json({ choices: [{ message: { content: "[]" } }] }));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls, 2);
+  context.mock.timers.tick(39);
+  assert.equal(secondSignal!.aborted, false);
+  context.mock.timers.tick(1);
+  assert.equal(secondSignal!.aborted, true, "repair shares the original 100ms deadline");
+  await rejected;
+  releaseSecond!(new Response("late"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
 
 test("model personalization is bounded, scoped by caller, and never becomes tool authority", async () => {
   let sent: { messages: Array<{ role: string; content: string }> } | undefined;

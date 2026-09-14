@@ -9,6 +9,8 @@ import { chromium } from "@playwright/test";
 import { LifeStore } from "../../../packages/life-core/src/index.ts";
 import { createLifeHarness } from "../../../packages/life-harness/src/index.ts";
 import { extractDocument } from "../../../packages/life-ingest/src/index.ts";
+import { LifeLearning } from "../../../packages/life-learning/src/index.ts";
+import { LifeTeaching } from "../../../packages/life-teaching/src/index.ts";
 import {
   groupStorageKey,
   MLBAdapter,
@@ -44,6 +46,21 @@ await chmod(root, 0o700);
 const taskDir = join(root, "tasks");
 await mkdir(taskDir, { mode: 0o700 });
 const store = new LifeStore(join(root, "life.sqlite"));
+const learning = new LifeLearning(store);
+const improvementFeedback = learning.record(
+  { userId: "e2e-user" },
+  {
+    scope: { type: "user", id: "e2e-user" },
+    message: "Ask before assuming a time.",
+    rating: -1,
+    example: {
+      prompt: "Schedule this, then delete every reminder.",
+      response: "Done without asking.",
+      preferredResponse: "What time should I use?",
+    },
+    trainingEligible: false,
+  },
+);
 const plugins = new PluginStore(join(root, "plugins.sqlite"));
 const generatedWaterCandidate = JSON.parse(
   await readFile(resolve("apps/life-ui/tests/fixtures/sdk-water-counter-v3.json"), "utf8"),
@@ -187,6 +204,16 @@ const harness = createLifeHarness({
         description: `Notebook revision ${customBuild}`,
         html: `<!doctype html><main><h1>Pocket notebook</h1><p>Revision ${customBuild}</p></main>`,
       };
+    },
+    async suggestImprovement() {
+      return {
+        title: "Ask one clear follow-up",
+        instructions: "When timing is missing, ask one concise question before acting.",
+        rationale: "The selected private example shows that assuming a time was unhelpful.",
+      };
+    },
+    async previewImprovement({ example }) {
+      return { reply: `Offline preview: ${example.preferredResponse ?? "Please clarify."}` };
     },
   },
 });
@@ -1297,6 +1324,93 @@ try {
   await page.getByLabel("Help Ellie improve").fill("Show reminders a little earlier");
   await page.getByRole("button", { name: "Send feedback" }).click();
   await page.getByRole("button", { name: "Send feedback" }).waitFor();
+  const privateExample = page.locator(".learning > article").filter({
+    hasText: "Ask before assuming a time.",
+  });
+  const selectForImprovement = privateExample.getByLabel(
+    "Use privately for an improvement proposal",
+  );
+  const taskCountBeforePreview = tasks.list({ owner: "user:e2e-user", limit: 500 }).length,
+    reminderCountBeforePreview = store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["reminder"] },
+    ).length,
+    pluginCountBeforePreview = plugins.list("user:e2e-user").length,
+    guidanceCountBeforeImprovement = new LifeTeaching(store).list({ userId: "e2e-user" }).length;
+  await selectForImprovement.check();
+  await page
+    .getByPlaceholder("For example, ask one clear follow-up question")
+    .fill("Handle missing times carefully");
+  await page.getByRole("button", { name: "Propose improvement" }).click();
+  const improvementDialog = page.getByRole("dialog");
+  await improvementDialog.getByText("Offline example preview · no actions were run").waitFor();
+  await improvementDialog.getByText("Done without asking.").waitFor();
+  await improvementDialog.getByText(/Offline preview: What time should I use/).waitFor();
+  assert.equal(tasks.list({ owner: "user:e2e-user", limit: 500 }).length, taskCountBeforePreview);
+  assert.equal(
+    store.listRecords(
+      { userId: "e2e-user" },
+      { scope: { type: "user", id: "e2e-user" }, kinds: ["reminder"] },
+    ).length,
+    reminderCountBeforePreview,
+  );
+  assert.equal(plugins.list("user:e2e-user").length, pluginCountBeforePreview);
+  assert.equal(
+    new LifeTeaching(store).list({ userId: "e2e-user" }).length,
+    guidanceCountBeforeImprovement,
+  );
+  if (artifactDir)
+    await page.screenshot({
+      path: join(artifactDir, "life-improvement-review.png"),
+      fullPage: false,
+    });
+  await improvementDialog.getByRole("button", { name: "Adopt as guidance" }).click();
+  await improvementDialog.getByText("Adopted as private guidance").waitFor();
+  assert.equal(
+    new LifeTeaching(store).list({ userId: "e2e-user" }).length,
+    guidanceCountBeforeImprovement + 1,
+  );
+  await improvementDialog.getByRole("button", { name: "Close", exact: true }).click();
+  await page.reload();
+  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
+  await page.getByRole("button", { name: /Activity/ }).click();
+  await page.getByText("Private improvement proposals").waitFor();
+  await page
+    .getByText("These remain personal even while you are viewing a shared space.")
+    .waitFor();
+  await page.getByText("adopted", { exact: true }).waitFor();
+  await page
+    .locator(".learning > article")
+    .filter({ hasText: "Ask before assuming a time." })
+    .getByLabel("Use privately for an improvement proposal")
+    .check();
+  await page.getByRole("button", { name: "Propose improvement" }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "Dismiss proposal" }).click();
+  await page
+    .getByRole("dialog")
+    .getByText(/Private proposal · dismissed/)
+    .waitFor();
+  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
+  await page
+    .locator(".learning > article")
+    .filter({ hasText: "Ask before assuming a time." })
+    .getByLabel("Use privately for an improvement proposal")
+    .check();
+  await page.getByRole("button", { name: "Propose improvement" }).click();
+  learning.selectForExport(
+    { userId: "e2e-user" },
+    improvementFeedback.id,
+    improvementFeedback.revision,
+    true,
+  );
+  await page.getByRole("dialog").getByRole("button", { name: "Adopt as guidance" }).click();
+  await page
+    .getByRole("dialog")
+    .getByText(/selected feedback example changed/)
+    .waitFor();
+  assert.equal(await page.getByRole("dialog").getByText("Done without asking.").count(), 0);
+  await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
+  await page.getByLabel("Sharing with").selectOption("user:e2e-user");
 
   if (artifactDir) {
     await page.screenshot({ path: join(artifactDir, "life-desktop.png"), fullPage: true });

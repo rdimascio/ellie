@@ -15,6 +15,10 @@ import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src
 import { builtInManifest, PluginError } from "../../life-plugins/src/index.ts";
 import { LifeTeaching } from "../../life-teaching/src/index.ts";
 import {
+  LifeImprovementEngine,
+  LifeImprovementError,
+} from "../../life-learning/src/improvement.ts";
+import {
   addCalendarDays,
   CalendarTimeError,
   calendarDateKey,
@@ -42,6 +46,7 @@ export * from "./model.ts";
 export * from "./operations.ts";
 export * from "./continuation.ts";
 export * from "./build.ts";
+export * from "../../life-learning/src/improvement.ts";
 
 export interface LifeHarnessOptions {
   store: LifeStore;
@@ -52,6 +57,7 @@ export interface LifeHarnessOptions {
   now?: () => number;
   context?: ProactivityEngine;
   teaching?: LifeTeaching;
+  improvements?: LifeImprovementEngine;
 }
 export interface ChatRequest {
   actor: LifeActor;
@@ -94,6 +100,7 @@ export interface ChatResponse {
   createdGroup?: Pick<LifeGroup, "id" | "name">;
 }
 export interface LifeHarness {
+  improvements: LifeImprovementEngine;
   chat(request: ChatRequest): Promise<ChatResponse>;
   continuePendingIntent(request: {
     actor: LifeActor;
@@ -361,6 +368,14 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
   const now = options.now ?? Date.now;
   const context = options.context ?? new ProactivityEngine(options.store, now);
   const teaching = options.teaching ?? new LifeTeaching(options.store, now);
+  const improvements =
+    options.improvements ??
+    new LifeImprovementEngine({
+      store: options.store,
+      teaching,
+      model: options.model,
+      now,
+    });
   const sessions = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
   const contextGenerations = new Map<string, number>();
   const actorGenerations = new Map<string, number>();
@@ -1222,6 +1237,88 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
       });
       return finish(`${enabled ? "Resumed" : "Paused"} “${guide.record.title}”.`);
     }
+    if (/^review my feedback and suggest an improvement[.!?]?$/i.test(message)) {
+      const personalScope = { type: "user", id: request.actor.userId } as const;
+      const feedback = options.store
+        .listRecords(request.actor, { scope: personalScope, kinds: ["feedback"], limit: 500 })
+        .filter(
+          (record) =>
+            record.data.type === "learning-feedback-v1" &&
+            record.data.authorId === request.actor.userId &&
+            record.data.example &&
+            (record.data.rating === -1 ||
+              (record.data.example as Record<string, unknown>).preferredResponse !== undefined),
+        )
+        .slice(0, 3)
+        .map((record) => ({ id: record.id, revision: record.revision }));
+      if (!feedback.length)
+        return finish(
+          "I couldn’t find a recent private corrected or negative feedback example to review.",
+        );
+      try {
+        const proposal = await improvements.propose(request.actor, {
+          feedback,
+          ...(request.signal ? { signal: request.signal } : {}),
+          ...(request.isContextCurrent ? { isContextCurrent: request.isContextCurrent } : {}),
+        });
+        records.push(proposal.record);
+        actions.push({
+          label: `Propose improvement: ${proposal.record.title}`,
+          status: "completed",
+        });
+        return finish(
+          `Proposed “${proposal.record.title}” from ${feedback.length} private feedback ${feedback.length === 1 ? "example" : "examples"}. Review its offline previews before adopting it.`,
+        );
+      } catch (error) {
+        if (error instanceof LifeImprovementError) return finish(error.message);
+        throw error;
+      }
+    }
+    if (/^list improvements[.!?]?$/i.test(message)) {
+      const proposals = improvements.list(request.actor);
+      return finish(
+        proposals.length
+          ? `Private improvements: ${proposals.map((proposal) => `${proposal.record.title} (${proposal.status})`).join("; ")}.`
+          : "You don’t have any private improvement proposals yet.",
+      );
+    }
+    const improvementAction = /^(adopt|dismiss) improvement\s+(.+?)[.!?]?$/i.exec(message);
+    if (improvementAction) {
+      const title = clean(improvementAction[2]!);
+      const matches = improvements
+        .list(request.actor)
+        .filter((proposal) => clean(proposal.record.title).toLowerCase() === title.toLowerCase());
+      if (matches.length !== 1)
+        return finish(
+          matches.length
+            ? "That name matches more than one private improvement. Rename or remove one first."
+            : `I couldn’t find a private improvement named “${title}”.`,
+        );
+      try {
+        const proposal =
+          improvementAction[1]!.toLowerCase() === "adopt"
+            ? improvements.adopt(request.actor, matches[0]!.record.id, matches[0]!.record.revision)
+            : improvements.dismiss(
+                request.actor,
+                matches[0]!.record.id,
+                matches[0]!.record.revision,
+              );
+        records.push(proposal.record);
+        if (proposal.status === "adopted") invalidateActorContext(request.actor);
+        actions.push({
+          label: `${proposal.status === "adopted" ? "Adopt" : "Dismiss"} improvement: ${proposal.record.title}`,
+          status: "completed",
+        });
+        return finish(
+          proposal.status === "adopted"
+            ? `Adopted “${proposal.record.title}” as active private guidance.`
+            : `Dismissed “${proposal.record.title}”.`,
+        );
+      } catch (error) {
+        if (error instanceof LifeImprovementError) return finish(error.message);
+        throw error;
+      }
+    }
     const placeReminder = /^remind me to\s+(.+?)\s+when i(?:'m| am) at\s+(.+)$/i.exec(message);
     if (placeReminder) {
       const storeName = clean(placeReminder[2]!);
@@ -1925,6 +2022,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     );
   }
   return {
+    improvements,
     chat,
     continuePendingIntent,
     invalidateContext,

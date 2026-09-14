@@ -33,3 +33,9 @@ The builder supplies the synchronous `window.ellie` SDK contract, including raw-
 A revision includes the previous complete app as untrusted input and requests a complete replacement. Serialized builder messages have a 256-KiB UTF-8 ceiling. The adapter distinguishes invalid output, transport failure, timeout and cancellation through typed errors with static user-facing messages. The harness separately guards generation admission, scope, cancellation and current version before saving. No generated code executes on the server.
 
 An app that passes JSON, syntax and capability checks can still have functional defects. Real browser acceptance must check the requested behavior, persistence and failure handling. Natural-language revisions create retained app versions, allowing a failed improvement to leave the existing version active and successful revisions to be rolled back.
+
+## Feedback improvement methods
+
+`suggestImprovement` proposes a title, bounded instruction and rationale from one to three explicitly selected private examples. `previewImprovement` receives the original prompt and proposed instruction; the adapter withholds the reference answer and correction. It returns a reply only, without an action channel. Neither method executes the harness planner, tools or generated code.
+
+Each method keeps whole fields inside a 64-KiB serialized input limit, uses strict output validation and permits one JSON/schema repair within its original thirty-second deadline. Repair diagnostics are untrusted, bounded to 4,000 Unicode code points or less if required by the byte ceiling, and cannot change the original request. An invalid second output or transport failure ends the method. The [improvement engine](life-improvement.md) adds the overall workflow deadline, private revision/epoch checks, retained admission, and explicit adoption into versioned guidance.

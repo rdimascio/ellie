@@ -78,6 +78,40 @@ test("records survive restart, enforce private/group scopes, revisions and delet
   }
 });
 
+test("improvement selector filters before its cap and stays actor-private", async () => {
+  const f = await fixture();
+  const store = f.open();
+  try {
+    const proposal = store.createRecord(alice, {
+      kind: "routine",
+      title: "Older proposal",
+      scope: { type: "user", id: "alice" },
+      data: { type: "learning-improvement-v1", status: "ready" },
+    });
+    for (let index = 0; index < 501; index++)
+      store.createRecord(alice, {
+        kind: "routine",
+        title: `Unrelated ${index}`,
+        scope: { type: "user", id: "alice" },
+        data: { type: "ordinary-routine" },
+      });
+    store.createRecord(bob, {
+      kind: "routine",
+      title: "Bob proposal",
+      scope: { type: "user", id: "bob" },
+      data: { type: "learning-improvement-v1", status: "ready" },
+    });
+    assert.deepEqual(
+      store.listImprovementRecords(alice).map(({ id }) => id),
+      [proposal.id],
+    );
+    assert.throws(() => store.listImprovementRecords(alice, 22), /limit is invalid/);
+  } finally {
+    store.close();
+    await rm(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("settings resolve precedence and cannot override permissions", async () => {
   const f = await fixture();
   try {

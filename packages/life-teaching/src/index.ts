@@ -35,6 +35,7 @@ export interface AdoptedGuidance {
 }
 
 const TYPE = "teaching-guide-v1";
+const IMPROVEMENT_TYPE = "learning-improvement-v1";
 const MAX_INSTRUCTIONS = 4_000;
 function bounded(value: unknown, limit: number): string {
   if (typeof value !== "string" || !value.trim() || value.length > limit)
@@ -132,6 +133,50 @@ export class LifeTeaching {
     return this.describe(actor, record);
   }
 
+  /** Atomically turns a reviewed private improvement proposal into enabled guidance. */
+  adoptImprovement(actor: LifeActor, id: string, expectedRevision: number): TeachingGuide {
+    const proposal = this.store.getRecord(actor, id);
+    if (
+      !proposal ||
+      proposal.kind !== "routine" ||
+      proposal.scope.type !== "user" ||
+      proposal.scope.id !== actor.userId ||
+      proposal.data.type !== IMPROVEMENT_TYPE ||
+      proposal.data.status !== "ready"
+    )
+      throw new LifeAccessError("Improvement proposal unavailable.");
+    if (proposal.revision !== expectedRevision)
+      throw new LifeConflictError("Improvement proposal changed.");
+    const instructions = bounded(proposal.body, MAX_INSTRUCTIONS);
+    const adoptedAt = this.now();
+    const version: TeachingVersion = {
+      version: 1,
+      instructions,
+      sources: [],
+      adoptedBy: actor.userId,
+      adoptedAt,
+    };
+    const record = this.store.updateRecord(actor, id, expectedRevision, {
+      body: instructions,
+      data: {
+        type: TYPE,
+        enabled: true,
+        version: 1,
+        versions: [version],
+        improvementAudit: {
+          ...proposal.data,
+          candidateInstructions: instructions,
+          status: "adopted",
+          adoptedBy: actor.userId,
+          adoptedAt,
+        },
+      },
+      provenance: [],
+      relationships: [],
+    });
+    return this.describe(actor, record);
+  }
+
   get(actor: LifeActor, id: string): TeachingGuide {
     const record = this.store.getRecord(actor, id);
     if (!record) throw new LifeAccessError("Teaching guide unavailable.");
@@ -177,6 +222,9 @@ export class LifeTeaching {
         enabled: guide.enabled,
         version: version.version,
         versions: [...guide.versions, version].slice(-8),
+        ...(guide.record.data.improvementAudit === undefined
+          ? {}
+          : { improvementAudit: guide.record.data.improvementAudit }),
       },
       provenance: sources.map((source) => ({ sourceId: source.id, derived: true })),
       relationships: sources.map((source) => ({ type: "taught-by", targetId: source.id })),

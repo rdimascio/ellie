@@ -1401,6 +1401,12 @@ main {
   gap: 10px;
   margin-top: 22px;
 }
+.modal-actions button:not(.primary) {
+  border: 1px solid var(--rule);
+  border-radius: 18px;
+  background: transparent;
+  padding: 8px 14px;
+}
 .danger {
   border: 0;
   background: transparent;
@@ -1669,6 +1675,69 @@ main {
   margin-top: 42px;
   border-top: 1px solid var(--ink);
   padding-top: 20px;
+}
+.improvement-builder,
+.improvement-list {
+  margin: 22px 0;
+  padding: 18px 0;
+  border-block: 1px solid var(--line);
+}
+.improvement-builder > div,
+.modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.improvement-builder label {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0;
+}
+.improvement-builder input {
+  width: 100%;
+}
+.improvement-list > article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.improvement-list > article > div {
+  display: grid;
+  gap: 2px;
+}
+.improvement-list span {
+  color: var(--muted);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+.proposal-copy {
+  padding: 10px 0 18px;
+}
+.preview-list > p {
+  color: var(--muted);
+}
+.preview-list article {
+  padding: 16px 0;
+  border-top: 1px solid var(--line);
+}
+.preview-list article > div {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.preview-list blockquote {
+  margin: 0;
+  padding: 14px;
+  background: var(--soft);
+  border-radius: 10px;
+}
+.preview-list b {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  text-transform: uppercase;
 }
 .learning > header {
   display: flex;

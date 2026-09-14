@@ -1466,6 +1466,170 @@ test("conversation response feedback is bound to an owned turn and stored privat
   }
 });
 
+test("private improvement routes reject forged scope and abort without late persistence", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" },
+      feedback = f.life.createRecord(actor, {
+        kind: "feedback",
+        title: "Response to improve",
+        scope: { type: "user", id: "local" },
+        data: {
+          type: "learning-feedback-v1",
+          example: { prompt: "Hello", response: "Hi", preferredResponse: "Hello there" },
+        },
+      }),
+      proposalRecord = f.life.createRecord(actor, {
+        kind: "routine",
+        title: "Warmer greetings",
+        scope: { type: "user", id: "local" },
+        data: {
+          type: "learning-improvement-v1",
+          status: "ready",
+          previews: [{ candidateResponse: "hidden direct replay" }],
+          improvementAudit: { previews: [{ candidateResponse: "hidden audit replay" }] },
+        },
+      }),
+      proposal = {
+        record: proposalRecord,
+        status: "ready" as const,
+        instructions: "Use a warmer greeting.",
+        rationale: "The selected example asked for warmth.",
+        feedback: [{ id: feedback.id, revision: feedback.revision }],
+        previews: [
+          {
+            feedbackId: feedback.id,
+            prompt: "Hello",
+            recordedResponse: "Hi",
+            preferredResponse: "Hello there",
+            candidateResponse: "Hello there!",
+          },
+        ],
+      };
+    let entered!: () => void,
+      settleCalls = 0;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    f.harness.improvements = {
+      modelAvailable: true,
+      list: () => [proposal],
+      get: () => ({ ...proposal, status: "stale", previews: proposal.previews }),
+      propose: (_trustedActor, input) => {
+        if (["capacity", "invalid_candidate", "model_transport", "busy"].includes(input.goal!))
+          return Promise.reject({ code: input.goal });
+        return new Promise((_resolve, reject) => {
+          entered();
+          input.signal?.addEventListener("abort", () => reject({ code: "cancelled" }), {
+            once: true,
+          });
+        });
+      },
+      adopt: () => proposal,
+      dismiss: () => ({ ...proposal, status: "dismissed" }),
+      settleActive: async () => {
+        settleCalls++;
+        return true;
+      },
+    };
+    const running = await f.start(),
+      cookie = await authenticate(running.url, "a".repeat(43));
+    const list = (await (
+      await fetch(`${running.url}/api/life/improvements`, { headers: { cookie } })
+    ).json()) as { modelAvailable: boolean; proposals: unknown[] };
+    assert.equal(list.modelAvailable, true);
+    assert.equal(list.proposals.length, 1);
+    const stale = (await (
+      await fetch(`${running.url}/api/life/improvements/${proposalRecord.id}`, {
+        headers: { cookie },
+      })
+    ).json()) as {
+      status: string;
+      previews: unknown[];
+      record: { data: { previews?: unknown; improvementAudit?: { previews?: unknown } } };
+    };
+    assert.equal(stale.status, "stale");
+    assert.deepEqual(stale.previews, []);
+    assert.equal(stale.record.data.previews, undefined);
+    assert.equal(stale.record.data.improvementAudit?.previews, undefined);
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/improvements`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({
+            scope: "group:forged",
+            feedback: [{ id: feedback.id, revision: feedback.revision }],
+          }),
+        })
+      ).status,
+      400,
+    );
+    for (const invalidBody of [
+      { feedback: [{ id: feedback.id, revision: [feedback.revision] }] },
+      { feedback: [{ id: feedback.id, revision: feedback.revision }], extra: true },
+    ])
+      assert.equal(
+        (
+          await fetch(`${running.url}/api/life/improvements`, {
+            method: "POST",
+            headers: jsonHeaders(running.url, cookie),
+            body: JSON.stringify(invalidBody),
+          })
+        ).status,
+        400,
+      );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/improvements/${proposalRecord.id}/adopt`, {
+          method: "POST",
+          headers: jsonHeaders(running.url, cookie),
+          body: JSON.stringify({ expectedRevision: [proposalRecord.revision] }),
+        })
+      ).status,
+      400,
+    );
+    for (const [goal, status, message] of [
+      ["capacity", 429, "Delete an old improvement proposal before creating another."],
+      ["busy", 429, "Two improvement reviews are already running. Try again shortly."],
+      ["invalid_candidate", 502, "The local model returned an invalid improvement proposal."],
+      [
+        "model_transport",
+        503,
+        "The local model runner is unavailable. Try again when it is ready.",
+      ],
+    ] as const) {
+      const result = await fetch(`${running.url}/api/life/improvements`, {
+        method: "POST",
+        headers: jsonHeaders(running.url, cookie),
+        body: JSON.stringify({
+          feedback: [{ id: feedback.id, revision: feedback.revision }],
+          goal,
+        }),
+      });
+      assert.equal(result.status, status);
+      assert.equal(((await result.json()) as { error: string }).error, message);
+    }
+    const pending = fetch(`${running.url}/api/life/improvements`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ feedback: [{ id: feedback.id, revision: feedback.revision }] }),
+    }).catch(() => undefined);
+    await started;
+    await running.server.close();
+    assert.equal(settleCalls, 1);
+    await pending;
+    assert.equal(
+      f.life.listRecords(actor, { scope: { type: "user", id: "local" }, kinds: ["routine"] })
+        .length,
+      1,
+      "the aborted engine cannot persist another proposal",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
 test("server close refuses to release stores while an HTTP handler remains active", async () => {
   const f = await fixture();
   let release!: () => void;
@@ -1793,7 +1957,7 @@ test("raw binary upload accepts documents above the JSON limit without base64 ex
   }
 });
 
-test("reviewed reset aborts an active binary extraction before deleting stores", async () => {
+test("reviewed reset aborts active extraction and improvement review before deleting stores", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-binary-reset-"));
   await chmod(root, 0o700);
   const assets = join(root, "assets");
@@ -1802,10 +1966,24 @@ test("reviewed reset aborts an active binary extraction before deleting stores",
   const life = new LifeStore(join(root, "life.sqlite")),
     plugins = new PluginStore(join(root, "plugins.sqlite")),
     tasks = new TaskRuntime({ directory: join(root, "tasks") });
-  let extractionStarted!: () => void;
+  const feedback = life.createRecord(
+    { userId: "local" },
+    {
+      kind: "feedback",
+      title: "Improve",
+      scope: { type: "user", id: "local" },
+      data: { type: "learning-feedback-v1", example: { prompt: "a", response: "b" } },
+    },
+  );
+  let extractionStarted!: () => void,
+    improvementStarted!: () => void,
+    settleCalls = 0;
   const started = new Promise<void>((resolve) => {
-    extractionStarted = resolve;
-  });
+      extractionStarted = resolve;
+    }),
+    improvementEntered = new Promise<void>((resolve) => {
+      improvementStarted = resolve;
+    });
   const server = createLifeServer({
     stateDir: root,
     assetsDir: assets,
@@ -1815,6 +1993,30 @@ test("reviewed reset aborts an active binary extraction before deleting stores",
     harness: {
       chat: async () => ({ reply: "", conversationId: "c" }),
       invalidateActorContext() {},
+      improvements: {
+        modelAvailable: true,
+        list: () => [],
+        get: () => {
+          throw new Error("unused");
+        },
+        propose: (_actor, input) =>
+          new Promise((_resolve, reject) => {
+            improvementStarted();
+            input.signal?.addEventListener("abort", () => reject({ code: "cancelled" }), {
+              once: true,
+            });
+          }),
+        adopt: () => {
+          throw new Error("unused");
+        },
+        dismiss: () => {
+          throw new Error("unused");
+        },
+        settleActive: async () => {
+          settleCalls++;
+          return true;
+        },
+      },
     },
     extractor: async ({ signal }) => {
       extractionStarted();
@@ -1846,7 +2048,13 @@ test("reviewed reset aborts an active binary extraction before deleting stores",
       },
       body: Buffer.from("scan"),
     });
+    const improvement = fetch(`${running.url}/api/life/improvements`, {
+      method: "POST",
+      headers: jsonHeaders(running.url, cookie),
+      body: JSON.stringify({ feedback: [{ id: feedback.id, revision: feedback.revision }] }),
+    });
     await started;
+    await improvementEntered;
     const reset = await fetch(`${running.url}/api/life/personal-data/reset`, {
       method: "POST",
       headers: jsonHeaders(running.url, cookie),
@@ -1854,7 +2062,10 @@ test("reviewed reset aborts an active binary extraction before deleting stores",
     });
     assert.equal(reset.status, 200);
     assert.equal((await upload).status, 408);
+    assert.equal((await improvement).status, 408);
+    assert.equal(settleCalls > 0, true);
     assert.equal(life.personalSummary({ userId: "local" }).sources, 0);
+    assert.equal(life.personalSummary({ userId: "local" }).records, 0);
   } finally {
     await server.close();
     await tasks.close();

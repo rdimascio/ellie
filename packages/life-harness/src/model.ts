@@ -1,6 +1,26 @@
 import type { LifeIntent } from "./operations.ts";
 import type { ModelWorldContext } from "../../life-context/src/model-world.ts";
 import { planMessages } from "./model-context.ts";
+import {
+  improvementCandidate,
+  improvementMessages,
+  improvementPreview,
+  improvementPreviewMessages,
+  improvementRepairMessages,
+  LifeModelImprovementError,
+} from "./improvement-model.ts";
+import type {
+  LifeImprovementCandidate,
+  LifeImprovementRequest,
+  LifeImprovementPreviewRequest,
+} from "./improvement-model.ts";
+export { LifeModelImprovementError } from "./improvement-model.ts";
+export type {
+  LifeImprovementExample,
+  LifeImprovementCandidate,
+  LifeImprovementRequest,
+  LifeImprovementPreviewRequest,
+} from "./improvement-model.ts";
 
 export interface LifeModelRequest {
   message: string;
@@ -49,6 +69,14 @@ export interface LifeModelPlan {
 
 export interface LifeModel {
   plan(request: LifeModelRequest, signal?: AbortSignal): Promise<LifeModelPlan>;
+  suggestImprovement?(
+    request: LifeImprovementRequest,
+    signal?: AbortSignal,
+  ): Promise<LifeImprovementCandidate>;
+  previewImprovement?(
+    request: LifeImprovementPreviewRequest,
+    signal?: AbortSignal,
+  ): Promise<{ reply: string }>;
   build?(
     request: string | LifePluginBuildRequest,
     signal?: AbortSignal,
@@ -403,6 +431,77 @@ export class LocalOpenAIModel implements LifeModel {
         "The model returned an invalid app. Try a simpler request or revision.",
         { cause: error },
       );
+    }
+  }
+
+  async suggestImprovement(
+    request: LifeImprovementRequest,
+    signal?: AbortSignal,
+  ): Promise<LifeImprovementCandidate> {
+    return this.improvementCall(improvementMessages(request), improvementCandidate, signal);
+  }
+
+  async previewImprovement(
+    request: LifeImprovementPreviewRequest,
+    signal?: AbortSignal,
+  ): Promise<{ reply: string }> {
+    return this.improvementCall(improvementPreviewMessages(request), improvementPreview, signal);
+  }
+
+  private async improvementCall<T>(
+    messages: Array<{ role: string; content: string }>,
+    parse: (response: string) => T,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const deadline = new AbortController(),
+      timer = setTimeout(() => deadline.abort(new LocalModelDeadlineError()), this.timeoutMs),
+      combined = signal ? AbortSignal.any([signal, deadline.signal]) : deadline.signal,
+      invalid = (error: unknown) =>
+        new LifeModelImprovementError(
+          "invalid_response",
+          "The model returned an invalid improvement preview. No guidance was adopted.",
+          { cause: error },
+        );
+    try {
+      const response = await this.call(messages, combined);
+      try {
+        return parse(response);
+      } catch (error) {
+        if (combined.aborted) throw cancellation(combined);
+        let repairedMessages;
+        try {
+          repairedMessages = improvementRepairMessages(messages, response);
+        } catch {
+          throw invalid(error);
+        }
+        // One schema repair shares this method's original deadline; transport
+        // failures never enter this branch and never cause an inference retry.
+        const repaired = await this.call(repairedMessages, combined);
+        try {
+          return parse(repaired);
+        } catch (error) {
+          throw invalid(error);
+        }
+      }
+    } catch (error) {
+      if (signal?.aborted)
+        throw new LifeModelImprovementError("cancelled", "The improvement preview was cancelled.", {
+          cause: error,
+        });
+      if (error instanceof LocalModelDeadlineError)
+        throw new LifeModelImprovementError(
+          "timeout",
+          "The improvement preview exceeded its model deadline. Try fewer examples.",
+          { cause: error },
+        );
+      if (error instanceof LifeModelImprovementError) throw error;
+      throw new LifeModelImprovementError(
+        "transport",
+        "The local model could not finish the improvement preview. Check the runner and try again.",
+        { cause: error },
+      );
+    } finally {
+      clearTimeout(timer);
     }
   }
 

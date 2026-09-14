@@ -16,6 +16,7 @@ import type {
   ModelStatus,
   PendingIntent,
   Group,
+  ImprovementProposal,
 } from "./types";
 export class ApiError extends Error {
   constructor(
@@ -350,6 +351,34 @@ export const api = {
       request<{ format: string; count: number; jsonl: string }>("/api/life/learning/export", {
         method: "POST",
         body: JSON.stringify({ ids }),
+      }),
+  },
+  improvements: {
+    list: () =>
+      request<{ proposals: ImprovementProposal[]; modelAvailable: boolean }>(
+        "/api/life/improvements",
+      ),
+    detail: (id: string, signal?: AbortSignal) =>
+      request<ImprovementProposal>(`/api/life/improvements/${encodeURIComponent(id)}`, { signal }),
+    propose: (
+      feedback: Array<{ id: string; revision: number }>,
+      goal: string,
+      signal?: AbortSignal,
+    ) =>
+      request<ImprovementProposal>("/api/life/improvements", {
+        method: "POST",
+        body: JSON.stringify({ feedback, ...(goal.trim() ? { goal: goal.trim() } : {}) }),
+        signal,
+      }),
+    adopt: (id: string, expectedRevision: number) =>
+      request<ImprovementProposal>(`/api/life/improvements/${encodeURIComponent(id)}/adopt`, {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision }),
+      }),
+    dismiss: (id: string, expectedRevision: number) =>
+      request<ImprovementProposal>(`/api/life/improvements/${encodeURIComponent(id)}/dismiss`, {
+        method: "POST",
+        body: JSON.stringify({ expectedRevision }),
       }),
   },
   import: {
