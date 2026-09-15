@@ -636,8 +636,8 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     let addressCandidate = !insideWebArea && browserAccessibilityAddressCandidate(
       role: role, browser: browser)
     let labeledContent = insideWebArea
-      && (role == "AXSearchField" || role == kAXTextFieldRole || role == "AXLink"
-        || role == kAXButtonRole || role == kAXStaticTextRole)
+      && (role == "AXSearchField" || role == kAXTextFieldRole || role == "AXTextArea"
+        || role == "AXLink" || role == kAXButtonRole || role == kAXStaticTextRole)
     let needsLabel = labeledContent || (addressCandidate && browser == .safari)
     let label = needsLabel
       ? try string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute) : nil
@@ -845,7 +845,7 @@ func browserAccessibilityNodeKind(
   }
   guard insideWebArea else { return nil }
   switch role {
-  case "AXSearchField", kAXTextFieldRole: return .search
+  case "AXSearchField", kAXTextFieldRole, "AXTextArea": return .search
   case "AXLink": return .link
   case kAXButtonRole: return .button
   case kAXStaticTextRole: return .text
