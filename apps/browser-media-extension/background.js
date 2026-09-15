@@ -359,6 +359,7 @@ async function refreshWebMCPBinding(controller) {
   if (controller.signal.aborted) throw new Error("cancelled");
   const documentId = installed[0]?.documentId;
   const after = await selectedAnchorTab(selection);
+  if (controller.signal.aborted) throw new Error("cancelled");
   if (
     !documentId ||
     webMCPSelection !== selection ||

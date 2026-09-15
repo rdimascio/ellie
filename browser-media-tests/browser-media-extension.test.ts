@@ -191,8 +191,11 @@ test("explicit refresh renews only the retained same-page selection authority", 
   let focused = true;
   let pendingTools = false;
   let pendingRefresh = false;
+  let armWindowReadAfterInjection = false;
+  let pauseNextWindowRead = false;
   let settleTools: ((value: unknown) => void) | undefined;
   let settleRefresh: ((value: unknown) => void) | undefined;
+  let settleWindowRead: ((value: unknown) => void) | undefined;
   const tab = {
     id: 7,
     windowId: 3,
@@ -226,7 +229,17 @@ test("explicit refresh renews only the retained same-page selection authority", 
         onReplaced: replaced,
         onUpdated: updated,
       },
-      windows: { get: async () => ({ id: 3, focused }) },
+      windows: {
+        get: async () => {
+          if (pauseNextWindowRead) {
+            pauseNextWindowRead = false;
+            return new Promise((resolve) => {
+              settleWindowRead = resolve;
+            });
+          }
+          return { id: 3, focused };
+        },
+      },
       scripting: {
         executeScript(options: { files?: string[] }) {
           if (options.files && pendingRefresh) {
@@ -240,6 +253,10 @@ test("explicit refresh renews only the retained same-page selection authority", 
             });
           }
           injectionCount += 1;
+          if (options.files && armWindowReadAfterInjection) {
+            armWindowReadAfterInjection = false;
+            pauseNextWindowRead = true;
+          }
           return Promise.resolve([{ documentId }]);
         },
       },
@@ -374,6 +391,24 @@ test("explicit refresh renews only the retained same-page selection authority", 
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(context.__refreshTest.state().binding, undefined);
   pendingRefresh = false;
+
+  tab.url = "https://www.youtube.com/results?search_query=cancel-final-check";
+  documentId = "document-cancel-final-check";
+  updated.emit(7, { url: tab.url });
+  armWindowReadAfterInjection = true;
+  const cancelledFinalCheck = request("binding.refresh", "cancel-final-check");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const finalCheckCancellation = await context.__refreshTest.request({
+    protocol: "ellie.browser-webmcp.v1",
+    id: "cancel-final-check-request",
+    type: "cancel",
+    targetId: "cancel-final-check",
+  });
+  assert.equal(finalCheckCancellation.cancelled, true);
+  settleWindowRead?.({ id: 3, focused: true });
+  await assert.rejects(cancelledFinalCheck, /cancelled/);
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  settleWindowRead = undefined;
 
   tab.url = "https://www.youtube.com/results?search_query=race";
   documentId = "document-4";
