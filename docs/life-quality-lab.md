@@ -35,15 +35,18 @@ The private ledger lives outside the repository in an operator-selected director
 
 The initial memory pilot uses a deterministic model transport to inspect the real context delivery path. Its timings measure the local service and fixture, not Qwen inference. That cannot establish answer correctness, reasoning quality, natural-language understanding or end-user latency. Real-model trials require a separately reserved model process and a clear baseline; missing model/device/provider access remains visible in the report. Never silently use the live preview model or real connected accounts.
 
-## Running the initial checks
+## Running focused checks
 
 Use Node 24 and the pinned Bun version. From the owned checkout:
 
 ```sh
 ELLIE_QUALITY_REPORT=/absolute/private/report.json bun run life:quality
 node --test tests/life-quality-proactivity.test.ts
+node --test tests/life-quality-forgetting.test.ts
 ```
 
 Run independent checks separately so one failure does not hide another track's result. Keep ordinary logs and generated fixture state out of the repository. Preserve actionable synthetic failure evidence in the private ledger, and promote useful regression cases to the test suite.
+
+The forgetting scenario checks the entire outbound model request, cached memory inspection and generated Markdown after suppression, request recovery, restart and conversation deletion. The visible conversation remains available until deletion; unrelated memories must remain available throughout.
 
 Do not run an unchanged broad CI gate, occupy Xcode/Simulator or a shared model process without the release coordinator's reservation, alter the existing preview, modify `~/.ellie` or Keychain, change device permissions, deploy, or independently merge main. The lab can prepare reviewable fixes while phone and release work continue. Live provider consent, physical-device acceptance and production release claims remain separate.

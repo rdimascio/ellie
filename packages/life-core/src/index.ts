@@ -3290,7 +3290,10 @@ export class LifeStore {
       throw new TypeError("History limit is invalid");
     const rows = this.db
         .prepare(
-          "SELECT * FROM conversation_turns WHERE conversation_id=? ORDER BY created_at DESC,id DESC LIMIT 200",
+          `SELECT t.*,coalesce(m.suppressed,0) memory_suppressed FROM conversation_turns t
+           LEFT JOIN automatic_prompt_memories m ON m.user_id=t.user_id AND m.turn_id=t.id
+           WHERE t.conversation_id=?
+           ORDER BY t.created_at DESC,t.id DESC LIMIT 200`,
         )
         .all(conversation.id) as Array<Record<string, unknown>>,
       current = currentFingerprint ?? this.contextFingerprintFor(actor, conversation.scope),
@@ -3302,6 +3305,7 @@ export class LifeStore {
         !this.evidenceCurrent(actor, conversation.scope, JSON.parse(String(row.evidence_json)))
       )
         break;
+      if (row.memory_suppressed) continue;
       valid.push(row);
       if (valid.length >= Math.ceil(limit / 2)) break;
     }
