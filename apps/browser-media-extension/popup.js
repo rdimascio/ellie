@@ -1,7 +1,11 @@
 let snapshot;
 let selectedTab;
 let pending;
+let selectedBinding = false;
+let nativeConnectionStatus = "idle";
+let nativeConnectionRevision = 0;
 const status = document.querySelector("#status");
+const connectionStatus = document.querySelector("#connection-status");
 const titles = document.querySelector("#titles");
 const stop = document.querySelector("#stop");
 const actionId = () => crypto.randomUUID();
@@ -101,9 +105,41 @@ document.querySelector("#webmcp").onclick = async () => {
 
 document.querySelector("#bind-webmcp").onclick = async () => {
   const value = await run({ type: "bindWebMCP", actionId: crypto.randomUUID() });
-  if (value)
-    status.textContent =
-      value.availability === "accessibility"
-        ? "Page selected for Accessibility controls"
-        : "Page selected for WebMCP tools";
+  if (!value) return;
+  selectedBinding = true;
+  recordNativeConnection(value.nativeConnection);
+  showNativeConnection(nativeConnectionStatus);
 };
+
+function showNativeConnection(value) {
+  const messages = {
+    waiting: "Page selected. Waiting for Mac connection…",
+    connected: "Page selected. Mac connected.",
+    missing: "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
+    disconnected: "Page selected. The Mac connection was lost.",
+  };
+  connectionStatus.textContent = messages[value] || "Page selected. Mac connection unavailable.";
+}
+
+function recordNativeConnection(value) {
+  if (
+    !value ||
+    !["waiting", "connected", "missing", "disconnected"].includes(value.status) ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision <= nativeConnectionRevision
+  )
+    return;
+  nativeConnectionStatus = value.status;
+  nativeConnectionRevision = value.revision;
+  if (selectedBinding) showNativeConnection(nativeConnectionStatus);
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (
+    !message ||
+    Object.keys(message).sort().join() !== "protocol,revision,status" ||
+    message.protocol !== "ellie.browser-native-status.v1"
+  )
+    return;
+  recordNativeConnection(message);
+});
