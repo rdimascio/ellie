@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct BrowserControlView: View {
+  @Environment(\.scenePhase) private var scenePhase
   @ObservedObject var controls: PhoneControlStore
   @ObservedObject var browser: BrowserPhoneControlStore
   @State private var search = ""
@@ -59,6 +60,9 @@ struct BrowserControlView: View {
     }
     .navigationTitle("Browser control")
     .onChange(of: controls.selectedNodeID) { _, value in browser.clearIfTargetChanged(to: value) }
+    .onChange(of: scenePhase) { _, phase in
+      if phase != .active { browser.cancel() }
+    }
     .onDisappear { browser.cancel() }
   }
 

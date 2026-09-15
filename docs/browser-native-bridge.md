@@ -33,3 +33,38 @@ stale handles and media-companion regressions. Native-host stream tests exercise
 Unix relay, malformed framing and disconnected outcomes. These tests do not establish
 WebMCP availability on Netflix, YouTube, Disney+, Safari or Arc, an installed extension,
 actual player effects, or the physical iPhone voice flow.
+
+## Real-browser acceptance runner
+
+`bun run accept:browser-webmcp` drives an owned HTTPS page through an isolated
+agent-browser profile, the production extension scripts, an owner-provided staged development
+native host artifact, the real Unix bridge seam and the canonical browser-operation executor. The page registers its read
+and scroll tools with the browser's native `document.modelContext.registerTool()` implementation.
+The runner records the exact source, release, extension fixture changes, browser executable,
+registry, snapshots and screenshots. It requires a measured scroll offset and visible text change,
+then reverses that one action only after both the WebMCP result and page effect are known. An
+unknown result forbids replay, Accessibility fallback and rollback dispatch.
+
+Use the immutable owner-provided staged development artifact and an explicit Chrome for Testing
+executable. This artifact has no authenticated publisher admission:
+
+```sh
+ELLIE_BROWSER_ACCEPTANCE_RELEASE=/absolute/path/to/staged-development-artifact \
+ELLIE_BROWSER_ACCEPTANCE_BROWSER=/absolute/path/to/Google\ Chrome\ for\ Testing \
+bun run accept:browser-webmcp
+```
+
+The gate requires a clean checkout. A developer can set
+`ELLIE_BROWSER_ACCEPTANCE_ALLOW_DIRTY=1` while iterating, but that run records dirty source and is
+not release evidence.
+
+All browser profiles, manifests, private runtime state and certificates are created beneath one
+owned temporary root. The HTTPS exception is scoped to the fixture leaf's SPKI and hostname; the
+runner does not change the user trust store or cross a security interstitial. A passing run proves
+the reviewed Chrome 152 dialect (serialized schemas, JSON-string arguments and results), extension,
+packaged native host and reviewed Node Unix bridge seam. The current WebMCP draft instead takes an
+object argument while retaining serialized schemas, so the reviewed origin/tool policy selects the
+argument dialect explicitly before dispatch. Schema representation is never used as the dialect
+signal, and an action is never retried with another representation. This run does not prove
+authenticated publisher admission, the packaged Swift broker's Arc ancestry check, an Arc WebMCP
+implementation, Accessibility, a streaming provider, or a physical phone path.
