@@ -1,0 +1,565 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { connect } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { browserWebMCPAction } from "@ellie/protocol";
+import { defaults } from "@ellie/config";
+import { runNode } from "../apps/node/src/index.ts";
+import { BrowserNodeExecutor } from "../apps/node/src/browser-executor.ts";
+import { BrowserAccessibilityRuntime } from "../apps/node/src/browser-accessibility-runtime.ts";
+import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
+import { startBrowserKernelBridge } from "../apps/node/src/browser-kernel-bridge.ts";
+import { browserWebMCPFrame } from "../apps/node/src/browser-webmcp-bridge.ts";
+import { fixture } from "./helpers.ts";
+
+async function compileSession(executable: string): Promise<void> {
+  const child = spawn(
+    "/usr/bin/xcrun",
+    [
+      "swiftc",
+      "-D",
+      "ELLIE_AX_TEST_BACKEND",
+      new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
+      new URL("../packages/macos/native/BrowserAccessibilitySession.swift", import.meta.url)
+        .pathname,
+      new URL("fixtures/browser-accessibility-session-backend.swift", import.meta.url).pathname,
+      "-o",
+      executable,
+    ],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let bytes = 0;
+  child.stdout.on("data", (value: Buffer) => {
+    bytes += value.length;
+  });
+  child.stderr.on("data", (value: Buffer) => {
+    bytes += value.length;
+  });
+  let stopping = false;
+  const deadline = setTimeout(() => {
+    stopping = true;
+    child.kill("SIGTERM");
+  }, 20_000);
+  const result = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code, signal) => resolve({ code, signal }));
+    },
+  );
+  clearTimeout(deadline);
+  assert.equal(stopping, false, "Swift fixture compilation exceeded its deadline");
+  assert.ok(bytes <= 64 * 1024, "Swift fixture compiler output exceeded its bound");
+  assert.deepEqual(result, { code: 0, signal: null });
+}
+
+async function compileSwift(executable: string, files: string[], flags: string[] = []) {
+  const child = spawn("/usr/bin/xcrun", ["swiftc", ...flags, ...files, "-o", executable], {
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  let expired = false;
+  const deadline = setTimeout(() => {
+    expired = true;
+    child.kill("SIGTERM");
+  }, 20_000);
+  const code = await new Promise<number | null>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("close", resolve);
+  });
+  clearTimeout(deadline);
+  assert.equal(expired, false, "Swift compilation exceeded its deadline");
+  assert.equal(code, 0);
+}
+
+test("persistent accessibility helper binds, reads and reports mutations as unverified", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-runtime-"));
+  let completed = false;
+  try {
+    const helper = join(root, "helper.mjs");
+    await writeFile(
+      helper,
+      `#!${process.execPath}
+import { createInterface } from 'node:readline';
+let session;
+for await (const line of createInterface({ input: process.stdin })) {
+  const value = JSON.parse(line);
+  if (value.type === 'bind') { session = 'session-1'; console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision:value.documentRevision})); }
+  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],operation:'read'}));
+  else console.log(JSON.stringify({id:value.id,status:'dispatchedUnverified',sessionID:session,documentRevision:'document-1',operation:value.operation}));
+}
+`,
+    );
+    await chmod(helper, 0o700);
+    let context = {
+      browserProcessPid: process.pid,
+      browserStartSeconds: 1,
+      browserStartMicroseconds: 0,
+      browserCodeHash: "00".repeat(20),
+      connectionId: "connection-1",
+      authenticated: true,
+    };
+    const runtime = new BrowserAccessibilityRuntime(helper, () => context);
+    const binding = {
+      availability: "accessibility" as const,
+      documentId: "document-1",
+      url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+      revision: "revision-1",
+    };
+    const signal = new AbortController().signal;
+    const view = await runtime.execute(
+      browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+      binding,
+      signal,
+    );
+    assert.equal(view.browser.source, "accessibility");
+    assert.equal(view.browser.operation, "read");
+    const mutation = await runtime.execute(
+      browserWebMCPAction({ tool: "browser.scroll", direction: "down", revision: "revision-1" }),
+      binding,
+      signal,
+    );
+    assert.equal(mutation.ok, false);
+    assert.deepEqual(mutation.browser, {
+      source: "accessibility",
+      operation: "command",
+      status: "unknown",
+      revision: "revision-1",
+    });
+    context = { ...context, browserStartMicroseconds: 1 };
+    await assert.rejects(
+      runtime.execute(
+        browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+        binding,
+        signal,
+      ),
+      /page changed/,
+    );
+    context = { ...context, connectionId: "connection-2" };
+    await assert.rejects(
+      runtime.execute(
+        browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+        binding,
+        signal,
+      ),
+      /page changed/,
+    );
+    await runtime.close();
+    completed = true;
+  } finally {
+    if (completed) await rm(root, { recursive: true });
+    else t.diagnostic(`Retained browser AX runtime fixture: ${root}`);
+  }
+});
+
+test("adapter selection happens once before dispatch and never falls through", async () => {
+  let webCalls = 0;
+  let axCalls = 0;
+  const accessibility = {
+    async execute() {
+      axCalls += 1;
+      throw new Error("unexpected");
+    },
+  } as unknown as BrowserAccessibilityRuntime;
+  const selector = new BrowserOperationSelector(
+    async () => ({
+      availability: "webmcp",
+      bindingId: "binding-1",
+      documentId: "document-1",
+      origin: "https://www.youtube.com",
+      url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+      expiresAt: Date.now() + 60_000,
+    }),
+    {
+      async execute() {
+        webCalls += 1;
+        throw new Error("unknown after dispatch");
+      },
+    },
+    accessibility,
+  );
+  await assert.rejects(
+    selector.execute(
+      browserWebMCPAction({ tool: "browser.scroll", direction: "right", revision: "revision-1" }),
+      new AbortController().signal,
+    ),
+    /unknown after dispatch/,
+  );
+  assert.equal(webCalls, 1);
+  assert.equal(axCalls, 0);
+});
+
+test("reported native-host PID cannot authorize accessibility", async () => {
+  const runtime = new BrowserAccessibilityRuntime("/bin/false", () => ({
+    browserProcessPid: process.pid,
+    browserStartSeconds: 1,
+    browserStartMicroseconds: 0,
+    browserCodeHash: "00".repeat(20),
+    connectionId: "reported-only",
+    authenticated: false,
+  }));
+  await assert.rejects(
+    runtime.execute(
+      browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+      {
+        availability: "accessibility",
+        documentId: "document-1",
+        url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+        revision: "revision-1",
+      },
+      new AbortController().signal,
+    ),
+    /page changed/,
+  );
+});
+
+test(
+  "coordinator and runNode traverse the persistent Swift helper framing path",
+  { skip: process.platform !== "darwin", timeout: 30_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-node-"));
+    const f = await fixture();
+    const abort = new AbortController();
+    let agent: Promise<void> | undefined;
+    let runtime: BrowserAccessibilityRuntime | undefined;
+    let completed = false;
+    try {
+      const executable = join(root, "ellie-browser-accessibility");
+      await compileSession(executable);
+      const context = {
+        browserProcessPid: process.pid,
+        browserStartSeconds: 1,
+        browserStartMicroseconds: 0,
+        browserCodeHash: "00".repeat(20),
+        connectionId: "connection-1",
+        authenticated: true,
+      };
+      runtime = new BrowserAccessibilityRuntime(executable, () => context);
+      const selector = new BrowserOperationSelector(
+        async () => ({
+          availability: "accessibility",
+          bindingId: "binding-1",
+          documentId: "document-1",
+          origin: "https://www.youtube.com",
+          url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+          expiresAt: Date.now() + 60_000,
+        }),
+        {
+          async execute() {
+            throw new Error("WebMCP must not dispatch.");
+          },
+        },
+        runtime,
+      );
+      const paired = await f.pair("ax-node");
+      let ready!: () => void;
+      const registered = new Promise<void>((resolve) => {
+        ready = resolve;
+      });
+      agent = runNode({
+        client: paired,
+        preferences: defaults,
+        signal: abort.signal,
+        executor: new BrowserNodeExecutor(
+          {
+            capabilities: async () => [],
+            execute: async () => ({ ok: false, message: "Unavailable." }),
+          },
+          selector,
+        ),
+        onStatus: ready,
+      });
+      await registered;
+      const status = await f.controller.call("POST", "/v1/commands", {
+        nodeId: "ax-node",
+        action: { tool: "browser.status" },
+      });
+      assert.equal((status as { browser?: { source?: string } }).browser?.source, "accessibility");
+      completed = true;
+    } finally {
+      abort.abort();
+      await f.close();
+      await agent;
+      await runtime?.close();
+      if (completed) await rm(root, { recursive: true });
+      else t.diagnostic(`Retained browser AX node fixture: ${root}`);
+    }
+  },
+);
+
+test("runNode persists malformed post-dispatch accessibility outcome as unknown", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-unknown-"));
+  const f = await fixture();
+  const abort = new AbortController();
+  let agent: Promise<void> | undefined;
+  let runtime: BrowserAccessibilityRuntime | undefined;
+  let completed = false;
+  try {
+    const executable = join(root, "helper.mjs");
+    const performed = join(root, "performed");
+    await writeFile(
+      executable,
+      `#!${process.execPath}
+import { appendFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+let session, documentRevision;
+for await (const line of createInterface({ input: process.stdin })) {
+  const value = JSON.parse(line);
+  if (value.type === 'bind') { session = 'session-1'; documentRevision = value.documentRevision; console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision})); }
+  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision,items:[],operation:'read'}));
+  else { appendFileSync(${JSON.stringify(performed)}, value.id + '\\n'); console.log(JSON.stringify({id:value.id,status:'garbage',sessionID:session,documentRevision,operation:value.operation})); }
+}
+`,
+    );
+    await chmod(executable, 0o700);
+    const context = {
+      browserProcessPid: process.pid,
+      browserStartSeconds: 1,
+      browserStartMicroseconds: 0,
+      browserCodeHash: "00".repeat(20),
+      connectionId: "connection-1",
+      authenticated: true,
+    };
+    runtime = new BrowserAccessibilityRuntime(executable, () => context);
+    const selector = new BrowserOperationSelector(
+      async () => ({
+        availability: "accessibility",
+        bindingId: "binding-1",
+        documentId: "document-1",
+        origin: "https://www.youtube.com",
+        url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+        expiresAt: Date.now() + 60_000,
+      }),
+      {
+        async execute() {
+          throw new Error("WebMCP must not dispatch.");
+        },
+      },
+      runtime,
+    );
+    const paired = await f.pair("ax-unknown-node");
+    let ready!: () => void;
+    const registered = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    agent = runNode({
+      client: paired,
+      preferences: defaults,
+      signal: abort.signal,
+      executor: new BrowserNodeExecutor(
+        {
+          capabilities: async () => [],
+          execute: async () => ({ ok: false, message: "Unavailable." }),
+        },
+        selector,
+      ),
+      onStatus: ready,
+    });
+    await registered;
+    const status = (await f.controller.call("POST", "/v1/commands", {
+      nodeId: "ax-unknown-node",
+      action: { tool: "browser.status" },
+    })) as { browser: { revision: string } };
+    const revision = status.browser.revision;
+    await f.controller.call("POST", "/v1/commands", {
+      nodeId: "ax-unknown-node",
+      action: { tool: "browser.read", view: "summary", revision },
+    });
+    const response = (await f.controller.call("POST", "/v1/commands", {
+      nodeId: "ax-unknown-node",
+      action: { tool: "browser.scroll", direction: "down", revision },
+    })) as { browser: { status: string } };
+    assert.equal(response.browser.status, "unknown");
+    assert.equal((await readFile(performed, "utf8")).trim().split("\n").length, 1);
+    const stored = f.jobStore.list("ax-unknown-node", 1)[0]!;
+    assert.equal(stored.state, "unknown");
+    completed = true;
+  } finally {
+    abort.abort();
+    await f.close();
+    await agent;
+    await runtime?.close();
+    if (completed) await rm(root, { recursive: true });
+    else t.diagnostic(`Retained browser AX unknown fixture: ${root}`);
+  }
+});
+
+test(
+  "kernel broker rejects a direct same-user peer and admits its exact browser-child fixture",
+  { skip: process.platform !== "darwin", timeout: 45_000 },
+  async (t) => {
+    const root = await mkdtemp("/tmp/e-bk-");
+    let completed = false;
+    try {
+      const payload = join(root, "payload");
+      const helpers = join(payload, "helpers");
+      const bin = join(payload, "bin");
+      const home = join(root, "home");
+      await mkdir(join(home, "Library/Application Support/Ellie"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      for (const directory of [
+        home,
+        join(home, "Library"),
+        join(home, "Library/Application Support"),
+        join(home, "Library/Application Support/Ellie"),
+      ])
+        await chmod(directory, 0o700);
+      await mkdir(helpers, { recursive: true });
+      await mkdir(bin);
+      const broker = join(helpers, "ellie-browser-runtime-broker");
+      const productionBroker = join(helpers, "production-browser-runtime-broker");
+      const peer = join(bin, "node");
+      await compileSwift(
+        broker,
+        [
+          new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
+          new URL("../packages/macos/native/BrowserRuntimeBroker.swift", import.meta.url).pathname,
+        ],
+        ["-D", "ELLIE_AX_BROKER_TEST", "-lbsm"],
+      );
+      await compileSwift(
+        productionBroker,
+        [
+          new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
+          new URL("../packages/macos/native/BrowserRuntimeBroker.swift", import.meta.url).pathname,
+        ],
+        ["-lbsm"],
+      );
+      await compileSwift(
+        peer,
+        [new URL("fixtures/browser-kernel-peer.swift", import.meta.url).pathname],
+        ["-parse-as-library"],
+      );
+      const socket = join(
+        home,
+        "Library/Application Support/Ellie/BrowserBridge/browser-webmcp-v1.sock",
+      );
+      const lock = join(home, "Library/Application Support/Ellie/BrowserBridge/broker.lock");
+      const waitForSocket = async () => {
+        for (let count = 0; count < 100; count += 1) {
+          if (
+            await access(socket).then(
+              () => true,
+              () => false,
+            )
+          )
+            return;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.fail("broker socket did not appear");
+      };
+      const waitForNoSocket = async () => {
+        for (let count = 0; count < 100; count += 1) {
+          if (
+            !(await access(socket).then(
+              () => true,
+              () => false,
+            ))
+          )
+            return;
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.fail("broker socket was not removed");
+      };
+
+      const crashed = spawn(broker, [], {
+        env: { HOME: home, PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+        stdio: ["pipe", "ignore", "ignore"],
+      });
+      const crashedExit = new Promise((resolve) => crashed.once("close", resolve));
+      await waitForSocket();
+      assert.equal(crashed.kill("SIGKILL"), true);
+      assert.equal(await crashedExit, null);
+      assert.equal(
+        await access(socket).then(
+          () => true,
+          () => false,
+        ),
+        true,
+      );
+      const staleSocket = await lstat(socket);
+      const retainedLock = await lstat(lock);
+      assert.equal(retainedLock.mode & 0o777, 0o600);
+
+      const first = await startBrowserKernelBridge({ home, executable: broker });
+      for (let count = 0; count < 100; count += 1) {
+        const current = await lstat(socket).catch(() => undefined);
+        if (current && current.ino !== staleSocket.ino) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (count === 99) assert.fail("stale broker socket was not replaced");
+      }
+      assert.equal((await lstat(lock)).ino, retainedLock.ino);
+      const hostile = connect(socket);
+      await new Promise<void>((resolve, reject) => {
+        hostile.once("connect", resolve);
+        hostile.once("error", reject);
+      });
+      hostile.write(
+        browserWebMCPFrame.encode({ type: "native-host.hello", version: 1, parentPid: 1 }),
+      );
+      await new Promise((resolve) => hostile.once("close", resolve));
+      assert.equal(first.connectionContext(), undefined);
+      await first.close();
+      await waitForNoSocket();
+
+      const production = await startBrowserKernelBridge({ home, executable: productionBroker });
+      await waitForSocket();
+      const untrustedExactPeer = spawn(peer, [], { env: { HOME: home }, stdio: "ignore" });
+      const untrustedExactExit = new Promise((resolve) =>
+        untrustedExactPeer.once("close", resolve),
+      );
+      assert.equal(await untrustedExactExit, 3);
+      assert.equal(production.connectionContext(), undefined);
+      await production.close();
+      await waitForNoSocket();
+
+      const bridge = await startBrowserKernelBridge({ home, executable: broker });
+      await waitForSocket();
+      const child = spawn(peer, ["--disconnect"], { env: { HOME: home }, stdio: "ignore" });
+      const childExit = new Promise((resolve) => child.once("close", resolve));
+      for (let count = 0; !bridge.connected() && count < 100; count += 1)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(bridge.connectionContext()?.authenticated, true);
+      const response = await bridge.request(
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: "status-1",
+          type: "binding.status",
+        },
+        new AbortController().signal,
+      );
+      assert.equal(response.status, "ok");
+      const firstConnection = bridge.connectionContext()?.connectionId;
+      assert.ok(firstConnection);
+      assert.equal(await childExit, 0);
+      for (let count = 0; bridge.connected() && count < 100; count += 1)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(bridge.connectionContext(), undefined);
+
+      const replacement = spawn(peer, [], { env: { HOME: home }, stdio: "ignore" });
+      const replacementExit = new Promise((resolve) => replacement.once("close", resolve));
+      for (let count = 0; !bridge.connected() && count < 100; count += 1)
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(bridge.connectionContext()?.authenticated, true);
+      assert.notEqual(bridge.connectionContext()?.connectionId, firstConnection);
+      const replacementResponse = await bridge.request(
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: "status-2",
+          type: "binding.status",
+        },
+        new AbortController().signal,
+      );
+      assert.equal(replacementResponse.status, "ok");
+      await bridge.close();
+      assert.equal(await replacementExit, 0);
+      completed = true;
+    } finally {
+      if (completed) await rm(root, { recursive: true });
+      else t.diagnostic(`Retained browser kernel fixture: ${root}`);
+    }
+  },
+);

@@ -1,4 +1,5 @@
 const productionOrigins = new Set(["https://www.netflix.com", "https://www.youtube.com"]);
+const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);
 const mutationLedgers = new Map();
 const mutationTypes = new Set(["scrollViewport", "scrollRow", "open", "play", "pause", "seek"]);
 const actionPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -113,11 +114,27 @@ function reviewedTools(origin) {
   return Object.hasOwn(reviewedWebMCPBindings, origin) ? reviewedWebMCPBindings[origin] : undefined;
 }
 
+function bindingAvailability(origin) {
+  const tools = reviewedTools(origin);
+  return Array.isArray(tools) && tools.length > 0
+    ? "webmcp"
+    : accessibilityBindingOrigins.has(origin)
+      ? "accessibility"
+      : undefined;
+}
+
 async function currentWebMCPDocument(binding) {
   const tab = await chrome.tabs.get(binding.tabId);
   if (!tab.url) throw new Error("page_changed");
   const url = new URL(tab.url);
-  if (url.origin !== binding.origin) throw new Error("unsupported_origin");
+  if (url.origin !== binding.origin) {
+    webMCPBinding = undefined;
+    throw new Error("unsupported_origin");
+  }
+  if (binding.documentId !== "pending" && tab.url !== binding.url) {
+    webMCPBinding = undefined;
+    throw new Error("page_changed");
+  }
   const installed = await chrome.scripting.executeScript({
     target: { tabId: binding.tabId },
     world: "MAIN",
@@ -125,7 +142,10 @@ async function currentWebMCPDocument(binding) {
   });
   const documentId = installed[0]?.documentId;
   if (!documentId) throw new Error("page_changed");
-  if (binding.documentId !== documentId) binding.tools.clear();
+  if (binding.documentId !== "pending" && binding.documentId !== documentId) {
+    webMCPBinding = undefined;
+    throw new Error("page_changed");
+  }
   binding.documentId = documentId;
   binding.url = tab.url;
   return binding;
@@ -136,7 +156,8 @@ async function bindWebMCP(tabId) {
   const tab = await chrome.tabs.get(tabId);
   if (!tab.url) throw new Error("unsupported_page");
   const origin = new URL(tab.url).origin;
-  if (!reviewedTools(origin)) throw new Error("unsupported_origin");
+  const availability = bindingAvailability(origin);
+  if (!availability) throw new Error("unsupported_origin");
   const binding = await currentWebMCPDocument({
     bindingId: crypto.randomUUID(),
     tabId,
@@ -144,11 +165,17 @@ async function bindWebMCP(tabId) {
     origin,
     url: tab.url,
     expiresAt: Date.now() + bindingLifetimeMs,
+    availability,
     tools: new Map(),
   });
   webMCPBinding = binding;
   connectNativeHost();
-  return { bindingId: binding.bindingId, origin, expiresAt: binding.expiresAt };
+  return {
+    bindingId: binding.bindingId,
+    origin,
+    expiresAt: binding.expiresAt,
+    availability: binding.availability,
+  };
 }
 
 function liveBinding() {
@@ -283,6 +310,7 @@ async function handleNativeRequest(request) {
         origin: binding.origin,
         url: binding.url,
         expiresAt: binding.expiresAt,
+        availability: binding.availability,
       };
     }
     if (request.type === "tools.list") return await listWebMCPTools();
@@ -396,14 +424,5 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (!webMCPBinding || webMCPBinding.tabId !== tabId || !change.url) return;
   activeWebMCP?.controller.abort();
-  try {
-    if (new URL(change.url).origin !== webMCPBinding.origin) webMCPBinding = undefined;
-    else {
-      webMCPBinding.bindingId = crypto.randomUUID();
-      webMCPBinding.documentId = "changed";
-      webMCPBinding.tools.clear();
-    }
-  } catch {
-    webMCPBinding = undefined;
-  }
+  webMCPBinding = undefined;
 });

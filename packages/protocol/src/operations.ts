@@ -282,23 +282,24 @@ export type BrowserView = {
   summary?: string;
   items: { id: string; label: string; state?: string }[];
 };
+export type BrowserExecutionSource = "webmcp" | "accessibility";
 export type BrowserWebMCPStructuredResult =
   | {
-      source: "webmcp";
+      source: BrowserExecutionSource;
       operation: "status";
       status: "connected" | "unbound" | "unsupported" | "unavailable";
       revision?: string;
       origin?: string;
     }
   | {
-      source: "webmcp";
+      source: BrowserExecutionSource;
       operation: "read";
       status: "completed";
       revision: string;
       view: BrowserView;
     }
   | {
-      source: "webmcp";
+      source: BrowserExecutionSource;
       operation: "command";
       status: "completed" | "failed" | "unknown" | "cancelled" | "timed_out";
       revision: string;
@@ -368,7 +369,10 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         ? ["source", "operation", "status", "revision", "origin"]
         : ["source", "operation", "status"],
     );
-    if (browser.source !== "webmcp") throw new Error("Invalid browser operation result.");
+    if (browser.source !== "webmcp" && browser.source !== "accessibility")
+      throw new Error("Invalid browser operation result.");
+    if (!connected && browser.source !== "webmcp")
+      throw new Error("Invalid browser operation result.");
     if (
       !connected &&
       browser.status !== "unbound" &&
@@ -379,7 +383,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     if (body.ok !== connected) throw new Error("Invalid browser operation result.");
     const checked: BrowserWebMCPStructuredResult = connected
       ? {
-          source: "webmcp",
+          source: browser.source,
           operation: "status",
           status: "connected",
           revision: browserIdentifier(browser.revision),
@@ -394,7 +398,8 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
   }
   if (browser.operation === "read") {
     exactObject(browser, ["source", "operation", "status", "revision", "view"]);
-    if (browser.source !== "webmcp") throw new Error("Invalid browser operation result.");
+    if (browser.source !== "webmcp" && browser.source !== "accessibility")
+      throw new Error("Invalid browser operation result.");
     if (browser.status !== "completed") throw new Error("Invalid browser operation result.");
     if (body.ok !== true) throw new Error("Invalid browser operation result.");
     const view = browser.view as Record<string, unknown>;
@@ -422,7 +427,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
       ok: body.ok,
       message,
       browser: {
-        source: "webmcp",
+        source: browser.source,
         operation: "read",
         status: "completed",
         revision: browserIdentifier(browser.revision),
@@ -435,7 +440,8 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     };
   }
   exactObject(browser, ["source", "operation", "status", "revision"]);
-  if (browser.source !== "webmcp") throw new Error("Invalid browser operation result.");
+  if (browser.source !== "webmcp" && browser.source !== "accessibility")
+    throw new Error("Invalid browser operation result.");
   if (
     browser.operation !== "command" ||
     !["completed", "failed", "unknown", "cancelled", "timed_out"].includes(browser.status as string)
@@ -443,11 +449,13 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     throw new Error("Invalid browser operation result.");
   if (body.ok !== (browser.status === "completed"))
     throw new Error("Invalid browser operation result.");
+  if (browser.source === "accessibility" && browser.status !== "unknown")
+    throw new Error("Invalid browser operation result.");
   return {
     ok: body.ok,
     message,
     browser: {
-      source: "webmcp",
+      source: browser.source,
       operation: "command",
       status: browser.status as "completed" | "failed" | "unknown" | "cancelled" | "timed_out",
       revision: browserIdentifier(browser.revision),

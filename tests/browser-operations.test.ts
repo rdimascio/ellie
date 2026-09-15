@@ -92,7 +92,7 @@ test("browser operation and structured result contracts are closed and bounded",
       },
     }),
   );
-  assert.throws(() =>
+  assert.deepEqual(
     browserWebMCPOperationResult({
       ok: true,
       message: "x",
@@ -102,6 +102,29 @@ test("browser operation and structured result contracts are closed and bounded",
         status: "connected",
         revision: "r",
         origin: "https://video.example",
+      },
+    }),
+    {
+      ok: true,
+      message: "x",
+      browser: {
+        source: "accessibility",
+        operation: "status",
+        status: "connected",
+        revision: "r",
+        origin: "https://video.example",
+      },
+    },
+  );
+  assert.throws(() =>
+    browserWebMCPOperationResult({
+      ok: true,
+      message: "overclaimed",
+      browser: {
+        source: "accessibility",
+        operation: "command",
+        status: "completed",
+        revision: "r",
       },
     }),
   );
@@ -154,6 +177,7 @@ test("executor binds reviewed WebMCP tools, returns typed views and rejects stal
           origin: "https://video.example",
           url: "https://video.example/watch",
           expiresAt: Date.now() + 60_000,
+          availability: "webmcp",
         });
       if (request.type === "tools.list") {
         const response = browserWebMCPResultFor(request.id, "ok", {

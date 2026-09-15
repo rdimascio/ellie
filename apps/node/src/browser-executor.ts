@@ -1,13 +1,15 @@
 import type { Executor } from "@ellie/macos";
 import type { Action, Capability, Result } from "@ellie/protocol";
 import { BROWSER_CAPABILITIES } from "@ellie/protocol";
-import type { BrowserWebMCPOperations } from "./browser-operations.ts";
+type BrowserOperations = {
+  execute(action: Action, signal: AbortSignal): Promise<Result>;
+};
 
 /** Composes the fixed desktop helper with an initialized reviewed browser executor. */
 export class BrowserNodeExecutor implements Executor {
   private readonly desktop: Executor;
-  private readonly browser: BrowserWebMCPOperations;
-  constructor(desktop: Executor, browser: BrowserWebMCPOperations) {
+  private readonly browser: BrowserOperations;
+  constructor(desktop: Executor, browser: BrowserOperations) {
     this.desktop = desktop;
     this.browser = browser;
   }
