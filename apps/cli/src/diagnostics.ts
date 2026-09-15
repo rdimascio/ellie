@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  CAPABILITIES,
+  DESKTOP_CAPABILITIES,
   capabilities as parseCapabilities,
   operationDefinition,
   record,
@@ -246,7 +246,9 @@ export async function doctorService(
   try {
     capabilities = await environment.capabilities();
     lines.push(`Terminal helper tools: ${capabilities.join(", ")}`);
-    terminalMissing = CAPABILITIES.some((capability) => !capabilities!.includes(capability));
+    terminalMissing = DESKTOP_CAPABILITIES.some(
+      (capability) => !capabilities!.includes(capability),
+    );
     if (
       !coordinator &&
       (config as NodeConfig | undefined)?.executionEnabled !== false &&
@@ -302,7 +304,7 @@ export async function doctorService(
             registered.executionCapabilities ?? registered.capabilities,
           );
           lines.push(`Registered node tools: ${advertised.join(", ")}`);
-          const registeredMissing = CAPABILITIES.some(
+          const registeredMissing = DESKTOP_CAPABILITIES.some(
             (capability) => !advertised.includes(capability),
           );
           if ((config as NodeConfig).executionEnabled && registeredMissing)

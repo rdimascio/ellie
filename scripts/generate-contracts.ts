@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { OPERATION_REGISTRY } from "../packages/protocol/src/operations.ts";
+import { CAPABILITIES, OPERATION_REGISTRY } from "../packages/protocol/src/operations.ts";
 import { JOB_OUTCOME_CODES, JOB_STATES } from "../packages/protocol/src/index.ts";
 
 import {
@@ -246,7 +246,7 @@ function protocolSchema(): Json {
       Identifier: identifier,
       Capability: {
         type: "string",
-        enum: OPERATION_REGISTRY.operations.map((operation) => operation.requiredCapability),
+        enum: [...CAPABILITIES],
       },
       Layout: { type: "string", enum: [...OPERATION_REGISTRY.values.layouts] },
       Monitor: { type: "string", enum: [...OPERATION_REGISTRY.values.monitors] },
@@ -744,7 +744,7 @@ function openApi(): Json {
             capabilities: {
               type: "array",
               minItems: 1,
-              maxItems: OPERATION_REGISTRY.operations.length,
+              maxItems: CAPABILITIES.length,
               uniqueItems: true,
               items: ref("Capability"),
             },
@@ -926,12 +926,12 @@ function openApi(): Json {
           properties: {
             capabilities: {
               type: "array",
-              maxItems: OPERATION_REGISTRY.operations.length,
+              maxItems: CAPABILITIES.length,
               items: ref("Capability"),
             },
             executionCapabilities: {
               type: "array",
-              maxItems: OPERATION_REGISTRY.operations.length,
+              maxItems: CAPABILITIES.length,
               items: ref("Capability"),
             },
             computeCapabilities: ref("ComputeCapabilities"),

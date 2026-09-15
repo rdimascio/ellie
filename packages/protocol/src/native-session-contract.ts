@@ -43,7 +43,7 @@ export function nativeSessionSchemas() {
     uniqueItems: true,
     items: ref("NativeGrant"),
     description:
-      "Each target is unique. Native phone authority is restricted to app.open on explicitly granted targets.",
+      "Each target is unique. Native phone authority is restricted to the exact app.open, browser.read, and browser.control capabilities granted for that target.",
     "x-ellie-unique-key": "target",
   };
   return {
@@ -53,7 +53,13 @@ export function nativeSessionSchemas() {
       required: ["target", "capabilities"],
       properties: {
         target: identifier,
-        capabilities: { type: "array", minItems: 1, maxItems: 1, items: { const: "app.open" } },
+        capabilities: {
+          type: "array",
+          minItems: 1,
+          maxItems: 3,
+          uniqueItems: true,
+          items: { enum: ["app.open", "browser.read", "browser.control"] },
+        },
       },
     },
     NativeInvitationSpec: {

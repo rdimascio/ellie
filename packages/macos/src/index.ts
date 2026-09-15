@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { nativeHelperPath } from "@ellie/config";
 import type { Action, Capability, Result } from "@ellie/protocol";
-import { CAPABILITIES, record, result } from "@ellie/protocol";
+import { DESKTOP_CAPABILITIES, record, result } from "@ellie/protocol";
 export interface Executor {
   capabilities(): Promise<Capability[]>;
   execute(action: Action, signal?: AbortSignal): Promise<Result>;
@@ -51,7 +51,7 @@ export class MacOSExecutor implements Executor {
   }
   async capabilities(): Promise<Capability[]> {
     const status = record(await this.call({ command: "doctor" }));
-    return status.accessibility === true ? [...CAPABILITIES] : ["app.open", "url.open"];
+    return status.accessibility === true ? [...DESKTOP_CAPABILITIES] : ["app.open", "url.open"];
   }
   async execute(action: Action, signal?: AbortSignal): Promise<Result> {
     return result(await this.call(action, signal));
