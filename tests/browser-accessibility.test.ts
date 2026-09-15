@@ -78,7 +78,7 @@ async function runOwned(file: string, args: string[], timeoutMs: number) {
 
 test(
   "browser accessibility primitive revalidates observed pages before bounded mock actions",
-  // One compiler and seven children each retain their own TERM, KILL and reap bounds.
+  // One compiler and eight children each retain their own TERM, KILL and reap bounds.
   { skip: !mac, timeout: 125_000 },
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "ellie-browser-accessibility-"));
@@ -105,6 +105,7 @@ test(
       "cancel-and-bounds",
       "search-partial",
       "ambiguous-and-playback",
+      "youtube-item-policy",
       "typed-browser-topology",
     ]) {
       const result = await runOwned(executable, [scenario], 5_000);
