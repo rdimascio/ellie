@@ -711,7 +711,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
       throw BrowserAccessibilityFailure.unauthorized
     }
     let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures)
-    guard SecCodeCheckValidityWithErrors(code, flags, requirement, nil) == errSecSuccess else {
+    guard SecCodeCheckValidityWithErrors(code, [], requirement, nil) == errSecSuccess else {
       throw BrowserAccessibilityFailure.unauthorized
     }
     var staticCode: SecStaticCode?

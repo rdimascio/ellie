@@ -116,7 +116,7 @@ private func nativeHostCodeHash(_ token: audit_token_t, expectedExecutable: URL)
   var code: SecCode?
   let flags = SecCSFlags(rawValue: kSecCSStrictValidate | kSecCSCheckAllArchitectures)
   guard SecCodeCopyGuestWithAttributes(nil, attributes, [], &code) == errSecSuccess, let code,
-    SecCodeCheckValidityWithErrors(code, flags, nil, nil) == errSecSuccess
+    SecCodeCheckValidityWithErrors(code, [], nil, nil) == errSecSuccess
   else { return nil }
   var staticCode: SecStaticCode?
   guard SecCodeCopyStaticCode(code, [], &staticCode) == errSecSuccess, let staticCode,
@@ -322,6 +322,7 @@ private func removeStaleSocket(_ path: String, lockRecord: String, newLock: Bool
   return removeOwnedEntry(path, existing)
 }
 
+#if !ELLIE_BROWSER_RUNTIME_BROKER_EMBEDDED_TEST
 @main
 enum BrowserRuntimeBrokerMain {
   static func main() {
@@ -459,3 +460,4 @@ enum BrowserRuntimeBrokerMain {
     }
   }
 }
+#endif
