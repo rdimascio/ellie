@@ -197,7 +197,8 @@ test("every accepted prompt generates private Markdown and reaches a fresh sessi
     const forgotten = await post("Forget Pippin.");
     assert.equal(forgotten.response.status, 200);
     assert.match(JSON.stringify(forgotten.body), /Removed that from automatic memory/);
-    assert.equal((await post("Help me plan my afternoon.")).response.status, 200);
+    // This no-action model probes memory; checklist creation has its own planning tests.
+    assert.equal((await post("Suggest something for my afternoon.")).response.status, 200);
     assert.doesNotMatch(system(), /Pippin/);
     await server!.close();
     server = undefined;

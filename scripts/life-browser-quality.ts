@@ -9,6 +9,7 @@ import {
   startLifeBrowserQualityFixture,
   type BrowserQualityModel,
 } from "./life-browser-quality-fixture.ts";
+import { planDetails } from "../packages/life-plans/src/index.ts";
 
 type ScenarioStatus = "pass" | "fail" | "skipped";
 interface ScenarioReceipt {
@@ -36,15 +37,30 @@ const reportRoot = resolve(
 const session = `elq-${process.pid}-${randomUUID().slice(0, 4)}`;
 const browserConfigPath = join(reportRoot, "agent-browser-config.json");
 const scenarioNames = ["memory", "pending-status", "reminder", "arcade", "mlb"] as const;
+const selectableScenarioNames = [...scenarioNames, "planning"] as const;
 const requestedScenarios = new Set(
   (process.env.LIFE_QUALITY_SCENARIOS ?? scenarioNames.join(","))
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean),
 );
-if ([...requestedScenarios].some((name) => !(scenarioNames as readonly string[]).includes(name)))
-  throw new Error(`LIFE_QUALITY_SCENARIOS must contain: ${scenarioNames.join(", ")}.`);
+if (
+  [...requestedScenarios].some(
+    (name) => !(selectableScenarioNames as readonly string[]).includes(name),
+  )
+)
+  throw new Error(`LIFE_QUALITY_SCENARIOS must contain: ${selectableScenarioNames.join(", ")}.`);
 if (requestedScenarios.size === 0) throw new Error("LIFE_QUALITY_SCENARIOS cannot be empty.");
+const planningPrompts = {
+  compound:
+    "Help me tidy the kitchen. Make a checklist with exactly two items: wipe the counter, then take out the recycling.",
+  direct:
+    "Make a checklist for tidying the kitchen with exactly two items: wipe the counter and take out the recycling.",
+} as const;
+const planningVariant = process.env.LIFE_QUALITY_PLANNING_VARIANT ?? "compound";
+if (planningVariant !== "compound" && planningVariant !== "direct")
+  throw new Error("LIFE_QUALITY_PLANNING_VARIANT must be compound or direct.");
+const planningPrompt = planningPrompts[planningVariant];
 const commandLog: Array<{ command: string; durationMs: number; ok: boolean }> = [];
 let launchSecret = "";
 let publicOrigin = "";
@@ -183,18 +199,39 @@ async function screenshot(receipt: ScenarioReceipt, name: string) {
   receipt.screenshots.push(basename(path));
 }
 
-async function sendChat(receipt: ScenarioReceipt, step: string, message: string) {
+async function sendChat(
+  receipt: ScenarioReceipt,
+  step: string,
+  message: string,
+  timeoutMs = 20_000,
+) {
   await snapshot(receipt, `${step}-before`, false);
   const articleCount = Number(await browser(["get", "count", ".messages article"]));
   await fillAndClick(receipt, step, "textbox", "Message Ellie", message, "Send message");
-  await browser(
-    [
-      "wait",
-      "--fn",
-      `document.querySelectorAll('.messages article').length >= ${articleCount + 2} && !document.querySelector('.typing,.provisional-reply')`,
-    ],
-    { timeoutMs: 20_000 },
-  );
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const raw = await browser(
+      [
+        "--json",
+        "eval",
+        `(() => { const text = document.body.innerText; return { completed: document.querySelectorAll('.messages article').length >= ${articleCount + 2} && !document.querySelector('.typing,.provisional-reply'), uncertain: /connection ended before Ellie confirmed the outcome/i.test(text) || /last connection ended without a final result/i.test(text) }; })()`,
+      ],
+      { timeoutMs: 5_000 },
+    );
+    const parsed = JSON.parse(raw) as {
+      data?: { result?: { completed?: unknown; uncertain?: unknown } };
+    };
+    const state = parsed.data?.result;
+    assert.ok(state, "agent-browser eval returned no chat completion state");
+    if (state.completed) break;
+    if (state.uncertain) {
+      await snapshot(receipt, `${step}-uncertain`, false);
+      throw new Error("Chat entered recovery state before producing a final assistant result.");
+    }
+    if (Date.now() >= deadline)
+      throw new Error(`Chat did not produce a final assistant result within ${timeoutMs}ms.`);
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
   return snapshot(receipt, `${step}-result`, false);
 }
 
@@ -261,12 +298,23 @@ function configuredModel(): BrowserQualityModel {
 async function main() {
   await mkdir(reportRoot, { recursive: true, mode: 0o700 });
   await writeFile(browserConfigPath, "{}\n", { mode: 0o600 });
-  const fixture = await startLifeBrowserQualityFixture({ model: configuredModel() });
+  const model = configuredModel();
+  if (requestedScenarios.has("planning") && model.mode !== "loopback")
+    throw new Error(
+      "The planning scenario requires LIFE_QUALITY_MODEL_URL and LIFE_QUALITY_MODEL_ID for an explicit loopback model.",
+    );
+  const fixture = await startLifeBrowserQualityFixture({ model });
   publicOrigin = fixture.url;
   launchSecret = fixture.launchUrl;
   const receipts: ScenarioReceipt[] = [];
   let cleanupError: unknown;
-  const diagnostics: { console?: string; errors?: string } = {};
+  const diagnostics: {
+    console?: string;
+    errors?: string;
+    modelRequests?: string;
+    modelResponses?: string;
+    modelResults?: string;
+  } = {};
   try {
     await browser(["open", fixture.launchUrl], { record: false });
     await browser(["wait", "--load", "networkidle"]);
@@ -396,6 +444,143 @@ async function main() {
         );
       }),
     );
+
+    if (requestedScenarios.has("planning"))
+      receipts.push(
+        await runScenario("planning", async (receipt) => {
+          await openHome(receipt);
+          const actor = { userId: fixture.actorId };
+          const scope = { type: "user" as const, id: fixture.actorId };
+          assert.equal(
+            fixture.stores().life.listPlanRecords(actor, { scope, limit: 64 }).length,
+            0,
+            "planning scenario requires a fresh empty plan store",
+          );
+          await browser(["scroll", "down", "350"]);
+          await click(receipt, "open-empty-plans", "button", /Plans.*Open plans/i);
+          const empty = await snapshot(receipt, "empty-plans", false);
+          assert.match(empty.text, /No saved plans yet/i);
+          await click(receipt, "open-orb", "button", "Talk to Ellie");
+          const beforeModelCalls = fixture.captures.modelMessages.length;
+          await sendChat(receipt, "create-plan", planningPrompt, 90_000);
+          const modelCalls = fixture.captures.modelMessages.length - beforeModelCalls;
+          assert.ok(modelCalls >= 1, "planning request did not reach the loopback model");
+          assert.ok(
+            fixture.captures.modelMessages.slice(beforeModelCalls).some((messages) =>
+              messages.some(
+                (message) =>
+                  message.role === "user" &&
+                  (() => {
+                    try {
+                      const content = JSON.parse(message.content) as { message?: unknown };
+                      return content.message === planningPrompt;
+                    } catch {
+                      return false;
+                    }
+                  })(),
+              ),
+            ),
+            "captured model requests did not contain the exact submitted planning prompt",
+          );
+          await click(receipt, "close-conversation", "button", "Close conversation");
+          const records = fixture.stores().life.listPlanRecords(actor, { scope, limit: 64 });
+          assert.equal(records.length, 1, "the modeled request must save exactly one plan");
+          const initial = planDetails(records[0]!);
+          assert.equal(initial.totalSteps, 2);
+          assert.equal(initial.completedSteps, 0);
+          assert.match(initial.steps[0]!.title, /wipe.*counter/i);
+          assert.match(initial.steps[1]!.title, /take out.*recycling/i);
+          assert.ok(initial.steps.every((step) => !step.completed));
+
+          await openHome(receipt);
+          await browser(["scroll", "down", "350"]);
+          await click(receipt, "open-created-plans", "button", /Plans.*Open plans/i);
+          await click(
+            receipt,
+            "open-created-plan",
+            "button",
+            new RegExp(
+              `${initial.record.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*0 of 2`,
+              "i",
+            ),
+          );
+          const initialUi = await snapshot(receipt, "initial-open-steps", true);
+          assert.equal(
+            (
+              await browser(["is", "checked", ref(initialUi, "checkbox", initial.steps[0]!.title)])
+            ).trim(),
+            "false",
+          );
+          assert.equal(
+            (
+              await browser(["is", "checked", ref(initialUi, "checkbox", initial.steps[1]!.title)])
+            ).trim(),
+            "false",
+          );
+          await click(receipt, "complete-first-step", "checkbox", initial.steps[0]!.title);
+          await browser(["wait", "--text", "Saved checklist · 1 of 2 complete"]);
+          await snapshot(receipt, "one-complete", false);
+          await click(receipt, "close-plan", "button", "Close");
+          await browser(["reload"]);
+          await browser(["wait", "--load", "networkidle"]);
+          await openHome(receipt);
+          await browser(["scroll", "down", "350"]);
+          await click(receipt, "open-reloaded-plans", "button", /Plans.*Open plans/i);
+          await click(
+            receipt,
+            "reopen-plan",
+            "button",
+            new RegExp(
+              `${initial.record.title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}.*1 of 2`,
+              "i",
+            ),
+          );
+          const reopened = await snapshot(receipt, "reopened", true);
+          const first = ref(reopened, "checkbox", initial.steps[0]!.title);
+          const second = ref(reopened, "checkbox", initial.steps[1]!.title);
+          assert.equal((await browser(["is", "checked", first])).trim(), "true");
+          assert.equal((await browser(["is", "checked", second])).trim(), "false");
+          const persisted = planDetails(fixture.stores().life.getRecord(actor, initial.record.id)!);
+          assert.equal(persisted.totalSteps, 2);
+          assert.equal(persisted.completedSteps, 1);
+          assert.ok(persisted.record.revision > initial.record.revision);
+          assert.equal(persisted.steps[0]!.id, initial.steps[0]!.id);
+          assert.equal(persisted.steps[1]!.id, initial.steps[1]!.id);
+          assert.equal(persisted.steps[0]!.completed, true);
+          assert.equal(persisted.steps[1]!.completed, false);
+          const evidence = `${receipt.name}-evidence.json`;
+          await writeFile(
+            join(reportRoot, evidence),
+            `${JSON.stringify(
+              {
+                planningVariant,
+                planningPrompt,
+                modelCalls,
+                planId: persisted.record.id,
+                revision: persisted.record.revision,
+                steps: persisted.steps.map((step) => ({
+                  id: step.id,
+                  title: step.title,
+                  completed: step.completed,
+                })),
+              },
+              null,
+              2,
+            )}\n`,
+            { mode: 0o600 },
+          );
+          receipt.snapshots.push(evidence);
+          receipt.checks.push(
+            "fresh Plans view was empty before the prompt",
+            `planning variant ${planningVariant} submitted exact prompt: ${planningPrompt}`,
+            `loopback model transport was called ${modelCalls} time(s), including any schema repair`,
+            "one two-step plan was saved with both steps initially open",
+            "first checkbox persisted through reload while the second remained open",
+            "stable plan and step IDs were corroborated read-only from LifeStore",
+          );
+          await screenshot(receipt, "complete");
+        }),
+      );
 
     receipts.push(
       await runScenario("reminder", async (receipt) => {
@@ -551,6 +736,55 @@ async function main() {
       }),
     );
   } finally {
+    if (fixture.modelMode === "loopback") {
+      try {
+        const path = join(reportRoot, "model-requests.json");
+        const requests = fixture.captures.modelMessages.slice(0, 64);
+        await writeFile(
+          path,
+          `${JSON.stringify(
+            {
+              capturedCount: fixture.captures.modelMessages.length,
+              includedCount: requests.length,
+              omittedCount: Math.max(0, fixture.captures.modelMessages.length - requests.length),
+              requests,
+            },
+            null,
+            2,
+          )}\n`,
+          { mode: 0o600 },
+        );
+        diagnostics.modelRequests = basename(path);
+        const responsesPath = join(reportRoot, "model-responses.json");
+        await writeFile(
+          responsesPath,
+          `${JSON.stringify(
+            {
+              capturedCount: fixture.captures.modelResponseCount,
+              includedCount: fixture.captures.modelResponses.length,
+              omittedCount: Math.max(
+                0,
+                fixture.captures.modelResponseCount - fixture.captures.modelResponses.length,
+              ),
+              responses: fixture.captures.modelResponses,
+            },
+            null,
+            2,
+          )}\n`,
+          { mode: 0o600 },
+        );
+        diagnostics.modelResponses = basename(responsesPath);
+        const resultsPath = join(reportRoot, "model-results.json");
+        await writeFile(
+          resultsPath,
+          `${JSON.stringify({ results: fixture.captures.modelResults }, null, 2)}\n`,
+          { mode: 0o600 },
+        );
+        diagnostics.modelResults = basename(resultsPath);
+      } catch (error) {
+        cleanupError = cleanupError ? new AggregateError([cleanupError, error]) : error;
+      }
+    }
     for (const kind of ["console", "errors"] as const) {
       try {
         const output = await browser([kind]);
@@ -590,6 +824,7 @@ async function main() {
     version: 1,
     createdAt: new Date().toISOString(),
     modelMode: fixture.modelMode,
+    planningVariant,
     evidenceSource: fixture.source,
     runtime: {
       node: process.version,

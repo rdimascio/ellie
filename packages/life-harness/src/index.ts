@@ -15,6 +15,7 @@ import type { LifePlugin, MLBAdapter, PluginStore } from "../../life-plugins/src
 import { builtInManifest, PluginError } from "../../life-plugins/src/index.ts";
 import { LifeTeaching } from "../../life-teaching/src/index.ts";
 import { LifePlanError, LifePlans } from "../../life-plans/src/index.ts";
+import { isDirectPlanRequest } from "./direct-plan-request.ts";
 import {
   LifeImprovementEngine,
   LifeImprovementError,
@@ -2762,14 +2763,7 @@ function authorizesIntent(message: string, intent: LifeIntent): boolean {
         ).test(requestText) && overlaps(intent.query)
       );
     case "create_plan":
-      return (
-        (new RegExp(
-          `^(?:please\\s+)?${polite}(?:(?:create|make|start|add)\\s+(?:a\\s+)?(?:plan|checklist)|help me (?:plan|prepare)\\b)`,
-          "i",
-        ).test(requestText) ||
-          /^(?:please\s+)?(?:plan|prepare)\s+(?:for\s+)?/i.test(requestText)) &&
-        overlaps(intent.title)
-      );
+      return isDirectPlanRequest(requestText) && overlaps(intent.title);
   }
 }
 function operationLabel(intent: LifeIntent): string {
