@@ -40,6 +40,17 @@ class BrowserAccessibilityRequestFailure extends Error {
     this.possibleDispatch = possibleDispatch;
   }
 }
+const requestFailure = (pending: Pending, cleanupCertain: boolean) => {
+  const possibleDispatch = pending.dispatched && pending.expected.type === "perform";
+  const message = !cleanupCertain
+    ? "Browser accessibility cleanup is uncertain."
+    : possibleDispatch
+      ? "Browser accessibility outcome is unknown."
+      : pending.expected.type === "read"
+        ? "Browser accessibility read failed."
+        : "Browser accessibility helper is unavailable.";
+  return new BrowserAccessibilityRequestFailure(message, possibleDispatch);
+};
 type Generation = {
   child: ChildProcessWithoutNullStreams;
   input: Buffer;
@@ -202,14 +213,7 @@ export class BrowserAccessibilityRuntime {
     if (this.generation !== owner) return;
     const pending = owner.pending;
     owner.pending = undefined;
-    pending?.reject(
-      new BrowserAccessibilityRequestFailure(
-        pending.dispatched
-          ? "Browser accessibility outcome is unknown."
-          : "Browser accessibility helper is unavailable.",
-        pending.dispatched,
-      ),
-    );
+    if (pending) pending.reject(requestFailure(pending, true));
     this.session = undefined;
     void this.stopChild(owner);
   }
@@ -273,16 +277,7 @@ export class BrowserAccessibilityRuntime {
       const abandon = () =>
         finish(() => {
           if (this.generation === owner && owner.pending === pending) owner.pending = undefined;
-          void this.stopChild(owner).then((certain) =>
-            reject(
-              new BrowserAccessibilityRequestFailure(
-                certain
-                  ? "Browser accessibility outcome is unknown."
-                  : "Browser accessibility cleanup is uncertain.",
-                pending.dispatched,
-              ),
-            ),
-          );
+          void this.stopChild(owner).then((certain) => reject(requestFailure(pending, certain)));
         });
       const timer = setTimeout(abandon, 15_000);
       const pending: Pending = {

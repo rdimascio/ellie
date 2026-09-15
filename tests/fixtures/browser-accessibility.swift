@@ -506,19 +506,19 @@ private func scenario(_ name: String) throws {
     try expect(invalidURL?.value == nil, "non-URL AXLink value admitted")
   case "real-tree-bounds":
     try expect(
-      BrowserAccessibilityTraversalLimits.permitsElement(count: 960, depth: 10),
+      BrowserAccessibilityTraversalLimits.permitsElement(count: 1_782, depth: 21),
       "observed full Arc tree rejected")
     try expect(
-      BrowserAccessibilityTraversalLimits.permitsNode(count: 403),
+      BrowserAccessibilityTraversalLimits.permitsNode(count: 483),
       "observed full Arc projection rejected")
     try expect(
-      BrowserAccessibilityTraversalLimits.permitsCall(count: 4_500),
+      BrowserAccessibilityTraversalLimits.permitsCall(count: 4_699),
       "bounded optimized reads rejected")
     try expect(
-      !BrowserAccessibilityTraversalLimits.permitsElement(count: 1_281, depth: 10),
+      !BrowserAccessibilityTraversalLimits.permitsElement(count: 2_561, depth: 21),
       "oversized element tree admitted")
     try expect(
-      !BrowserAccessibilityTraversalLimits.permitsElement(count: 960, depth: 13),
+      !BrowserAccessibilityTraversalLimits.permitsElement(count: 1_782, depth: 33),
       "over-depth tree admitted")
     try expect(
       !BrowserAccessibilityTraversalLimits.permitsNode(count: 769),

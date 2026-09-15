@@ -40,6 +40,7 @@ async function fixture(
     | "semantic-read"
     | "semantic-perform"
     | "ignore"
+    | "ignore-perform"
     | "respond",
 ) {
   const root = await mkdtemp(join(tmpdir(), "ellie-ax-lifecycle-"));
@@ -50,7 +51,7 @@ async function fixture(
     `#!${process.execPath}\n` +
       String.raw`const fs=require("node:fs"),path=require("node:path"),root=path.dirname(process.argv[1]),countPath=path.join(root,"count"),mode=fs.readFileSync(path.join(root,"mode"),"utf8");
 const count=Number(fs.existsSync(countPath)?fs.readFileSync(countPath,"utf8"):0)+1;fs.writeFileSync(countPath,String(count));fs.writeFileSync(path.join(root,"pid-"+count),String(process.pid));
-let input="",session,documentRevision;process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{input+=chunk;const newline=input.indexOf("\n");if(newline<0)return;const raw=input.slice(0,newline);input=input.slice(newline+1);const value=JSON.parse(raw);fs.appendFileSync(path.join(root,"requests-"+count),value.id+"\\n");if(count===1&&mode==="malformed-first"){process.stdout.write("{}\n");return;}if(mode==="ignore")return;let reply;if(value.type==="bind"){session="session-"+count;documentRevision=value.documentRevision;reply={id:value.id,status:count===1&&mode==="semantic-bind"?"garbage":"bound",sessionID:session,documentRevision};}else if(value.type==="read")reply={id:value.id,status:count===1&&mode==="semantic-read"?"garbage":"completed",sessionID:session,generation:"generation-"+count,documentRevision,items:[],operation:"read"};else reply={id:value.id,status:"dispatchedUnverified",sessionID:session,documentRevision,operation:count===1&&mode==="semantic-perform"?"search":value.operation};process.stdout.write(JSON.stringify(reply)+"\n",()=>{if(count===1&&mode==="close-after-bind"){fs.closeSync(0);fs.writeFileSync(path.join(root,"stdin-closed"),"yes");}});});
+let input="",session,documentRevision;process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{input+=chunk;const newline=input.indexOf("\n");if(newline<0)return;const raw=input.slice(0,newline);input=input.slice(newline+1);const value=JSON.parse(raw);fs.appendFileSync(path.join(root,"requests-"+count),value.id+"\\n");if(count===1&&mode==="malformed-first"){process.stdout.write("{}\n");return;}if(mode==="ignore"||(mode==="ignore-perform"&&value.type==="perform"))return;let reply;if(value.type==="bind"){session="session-"+count;documentRevision=value.documentRevision;reply={id:value.id,status:count===1&&mode==="semantic-bind"?"garbage":"bound",sessionID:session,documentRevision};}else if(value.type==="read")reply={id:value.id,status:count===1&&mode==="semantic-read"?"garbage":"completed",sessionID:session,generation:"generation-"+count,documentRevision,items:[],operation:"read"};else reply={id:value.id,status:"dispatchedUnverified",sessionID:session,documentRevision,operation:count===1&&mode==="semantic-perform"?"search":value.operation};process.stdout.write(JSON.stringify(reply)+"\n",()=>{if(count===1&&mode==="close-after-bind"){fs.closeSync(0);fs.writeFileSync(path.join(root,"stdin-closed"),"yes");}});});
 setInterval(()=>{},1000);`,
     { mode: 0o700 },
   );
@@ -104,7 +105,7 @@ test("stdin EPIPE is contained and a certain retirement permits a fresh helper",
         binding,
         new AbortController().signal,
       ),
-      /outcome is unknown/,
+      /read failed/,
     );
     await writeFile(join(item.root, "mode"), "respond", { mode: 0o600 });
     const result = await recoverStatus(runtime);
@@ -175,7 +176,7 @@ test("malformed reply settles its request and stale generation events cannot kil
   let complete = false;
   try {
     const runtime = new BrowserAccessibilityRuntime(item.executable, () => context);
-    await assert.rejects(executeStatus(runtime), /outcome is unknown/);
+    await assert.rejects(executeStatus(runtime), /helper is unavailable/);
     const result = await recoverStatus(runtime);
     assert.equal(result.browser.status, "connected");
     assert.equal(await item.count(), 2);
@@ -197,11 +198,11 @@ test("semantic bind, read, and perform corruption retires the helper before reco
     try {
       const runtime = new BrowserAccessibilityRuntime(item.executable, () => context);
       if (mode === "semantic-bind") {
-        await assert.rejects(executeStatus(runtime), /outcome is unknown/);
+        await assert.rejects(executeStatus(runtime), /helper is unavailable/);
       } else {
         await executeStatus(runtime);
         if (mode === "semantic-read") {
-          await assert.rejects(executeRead(runtime), /outcome is unknown/);
+          await assert.rejects(executeRead(runtime), /read failed/);
         } else {
           await executeRead(runtime);
           const result = await runtime.execute(
@@ -227,16 +228,25 @@ test("semantic bind, read, and perform corruption retires the helper before reco
   }
 });
 
-test("cancelled dispatched work is unknown and is never replayed after certain cleanup", async () => {
-  const item = await fixture("ignore");
+test("cancelled dispatched action is unknown and is never replayed after certain cleanup", async () => {
+  const item = await fixture("ignore-perform");
   let complete = false;
   try {
     const runtime = new BrowserAccessibilityRuntime(item.executable, () => context);
     const aborter = new AbortController();
-    const pending = executeStatus(runtime, aborter.signal);
-    await waitFor(() => item.count().then((value) => value === 1));
+    await executeStatus(runtime);
+    await executeRead(runtime);
+    const pending = runtime.execute(
+      { tool: "browser.scroll", direction: "down", revision: binding.revision },
+      binding,
+      aborter.signal,
+    );
+    await waitFor(async () => {
+      const requests = await readFile(join(item.root, "requests-1"), "utf8");
+      return requests.split("\\n").filter(Boolean).length === 3;
+    });
     aborter.abort();
-    await assert.rejects(pending, /outcome is unknown/);
+    assert.equal((await pending).browser.status, "unknown");
     await writeFile(join(item.root, "mode"), "respond", { mode: 0o600 });
     await recoverStatus(runtime);
     assert.match(await readFile(join(item.root, "requests-2"), "utf8"), /^[^\\]+\\n$/);
