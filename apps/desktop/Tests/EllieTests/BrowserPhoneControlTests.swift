@@ -112,6 +112,76 @@ final class BrowserPhoneControlTests: XCTestCase {
   }
 
   @MainActor
+  func testReviewedSearchSelectionAndPlaybackRequireExplicitReadsWithoutReplay() async {
+    let transport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let search = BrowserVoiceIntent.search(query: "public video")
+
+    XCTAssertFalse(store.canPerform(search, on: node))
+    XCTAssertFalse(store.perform(search, on: node))
+    let initialActionCount = await transport.actions.count
+    XCTAssertEqual(initialActionCount, 0)
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.canPerform(search, on: node))
+    XCTAssertTrue(store.perform(search, on: node))
+    await eventually { if case .outcome = store.phase { true } else { false } }
+    XCTAssertNil(store.page)
+    let searchActionCount = await transport.actions.count
+    XCTAssertEqual(searchActionCount, 3)
+
+    XCTAssertFalse(store.perform(.openResult(index: 1), on: node))
+    let rejectedSelectionActionCount = await transport.actions.count
+    XCTAssertEqual(rejectedSelectionActionCount, 3)
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(.openResult(index: 1), on: node))
+    await eventually { if case .outcome = store.phase { true } else { false } }
+    XCTAssertFalse(store.canPerform(.play, on: node))
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(.play, on: node))
+    await eventually { if case .outcome = store.phase { true } else { false } }
+    XCTAssertFalse(store.canPerform(.pause, on: node))
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(.pause, on: node))
+    await eventually { if case .outcome = store.phase { true } else { false } }
+
+    let actions = await transport.actions
+    XCTAssertEqual(actions.count, 12)
+    XCTAssertEqual(
+      actions.filter {
+        switch $0 {
+        case .search, .select, .playback: return true
+        default: return false
+        }
+      }.count, 4)
+  }
+
+  @MainActor
+  func testEmptyObservedResultListRejectsSelectionWithoutCrashingOrDispatching() async {
+    let transport = BrowserPhoneFakeTransport(items: [])
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertFalse(store.canPerform(.openResult(index: 1), on: node))
+    XCTAssertFalse(store.perform(.openResult(index: 1), on: node))
+    let actionCount = await transport.actions.count
+    XCTAssertEqual(actionCount, 2)
+  }
+
+  @MainActor
   func testAccessibilityPagePreservesSourceAndUnknownCommandInvalidatesIt() async {
     let transport = BrowserPhoneFakeTransport(source: .accessibility, commandStatus: .unknown)
     let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
@@ -156,16 +226,19 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private let commandError: Bool
   private let source: BrowserPhoneSource
   private let commandStatus: BrowserPhoneCommandStatus?
+  private let items: [BrowserPhoneItem]
   private var commandContinuation: CheckedContinuation<Void, Never>?
   private var readContinuation: CheckedContinuation<Void, Never>?
   init(
     delayRead: Bool = false, commandError: Bool = false,
-    source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil
+    source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
+    items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)]
   ) {
     self.delayRead = delayRead
     self.commandError = commandError
     self.source = source
     self.commandStatus = commandStatus
+    self.items = items
   }
   func execute(
     _ action: BrowserPhoneAction, nodeID: String, credential: NativeEnrollmentCredential
@@ -179,7 +252,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
       return .page(
         BrowserPhonePage(
           nodeID: nodeID, source: source, revision: revision, title: "Page", summary: nil,
-          items: [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)]))
+          items: items))
     default:
       if commandError { throw PhoneControlFailure.unavailable }
       if let commandStatus { return .command(source: source, status: commandStatus, revision: revision) }

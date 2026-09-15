@@ -23,7 +23,7 @@ struct SpeechTurnView: View {
     Form {
       Section("Voice command") {
         Text(
-          "Record up to 30 seconds. Audio is sent only to your paired coordinator for transcription. Review the text before choosing an app."
+          "Record up to 30 seconds. Audio is sent only to your paired coordinator for transcription. Review the text before choosing an action."
         )
         .font(.footnote)
         .foregroundStyle(.secondary)
@@ -56,11 +56,21 @@ struct SpeechTurnView: View {
               .font(.footnote).foregroundStyle(.secondary)
           } else if let intent = BrowserVoiceIntentParser.parse(speech.transcript) {
             Button("Run \(intent.displayLabel) on selected Mac") {
-              browserStore.perform(intent, on: controlStore.selectedNode)
-              speech.discardReview()
+              if browserStore.perform(intent, on: controlStore.selectedNode) {
+                speech.discardReview()
+              }
             }
-            .disabled(controlsBusy || browserStore.isBusy || controlStore.selectedNode == nil)
-            Text("The command uses the current reviewed browser page. Read the page first for controls and results.")
+            .disabled(
+              controlsBusy || !browserStore.canPerform(intent, on: controlStore.selectedNode))
+            if !browserStore.canPerform(intent, on: controlStore.selectedNode) {
+              Button("Read current browser page", systemImage: "doc.text.magnifyingglass") {
+                browserStore.refresh(on: controlStore.selectedNode)
+              }
+              .disabled(controlsBusy || !browserStore.canRefresh(on: controlStore.selectedNode))
+            }
+            Text(
+              "The reviewed command uses the current browser page. Reading is separate and never sends the command."
+            )
               .font(.footnote).foregroundStyle(.secondary)
           } else {
             Text("Say an app command or a reviewed browser command such as “Scroll down” or “Search for local news.”")
@@ -69,17 +79,28 @@ struct SpeechTurnView: View {
           Button("Discard transcript", role: .destructive) { speech.discardReview() }
         }
       }
+      browserContinuation
     }
     .navigationTitle("Voice command")
-    .onDisappear { speech.cancelAndDiscard() }
+    .onDisappear {
+      speech.cancelAndDiscard()
+      browserStore.cancel()
+    }
     .onChange(of: scenePhase) { _, phase in
-      if phase != .active { speech.cancelAndDiscard() }
+      if phase != .active {
+        speech.cancelAndDiscard()
+        browserStore.cancel()
+      }
     }
   }
 
   @ViewBuilder private var browserStatus: some View {
     switch browserStore.phase {
-    case .idle, .ready: EmptyView()
+    case .idle: EmptyView()
+    case .ready:
+      Section {
+        Label("Current browser page is ready for review.", systemImage: "checkmark.circle")
+      }
     case .checking: Section { ProgressView("Checking browser connection…") }
     case .reading: Section { ProgressView("Reading current page…") }
     case .sending(let label): Section { ProgressView("Sending \(label)…") }
@@ -89,6 +110,37 @@ struct SpeechTurnView: View {
     case .failed(let message): Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked:
       Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
+    }
+  }
+
+  @ViewBuilder private var browserContinuation: some View {
+    if speech.phase != .reviewing, showsBrowserContinuation {
+      Section("Continue in browser") {
+        if browserStore.page != nil {
+          NavigationLink {
+            BrowserControlView(controls: controlStore, browser: browserStore)
+          } label: {
+            Label("Review observed results and controls", systemImage: "list.bullet.rectangle")
+          }
+        } else {
+          Button("Read updated browser page", systemImage: "doc.text.magnifyingglass") {
+            browserStore.refresh(on: controlStore.selectedNode)
+          }
+          .disabled(controlsBusy || !browserStore.canRefresh(on: controlStore.selectedNode))
+        }
+        Text(
+          "Read the updated page before selecting an observed result or using Play and Pause."
+        )
+        .font(.footnote).foregroundStyle(.secondary)
+      }
+    }
+  }
+
+  private var showsBrowserContinuation: Bool {
+    if browserStore.page != nil { return true }
+    switch browserStore.phase {
+    case .outcome, .unknown, .failed: return true
+    default: return false
     }
   }
 
