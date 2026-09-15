@@ -3299,13 +3299,13 @@ export class LifeStore {
       current = currentFingerprint ?? this.contextFingerprintFor(actor, conversation.scope),
       valid: Record<string, unknown>[] = [];
     for (const row of rows) {
-      if (row.memory_suppressed) continue;
       if (row.status !== "completed") continue;
       if (
         String(row.context_fingerprint) !== current ||
         !this.evidenceCurrent(actor, conversation.scope, JSON.parse(String(row.evidence_json)))
       )
         break;
+      if (row.memory_suppressed) continue;
       valid.push(row);
       if (valid.length >= Math.ceil(limit / 2)) break;
     }
