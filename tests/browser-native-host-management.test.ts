@@ -7,6 +7,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -23,6 +24,37 @@ import {
 } from "../apps/cli/src/browser-native-host-management.ts";
 import { browserWebMCPHostInstallationPlan } from "../scripts/browser-webmcp-host-setup.ts";
 import { stageApplication } from "../scripts/build-service-payload.mjs";
+
+async function materializeProductionDependencies(
+  repository: string,
+  source: string,
+): Promise<void> {
+  const workspaces = new Map<string, string>();
+  for (const area of ["apps", "packages"]) {
+    for (const name of await readdir(join(source, area))) {
+      const directory = join(source, area, name);
+      try {
+        const value = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
+        if (typeof value.name === "string") workspaces.set(value.name, directory);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+    }
+  }
+  const queue = ["@ellie/cli", "@ellie/node", "@ellie/server"];
+  const visited = new Set<string>();
+  while (queue.length > 0) {
+    const name = queue.shift()!;
+    if (visited.has(name)) continue;
+    visited.add(name);
+    const directory = workspaces.get(name) ?? join(repository, "node_modules", name);
+    const value = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
+    for (const dependency of Object.keys(value.dependencies ?? {})) queue.push(dependency);
+    if (!workspaces.has(name)) {
+      await cp(await realpath(directory), join(source, "node_modules", name), { recursive: true });
+    }
+  }
+}
 
 async function fixture(t: test.TestContext) {
   const home = await realpath(await mkdtemp(join(tmpdir(), "ellie-browser-host-")));
@@ -234,7 +266,7 @@ test("the actual staged application imports and invokes native-host preflight", 
   await mkdir(source, { mode: 0o700 });
   for (const name of ["apps", "packages", "package.json", "bun.lock", "LICENSE"])
     await cp(join(repository, name), join(source, name), { recursive: true });
-  await symlink(join(repository, "node_modules"), join(source, "node_modules"));
+  await materializeProductionDependencies(repository, source);
   await mkdir(join(source, "apps/command-center/dist"), { recursive: true });
   await writeFile(join(source, "apps/command-center/dist/index.html"), "fixture\n");
   await mkdir(join(source, "apps/life-ui/dist/assets"), { recursive: true });
