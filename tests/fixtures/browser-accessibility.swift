@@ -2,6 +2,106 @@ import Foundation
 
 private final class Token: NSObject {}
 
+private final class MouseEventToken: NSObject {}
+
+private final class MockPressSystem: BrowserAccessibilityPressSystem {
+  var trusted = true
+  var permitted = true
+  var active = true
+  var frontmost: Int32? = 42
+  var displays = [CGRect(x: 0, y: 0, width: 1_920, height: 1_080)]
+  var frames: [(BrowserAccessibilityElementReference, CGRect)] = []
+  var processIDs: [(BrowserAccessibilityElementReference, Int32)] = []
+  var parents: [(BrowserAccessibilityElementReference, BrowserAccessibilityElementReference)] = []
+  var hit: BrowserAccessibilityElementReference!
+  var posts: [String] = []
+  var makeEvents = true
+  var frameReads = 0
+  var authorityChecks = 0
+  var frameProvider: ((BrowserAccessibilityElementReference, Int) throws -> CGRect)?
+  var onPost: ((String) -> Void)?
+  var onAuthorityCheck: ((Int) -> Void)?
+  private var downEvent: BrowserAccessibilityMouseEvent?
+  private var upEvent: BrowserAccessibilityMouseEvent?
+
+  func accessibilityTrusted() -> Bool {
+    authorityChecks += 1
+    onAuthorityCheck?(authorityChecks)
+    return trusted
+  }
+  func postEventAccessPermitted() -> Bool { permitted }
+  func applicationIsActive(processID: Int32) -> Bool { active }
+  func frontmostProcessID() -> Int32? { frontmost }
+  func displayFrames() throws -> [CGRect] { displays }
+  func hitTest(at point: CGPoint) throws -> BrowserAccessibilityElementReference { hit }
+
+  func frame(of element: BrowserAccessibilityElementReference) throws -> CGRect {
+    frameReads += 1
+    if let frameProvider { return try frameProvider(element, frameReads) }
+    guard let entry = frames.first(where: { same($0.0, element) }) else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    return entry.1
+  }
+
+  func processID(of element: BrowserAccessibilityElementReference) throws -> Int32 {
+    guard let entry = processIDs.first(where: { same($0.0, element) }) else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    return entry.1
+  }
+
+  func parent(of element: BrowserAccessibilityElementReference) throws
+    -> BrowserAccessibilityElementReference?
+  { parents.first(where: { same($0.0, element) })?.1 }
+
+  func same(
+    _ first: BrowserAccessibilityElementReference,
+    _ second: BrowserAccessibilityElementReference
+  ) -> Bool { first.isSameObject(as: second) }
+
+  func mouseEvents(at point: CGPoint) -> BrowserAccessibilityMouseEvents? {
+    guard makeEvents else { return nil }
+    let down = BrowserAccessibilityMouseEvent(MouseEventToken())
+    let up = BrowserAccessibilityMouseEvent(MouseEventToken())
+    downEvent = down
+    upEvent = up
+    return BrowserAccessibilityMouseEvents(down: down, up: up)
+  }
+
+  func post(_ event: BrowserAccessibilityMouseEvent, to processID: Int32) {
+    let name = event === downEvent ? "down" : event === upEvent ? "up" : "unknown"
+    posts.append("\(name):\(processID)")
+    onPost?(name)
+  }
+}
+
+private func pressAuthorization(
+  target: BrowserAccessibilityElementReference = BrowserAccessibilityElementReference(Token()),
+  window: BrowserAccessibilityElementReference = BrowserAccessibilityElementReference(Token()),
+  webArea: BrowserAccessibilityElementReference = BrowserAccessibilityElementReference(Token()),
+  processID: Int32 = 42
+) -> BrowserAccessibilityPressAuthorization {
+  BrowserAccessibilityPressAuthorization(
+    browser: .arc, processID: processID, launchIdentity: "launch-1",
+    exactURL: "https://www.youtube.com/results?search_query=nature",
+    documentRevision: "revision-1", window: window, webArea: webArea, target: target)
+}
+
+private func configuredPressSystem(
+  _ authorization: BrowserAccessibilityPressAuthorization
+) -> MockPressSystem {
+  let system = MockPressSystem()
+  system.frames = [
+    (authorization.window, CGRect(x: 0, y: 0, width: 1_000, height: 800)),
+    (authorization.webArea, CGRect(x: 50, y: 80, width: 900, height: 700)),
+    (authorization.target, CGRect(x: 200, y: 150, width: 120, height: 40)),
+  ]
+  system.processIDs = [(authorization.target, authorization.processID)]
+  system.hit = authorization.target
+  return system
+}
+
 private final class MockBackend: BrowserAccessibilityBackend {
   var current: BrowserAccessibilitySnapshot
   var actions: [String] = []
@@ -50,6 +150,18 @@ private final class MockBackend: BrowserAccessibilityBackend {
     valueReferences.append(element)
     if let valueProvider { return try valueProvider(valueReads, lastSetValue) }
     return lastSetValue
+  }
+
+  func press(
+    revalidate: () throws -> BrowserAccessibilityPressAuthorization,
+    cancelled: () -> Bool
+  ) throws {
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    _ = try revalidate()
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    _ = try revalidate()
+    actions.append("press")
+    if actionFailure { throw BrowserAccessibilityFailure.unavailable }
   }
 
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws {
@@ -634,6 +746,135 @@ private func scenario(_ name: String) throws {
           documentRevision: ambiguousView.documentRevision), on: ambiguousPage)
     }
     try expect(ambiguousBackend.actions.isEmpty, "ambiguous AXTextArea search mutated field")
+  case "mouse-press-guards":
+    do {
+      let authorization = pressAuthorization()
+      let system = configuredPressSystem(authorization)
+      let dispatcher = BrowserAccessibilityPressDispatcher(system: system)
+      var revalidations = 0
+      try dispatcher.press(revalidate: {
+        revalidations += 1
+        return authorization
+      }, cancelled: { false })
+      try expect(revalidations == 2, "press authority was not rebound twice")
+      try expect(system.posts == ["down:42", "up:42"], "single click pair changed")
+    }
+
+    do {
+      let authorization = pressAuthorization()
+      let child = BrowserAccessibilityElementReference(Token())
+      let system = configuredPressSystem(authorization)
+      system.hit = child
+      system.processIDs.append((child, 42))
+      system.parents.append((child, authorization.target))
+      try BrowserAccessibilityPressDispatcher(system: system).press(
+        revalidate: { authorization }, cancelled: { false })
+      try expect(system.posts == ["down:42", "up:42"], "owned descendant was rejected")
+    }
+
+    for mutation in ["occluded", "wrong-pid", "nonfinite", "outside", "inactive", "permission"] {
+      let authorization = pressAuthorization()
+      let system = configuredPressSystem(authorization)
+      switch mutation {
+      case "occluded":
+        let occluder = BrowserAccessibilityElementReference(Token())
+        system.hit = occluder
+        system.processIDs.append((occluder, 42))
+      case "wrong-pid":
+        system.processIDs = [(authorization.target, 99)]
+      case "nonfinite":
+        system.frames[2].1 = CGRect(x: CGFloat.nan, y: 150, width: 120, height: 40)
+      case "outside":
+        system.frames[2].1 = CGRect(x: 2_000, y: 150, width: 120, height: 40)
+      case "inactive": system.active = false
+      case "permission": system.permitted = false
+      default: break
+      }
+      do {
+        try BrowserAccessibilityPressDispatcher(system: system).press(
+          revalidate: { authorization }, cancelled: { false })
+        throw NSError(domain: "BrowserAccessibilityFixture", code: 4)
+      } catch is BrowserAccessibilityFailure {}
+      try expect(system.posts.isEmpty, "\(mutation) guard dispatched")
+    }
+
+    do {
+      let authorization = pressAuthorization()
+      let replacement = pressAuthorization(
+        target: BrowserAccessibilityElementReference(Token()), window: authorization.window,
+        webArea: authorization.webArea)
+      let system = configuredPressSystem(authorization)
+      var count = 0
+      try expectFailure(.stale) {
+        try BrowserAccessibilityPressDispatcher(system: system).press(revalidate: {
+          count += 1
+          return count == 1 ? authorization : replacement
+        }, cancelled: { false })
+      }
+      try expect(system.posts.isEmpty, "replaced target dispatched")
+    }
+
+    do {
+      let authorization = pressAuthorization()
+      let system = configuredPressSystem(authorization)
+      let original = system.frames[2].1
+      system.frameProvider = { element, read in
+        guard let entry = system.frames.first(where: { system.same($0.0, element) }) else {
+          throw BrowserAccessibilityFailure.unavailable
+        }
+        if system.same(element, authorization.target), read >= 4 {
+          return original.offsetBy(dx: 1, dy: 0)
+        }
+        return entry.1
+      }
+      try expectFailure(.stale) {
+        try BrowserAccessibilityPressDispatcher(system: system).press(
+          revalidate: { authorization }, cancelled: { false })
+      }
+      try expect(system.posts.isEmpty, "moved target dispatched")
+    }
+
+    do {
+      let authorization = pressAuthorization()
+      let system = configuredPressSystem(authorization)
+      var cancelled = false
+      system.onAuthorityCheck = { count in
+        if count == 3 { cancelled = true }
+      }
+      try expectFailure(.cancelled) {
+        try BrowserAccessibilityPressDispatcher(system: system).press(
+          revalidate: { authorization }, cancelled: { cancelled })
+      }
+      try expect(system.posts.isEmpty, "final authority cancellation dispatched")
+    }
+
+    do {
+      let authorization = pressAuthorization()
+      let system = configuredPressSystem(authorization)
+      var cancelled = false
+      system.onPost = { event in
+        if event == "down" { cancelled = true }
+      }
+      try expectFailure(.partialUnknown) {
+        try BrowserAccessibilityPressDispatcher(system: system).press(
+          revalidate: { authorization }, cancelled: { cancelled })
+      }
+      try expect(
+        system.posts == ["down:42", "up:42"],
+        "post-dispatch cancellation did not release exact owned click")
+    }
+
+    do {
+      let authorization = pressAuthorization()
+      let system = configuredPressSystem(authorization)
+      system.makeEvents = false
+      try expectFailure(.unavailable) {
+        try BrowserAccessibilityPressDispatcher(system: system).press(
+          revalidate: { authorization }, cancelled: { false })
+      }
+      try expect(system.posts.isEmpty, "event construction failure dispatched")
+    }
+
   case "real-tree-bounds":
     try expect(
       BrowserAccessibilityTraversalLimits.permitsElement(count: 1_782, depth: 21),

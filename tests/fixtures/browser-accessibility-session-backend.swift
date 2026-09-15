@@ -47,6 +47,15 @@ private final class SessionBackend: BrowserAccessibilityBackend {
   func same(_ first: BrowserAccessibilityElementReference,
     _ second: BrowserAccessibilityElementReference) -> Bool { first.isSameObject(as: second) }
   func setValue(_ value: String, on element: BrowserAccessibilityElementReference) throws {}
+  func press(
+    revalidate: () throws -> BrowserAccessibilityPressAuthorization,
+    cancelled: () -> Bool
+  ) throws {
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    _ = try revalidate()
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    _ = try revalidate()
+  }
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws {}
 }
 

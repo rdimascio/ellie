@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import CoreGraphics
 import Foundation
 import Security
 
@@ -109,7 +110,22 @@ protocol BrowserAccessibilityBackend: AnyObject {
   ) -> Bool
   func setValue(_ value: String, on element: BrowserAccessibilityElementReference) throws
   func value(on element: BrowserAccessibilityElementReference) throws -> String?
+  func press(
+    revalidate: () throws -> BrowserAccessibilityPressAuthorization,
+    cancelled: () -> Bool
+  ) throws
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws
+}
+
+struct BrowserAccessibilityPressAuthorization {
+  let browser: BrowserAccessibilityBrowser
+  let processID: Int32
+  let launchIdentity: String
+  let exactURL: String
+  let documentRevision: String
+  let window: BrowserAccessibilityElementReference
+  let webArea: BrowserAccessibilityElementReference
+  let target: BrowserAccessibilityElementReference
 }
 
 extension BrowserAccessibilityBackend {
@@ -295,7 +311,14 @@ final class BrowserAccessibilityAdapter {
         case .confirm:
           try backend.perform("confirm", on: ready.target.reference)
         case .press:
-          try backend.perform("press", on: ready.target.reference)
+          try backend.press(
+            revalidate: {
+              let fresh = try self.rebound(page)
+              guard let final = self.rebindSearchPlan(ready, in: fresh.nodes),
+                final.submission == .press
+              else { throw BrowserAccessibilityFailure.stale }
+              return self.pressAuthorization(fresh, page: page, target: final.target.reference)
+            }, cancelled: cancelled)
         }
         return outcome(.search, .dispatchedUnverified, page)
       } catch {
@@ -305,7 +328,16 @@ final class BrowserAccessibilityAdapter {
       guard let item = observed.items[itemID], let reboundItem = uniqueRebind(item, in: snapshot.nodes)
       else { throw BrowserAccessibilityFailure.stale }
       guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
-      do { try backend.perform("press", on: reboundItem.reference) }
+      do {
+        try backend.press(
+          revalidate: {
+            let fresh = try self.rebound(page)
+            guard let final = self.uniqueRebind(reboundItem, in: fresh.nodes) else {
+              throw BrowserAccessibilityFailure.stale
+            }
+            return self.pressAuthorization(fresh, page: page, target: final.reference)
+          }, cancelled: cancelled)
+      }
       catch { return outcome(.select, .unknown, page) }
       return outcome(.select, .dispatchedUnverified, page)
     case .playback(let playback, _, _):
@@ -317,7 +349,20 @@ final class BrowserAccessibilityAdapter {
         throw BrowserAccessibilityFailure.ambiguous
       }
       guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
-      do { try backend.perform("press", on: control.reference) }
+      do {
+        try backend.press(
+          revalidate: {
+            let fresh = try self.rebound(page)
+            let matches = fresh.nodes.filter {
+              $0.kind == .button && $0.enabled && $0.actions.contains("press")
+                && self.playbackLabel($0.label, matches: playback)
+            }
+            guard matches.count == 1,
+              let final = self.uniqueRebind(control, in: matches)
+            else { throw BrowserAccessibilityFailure.stale }
+            return self.pressAuthorization(fresh, page: page, target: final.reference)
+          }, cancelled: cancelled)
+      }
       catch { return outcome(.playback, .unknown, page) }
       return outcome(.playback, .dispatchedUnverified, page)
     }
@@ -344,6 +389,18 @@ final class BrowserAccessibilityAdapter {
         && backend.same($0.reference, prior.reference)
     }
     return matches.count == 1 ? matches[0] : nil
+  }
+
+  private func pressAuthorization(
+    _ snapshot: BrowserAccessibilitySnapshot,
+    page: BrowserAccessibilityAuthorizedPage,
+    target: BrowserAccessibilityElementReference
+  ) -> BrowserAccessibilityPressAuthorization {
+    BrowserAccessibilityPressAuthorization(
+      browser: snapshot.browser, processID: snapshot.processID,
+      launchIdentity: snapshot.launchIdentity, exactURL: snapshot.exactURL,
+      documentRevision: page.documentRevision, window: snapshot.window,
+      webArea: snapshot.webArea, target: target)
   }
 
   private func searchPlan(in nodes: [BrowserAccessibilityNode]) throws -> SearchPlan {
@@ -539,11 +596,318 @@ enum BrowserAccessibilityTraversalLimits {
   }
 }
 
+final class BrowserAccessibilityMouseEvent {
+  fileprivate let value: AnyObject
+  init(_ value: AnyObject) { self.value = value }
+}
+
+struct BrowserAccessibilityMouseEvents {
+  let down: BrowserAccessibilityMouseEvent
+  let up: BrowserAccessibilityMouseEvent
+}
+
+protocol BrowserAccessibilityPressSystem: AnyObject {
+  func accessibilityTrusted() -> Bool
+  func postEventAccessPermitted() -> Bool
+  func applicationIsActive(processID: Int32) -> Bool
+  func frontmostProcessID() -> Int32?
+  func frame(of element: BrowserAccessibilityElementReference) throws -> CGRect
+  func displayFrames() throws -> [CGRect]
+  func hitTest(at point: CGPoint) throws -> BrowserAccessibilityElementReference
+  func processID(of element: BrowserAccessibilityElementReference) throws -> Int32
+  func parent(of element: BrowserAccessibilityElementReference) throws
+    -> BrowserAccessibilityElementReference?
+  func same(
+    _ first: BrowserAccessibilityElementReference,
+    _ second: BrowserAccessibilityElementReference
+  ) -> Bool
+  func mouseEvents(at point: CGPoint) -> BrowserAccessibilityMouseEvents?
+  func post(_ event: BrowserAccessibilityMouseEvent, to processID: Int32)
+}
+
+final class BrowserAccessibilityPressDispatcher {
+  private struct Geometry {
+    let target: CGRect
+    let window: CGRect
+    let webArea: CGRect
+    let point: CGPoint
+  }
+
+  private static let maximumParentDepth = 16
+  static let maximumDisplayCount: UInt32 = 32
+  private static let maximumCalls = 128
+  private static let totalSeconds = 2.0
+  private let system: BrowserAccessibilityPressSystem
+  private var calls = 0
+  private var deadline = 0.0
+
+  init(system: BrowserAccessibilityPressSystem) { self.system = system }
+
+  func press(
+    revalidate: () throws -> BrowserAccessibilityPressAuthorization,
+    cancelled: () -> Bool
+  ) throws {
+    calls = 0
+    deadline = ProcessInfo.processInfo.systemUptime + Self.totalSeconds
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    let first = try revalidate()
+    let firstGeometry = try validate(first)
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    let final = try revalidate()
+    guard sameAuthorization(first, final) else { throw BrowserAccessibilityFailure.stale }
+    let finalGeometry = try validate(final)
+    guard sameGeometry(firstGeometry, finalGeometry) else {
+      throw BrowserAccessibilityFailure.stale
+    }
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    guard let events = system.mouseEvents(at: finalGeometry.point) else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    try check()
+    try requireAuthority(final.processID)
+    guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+    try checkDeadline()
+    system.post(events.down, to: final.processID)
+    defer { system.post(events.up, to: final.processID) }
+    guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
+  }
+
+  private func validate(_ authorization: BrowserAccessibilityPressAuthorization) throws
+    -> Geometry
+  {
+    guard authorization.processID > 0, !authorization.launchIdentity.isEmpty,
+      !authorization.exactURL.isEmpty, !authorization.documentRevision.isEmpty
+    else { throw BrowserAccessibilityFailure.unauthorized }
+    try requireAuthority(authorization.processID)
+    let target = try checked { try system.frame(of: authorization.target) }
+    let window = try checked { try system.frame(of: authorization.window) }
+    let webArea = try checked { try system.frame(of: authorization.webArea) }
+    guard validFrame(target), validFrame(window), validFrame(webArea) else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    let visible = target.intersection(window).intersection(webArea)
+    guard validFrame(visible) else { throw BrowserAccessibilityFailure.unavailable }
+    let displays = try checked { try system.displayFrames() }
+    guard !displays.isEmpty, displays.count <= Int(Self.maximumDisplayCount),
+      displays.allSatisfy(validFrame)
+    else { throw BrowserAccessibilityFailure.unavailable }
+    let visibleDisplays = displays.map { visible.intersection($0) }.filter(validFrame)
+    guard visibleDisplays.count == 1, let visibleTarget = visibleDisplays.first else {
+      throw BrowserAccessibilityFailure.ambiguous
+    }
+    let point = CGPoint(x: visibleTarget.midX, y: visibleTarget.midY)
+    guard point.x.isFinite, point.y.isFinite else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    let hit = try checked { try system.hitTest(at: point) }
+    guard try belongsToTarget(
+      hit, target: authorization.target, processID: authorization.processID)
+    else { throw BrowserAccessibilityFailure.unauthorized }
+    return Geometry(target: target, window: window, webArea: webArea, point: point)
+  }
+
+  private func belongsToTarget(
+    _ hit: BrowserAccessibilityElementReference,
+    target: BrowserAccessibilityElementReference,
+    processID: Int32
+  ) throws -> Bool {
+    guard try checked({ try system.processID(of: target) }) == processID else { return false }
+    var element = hit
+    for depth in 0...Self.maximumParentDepth {
+      guard try checked({ try system.processID(of: element) }) == processID else { return false }
+      if system.same(element, target) { return true }
+      guard depth < Self.maximumParentDepth,
+        let parent = try checked({ try system.parent(of: element) })
+      else { return false }
+      element = parent
+    }
+    return false
+  }
+
+  private func requireAuthority(_ processID: Int32) throws {
+    try check()
+    guard system.accessibilityTrusted(), system.postEventAccessPermitted(),
+      system.applicationIsActive(processID: processID),
+      system.frontmostProcessID() == processID
+    else { throw BrowserAccessibilityFailure.unauthorized }
+    try checkDeadline()
+  }
+
+  private func sameAuthorization(
+    _ first: BrowserAccessibilityPressAuthorization,
+    _ second: BrowserAccessibilityPressAuthorization
+  ) -> Bool {
+    first.browser == second.browser && first.processID == second.processID
+      && first.launchIdentity == second.launchIdentity && first.exactURL == second.exactURL
+      && first.documentRevision == second.documentRevision
+      && system.same(first.window, second.window) && system.same(first.webArea, second.webArea)
+      && system.same(first.target, second.target)
+  }
+
+  private func sameGeometry(_ first: Geometry, _ second: Geometry) -> Bool {
+    first.target == second.target && first.window == second.window
+      && first.webArea == second.webArea && first.point == second.point
+  }
+
+  private func validFrame(_ frame: CGRect) -> Bool {
+    frame.origin.x.isFinite && frame.origin.y.isFinite && frame.width.isFinite
+      && frame.height.isFinite && frame.width > 0 && frame.height > 0
+      && !frame.isNull && !frame.isInfinite
+  }
+
+  private func checked<T>(_ operation: () throws -> T) throws -> T {
+    try check()
+    let result = try operation()
+    try checkDeadline()
+    return result
+  }
+
+  private func check() throws {
+    calls += 1
+    guard calls <= Self.maximumCalls else { throw BrowserAccessibilityFailure.deadline }
+    try checkDeadline()
+  }
+
+  private func checkDeadline() throws {
+    guard ProcessInfo.processInfo.systemUptime <= deadline else {
+      throw BrowserAccessibilityFailure.deadline
+    }
+  }
+}
+
+final class MacBrowserAccessibilityPressSystem: BrowserAccessibilityPressSystem {
+  private static let timeout: Float = 0.1
+
+  func accessibilityTrusted() -> Bool { AXIsProcessTrusted() }
+  func postEventAccessPermitted() -> Bool { CGPreflightPostEventAccess() }
+
+  func applicationIsActive(processID: Int32) -> Bool {
+    NSRunningApplication(processIdentifier: processID)?.isActive == true
+  }
+
+  func frontmostProcessID() -> Int32? {
+    NSWorkspace.shared.frontmostApplication?.processIdentifier
+  }
+
+  func frame(of element: BrowserAccessibilityElementReference) throws -> CGRect {
+    let position = try axValue(element, attribute: kAXPositionAttribute, type: .cgPoint)
+    let size = try axValue(element, attribute: kAXSizeAttribute, type: .cgSize)
+    var point = CGPoint.zero
+    var dimensions = CGSize.zero
+    guard AXValueGetValue(position, .cgPoint, &point),
+      AXValueGetValue(size, .cgSize, &dimensions)
+    else { throw BrowserAccessibilityFailure.unavailable }
+    return CGRect(origin: point, size: dimensions)
+  }
+
+  func displayFrames() throws -> [CGRect] {
+    var count: UInt32 = 0
+    guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0,
+      count <= BrowserAccessibilityPressDispatcher.maximumDisplayCount
+    else { throw BrowserAccessibilityFailure.unavailable }
+    var displays = [CGDirectDisplayID](repeating: 0, count: Int(count))
+    var finalCount: UInt32 = 0
+    guard CGGetActiveDisplayList(count, &displays, &finalCount) == .success,
+      finalCount == count
+    else { throw BrowserAccessibilityFailure.unavailable }
+    return displays.map(CGDisplayBounds)
+  }
+
+  func hitTest(at point: CGPoint) throws -> BrowserAccessibilityElementReference {
+    let systemWide = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(systemWide, Self.timeout)
+    var hit: AXUIElement?
+    guard AXUIElementCopyElementAtPosition(
+      systemWide, Float(point.x), Float(point.y), &hit) == .success, let hit
+    else { throw BrowserAccessibilityFailure.unavailable }
+    AXUIElementSetMessagingTimeout(hit, Self.timeout)
+    return BrowserAccessibilityElementReference(hit)
+  }
+
+  func processID(of element: BrowserAccessibilityElementReference) throws -> Int32 {
+    let target = try axElement(element)
+    var processID: pid_t = 0
+    guard AXUIElementGetPid(target, &processID) == .success, processID > 0 else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    return processID
+  }
+
+  func parent(of element: BrowserAccessibilityElementReference) throws
+    -> BrowserAccessibilityElementReference?
+  {
+    let target = try axElement(element)
+    var raw: CFTypeRef?
+    let status = AXUIElementCopyAttributeValue(target, kAXParentAttribute as CFString, &raw)
+    if status == .noValue || status == .attributeUnsupported { return nil }
+    guard status == .success, let raw, CFGetTypeID(raw) == AXUIElementGetTypeID() else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    let parent = raw as! AXUIElement
+    AXUIElementSetMessagingTimeout(parent, Self.timeout)
+    return BrowserAccessibilityElementReference(parent)
+  }
+
+  func same(
+    _ first: BrowserAccessibilityElementReference,
+    _ second: BrowserAccessibilityElementReference
+  ) -> Bool { CFEqual(first.value, second.value) }
+
+  func mouseEvents(at point: CGPoint) -> BrowserAccessibilityMouseEvents? {
+    guard let source = CGEventSource(stateID: .privateState),
+      let down = CGEvent(
+        mouseEventSource: source, mouseType: .leftMouseDown,
+        mouseCursorPosition: point, mouseButton: .left),
+      let up = CGEvent(
+        mouseEventSource: source, mouseType: .leftMouseUp,
+        mouseCursorPosition: point, mouseButton: .left)
+    else { return nil }
+    down.flags = []
+    up.flags = []
+    down.setIntegerValueField(.mouseEventClickState, value: 1)
+    up.setIntegerValueField(.mouseEventClickState, value: 1)
+    return BrowserAccessibilityMouseEvents(
+      down: BrowserAccessibilityMouseEvent(down), up: BrowserAccessibilityMouseEvent(up))
+  }
+
+  func post(_ event: BrowserAccessibilityMouseEvent, to processID: Int32) {
+    (event.value as! CGEvent).postToPid(processID)
+  }
+
+  private func axElement(_ reference: BrowserAccessibilityElementReference) throws -> AXUIElement {
+    guard CFGetTypeID(reference.value) == AXUIElementGetTypeID() else {
+      throw BrowserAccessibilityFailure.invalid
+    }
+    let element = reference.value as! AXUIElement
+    AXUIElementSetMessagingTimeout(element, Self.timeout)
+    return element
+  }
+
+  private func axValue(
+    _ reference: BrowserAccessibilityElementReference, attribute: String,
+    type: AXValueType
+  ) throws -> AXValue {
+    let element = try axElement(reference)
+    var raw: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &raw) == .success,
+      let raw, CFGetTypeID(raw) == AXValueGetTypeID()
+    else { throw BrowserAccessibilityFailure.unavailable }
+    let value = raw as! AXValue
+    guard AXValueGetType(value) == type else { throw BrowserAccessibilityFailure.unavailable }
+    return value
+  }
+}
+
 final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
   private static let timeout: Float = 0.25
   private static let totalSeconds = 4.0
   private var calls = 0
   private var deadline = 0.0
+  private let pressDispatcher: BrowserAccessibilityPressDispatcher
+
+  init(pressSystem: BrowserAccessibilityPressSystem = MacBrowserAccessibilityPressSystem()) {
+    pressDispatcher = BrowserAccessibilityPressDispatcher(system: pressSystem)
+  }
 
   // The process ID must be derived from the trusted native-host/browser connection. It must
   // never come from a phone or network request. This verifies that supplied process, but the
@@ -634,6 +998,13 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     return try string(element.value as! AXUIElement, kAXValueAttribute)
   }
 
+  func press(
+    revalidate: () throws -> BrowserAccessibilityPressAuthorization,
+    cancelled: () -> Bool
+  ) throws {
+    try pressDispatcher.press(revalidate: revalidate, cancelled: cancelled)
+  }
+
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws {
     guard CFGetTypeID(element.value) == AXUIElementGetTypeID() else {
       throw BrowserAccessibilityFailure.invalid
@@ -641,7 +1012,6 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     let target = element.value as! AXUIElement
     let name: String
     switch action {
-    case "press": name = kAXPressAction
     case "confirm": name = kAXConfirmAction
     case "scroll-up": name = "AXScrollUpByPage"
     case "scroll-down": name = "AXScrollDownByPage"
