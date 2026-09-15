@@ -5,12 +5,17 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { browserWebMCPAction } from "@ellie/protocol";
+import { browserWebMCPAction, browserWebMCPResultFor, type BrowserAction } from "@ellie/protocol";
 import { defaults } from "@ellie/config";
 import { runNode } from "../apps/node/src/index.ts";
 import { BrowserNodeExecutor } from "../apps/node/src/browser-executor.ts";
-import { BrowserAccessibilityRuntime } from "../apps/node/src/browser-accessibility-runtime.ts";
+import {
+  BrowserAccessibilityRuntime,
+  type BrowserAccessibilityBinding,
+} from "../apps/node/src/browser-accessibility-runtime.ts";
 import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
+import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
+import { reviewedBrowserRegistry } from "../apps/node/src/browser-operation-registry.ts";
 import { startBrowserKernelBridge } from "../apps/node/src/browser-kernel-bridge.ts";
 import { browserWebMCPFrame } from "../apps/node/src/browser-webmcp-bridge.ts";
 import { fixture } from "./helpers.ts";
@@ -206,6 +211,51 @@ test("adapter selection happens once before dispatch and never falls through", a
   );
   assert.equal(webCalls, 1);
   assert.equal(axCalls, 0);
+});
+
+test("validated extension availability reaches the accessibility selector", async () => {
+  let accessibilityCalls = 0;
+  const webmcp = new BrowserWebMCPOperations(
+    {
+      async request(request) {
+        assert.equal(request.type, "binding.status");
+        return browserWebMCPResultFor(request.id, "ok", {
+          bindingId: "binding-1",
+          documentId: "document-1",
+          origin: "https://www.youtube.com",
+          url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+          expiresAt: Date.now() + 60_000,
+          availability: "accessibility",
+        });
+      },
+    },
+    reviewedBrowserRegistry({ version: 1, bindings: [] }),
+  );
+  const selector = new BrowserOperationSelector((signal) => webmcp.bindingStatus(signal), webmcp, {
+    async execute(_action: BrowserAction, binding: BrowserAccessibilityBinding) {
+      accessibilityCalls += 1;
+      assert.equal(binding.availability, "accessibility");
+      return {
+        ok: true,
+        message: "Browser tab connected.",
+        browser: {
+          source: "accessibility",
+          operation: "status",
+          status: "connected",
+          revision: binding.revision,
+          origin: "https://www.youtube.com",
+        },
+      };
+    },
+  } as unknown as BrowserAccessibilityRuntime);
+
+  const result = await selector.execute(
+    browserWebMCPAction({ tool: "browser.status" }),
+    AbortSignal.timeout(1_000),
+  );
+  assert.ok("browser" in result);
+  assert.equal(result.browser.source, "accessibility");
+  assert.equal(accessibilityCalls, 1);
 });
 
 test("reported native-host PID cannot authorize accessibility", async () => {
