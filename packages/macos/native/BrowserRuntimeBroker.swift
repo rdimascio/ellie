@@ -99,7 +99,7 @@ private func socketAddress(_ path: String) -> (sockaddr_un, socklen_t)? {
   return (address, socklen_t(address.sun_len))
 }
 
-private struct PeerIdentity: Equatable {
+private struct PeerIdentity {
   let token: audit_token_t
   let pid: Int32
   let pidVersion: Int32
