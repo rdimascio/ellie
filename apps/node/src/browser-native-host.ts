@@ -1,5 +1,5 @@
 import { connect } from "node:net";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BROWSER_WEBMCP_LIMITS, browserWebMCPRequest, browserWebMCPResult } from "@ellie/protocol";
 import { browserWebMCPFrame, browserWebMCPSocketPath } from "./browser-webmcp-bridge.ts";
@@ -30,6 +30,32 @@ export function browserWebMCPNativeHostManifest(
 /** Manifest bytes for the one reviewed Ellie extension identity. Installation remains explicit. */
 export function ellieBrowserWebMCPNativeHostManifest(executablePath: string): string {
   return browserWebMCPNativeHostManifest(ELLIE_BROWSER_EXTENSION_ID, executablePath);
+}
+
+export type BrowserWebMCPHostInstallationPlan = {
+  extensionId: typeof ELLIE_BROWSER_EXTENSION_ID;
+  executablePath: string;
+  manifestName: `${typeof BROWSER_WEBMCP_NATIVE_HOST}.json`;
+  manifest: string;
+};
+
+/** Manifest plan for a captured release; authentication remains the caller's prerequisite. */
+export function browserWebMCPHostInstallationPlan(
+  capturedRelease: string,
+): BrowserWebMCPHostInstallationPlan {
+  if (
+    !capturedRelease.startsWith("/") ||
+    capturedRelease.includes("\0") ||
+    resolve(capturedRelease) !== capturedRelease
+  )
+    throw new Error("Invalid captured browser host release.");
+  const executablePath = join(capturedRelease, "payload", "bin", "ellie-browser-webmcp-host");
+  return {
+    extensionId: ELLIE_BROWSER_EXTENSION_ID,
+    executablePath,
+    manifestName: `${BROWSER_WEBMCP_NATIVE_HOST}.json`,
+    manifest: ellieBrowserWebMCPNativeHostManifest(executablePath),
+  };
 }
 
 export async function runBrowserWebMCPNativeHost(options: {

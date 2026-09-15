@@ -32,6 +32,11 @@ import { BrowserOperationSelector } from "../../node/src/browser-operation-selec
 import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
 import { startBrowserKernelBridge } from "../../node/src/browser-kernel-bridge.ts";
 import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
+import {
+  browserNativeHostPreflight,
+  installBrowserNativeHost,
+  uninstallBrowserNativeHost,
+} from "./browser-native-host-management.ts";
 import { packagedBrowserHelpers } from "./browser-runtime-paths.ts";
 
 import { generateCertificate } from "./certificate.ts";
@@ -155,6 +160,33 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
   };
 }
 async function main(): Promise<void> {
+  if (args[0] === "browser-webmcp" && args[1] === "host") {
+    const action = args[2];
+    if (
+      !["preflight", "install", "uninstall"].includes(action ?? "") ||
+      args.length !== 7 ||
+      args[3] !== "--browser" ||
+      args[4] !== "arc" ||
+      args[5] !== "--release" ||
+      !args[6]
+    )
+      throw new Error(
+        "Use: ellie browser-webmcp host preflight|install|uninstall --browser arc --release ABSOLUTE_CAPTURED_RELEASE",
+      );
+    const home = homedir();
+    if (action === "preflight") {
+      const report = await browserNativeHostPreflight(home, args[6]);
+      console.log(JSON.stringify(report));
+      if (!report.ready) process.exitCode = 1;
+    } else if (action === "install") {
+      await installBrowserNativeHost(home, args[6]);
+      console.log(JSON.stringify({ version: 1, browser: "arc", status: "installed" }));
+    } else {
+      await uninstallBrowserNativeHost(home, args[6]);
+      console.log(JSON.stringify({ version: 1, browser: "arc", status: "absent" }));
+    }
+    return;
+  }
   if (args[0] === "browser-webmcp" && args[1] === "native-host") {
     if (args.length !== 2) throw new Error("Browser native host invocation rejected.");
     try {
