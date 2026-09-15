@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,7 +16,10 @@ import {
 import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
 import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
 import { reviewedBrowserRegistry } from "../apps/node/src/browser-operation-registry.ts";
-import { startBrowserKernelBridge } from "../apps/node/src/browser-kernel-bridge.ts";
+import {
+  startBrowserKernelBridge,
+  type BrowserKernelBridge,
+} from "../apps/node/src/browser-kernel-bridge.ts";
 import { browserWebMCPFrame } from "../apps/node/src/browser-webmcp-bridge.ts";
 import { fixture } from "./helpers.ts";
 
@@ -459,6 +462,38 @@ test(
   async (t) => {
     const root = await mkdtemp("/tmp/e-bk-");
     let completed = false;
+    const bridges = new Set<BrowserKernelBridge>();
+    const children = new Set<ChildProcess>();
+    const trackBridge = (bridge: BrowserKernelBridge) => {
+      bridges.add(bridge);
+      return bridge;
+    };
+    const closeBridge = async (bridge: BrowserKernelBridge) => {
+      await bridge.close();
+      bridges.delete(bridge);
+    };
+    const trackChild = <T extends ChildProcess>(child: T): T => {
+      children.add(child);
+      return child;
+    };
+    const stopChild = async (child: ChildProcess): Promise<boolean> => {
+      if (child.exitCode !== null || child.signalCode !== null) return true;
+      const closed = new Promise<boolean>((resolve) => child.once("close", () => resolve(true)));
+      if (!child.kill("SIGTERM")) return false;
+      if (
+        await Promise.race([
+          closed,
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 250)),
+        ])
+      )
+        return true;
+      if (child.exitCode === null && child.signalCode === null && !child.kill("SIGKILL"))
+        return false;
+      return Promise.race([
+        closed,
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1_000)),
+      ]);
+    };
     try {
       const payload = join(root, "payload");
       const helpers = join(payload, "helpers");
@@ -509,18 +544,20 @@ test(
         "Library/Application Support/Ellie/BrowserBridge/browser-webmcp-v1.sock",
       );
       const lock = join(home, "Library/Application Support/Ellie/BrowserBridge/broker.lock");
-      const waitForSocket = async () => {
+      const waitForPublishedSocket = async () => {
         for (let count = 0; count < 100; count += 1) {
+          const current = await lstat(socket).catch(() => undefined);
           if (
-            await access(socket).then(
-              () => true,
-              () => false,
-            )
+            current?.isSocket() &&
+            (current.mode & 0o777) === 0o600 &&
+            current.uid === process.getuid!() &&
+            (await readFile(lock, "utf8").catch(() => undefined)) ===
+              `v1 ${current.dev} ${current.ino}\n`
           )
-            return;
+            return current;
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
-        assert.fail("broker socket did not appear");
+        assert.fail("broker socket and ownership record were not published together");
       };
       const waitForNoSocket = async () => {
         for (let count = 0; count < 100; count += 1) {
@@ -536,12 +573,14 @@ test(
         assert.fail("broker socket was not removed");
       };
 
-      const crashed = spawn(broker, [], {
-        env: { HOME: home, PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
-        stdio: ["pipe", "ignore", "ignore"],
-      });
+      const crashed = trackChild(
+        spawn(broker, [], {
+          env: { HOME: home, PATH: "/usr/bin:/bin", LANG: "C", LC_ALL: "C" },
+          stdio: ["pipe", "ignore", "ignore"],
+        }),
+      );
       const crashedExit = new Promise((resolve) => crashed.once("close", resolve));
-      await waitForSocket();
+      const publishedSocket = await waitForPublishedSocket();
       assert.equal(crashed.kill("SIGKILL"), true);
       assert.equal(await crashedExit, null);
       assert.equal(
@@ -554,45 +593,63 @@ test(
       const staleSocket = await lstat(socket);
       assert.equal(staleSocket.isSocket(), true);
       assert.equal(staleSocket.mode & 0o777, 0o600);
+      assert.equal(staleSocket.dev, publishedSocket.dev);
+      assert.equal(staleSocket.ino, publishedSocket.ino);
+      assert.equal(await readFile(lock, "utf8"), `v1 ${staleSocket.dev} ${staleSocket.ino}\n`);
       const retainedLock = await lstat(lock);
       assert.equal(retainedLock.mode & 0o777, 0o600);
 
-      const first = await startBrowserKernelBridge({ home, executable: broker });
-      const connectToReplacement = async () => {
+      const first = trackBridge(await startBrowserKernelBridge({ home, executable: broker }));
+      const connectToOwnedPublishedSocket = async () => {
         for (let count = 0; count < 100; count += 1) {
-          const candidate = connect(socket);
-          const connected = await new Promise<boolean>((resolve) => {
-            let settled = false;
-            const cleanup = () => {
-              clearTimeout(timer);
-              candidate.off("connect", onConnect);
-              candidate.off("error", onError);
-            };
-            const finish = (value: boolean) => {
-              if (settled) return;
-              settled = true;
-              cleanup();
-              resolve(value);
-            };
-            const onConnect = () => finish(true);
-            const onError = () => finish(false);
-            const timer = setTimeout(() => {
-              candidate.destroy();
-              finish(false);
-            }, 100);
-            candidate.once("connect", onConnect);
-            candidate.once("error", onError);
-          });
-          if (connected) {
-            candidate.on("error", () => {});
-            return candidate;
+          const [current, currentLock, record] = await Promise.all([
+            lstat(socket).catch(() => undefined),
+            lstat(lock).catch(() => undefined),
+            readFile(lock, "utf8").catch(() => undefined),
+          ]);
+          if (
+            current?.isSocket() &&
+            (current.mode & 0o777) === 0o600 &&
+            current.uid === process.getuid!() &&
+            currentLock?.isFile() &&
+            currentLock.dev === retainedLock.dev &&
+            currentLock.ino === retainedLock.ino &&
+            currentLock.uid === retainedLock.uid &&
+            currentLock.mode === retainedLock.mode &&
+            record === `v1 ${current.dev} ${current.ino}\n`
+          ) {
+            const candidate = connect(socket);
+            const connected = await new Promise<boolean>((resolve) => {
+              let settled = false;
+              const finish = (value: boolean) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                candidate.off("connect", onConnect);
+                candidate.off("error", onError);
+                resolve(value);
+              };
+              const onConnect = () => finish(true);
+              const onError = () => finish(false);
+              const timer = setTimeout(() => {
+                candidate.destroy();
+                finish(false);
+              }, 100);
+              candidate.once("connect", onConnect);
+              candidate.once("error", onError);
+            });
+            if (connected) {
+              candidate.on("error", () => {});
+              return { connection: candidate, socketInfo: current };
+            }
+            candidate.destroy();
           }
-          candidate.destroy();
           await new Promise((resolve) => setTimeout(resolve, 5));
         }
-        assert.fail("replacement broker socket did not accept a connection");
+        assert.fail("owned replacement broker socket did not accept a connection");
       };
-      const hostile = await connectToReplacement();
+      const { connection: hostile, socketInfo: replacementSocketInfo } =
+        await connectToOwnedPublishedSocket();
       const hostileClosed = hostile.closed
         ? Promise.resolve(true)
         : new Promise<boolean>((resolve) => {
@@ -605,7 +662,6 @@ test(
               resolve(true);
             });
           });
-      const replacementSocketInfo = await lstat(socket);
       assert.equal(replacementSocketInfo.isSocket(), true);
       assert.equal(replacementSocketInfo.mode & 0o777, 0o600);
       assert.equal(replacementSocketInfo.uid, process.getuid!());
@@ -615,23 +671,29 @@ test(
       );
       assert.equal(await hostileClosed, true, "replacement broker did not reject the hostile peer");
       assert.equal(first.connectionContext(), undefined);
-      await first.close();
+      await closeBridge(first);
       await waitForNoSocket();
 
-      const production = await startBrowserKernelBridge({ home, executable: productionBroker });
-      await waitForSocket();
-      const untrustedExactPeer = spawn(peer, [], { env: { HOME: home }, stdio: "ignore" });
+      const production = trackBridge(
+        await startBrowserKernelBridge({ home, executable: productionBroker }),
+      );
+      await waitForPublishedSocket();
+      const untrustedExactPeer = trackChild(
+        spawn(peer, [], { env: { HOME: home }, stdio: "ignore" }),
+      );
       const untrustedExactExit = new Promise((resolve) =>
         untrustedExactPeer.once("close", resolve),
       );
       assert.equal(await untrustedExactExit, 3);
       assert.equal(production.connectionContext(), undefined);
-      await production.close();
+      await closeBridge(production);
       await waitForNoSocket();
 
-      const bridge = await startBrowserKernelBridge({ home, executable: broker });
-      await waitForSocket();
-      const child = spawn(peer, ["--disconnect"], { env: { HOME: home }, stdio: "ignore" });
+      const bridge = trackBridge(await startBrowserKernelBridge({ home, executable: broker }));
+      await waitForPublishedSocket();
+      const child = trackChild(
+        spawn(peer, ["--disconnect"], { env: { HOME: home }, stdio: "ignore" }),
+      );
       const childExit = new Promise((resolve) => child.once("close", resolve));
       for (let count = 0; !bridge.connected() && count < 100; count += 1)
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -652,7 +714,7 @@ test(
         await new Promise((resolve) => setTimeout(resolve, 5));
       assert.equal(bridge.connectionContext(), undefined);
 
-      const replacement = spawn(peer, [], { env: { HOME: home }, stdio: "ignore" });
+      const replacement = trackChild(spawn(peer, [], { env: { HOME: home }, stdio: "ignore" }));
       const replacementExit = new Promise((resolve) => replacement.once("close", resolve));
       for (let count = 0; !bridge.connected() && count < 100; count += 1)
         await new Promise((resolve) => setTimeout(resolve, 5));
@@ -667,12 +729,28 @@ test(
         new AbortController().signal,
       );
       assert.equal(replacementResponse.status, "ok");
-      await bridge.close();
+      await closeBridge(bridge);
       assert.equal(await replacementExit, 0);
       completed = true;
     } finally {
-      if (completed) await rm(root, { recursive: true });
+      let cleanupCertain = true;
+      for (const bridge of bridges) {
+        try {
+          await closeBridge(bridge);
+        } catch (error) {
+          cleanupCertain = false;
+          t.diagnostic(`Browser kernel bridge cleanup uncertain: ${String(error)}`);
+        }
+      }
+      for (const child of children) {
+        if (!(await stopChild(child))) {
+          cleanupCertain = false;
+          t.diagnostic(`Browser kernel fixture child cleanup uncertain: ${child.pid ?? "unknown"}`);
+        }
+      }
+      if (completed && cleanupCertain) await rm(root, { recursive: true });
       else t.diagnostic(`Retained browser kernel fixture: ${root}`);
+      assert.equal(cleanupCertain, true, "browser kernel fixture cleanup was uncertain");
     }
   },
 );
