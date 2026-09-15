@@ -144,8 +144,9 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     Set(result.keys) == Set(["ok", "message", "browser"]),
     let ok = result["ok"] as? NSNumber, CFGetTypeID(ok) == CFBooleanGetTypeID(),
     let message = result["message"] as? String, validBrowserText(message, maximum: 4_000),
-    let browser = result["browser"] as? [String: Any], browser["source"] as? String == "webmcp",
-    let source = BrowserPhoneSource(rawValue: browser["source"] as! String),
+    let browser = result["browser"] as? [String: Any],
+    let sourceValue = browser["source"] as? String,
+    let source = BrowserPhoneSource(rawValue: sourceValue),
     let operation = browser["operation"] as? String, let status = browser["status"] as? String
   else { throw PhoneControlFailure.invalidResponse }
   if operation == "status" {
