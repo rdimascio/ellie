@@ -84,9 +84,12 @@ export class BrowserWebMCPOperations {
     if (checked.type === "cancel") throw new Error();
     return browserWebMCPResult(await this.bridge.request(checked, signal));
   }
-  async bindingStatus(signal: AbortSignal): Promise<BrowserBinding | "unbound" | "unsupported"> {
+  private async binding(
+    type: "binding.status" | "binding.refresh",
+    signal: AbortSignal,
+  ): Promise<BrowserBinding | "unbound" | "unsupported"> {
     const response = await this.call(
-      { protocol: BROWSER_WEBMCP_PROTOCOL, id: randomUUID(), type: "binding.status" },
+      { protocol: BROWSER_WEBMCP_PROTOCOL, id: randomUUID(), type },
       signal,
     );
     if (response.status === "unbound" || response.status === "unsupported_origin") {
@@ -135,6 +138,12 @@ export class BrowserWebMCPOperations {
       this.currentRevision = undefined;
     }
     return checked;
+  }
+  async bindingStatus(signal: AbortSignal): Promise<BrowserBinding | "unbound" | "unsupported"> {
+    return this.binding("binding.status", signal);
+  }
+  async bindingRefresh(signal: AbortSignal): Promise<BrowserBinding | "unbound" | "unsupported"> {
+    return this.binding("binding.refresh", signal);
   }
   private reviewed(
     origin: string,
@@ -205,9 +214,12 @@ export class BrowserWebMCPOperations {
     const action = browserWebMCPAction(raw);
     let binding: BrowserBinding | "unbound" | "unsupported";
     try {
-      binding = await this.bindingStatus(signal);
+      binding =
+        action.tool === "browser.refresh"
+          ? await this.bindingRefresh(signal)
+          : await this.bindingStatus(signal);
     } catch {
-      if (action.tool === "browser.status") {
+      if (action.tool === "browser.status" || action.tool === "browser.refresh") {
         return browserWebMCPOperationResult({
           ok: false,
           message: "Browser connection is unavailable.",
@@ -216,7 +228,7 @@ export class BrowserWebMCPOperations {
       }
       throw new Error("Browser connection is unavailable.");
     }
-    if (action.tool === "browser.status")
+    if (action.tool === "browser.status" || action.tool === "browser.refresh")
       return browserWebMCPOperationResult({
         ok: typeof binding === "object" && binding.availability === "webmcp",
         message:

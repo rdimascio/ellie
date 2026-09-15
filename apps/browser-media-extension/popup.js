@@ -1,7 +1,6 @@
 let snapshot;
 let selectedTab;
 let pending;
-let selectedBinding = false;
 let nativeConnectionStatus = "idle";
 let nativeConnectionRevision = 0;
 const status = document.querySelector("#status");
@@ -106,19 +105,19 @@ document.querySelector("#webmcp").onclick = async () => {
 document.querySelector("#bind-webmcp").onclick = async () => {
   const value = await run({ type: "bindWebMCP", actionId: crypto.randomUUID() });
   if (!value) return;
-  selectedBinding = true;
   recordNativeConnection(value.nativeConnection);
   showNativeConnection(nativeConnectionStatus);
+  status.textContent = "Page selected.";
 };
 
 function showNativeConnection(value) {
   const messages = {
-    waiting: "Page selected. Waiting for Mac connection…",
-    connected: "Page selected. Mac connected.",
-    missing: "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
-    disconnected: "Page selected. The Mac connection was lost.",
+    waiting: "Waiting for Mac connection…",
+    connected: "Mac connected.",
+    missing: "Ellie’s Mac connection could not be found. Check browser setup.",
+    disconnected: "The Mac connection was lost.",
   };
-  connectionStatus.textContent = messages[value] || "Page selected. Mac connection unavailable.";
+  connectionStatus.textContent = messages[value] || "Mac connection unavailable.";
 }
 
 function recordNativeConnection(value) {
@@ -131,7 +130,7 @@ function recordNativeConnection(value) {
     return;
   nativeConnectionStatus = value.status;
   nativeConnectionRevision = value.revision;
-  if (selectedBinding) showNativeConnection(nativeConnectionStatus);
+  showNativeConnection(nativeConnectionStatus);
 }
 
 chrome.runtime.onMessage.addListener((message) => {

@@ -326,6 +326,8 @@ export class BrowserAccessibilityRuntime {
     binding: BrowserAccessibilityBinding,
     signal: AbortSignal,
   ): Promise<BrowserWebMCPOperationResult> {
+    if (action.tool === "browser.refresh")
+      throw new Error("Browser refresh requires a fresh selected binding.");
     const context = this.context();
     if (
       !context ||

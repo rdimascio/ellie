@@ -338,6 +338,46 @@
       }
     },
     {
+      "id": "browser.refresh",
+      "requiredCapability": "browser.read",
+      "description": "Explicitly refresh the selected browser page binding within its original authority.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.refresh"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
       "id": "browser.read",
       "requiredCapability": "browser.read",
       "description": "Read a bounded reviewed view from the authorized browser page.",

@@ -24,6 +24,7 @@ enum BrowserPhoneResponse: Equatable, Sendable {
 }
 enum BrowserPhoneAction: Equatable, Sendable {
   case status
+  case refresh
   case read(revision: String)
   case scroll(BrowserScrollDirection, revision: String)
   case search(String, revision: String)
@@ -31,7 +32,7 @@ enum BrowserPhoneAction: Equatable, Sendable {
   case playback(BrowserVoiceIntent, revision: String)
 
   var requiresControl: Bool {
-    switch self { case .status, .read: false; default: true }
+    switch self { case .status, .refresh, .read: false; default: true }
   }
 }
 
@@ -90,6 +91,7 @@ final class BrowserPhoneControlTransport: BrowserPhoneControlTransporting, @unch
   private func wireAction(_ action: BrowserPhoneAction) throws -> [String: Any] {
     switch action {
     case .status: return ["tool": "browser.status"]
+    case .refresh: return ["tool": "browser.refresh"]
     case .read(let revision):
       guard validBrowserIdentifier(revision) else { throw PhoneControlFailure.rejected }
       return ["tool": "browser.read", "view": "summary", "revision": revision]
@@ -117,7 +119,7 @@ final class BrowserPhoneControlTransport: BrowserPhoneControlTransporting, @unch
 
 private func revision(_ action: BrowserPhoneAction) -> String? {
   switch action {
-  case .status: nil
+  case .status, .refresh: nil
   case .read(let value), .scroll(_, let value), .search(_, let value),
     .select(_, let value), .playback(_, let value): value
   }

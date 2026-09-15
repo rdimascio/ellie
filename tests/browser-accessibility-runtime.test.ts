@@ -423,6 +423,55 @@ test("validated extension availability reaches the accessibility selector", asyn
   assert.equal(accessibilityCalls, 1);
 });
 
+test("selector requests renewal only for explicit refresh and passes adapters ordinary status", async () => {
+  const refreshModes: boolean[] = [];
+  const adapterTools: string[] = [];
+  const selector = new BrowserOperationSelector(
+    async (_signal, refresh = false) => {
+      refreshModes.push(refresh);
+      return {
+        availability: "accessibility" as const,
+        bindingId: refresh ? "binding-2" : "binding-1",
+        documentId: refresh ? "document-2" : "document-1",
+        origin: "https://www.youtube.com",
+        url: "https://www.youtube.com/results",
+        expiresAt: Date.now() + 60_000,
+      };
+    },
+    {
+      async execute() {
+        throw new Error("WebMCP must not dispatch.");
+      },
+    },
+    {
+      async execute(action: BrowserAction) {
+        adapterTools.push(action.tool);
+        return {
+          ok: true,
+          message: "Browser tab connected.",
+          browser: {
+            source: "accessibility",
+            operation: "status",
+            status: "connected",
+            revision: "revision",
+            origin: "https://www.youtube.com",
+          },
+        };
+      },
+    } as unknown as BrowserAccessibilityRuntime,
+  );
+  await selector.execute(
+    browserWebMCPAction({ tool: "browser.status" }),
+    AbortSignal.timeout(1_000),
+  );
+  await selector.execute(
+    browserWebMCPAction({ tool: "browser.refresh" }),
+    AbortSignal.timeout(1_000),
+  );
+  assert.deepEqual(refreshModes, [false, true]);
+  assert.deepEqual(adapterTools, ["browser.status", "browser.status"]);
+});
+
 test("reported native-host PID cannot authorize accessibility", async () => {
   const runtime = new BrowserAccessibilityRuntime("/bin/false", () => ({
     browserProcessPid: process.pid,

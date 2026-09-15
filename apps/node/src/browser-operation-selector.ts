@@ -11,11 +11,15 @@ type WebMCP = { execute(action: Action, signal: AbortSignal): Promise<Result> };
 export class BrowserOperationSelector {
   private readonly binding: (
     signal: AbortSignal,
+    refresh?: boolean,
   ) => Promise<BrowserBinding | "unbound" | "unsupported">;
   private readonly webmcp: WebMCP;
   private readonly accessibility: BrowserAccessibilityRuntime;
   constructor(
-    binding: (signal: AbortSignal) => Promise<BrowserBinding | "unbound" | "unsupported">,
+    binding: (
+      signal: AbortSignal,
+      refresh?: boolean,
+    ) => Promise<BrowserBinding | "unbound" | "unsupported">,
     webmcp: WebMCP,
     accessibility: BrowserAccessibilityRuntime,
   ) {
@@ -27,15 +31,17 @@ export class BrowserOperationSelector {
   async execute(action: Action, signal: AbortSignal): Promise<Result> {
     if (!action.tool.startsWith("browser.")) throw new Error("Unsupported browser operation.");
     const browserAction = browserWebMCPAction(action);
-    const binding = await this.binding(signal);
+    const refresh = browserAction.tool === "browser.refresh";
+    const binding = await this.binding(signal, refresh);
+    const adapterAction = refresh ? browserWebMCPAction({ tool: "browser.status" }) : browserAction;
     if (typeof binding !== "object" || binding.availability === "webmcp")
-      return this.webmcp.execute(browserAction, signal);
+      return this.webmcp.execute(adapterAction, signal);
     const accessibilityBinding: BrowserAccessibilityBinding = {
       availability: "accessibility",
       documentId: binding.documentId,
       url: binding.url,
       revision: browserBindingRevision(binding),
     };
-    return this.accessibility.execute(browserAction, accessibilityBinding, signal);
+    return this.accessibility.execute(adapterAction, accessibilityBinding, signal);
   }
 }

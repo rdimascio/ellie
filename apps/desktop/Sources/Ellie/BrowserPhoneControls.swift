@@ -77,7 +77,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     phase = .checking
     launch(targetID: node.id, mayDispatch: false) {
       let status = try await self.transport.execute(
-        .status, nodeID: node.id, credential: self.credential)
+        .refresh, nodeID: node.id, credential: self.credential)
       guard case .status(let source, true, let revision?) = status else {
         throw PhoneControlFailure.rejected
       }

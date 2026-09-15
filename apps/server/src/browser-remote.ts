@@ -165,7 +165,7 @@ export function createBrowserRemote(
       if (!Object.hasOwn(parsed, "browser")) throw new Error("Browser command outcome unknown.");
       const checked = browserWebMCPOperationResult(parsed);
       const expected =
-        browserAction.tool === "browser.status"
+        browserAction.tool === "browser.status" || browserAction.tool === "browser.refresh"
           ? "status"
           : browserAction.tool === "browser.read"
             ? "read"
@@ -174,6 +174,7 @@ export function createBrowserRemote(
         throw new Error("Browser command outcome unknown.");
       if (
         browserAction.tool !== "browser.status" &&
+        browserAction.tool !== "browser.refresh" &&
         checked.browser.revision !== browserAction.revision
       )
         throw new Error("Browser command outcome unknown.");

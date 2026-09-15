@@ -159,6 +159,20 @@ export const OPERATION_REGISTRY = {
       output: RESULT,
     },
     {
+      id: "browser.refresh",
+      requiredCapability: "browser.read",
+      description:
+        "Explicitly refresh the selected browser page binding within its original authority.",
+      localPolicy: { appFields: [], urlFields: [] },
+      input: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tool"],
+        properties: { tool: { const: "browser.refresh" } },
+      },
+      output: RESULT,
+    },
+    {
       id: "browser.read",
       requiredCapability: "browser.read",
       description: "Read a bounded reviewed view from the authorized browser page.",

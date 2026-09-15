@@ -18,7 +18,10 @@ import {
   loadReviewedBrowserRegistry,
   reviewedBrowserRegistry,
 } from "../apps/node/src/browser-operation-registry.ts";
-import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
+import {
+  browserBindingRevision,
+  BrowserWebMCPOperations,
+} from "../apps/node/src/browser-operations.ts";
 
 const schema = { additionalProperties: false, type: "object" };
 const schemaHash = createHash("sha256")
@@ -51,6 +54,9 @@ test("browser operation and structured result contracts are closed and bounded",
   assert.deepEqual(browserWebMCPAction({ tool: "browser.status" }), {
     tool: "browser.status",
   });
+  assert.deepEqual(browserWebMCPAction({ tool: "browser.refresh" }), {
+    tool: "browser.refresh",
+  });
   assert.deepEqual(
     browserWebMCPAction({
       tool: "browser.scroll",
@@ -65,6 +71,7 @@ test("browser operation and structured result contracts are closed and bounded",
   );
   for (const malformed of [
     { tool: "browser.status", extra: true },
+    { tool: "browser.refresh", extra: true },
     { tool: "browser.scroll", direction: "diagonal", revision: "x" },
     { tool: "browser.search", query: "x".repeat(201), revision: "x" },
     {
@@ -307,4 +314,43 @@ test("executor binds reviewed WebMCP tools, returns typed views and rejects stal
     dispatchedBeforeStaleRevision,
   );
   assert.equal(BROWSER_WEBMCP_PROTOCOL, "ellie.browser-webmcp.v1");
+});
+
+test("explicit browser refresh uses only the dedicated binding request", async () => {
+  const calls: BrowserWebMCPRequest[] = [];
+  const expiresAt = Date.now() + 60_000;
+  const executor = new BrowserWebMCPOperations(
+    {
+      async request(request) {
+        calls.push(request);
+        if (request.type !== "binding.refresh") throw new Error("unexpected request");
+        return browserWebMCPResultFor(request.id, "ok", {
+          bindingId: "binding-refreshed",
+          documentId: "document-refreshed",
+          origin: "https://video.example",
+          url: "https://video.example/results",
+          expiresAt,
+          availability: "webmcp",
+        });
+      },
+    },
+    registry,
+  );
+  const result = await executor.execute({ tool: "browser.refresh" }, AbortSignal.timeout(1_000));
+  assert.equal(result.browser.operation, "status");
+  assert.equal(
+    result.browser.revision,
+    browserBindingRevision({
+      bindingId: "binding-refreshed",
+      documentId: "document-refreshed",
+      origin: "https://video.example",
+      url: "https://video.example/results",
+      expiresAt,
+      availability: "webmcp",
+    }),
+  );
+  assert.deepEqual(
+    calls.map((call) => call.type),
+    ["binding.refresh"],
+  );
 });
