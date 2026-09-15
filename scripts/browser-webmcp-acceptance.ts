@@ -108,11 +108,13 @@ async function prepareExtension(root: string, origin: string) {
         name: "ellie_acceptance_read",
         inputSchema: readSchema,
         annotations: readAnnotations,
+        argumentEncoding: "json-string",
       },
       {
         name: "ellie_acceptance_scroll",
         inputSchema: scrollSchema,
         annotations,
+        argumentEncoding: "json-string",
       },
     ],
   });
@@ -144,6 +146,7 @@ async function prepareExtension(root: string, origin: string) {
     fixtureDifferences: [
       `background.js productionOrigins contains only ${origin}`,
       "background.js reviewedWebMCPBindings contains only the two acceptance tools",
+      "both reviewed acceptance tools require the Chrome 152 JSON-string argument dialect",
       `manifest.json host_permissions contains only ${origin}/*`,
     ],
     productionManifestSha256: sha256(productionManifest),
@@ -281,6 +284,58 @@ async function waitUntil(check: () => boolean, message: string): Promise<void> {
   throw new Error(message);
 }
 
+async function closeFixtureServer(server: ReturnType<typeof createServer>): Promise<void> {
+  if (!server.listening) return;
+  await new Promise<void>((resolveClose, reject) =>
+    server.close((error) => (error ? reject(error) : resolveClose())),
+  );
+}
+
+async function prepareAcceptanceEnvironment(ownedRoot: string, home: string, release: string) {
+  let server: ReturnType<typeof createServer> | undefined;
+  let bridge: Awaited<ReturnType<typeof startBrowserWebMCPBridge>> | undefined;
+  try {
+    const identity = await generateBrowserTlsIdentity(hostname, { tempDir: ownedRoot });
+    server = createServer(
+      { key: identity.leafKey, cert: identity.leafCert },
+      (_request, response) => {
+        response.writeHead(200, {
+          "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store",
+          "content-security-policy":
+            "default-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; frame-src 'none'",
+        });
+        response.end(fixtureHtml());
+      },
+    );
+    await new Promise<void>((resolveListen, reject) => {
+      server!.once("error", reject);
+      server!.listen(0, "127.0.0.1", resolveListen);
+    });
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const origin = `https://${hostname}:${address.port}`;
+    const spki = createHash("sha256")
+      .update(
+        new X509Certificate(identity.leafCert).publicKey.export({ type: "spki", format: "der" }),
+      )
+      .digest("base64");
+    const extension = await prepareExtension(ownedRoot, origin);
+    const registry = await prepareRegistry(home, origin);
+    const profile = join(ownedRoot, "browser-profile");
+    const nativeHost = await prepareNativeHost(home, profile, release);
+    bridge = await startBrowserWebMCPBridge({ home });
+    const configPath = join(ownedRoot, "agent-browser-config.json");
+    await writeFile(configPath, "{}\n", { mode: 0o600 });
+    return { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki };
+  } catch (error) {
+    await bridge?.close().catch(() => {});
+    if (server) await closeFixtureServer(server).catch(() => {});
+    await rm(ownedRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
 async function main() {
   const sourceStatus = await gitValue(["status", "--short"]);
   if (sourceStatus && process.env.ELLIE_BROWSER_ACCEPTANCE_ALLOW_DIRTY !== "1")
@@ -297,7 +352,9 @@ async function main() {
     releaseInfo.isSymbolicLink() ||
     (releaseInfo.mode & 0o777) !== 0o555
   )
-    throw new Error("The acceptance release must be an immutable captured directory.");
+    throw new Error(
+      "The owner-provided staged development artifact must be an immutable directory.",
+    );
 
   const reportDirectory = resolve(
     process.env.REPORT_DIR ?? join(tmpdir(), `ellie-browser-webmcp-report-${Date.now()}`),
@@ -314,36 +371,8 @@ async function main() {
     recursive: true,
     mode: 0o700,
   });
-  const identity = await generateBrowserTlsIdentity(hostname, { tempDir: ownedRoot });
-  const server = createServer(
-    { key: identity.leafKey, cert: identity.leafCert },
-    (_request, response) => {
-      response.writeHead(200, {
-        "content-type": "text/html; charset=utf-8",
-        "cache-control": "no-store",
-        "content-security-policy":
-          "default-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; frame-src 'none'",
-      });
-      response.end(fixtureHtml());
-    },
-  );
-  await new Promise<void>((resolveListen, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolveListen);
-  });
-  const address = server.address();
-  assert.ok(address && typeof address !== "string");
-  const origin = `https://${hostname}:${address.port}`;
-  const spki = createHash("sha256")
-    .update(
-      new X509Certificate(identity.leafCert).publicKey.export({ type: "spki", format: "der" }),
-    )
-    .digest("base64");
-  const extension = await prepareExtension(ownedRoot, origin);
-  const registry = await prepareRegistry(home, origin);
-  const profile = join(ownedRoot, "browser-profile");
-  const nativeHost = await prepareNativeHost(home, profile, release);
-  const bridge = await startBrowserWebMCPBridge({ home });
+  const { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki } =
+    await prepareAcceptanceEnvironment(ownedRoot, home, release);
   const bridgeEvents: Array<{ type: string; status: string; value?: unknown }> = [];
   const operations = new BrowserWebMCPOperations(
     {
@@ -360,8 +389,6 @@ async function main() {
     registry.registry,
   );
   const session = `eb-${process.pid}-${randomUUID().slice(0, 4)}`;
-  const configPath = join(ownedRoot, "agent-browser-config.json");
-  await writeFile(configPath, "{}\n", { mode: 0o600 });
   const commands: CommandRecord[] = [];
   let browserStarted = false;
   let actionDispatched = false;
@@ -587,6 +614,8 @@ async function main() {
         driver: `agent-browser ${JSON.parse(await readFile("node_modules/agent-browser/package.json", "utf8")).version}`,
         profile: "owned temporary profile",
         webmcpApi: "native Document.prototype.modelContext with registerTool/getTools/executeTool",
+        webmcpDialect:
+          "reviewed Chrome 152 dialect: serialized schemas, JSON-string arguments and results",
         certificateTrust: "one owned leaf SPKI launch exception; no user trust-store change",
       },
       extension: {
@@ -645,7 +674,7 @@ async function main() {
   } finally {
     if (browserStarted) await agent(["close"]).catch((error) => (cleanupError = String(error)));
     await bridge.close().catch((error) => (cleanupError = String(error)));
-    await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+    await closeFixtureServer(server).catch((error) => (cleanupError = String(error)));
     if (!failure && !cleanupError) {
       await rm(ownedRoot, { recursive: true });
       retainedRoot = false;

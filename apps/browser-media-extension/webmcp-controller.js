@@ -66,15 +66,20 @@
       snapshots.clear();
       for (const tool of tools) {
         const value = metadata(tool);
-        const policy = reviewed.find(
+        const policies = reviewed.filter(
           (candidate) =>
             candidate.name === value.name &&
             exact(candidate.inputSchema, value.inputSchema) &&
-            exact(candidate.annotations, value.annotations),
+            exact(candidate.annotations, value.annotations) &&
+            ["object", "json-string"].includes(candidate.argumentEncoding),
         );
-        if (!policy) continue;
+        if (policies.length !== 1) continue;
         const handle = crypto.randomUUID();
-        snapshots.set(handle, { tool, metadata: value });
+        snapshots.set(handle, {
+          tool,
+          metadata: value,
+          argumentEncoding: policies[0].argumentEncoding,
+        });
         accepted.push({ handle, ...value });
       }
       return accepted;
@@ -99,16 +104,16 @@
         if (matching.length !== 1) throw new Error("stale_tool");
         const current = matching[0];
         controller.signal.throwIfAborted();
-        const stringEncoded = typeof current.inputSchema === "string";
         const result = await context.executeTool(
           current,
-          stringEncoded ? JSON.stringify(args) : args,
+          saved.argumentEncoding === "json-string" ? JSON.stringify(args) : args,
           { signal: controller.signal },
         );
         if (result === null) return { navigation: true };
         let value = result;
-        if (stringEncoded) {
-          if (typeof result !== "string") throw new Error("invalid_result");
+        if (typeof result === "string") {
+          if (new TextEncoder().encode(result).length > maximumResultBytes)
+            throw new Error("result_too_large");
           try {
             value = JSON.parse(result);
           } catch {

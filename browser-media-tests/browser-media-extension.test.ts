@@ -8,7 +8,9 @@ import { chromium, type BrowserContext, type Page } from "@playwright/test";
 
 const source = new URL("../apps/browser-media-extension/", import.meta.url).pathname;
 
-async function fixture(options: { accessibilityOnly?: boolean } = {}) {
+async function fixture(
+  options: { accessibilityOnly?: boolean; argumentEncoding?: "object" | "json-string" } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "ellie-media-test-"));
   const extension = join(root, "extension");
   await cp(source, extension, { recursive: true });
@@ -37,7 +39,7 @@ async function fixture(options: { accessibilityOnly?: boolean } = {}) {
         reviewedNeedle,
         options.accessibilityOnly
           ? reviewedNeedle
-          : `const reviewedWebMCPBindings = Object.freeze({"http://127.0.0.1:PORT":[{name:"ellie_fixture_action",inputSchema:{type:"object",additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false,consequentialHint:false}}]});`,
+          : `const reviewedWebMCPBindings = Object.freeze({"http://127.0.0.1:PORT":[{name:"ellie_fixture_action",inputSchema:{type:"object",additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false,consequentialHint:false},argumentEncoding:${JSON.stringify(options.argumentEncoding ?? "object")}}]});`,
       )
       .replace(
         accessibilityNeedle,
@@ -351,7 +353,7 @@ test(
 );
 
 test(
-  "connected WebMCP tab handles the browser's JSON-string schema and execution representation",
+  "serialized schema uses the reviewed object argument dialect",
   { timeout: 30_000 },
   async () => {
     const owned = await fixture();
@@ -380,7 +382,12 @@ test(
           value: {
             getTools: async () => [tool],
             executeTool: async (_tool: unknown, args: unknown) => {
-              if (typeof args !== "string" || JSON.stringify(JSON.parse(args)) !== "{}")
+              if (
+                !args ||
+                typeof args !== "object" ||
+                Array.isArray(args) ||
+                JSON.stringify(args) !== "{}"
+              )
                 throw new Error("unexpected_arguments");
               return JSON.stringify({ applied: true });
             },
@@ -416,6 +423,101 @@ test(
         { binding, listed },
       );
       assert.deepEqual(executed, { applied: true });
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "JSON-string tool results are bounded before parsing and never retried",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ argumentEncoding: "json-string" });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
+      const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
+      assert.ok(tab?.id);
+      await launched.page.evaluate(() => {
+        const tool = {
+          name: "ellie_fixture_action",
+          description: "Synthetic action",
+          inputSchema: JSON.stringify({ type: "object", additionalProperties: false }),
+          annotations: {
+            readOnlyHint: false,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+        };
+        let result = "{";
+        let invocations = 0;
+        Object.defineProperty(document, "modelContext", {
+          configurable: true,
+          value: {
+            getTools: async () => [tool],
+            executeTool: async (_tool: unknown, args: unknown) => {
+              invocations += 1;
+              if (typeof args !== "string" || JSON.stringify(JSON.parse(args)) !== "{}")
+                throw new Error("unexpected_arguments");
+              return result;
+            },
+          },
+        });
+        globalThis["__ellieStringResultTest"] = {
+          invocations: () => invocations,
+          oversized: () => {
+            result = JSON.stringify({ value: "💥".repeat(5_000) });
+          },
+        };
+      });
+      const binding = await launched.worker.evaluate(
+        (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+        tab.id,
+      );
+      const listed = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: "list-string-result-bounds",
+          type: "tools.list",
+        }),
+      );
+      const { handle, ...expected } = listed.tools[0];
+      const execute = (executionId: string) =>
+        launched.page.evaluate(
+          async ({ handle, expected, executionId }) => {
+            try {
+              await globalThis["__ellieWebMCPControllerV1"].execute(
+                handle,
+                expected,
+                {},
+                executionId,
+              );
+              return "resolved";
+            } catch (error) {
+              return error instanceof Error ? error.message : "failed";
+            }
+          },
+          { handle, expected, executionId },
+        );
+
+      assert.equal(await execute("invalid-string-result"), "invalid_result");
+      assert.equal(
+        await launched.page.evaluate(() => globalThis["__ellieStringResultTest"].invocations()),
+        1,
+      );
+      await launched.page.evaluate(() => globalThis["__ellieStringResultTest"].oversized());
+      assert.equal(await execute("oversized-string-result"), "result_too_large");
+      assert.equal(
+        await launched.page.evaluate(() => globalThis["__ellieStringResultTest"].invocations()),
+        2,
+      );
+      assert.equal(binding.availability, "webmcp");
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -683,6 +785,7 @@ test(
             untrustedContentHint: false,
             consequentialHint: false,
           },
+          argumentEncoding: "object",
         },
       ];
       const tools = await launched.harness.evaluate(
