@@ -10,6 +10,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -131,6 +132,30 @@ async function fixture(t: test.TestContext) {
   return { home, release, done: () => (complete = true) };
 }
 
+async function materializeLegacyInstallation(home: string, release: string) {
+  const plan = browserWebMCPHostInstallationPlan(release);
+  const directory = join(home, "Library/Application Support/Arc/User Data/NativeMessagingHosts");
+  const state = join(home, ".ellie/browser-native-hosts");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await mkdir(state, { recursive: true, mode: 0o700 });
+  const manifest = join(directory, plan.manifestName);
+  await writeFile(manifest, plan.manifest, { mode: 0o600 });
+  const launcher = await readFile(plan.executablePath);
+  await writeFile(
+    join(state, "arc-native-host.json"),
+    `${JSON.stringify({
+      version: 1,
+      browser: "arc",
+      phase: "installed",
+      release,
+      launcherSha256: createHash("sha256").update(launcher).digest("hex"),
+      manifestSha256: createHash("sha256").update(plan.manifest).digest("hex"),
+    })}\n`,
+    { mode: 0o600 },
+  );
+  return { directory, manifest, state, plan };
+}
+
 test("Arc native host install is explicit, exact, idempotent, and reversibly owned", async (t) => {
   const f = await fixture(t);
   assert.deepEqual(await browserNativeHostPreflight(f.home, f.release), {
@@ -143,11 +168,27 @@ test("Arc native host install is explicit, exact, idempotent, and reversibly own
   const plan = browserWebMCPHostInstallationPlan(f.release);
   const manifestPath = join(
     f.home,
-    "Library/Application Support/Arc/User Data/NativeMessagingHosts",
+    "Library/Application Support/Google/Chrome/NativeMessagingHosts",
     plan.manifestName,
   );
   assert.equal(await readFile(manifestPath, "utf8"), plan.manifest);
   assert.equal((await lstat(manifestPath)).mode & 0o777, 0o600);
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(join(f.home, ".ellie/browser-native-hosts/arc-native-host.json"), "utf8"),
+    ),
+    {
+      version: 2,
+      browser: "arc",
+      location: "chrome_user",
+      phase: "installed",
+      release: f.release,
+      launcherSha256: createHash("sha256")
+        .update(await readFile(plan.executablePath))
+        .digest("hex"),
+      manifestSha256: createHash("sha256").update(plan.manifest).digest("hex"),
+    },
+  );
   assert.equal((await browserNativeHostPreflight(f.home, f.release)).status, "installed");
   await installBrowserNativeHost(f.home, f.release);
   await uninstallBrowserNativeHost(f.home, f.release);
@@ -156,11 +197,83 @@ test("Arc native host install is explicit, exact, idempotent, and reversibly own
   f.done();
 });
 
+test("legacy Arc ownership remains inspectable and requires explicit uninstall", async (t) => {
+  const f = await fixture(t);
+  const legacy = await materializeLegacyInstallation(f.home, f.release);
+  assert.deepEqual(await browserNativeHostPreflight(f.home, f.release), {
+    version: 1,
+    browser: "arc",
+    status: "installed",
+    ready: false,
+    migrationRequired: true,
+  });
+  await assert.rejects(installBrowserNativeHost(f.home, f.release), /explicitly uninstalled/);
+  const currentDirectory = join(
+    f.home,
+    "Library/Application Support/Google/Chrome/NativeMessagingHosts",
+  );
+  await mkdir(currentDirectory, { recursive: true, mode: 0o700 });
+  const unrelated = join(currentDirectory, "org.example.unrelated.json");
+  await writeFile(unrelated, "preserve\n", { mode: 0o600 });
+  await uninstallBrowserNativeHost(f.home, f.release);
+  await assert.rejects(readFile(legacy.manifest), { code: "ENOENT" });
+  assert.equal(await readFile(unrelated, "utf8"), "preserve\n");
+  assert.deepEqual(await browserNativeHostPreflight(f.home, f.release), {
+    version: 1,
+    browser: "arc",
+    status: "absent",
+    ready: true,
+  });
+  f.done();
+});
+
+test("an orphaned legacy manifest blocks a new-location install and is preserved", async (t) => {
+  const f = await fixture(t);
+  const plan = browserWebMCPHostInstallationPlan(f.release);
+  const legacyDirectory = join(
+    f.home,
+    "Library/Application Support/Arc/User Data/NativeMessagingHosts",
+  );
+  await mkdir(legacyDirectory, { recursive: true, mode: 0o700 });
+  const legacyManifest = join(legacyDirectory, plan.manifestName);
+  await writeFile(legacyManifest, "orphaned legacy evidence\n", { mode: 0o600 });
+  assert.equal((await browserNativeHostPreflight(f.home, f.release)).status, "conflict");
+  await assert.rejects(installBrowserNativeHost(f.home, f.release), /legacy Arc.*preserved/);
+  assert.equal(await readFile(legacyManifest, "utf8"), "orphaned legacy evidence\n");
+  await assert.rejects(
+    readFile(
+      join(
+        f.home,
+        "Library/Application Support/Google/Chrome/NativeMessagingHosts",
+        plan.manifestName,
+      ),
+    ),
+    { code: "ENOENT" },
+  );
+  f.done();
+});
+
+test("uninstall never crosses from recorded legacy ownership into the current location", async (t) => {
+  const f = await fixture(t);
+  const legacy = await materializeLegacyInstallation(f.home, f.release);
+  const currentDirectory = join(
+    f.home,
+    "Library/Application Support/Google/Chrome/NativeMessagingHosts",
+  );
+  await mkdir(currentDirectory, { recursive: true, mode: 0o700 });
+  const currentManifest = join(currentDirectory, legacy.plan.manifestName);
+  await writeFile(currentManifest, "foreign current evidence\n", { mode: 0o600 });
+  await assert.rejects(uninstallBrowserNativeHost(f.home, f.release), /unowned.*preserved/);
+  assert.equal(await readFile(legacy.manifest, "utf8"), legacy.plan.manifest);
+  assert.equal(await readFile(currentManifest, "utf8"), "foreign current evidence\n");
+  f.done();
+});
+
 test("install preserves an existing unowned or different manifest", async (t) => {
   const f = await fixture(t);
   const plan = browserWebMCPHostInstallationPlan(f.release);
-  const directory = join(f.home, "Library/Application Support/Arc/User Data/NativeMessagingHosts");
-  await mkdir(directory, { mode: 0o700 });
+  const directory = join(f.home, "Library/Application Support/Google/Chrome/NativeMessagingHosts");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   const manifest = join(directory, plan.manifestName);
   await writeFile(manifest, "foreign\n", { mode: 0o600 });
   await assert.rejects(installBrowserNativeHost(f.home, f.release), /unowned/);
@@ -172,13 +285,43 @@ test("install preserves an existing unowned or different manifest", async (t) =>
 test("unsafe manifest and ownership paths are rejected without replacement", async (t) => {
   const f = await fixture(t);
   const plan = browserWebMCPHostInstallationPlan(f.release);
-  const directory = join(f.home, "Library/Application Support/Arc/User Data/NativeMessagingHosts");
-  await mkdir(directory, { mode: 0o700 });
+  const directory = join(f.home, "Library/Application Support/Google/Chrome/NativeMessagingHosts");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
   const target = join(f.home, "foreign");
   await writeFile(target, "foreign\n", { mode: 0o600 });
   await symlink(target, join(directory, plan.manifestName));
   await assert.rejects(installBrowserNativeHost(f.home, f.release), /unsafe/);
   assert.equal(await readFile(target, "utf8"), "foreign\n");
+  f.done();
+});
+
+test("a symlinked browser ancestor blocks preflight, install, and uninstall without cleanup", async (t) => {
+  const f = await fixture(t);
+  await installBrowserNativeHost(f.home, f.release);
+  const plan = browserWebMCPHostInstallationPlan(f.release);
+  const applicationSupport = join(f.home, "Library/Application Support");
+  const google = join(applicationSupport, "Google");
+  const preservedGoogle = join(applicationSupport, "Google-preserved");
+  const redirect = join(f.home, "redirected-google");
+  const redirectManifests = join(redirect, "Chrome/NativeMessagingHosts");
+  await rename(google, preservedGoogle);
+  await mkdir(redirectManifests, { recursive: true, mode: 0o700 });
+  const marker = join(redirectManifests, "preserve.txt");
+  await writeFile(marker, "redirect evidence\n", { mode: 0o600 });
+  await symlink(redirect, google);
+
+  assert.equal((await browserNativeHostPreflight(f.home, f.release)).status, "conflict");
+  await assert.rejects(installBrowserNativeHost(f.home, f.release), /unsafe/);
+  await assert.rejects(uninstallBrowserNativeHost(f.home, f.release), /unsafe/);
+  assert.equal(await readFile(marker, "utf8"), "redirect evidence\n");
+  assert.equal(
+    await readFile(join(preservedGoogle, "Chrome/NativeMessagingHosts", plan.manifestName), "utf8"),
+    plan.manifest,
+  );
+  assert.equal(
+    (await lstat(join(f.home, ".ellie/browser-native-hosts/arc-native-host.json"))).mode & 0o777,
+    0o600,
+  );
   f.done();
 });
 
@@ -188,7 +331,7 @@ test("uninstall preserves changed owned evidence and launcher mismatch", async (
   const plan = browserWebMCPHostInstallationPlan(f.release);
   const manifest = join(
     f.home,
-    "Library/Application Support/Arc/User Data/NativeMessagingHosts",
+    "Library/Application Support/Google/Chrome/NativeMessagingHosts",
     plan.manifestName,
   );
   await writeFile(manifest, "changed\n", { mode: 0o600 });
@@ -215,7 +358,7 @@ test("known interrupted phase resumes while a retained lock blocks every mutatio
   const plan = browserWebMCPHostInstallationPlan(f.release);
   const manifest = join(
     f.home,
-    "Library/Application Support/Arc/User Data/NativeMessagingHosts",
+    "Library/Application Support/Google/Chrome/NativeMessagingHosts",
     plan.manifestName,
   );
   await rm(manifest);
