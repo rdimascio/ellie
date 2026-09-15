@@ -4,9 +4,287 @@ import { mkdtemp, cp, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 import { chromium, type BrowserContext, type Page } from "@playwright/test";
 
 const source = new URL("../apps/browser-media-extension/", import.meta.url).pathname;
+
+function extensionEvent() {
+  const listeners: Array<(...values: any[]) => void> = [];
+  return {
+    addListener(listener: (...values: any[]) => void) {
+      listeners.push(listener);
+    },
+    emit(...values: any[]) {
+      for (const listener of listeners) listener(...values);
+    },
+  };
+}
+
+test("native host status reports a delayed missing-host failure without reconnecting", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const disconnect = extensionEvent();
+  const nativeMessages = extensionEvent();
+  const runtimeMessages = extensionEvent();
+  const removed = extensionEvent();
+  const updated = extensionEvent();
+  const posted: unknown[] = [];
+  const notifications: unknown[] = [];
+  let connects = 0;
+  const runtime: Record<string, any> = {
+    onMessage: runtimeMessages,
+    connectNative() {
+      connects += 1;
+      return {
+        onDisconnect: disconnect,
+        onMessage: nativeMessages,
+        postMessage(value: unknown) {
+          posted.push(value);
+        },
+      };
+    },
+    sendMessage(value: unknown) {
+      notifications.push(value);
+      return Promise.resolve();
+    },
+  };
+  const context: Record<string, any> = {
+    chrome: { runtime, tabs: { onRemoved: removed, onUpdated: updated } },
+    AbortController,
+    URL,
+    Promise,
+    Set,
+    Map,
+    Date,
+    Error,
+    Object,
+    Array,
+    String,
+    Number,
+    RegExp,
+    crypto,
+    setTimeout,
+    clearTimeout,
+  };
+  runInNewContext(
+    `${background}\n;globalThis.__nativeStatusTest={connect:connectNativeHost,status:()=>nativeConnectionStatus};`,
+    context,
+  );
+  assert.equal(context.__nativeStatusTest.connect(), "waiting");
+  assert.equal(context.__nativeStatusTest.status(), "waiting");
+  assert.equal(connects, 1);
+  assert.equal(posted.length, 0);
+  runtime.lastError = {
+    message: "Specified native messaging host not found. sensitive-detail",
+  };
+  disconnect.emit();
+  delete runtime.lastError;
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(context.__nativeStatusTest.status(), "missing");
+  assert.equal(connects, 1);
+  assert.equal(posted.length, 0);
+  assert.deepEqual(
+    notifications.map((value: any) => value.status),
+    ["waiting", "missing"],
+  );
+  assert.deepEqual(
+    notifications.map((value: any) => value.revision),
+    [1, 2],
+  );
+  assert.equal(JSON.stringify(notifications).includes("sensitive-detail"), false);
+});
+
+test("native host is connected only after a request and reports a later disconnect", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const disconnect = extensionEvent();
+  const nativeMessages = extensionEvent();
+  const notifications: any[] = [];
+  const posted: any[] = [];
+  let connects = 0;
+  const context: Record<string, any> = {
+    chrome: {
+      runtime: {
+        onMessage: extensionEvent(),
+        connectNative() {
+          connects += 1;
+          return {
+            onDisconnect: disconnect,
+            onMessage: nativeMessages,
+            postMessage(value: unknown) {
+              posted.push(value);
+            },
+          };
+        },
+        sendMessage(value: unknown) {
+          notifications.push(value);
+          return Promise.resolve();
+        },
+      },
+      tabs: { onRemoved: extensionEvent(), onUpdated: extensionEvent() },
+    },
+    AbortController,
+    URL,
+    Promise,
+    Set,
+    Map,
+    Date,
+    Error,
+    Object,
+    Array,
+    String,
+    Number,
+    RegExp,
+    crypto,
+    setTimeout,
+    clearTimeout,
+  };
+  runInNewContext(
+    `${background}\n;globalThis.__nativeStatusTest={connect:connectNativeHost,status:()=>nativeConnectionStatus};`,
+    context,
+  );
+  assert.equal(context.__nativeStatusTest.connect(), "waiting");
+  assert.equal(context.__nativeStatusTest.status(), "waiting");
+  nativeMessages.emit({ protocol: "invalid", id: "request-1", type: "binding.status" });
+  assert.equal(context.__nativeStatusTest.status(), "waiting");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(posted.length, 1);
+  nativeMessages.emit({
+    protocol: "ellie.browser-webmcp.v1",
+    id: "request-2",
+    type: "binding.status",
+  });
+  assert.equal(context.__nativeStatusTest.status(), "connected");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(posted.length, 2);
+  assert.deepEqual(
+    posted.map((value) => value.status),
+    ["unavailable", "unbound"],
+  );
+  disconnect.emit();
+  assert.equal(context.__nativeStatusTest.status(), "disconnected");
+  assert.equal(connects, 1);
+  assert.deepEqual(
+    notifications.map((value) => value.status),
+    ["waiting", "connected", "disconnected"],
+  );
+});
+
+test("popup distinguishes page selection, missing host, and later disconnect without extra actions", async () => {
+  const popup = await readFile(join(source, "popup.js"), "utf8");
+  const html = await readFile(join(source, "popup.html"), "utf8");
+  assert.match(html, />Select this page</);
+  assert.doesNotMatch(html, />Connect WebMCP tab</);
+  const runtimeMessages = extensionEvent();
+  const sent: any[] = [];
+  const elements = new Map<string, any>();
+  for (const id of [
+    "status",
+    "connection-status",
+    "titles",
+    "stop",
+    "inspect",
+    "up",
+    "down",
+    "play",
+    "pause",
+    "back",
+    "forward",
+    "webmcp",
+    "bind-webmcp",
+  ]) {
+    elements.set(id, {
+      disabled: id === "stop",
+      textContent: id === "status" ? "Ready" : "",
+      replaceChildren() {},
+    });
+  }
+  const context: Record<string, any> = {
+    chrome: {
+      tabs: { query: async () => [{ id: 7 }] },
+      runtime: {
+        onMessage: runtimeMessages,
+        sendMessage(value: unknown) {
+          sent.push(value);
+          return new Promise((resolve) => {
+            context.resolveBind = () =>
+              resolve({
+                ok: true,
+                value: {
+                  availability: "accessibility",
+                  nativeConnection: { status: "waiting", revision: 1 },
+                },
+              });
+          });
+        },
+      },
+    },
+    document: {
+      querySelector(selector: string) {
+        return elements.get(selector.slice(1));
+      },
+      createElement() {
+        return { append() {} };
+      },
+    },
+    crypto,
+    Error,
+    Object,
+    Array,
+    Promise,
+  };
+  runInNewContext(popup, context);
+  const binding = elements.get("bind-webmcp").onclick();
+  for (let attempt = 0; attempt < 5 && !context.resolveBind; attempt += 1) await Promise.resolve();
+  assert.equal(typeof context.resolveBind, "function");
+  runtimeMessages.emit({
+    protocol: "ellie.browser-native-status.v1",
+    status: "missing",
+    revision: 2,
+  });
+  context.resolveBind();
+  await binding;
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
+  );
+  assert.equal(elements.get("status").textContent, "Done");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].command.type, "bindWebMCP");
+  elements.get("status").textContent = "The result is unknown. Check the Mac before trying again.";
+  runtimeMessages.emit({
+    protocol: "ellie.browser-native-status.v1",
+    status: "missing",
+    revision: 3,
+  });
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
+  );
+  runtimeMessages.emit({
+    protocol: "ellie.browser-native-status.v1",
+    status: "disconnected",
+    revision: 4,
+  });
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. The Mac connection was lost.",
+  );
+  assert.equal(
+    elements.get("status").textContent,
+    "The result is unknown. Check the Mac before trying again.",
+  );
+  runtimeMessages.emit({
+    protocol: "ellie.browser-native-status.v1",
+    status: "missing",
+    revision: 5,
+    error: "sensitive-detail",
+  });
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. The Mac connection was lost.",
+  );
+  assert.equal(sent.length, 1);
+});
 
 async function fixture(
   options: { accessibilityOnly?: boolean; argumentEncoding?: "object" | "json-string" } = {},
@@ -52,7 +330,8 @@ async function fixture(
         `${tabGetNeedle.split("\n  const before")[0]}
   if (globalThis.__ellieTestBeforeTabGet) await globalThis.__ellieTestBeforeTabGet;
   const before = await chrome.tabs.get(binding.tabId);`,
-      ) + "\nglobalThis.__ellieTestWebMCP = { bind: bindWebMCP, request: handleNativeRequest };\n",
+      ) +
+      "\nglobalThis.__ellieTestWebMCP = { bind: bindWebMCP, request: handleNativeRequest, nativeStatus: () => nativeConnectionStatus };\n",
   );
   const controllerPath = join(extension, "media-controller.js");
   const controller = await readFile(controllerPath, "utf8");
@@ -86,6 +365,15 @@ test(
         return globalThis["__ellieTestWebMCP"].bind(tabId);
       }, tab.id);
       assert.equal(bound.availability, "accessibility");
+      assert.equal(bound.nativeConnection.status, "waiting");
+      let nativeStatus = "waiting";
+      for (let attempt = 0; attempt < 50 && nativeStatus === "waiting"; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        nativeStatus = await launched.worker.evaluate(() =>
+          globalThis["__ellieTestWebMCP"].nativeStatus(),
+        );
+      }
+      assert.equal(nativeStatus, "missing");
       const status = await launched.worker.evaluate(() =>
         globalThis["__ellieTestWebMCP"].request({
           protocol: "ellie.browser-webmcp.v1",

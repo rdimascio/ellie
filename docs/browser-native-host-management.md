@@ -5,6 +5,11 @@ release. This command installs a manifest file only. It does not load an extensi
 browser profile, start a service, request Accessibility access, or establish receipt-v2 publisher
 trust.
 
+Arc 1.164 on macOS resolves user native-messaging hosts from the Chrome-branded
+`~/Library/Application Support/Google/Chrome/NativeMessagingHosts` directory even though its
+displayed profile is under `Arc/User Data`. New Ellie ownership records bind installation and
+removal to that exact location. The installer does not probe or guess alternate directories.
+
 Review an installation without writing anything:
 
 ```sh
@@ -27,3 +32,11 @@ matching command. An interrupted process can retain its exclusive lock; prefligh
 required and no command reclaims that lock from a PID assertion. Inspect retained evidence before
 manual recovery. A successful preflight or install does not prove publisher admission, that the
 extension is loaded, that Arc has opened the host, or that macOS Accessibility consent is available.
+
+Records created by the earlier Arc-specific location remain schema version 1 and continue to bind
+only `~/Library/Application Support/Arc/User Data/NativeMessagingHosts`. Preflight reports an
+otherwise matching legacy installation as installed with `ready: false` and
+`migrationRequired: true`. Explicitly uninstall that matching legacy record before installing the
+current location; installation never moves it implicitly. With no ownership record, a host manifest
+at either supported location is a conflict and is preserved. Uninstall follows only the location in
+the ownership record and refuses an ambiguous matching manifest at the other location.

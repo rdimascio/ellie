@@ -18,7 +18,7 @@ type Identity = {
   nlink: number;
   size: number;
 };
-type RecordValue = {
+type LegacyRecordValue = {
   version: 1;
   browser: "arc";
   phase: Phase;
@@ -26,11 +26,22 @@ type RecordValue = {
   launcherSha256: string;
   manifestSha256: string;
 };
+type CurrentRecordValue = {
+  version: 2;
+  browser: "arc";
+  location: "chrome_user";
+  phase: Phase;
+  release: string;
+  launcherSha256: string;
+  manifestSha256: string;
+};
+type RecordValue = LegacyRecordValue | CurrentRecordValue;
 export type BrowserNativeHostReport = {
   version: 1;
   browser: "arc";
   status: "absent" | "installed" | "recovery_required" | "conflict" | "invalid_release";
   ready: boolean;
+  migrationRequired?: true;
 };
 
 const snapshot = (value: Identity): Identity => ({
@@ -82,7 +93,8 @@ async function openDirectoryIfPresent(
     return await openDirectory(path, uid);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
-    throw error;
+    if ((error as Error).message === "Browser native host directory is unsafe.") throw error;
+    throw new Error("Browser native host directory is unsafe.");
   }
 }
 async function rebindDirectory(
@@ -220,9 +232,14 @@ function parseRecord(bytes: Buffer): RecordValue {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error("Browser native host ownership is invalid.");
   const record = value as RecordValue;
+  const versionFields =
+    record.version === 1
+      ? Object.keys(record).length === 6
+      : record.version === 2 &&
+        Object.keys(record).length === 7 &&
+        record.location === "chrome_user";
   if (
-    Object.keys(record).length !== 6 ||
-    record.version !== 1 ||
+    !versionFields ||
     record.browser !== "arc" ||
     !["installing", "installed", "uninstalling"].includes(record.phase) ||
     !isAbsolute(record.release) ||
@@ -347,9 +364,13 @@ function locations(home: string) {
   if (!isAbsolute(home) || resolve(home) !== home)
     throw new Error("Browser native host home is invalid.");
   return {
+    home,
+    library: join(home, "Library"),
     state: join(home, ".ellie", "browser-native-hosts"),
-    browserParent: join(home, "Library", "Application Support", "Arc", "User Data"),
-    manifests: join(
+    applicationSupport: join(home, "Library", "Application Support"),
+    legacyVendorParent: join(home, "Library", "Application Support", "Arc"),
+    legacyBrowserParent: join(home, "Library", "Application Support", "Arc", "User Data"),
+    legacyManifests: join(
       home,
       "Library",
       "Application Support",
@@ -357,7 +378,126 @@ function locations(home: string) {
       "User Data",
       "NativeMessagingHosts",
     ),
+    currentVendorParent: join(home, "Library", "Application Support", "Google"),
+    currentBrowserParent: join(home, "Library", "Application Support", "Google", "Chrome"),
+    currentManifests: join(
+      home,
+      "Library",
+      "Application Support",
+      "Google",
+      "Chrome",
+      "NativeMessagingHosts",
+    ),
   };
+}
+
+type ManifestLocation = { ancestry: string[]; manifests: string };
+function legacyManifestLocation(paths: ReturnType<typeof locations>): ManifestLocation {
+  return {
+    ancestry: [
+      paths.home,
+      paths.library,
+      paths.applicationSupport,
+      paths.legacyVendorParent,
+      paths.legacyBrowserParent,
+      paths.legacyManifests,
+    ],
+    manifests: paths.legacyManifests,
+  };
+}
+function currentManifestLocation(paths: ReturnType<typeof locations>): ManifestLocation {
+  return {
+    ancestry: [
+      paths.home,
+      paths.library,
+      paths.applicationSupport,
+      paths.currentVendorParent,
+      paths.currentBrowserParent,
+      paths.currentManifests,
+    ],
+    manifests: paths.currentManifests,
+  };
+}
+function manifestLocation(
+  paths: ReturnType<typeof locations>,
+  record: RecordValue,
+): ManifestLocation {
+  return record.version === 1 ? legacyManifestLocation(paths) : currentManifestLocation(paths);
+}
+function otherManifestLocation(
+  paths: ReturnType<typeof locations>,
+  record: RecordValue,
+): ManifestLocation {
+  return record.version === 1 ? currentManifestLocation(paths) : legacyManifestLocation(paths);
+}
+type OpenedDirectory = { path: string; handle: FileHandle; id: Identity };
+async function closeDirectories(opened: OpenedDirectory[]): Promise<void> {
+  await Promise.all(opened.map((directory) => directory.handle.close()));
+}
+async function openManifestAncestry(
+  location: ManifestLocation,
+  uid: number,
+): Promise<OpenedDirectory[] | undefined> {
+  const opened: OpenedDirectory[] = [];
+  let complete = false;
+  try {
+    for (const path of location.ancestry) {
+      const directory = await openDirectoryIfPresent(path, uid);
+      if (!directory) return;
+      opened.push({ path, ...directory });
+    }
+    await rebindDirectories(opened, uid);
+    complete = true;
+    return opened;
+  } finally {
+    if (!complete) await closeDirectories(opened);
+  }
+}
+async function rebindDirectories(opened: OpenedDirectory[], uid: number): Promise<void> {
+  for (const directory of opened) await rebindDirectory(directory.path, directory, uid);
+}
+async function inspectManifestLocation(
+  location: ManifestLocation,
+  manifestName: string,
+  uid: number,
+): Promise<{ bytes: Buffer; id: Identity } | undefined> {
+  const opened = await openManifestAncestry(location, uid);
+  if (!opened) return;
+  try {
+    const manifest = await readBounded(join(location.manifests, manifestName), uid, [0o600]);
+    await rebindDirectories(opened, uid);
+    return manifest;
+  } finally {
+    await closeDirectories(opened);
+  }
+}
+async function ensureCurrentManifestDirectory(
+  paths: ReturnType<typeof locations>,
+  uid: number,
+): Promise<void> {
+  const ancestry = [
+    paths.home,
+    paths.library,
+    paths.applicationSupport,
+    paths.currentVendorParent,
+    paths.currentBrowserParent,
+    paths.currentManifests,
+  ];
+  const opened: OpenedDirectory[] = [];
+  try {
+    for (const [index, path] of ancestry.entries()) {
+      let directory = await openDirectoryIfPresent(path, uid);
+      if (!directory) {
+        if (index < 3) throw new Error("Browser native host parent directory is unavailable.");
+        await ensurePrivateDirectory(path, uid);
+        directory = await openDirectory(path, uid);
+      }
+      opened.push({ path, ...directory });
+      await rebindDirectories(opened, uid);
+    }
+  } finally {
+    await closeDirectories(opened);
+  }
 }
 
 export async function browserNativeHostPreflight(
@@ -374,48 +514,57 @@ export async function browserNativeHostPreflight(
   try {
     const paths = locations(home);
     const state = await openDirectoryIfPresent(paths.state, uid);
-    const browserParent = await openDirectory(paths.browserParent, uid);
-    const manifests = await openDirectoryIfPresent(paths.manifests, uid);
-    let recordFile, manifest, lockFile, stageFile;
+    let recordFile, lockFile, stageFile;
     try {
       recordFile = state ? await readBounded(join(paths.state, RECORD), uid, [0o600]) : undefined;
       lockFile = state ? await readBounded(join(paths.state, LOCK), uid, [0o600]) : undefined;
       stageFile = state ? await readBounded(join(paths.state, STAGE), uid, [0o600]) : undefined;
-      manifest = manifests
-        ? await readBounded(join(paths.manifests, validated.plan.manifestName), uid, [0o600])
-        : undefined;
       if (state) await rebindDirectory(paths.state, state, uid);
-      await rebindDirectory(paths.browserParent, browserParent, uid);
-      if (manifests) await rebindDirectory(paths.manifests, manifests, uid);
     } finally {
       await state?.handle.close();
-      await browserParent.handle.close();
-      await manifests?.handle.close();
     }
     if (lockFile || stageFile)
       return { version: 1, browser: "arc", status: "recovery_required", ready: false };
-    if (!recordFile && !manifest)
-      return { version: 1, browser: "arc", status: "absent", ready: true };
-    if (!recordFile && manifest)
-      return { version: 1, browser: "arc", status: "conflict", ready: false };
-    if (!recordFile || !manifest)
-      return { version: 1, browser: "arc", status: "recovery_required", ready: false };
-    const record = parseRecord(recordFile.bytes);
+    if (!recordFile) {
+      const [legacy, current] = await Promise.all([
+        inspectManifestLocation(legacyManifestLocation(paths), validated.plan.manifestName, uid),
+        inspectManifestLocation(currentManifestLocation(paths), validated.plan.manifestName, uid),
+      ]);
+      return legacy || current
+        ? { version: 1, browser: "arc", status: "conflict", ready: false }
+        : { version: 1, browser: "arc", status: "absent", ready: true };
+    }
+    const record = parseRecord(recordFile.bytes),
+      location = manifestLocation(paths, record),
+      [manifest, otherManifest] = await Promise.all([
+        inspectManifestLocation(location, validated.plan.manifestName, uid),
+        inspectManifestLocation(
+          otherManifestLocation(paths, record),
+          validated.plan.manifestName,
+          uid,
+        ),
+      ]);
+    if (otherManifest) return { version: 1, browser: "arc", status: "conflict", ready: false };
+    if (!manifest)
+      return {
+        version: 1,
+        browser: "arc",
+        status: "recovery_required",
+        ready: false,
+        ...(record.version === 1 ? { migrationRequired: true as const } : {}),
+      };
     const matching =
       record.release === release &&
       record.launcherSha256 === validated.launcherSha256 &&
       record.manifestSha256 === digest(validated.plan.manifest) &&
       manifest.bytes.equals(Buffer.from(validated.plan.manifest));
+    const installed = matching && record.phase === "installed";
     return {
       version: 1,
       browser: "arc",
-      status:
-        matching && record.phase === "installed"
-          ? "installed"
-          : matching
-            ? "recovery_required"
-            : "conflict",
-      ready: matching && record.phase === "installed",
+      status: installed ? "installed" : matching ? "recovery_required" : "conflict",
+      ready: installed && record.version === 2,
+      ...(record.version === 1 ? { migrationRequired: true as const } : {}),
     };
   } catch {
     return { version: 1, browser: "arc", status: "conflict", ready: false };
@@ -431,21 +580,11 @@ export async function installBrowserNativeHost(
     paths = locations(home);
   await ensurePrivateDirectory(join(home, ".ellie"), uid);
   await ensurePrivateDirectory(paths.state, uid);
-  const browserParent = await openDirectory(paths.browserParent, uid);
-  try {
-    try {
-      await mkdir(paths.manifests, { mode: 0o700 });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    }
-    await rebindDirectory(paths.browserParent, browserParent, uid);
-  } finally {
-    await browserParent.handle.close();
-  }
-  const state = await openDirectory(paths.state, uid),
-    manifests = await openDirectory(paths.manifests, uid);
+  const state = await openDirectory(paths.state, uid);
   const lockPath = join(paths.state, LOCK);
-  let lock: FileHandle | undefined, lockId: Identity | undefined;
+  let lock: FileHandle | undefined,
+    lockId: Identity | undefined,
+    manifests: { handle: FileHandle; id: Identity } | undefined;
   try {
     try {
       lock = await open(
@@ -461,15 +600,34 @@ export async function installBrowserNativeHost(
     await lock.sync();
     lockId = snapshot(await lock.stat());
     const recordPath = join(paths.state, RECORD),
-      manifestPath = join(paths.manifests, validated.plan.manifestName);
+      manifestPath = join(paths.currentManifests, validated.plan.manifestName);
     await revalidateRelease(release, uid, validated);
     if (await readBounded(join(paths.state, STAGE), uid, [0o600]))
       throw new Error("Browser native host update has retained stage evidence.");
     let recordFile = await readBounded(recordPath, uid, [0o600]);
+    if (recordFile && parseRecord(recordFile.bytes).version === 1)
+      throw new Error(
+        "Legacy Arc native host ownership must be explicitly uninstalled before installing the current location.",
+      );
+    const [legacyEvidence, currentEvidence] = await Promise.all([
+      inspectManifestLocation(legacyManifestLocation(paths), validated.plan.manifestName, uid),
+      inspectManifestLocation(currentManifestLocation(paths), validated.plan.manifestName, uid),
+    ]);
+    if (legacyEvidence)
+      throw new Error("A legacy Arc native host manifest was preserved; reconcile it explicitly.");
+    if (!recordFile && currentEvidence)
+      throw new Error("An unowned browser native host manifest already exists.");
+    await ensureCurrentManifestDirectory(paths, uid);
+    manifests = await openDirectory(paths.currentManifests, uid);
+    if (
+      await inspectManifestLocation(legacyManifestLocation(paths), validated.plan.manifestName, uid)
+    )
+      throw new Error("A legacy Arc native host manifest was preserved; reconcile it explicitly.");
     const manifest = await readBounded(manifestPath, uid, [0o600]);
-    const base: Omit<RecordValue, "phase"> = {
-      version: 1,
+    const base: Omit<CurrentRecordValue, "phase"> = {
+      version: 2,
       browser: "arc",
+      location: "chrome_user",
       release,
       launcherSha256: validated.launcherSha256,
       manifestSha256: digest(validated.plan.manifest),
@@ -500,7 +658,7 @@ export async function installBrowserNativeHost(
     if (!manifest) {
       await revalidateRelease(release, uid, validated);
       await publishExclusive(
-        paths.manifests,
+        paths.currentManifests,
         manifests,
         validated.plan.manifestName,
         Buffer.from(validated.plan.manifest),
@@ -522,7 +680,7 @@ export async function installBrowserNativeHost(
       await cleanupLock(lockPath, lockId, paths.state, state, uid);
     }
     await state.handle.close();
-    await manifests.handle.close();
+    await manifests?.handle.close();
   }
 }
 
@@ -533,10 +691,11 @@ export async function uninstallBrowserNativeHost(
 ): Promise<void> {
   const validated = await validateRelease(release, uid),
     paths = locations(home);
-  const state = await openDirectory(paths.state, uid),
-    manifests = await openDirectory(paths.manifests, uid);
+  const state = await openDirectory(paths.state, uid);
   const lockPath = join(paths.state, LOCK);
-  let lock: FileHandle | undefined, lockId: Identity | undefined;
+  let lock: FileHandle | undefined,
+    lockId: Identity | undefined,
+    manifestAncestry: OpenedDirectory[] | undefined;
   try {
     try {
       lock = await open(
@@ -551,25 +710,35 @@ export async function uninstallBrowserNativeHost(
     await lock.writeFile(`${process.pid}\n`);
     await lock.sync();
     lockId = snapshot(await lock.stat());
-    const recordPath = join(paths.state, RECORD),
-      manifestPath = join(paths.manifests, validated.plan.manifestName);
+    const recordPath = join(paths.state, RECORD);
     await revalidateRelease(release, uid, validated);
     if (await readBounded(join(paths.state, STAGE), uid, [0o600]))
       throw new Error("Browser native host update has retained stage evidence.");
     const recordFile = await readBounded(recordPath, uid, [0o600]);
     if (!recordFile) {
-      if (await readBounded(manifestPath, uid, [0o600]))
+      const [legacy, current] = await Promise.all([
+        inspectManifestLocation(legacyManifestLocation(paths), validated.plan.manifestName, uid),
+        inspectManifestLocation(currentManifestLocation(paths), validated.plan.manifestName, uid),
+      ]);
+      if (legacy || current)
         throw new Error("An unowned browser native host manifest was preserved.");
       return;
     }
-    const record = parseRecord(recordFile.bytes);
+    const record = parseRecord(recordFile.bytes),
+      location = manifestLocation(paths, record),
+      otherLocation = otherManifestLocation(paths, record);
     if (
       record.release !== release ||
       record.launcherSha256 !== validated.launcherSha256 ||
       record.manifestSha256 !== digest(validated.plan.manifest)
     )
       throw new Error("Browser native host ownership conflicts with this release.");
-    const manifest = await readBounded(manifestPath, uid, [0o600]);
+    if (await inspectManifestLocation(otherLocation, validated.plan.manifestName, uid))
+      throw new Error("An unowned browser native host manifest was preserved.");
+    const manifestPath = join(location.manifests, validated.plan.manifestName);
+    manifestAncestry = await openManifestAncestry(location, uid);
+    const manifests = manifestAncestry?.[manifestAncestry.length - 1];
+    const manifest = manifests ? await readBounded(manifestPath, uid, [0o600]) : undefined;
     if (manifest && !manifest.bytes.equals(Buffer.from(validated.plan.manifest)))
       throw new Error("Browser native host manifest changed and was preserved.");
     if (record.phase !== "uninstalling")
@@ -587,7 +756,7 @@ export async function uninstallBrowserNativeHost(
       throw new Error("Browser native host ownership changed.");
     if (manifest) {
       await revalidateRelease(release, uid, validated);
-      await rebindDirectory(paths.manifests, manifests, uid);
+      await rebindDirectories(manifestAncestry!, uid);
       const final = await readBounded(manifestPath, uid, [0o600]);
       if (
         !final ||
@@ -596,7 +765,7 @@ export async function uninstallBrowserNativeHost(
       )
         throw new Error("Browser native host manifest changed and was preserved.");
       await unlink(manifestPath);
-      await manifests.handle.sync();
+      await manifests!.handle.sync();
     }
     await revalidateRelease(release, uid, validated);
     await rebindDirectory(paths.state, state, uid);
@@ -615,6 +784,6 @@ export async function uninstallBrowserNativeHost(
       await cleanupLock(lockPath, lockId, paths.state, state, uid);
     }
     await state.handle.close();
-    await manifests.handle.close();
+    if (manifestAncestry) await closeDirectories(manifestAncestry);
   }
 }
