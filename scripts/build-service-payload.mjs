@@ -1018,6 +1018,84 @@ export async function buildServicePayload(options) {
     const minimumPattern = new RegExp(`minos ${MINIMUM_MACOS.replace(".", "\\.")}(?:\\s|$)`);
     if (!/platform MACOS/.test(buildVersion) || !minimumPattern.test(buildVersion))
       throw new Error("Native helper minimum macOS version does not match the payload.");
+    const browserAccessibilityHelper = join(payload, "helpers/ellie-browser-accessibility");
+    command(
+      "/usr/bin/xcrun",
+      [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-O",
+        "-parse-as-library",
+        "-target",
+        `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+        join(buildSource, "packages/macos/native/BrowserAccessibility.swift"),
+        join(buildSource, "packages/macos/native/BrowserAccessibilitySession.swift"),
+        "-o",
+        browserAccessibilityHelper,
+      ],
+      { stdio: "ignore" },
+    );
+    await chmod(browserAccessibilityHelper, 0o755);
+    command(
+      "/usr/bin/codesign",
+      [
+        "--force",
+        "--sign",
+        "-",
+        "--identifier",
+        "org.ellie.browser-accessibility",
+        browserAccessibilityHelper,
+      ],
+      { stdio: "ignore" },
+    );
+    command("/usr/bin/codesign", ["--verify", "--strict", browserAccessibilityHelper], {
+      stdio: "ignore",
+    });
+    if (
+      command("/usr/bin/lipo", ["-archs", browserAccessibilityHelper]).trim() !== helperArchitecture
+    )
+      throw new Error("Browser accessibility helper architecture does not match the payload.");
+    const browserHelperBuild = command("/usr/bin/xcrun", [
+      "vtool",
+      "-show-build",
+      browserAccessibilityHelper,
+    ]);
+    if (!/platform MACOS/.test(browserHelperBuild) || !minimumPattern.test(browserHelperBuild))
+      throw new Error(
+        "Browser accessibility helper minimum macOS version does not match the payload.",
+      );
+    const browserBroker = join(payload, "helpers/ellie-browser-runtime-broker");
+    command(
+      "/usr/bin/xcrun",
+      [
+        "swiftc",
+        "-swift-version",
+        "5",
+        "-O",
+        "-parse-as-library",
+        "-target",
+        `${helperArchitecture}-apple-macos${MINIMUM_MACOS}`,
+        join(buildSource, "packages/macos/native/BrowserAccessibility.swift"),
+        join(buildSource, "packages/macos/native/BrowserRuntimeBroker.swift"),
+        "-lbsm",
+        "-o",
+        browserBroker,
+      ],
+      { stdio: "ignore" },
+    );
+    await chmod(browserBroker, 0o755);
+    command(
+      "/usr/bin/codesign",
+      ["--force", "--sign", "-", "--identifier", "org.ellie.browser-runtime-broker", browserBroker],
+      { stdio: "ignore" },
+    );
+    command("/usr/bin/codesign", ["--verify", "--strict", browserBroker], { stdio: "ignore" });
+    if (command("/usr/bin/lipo", ["-archs", browserBroker]).trim() !== helperArchitecture)
+      throw new Error("Browser runtime broker architecture does not match the payload.");
+    const browserBrokerBuild = command("/usr/bin/xcrun", ["vtool", "-show-build", browserBroker]);
+    if (!/platform MACOS/.test(browserBrokerBuild) || !minimumPattern.test(browserBrokerBuild))
+      throw new Error("Browser runtime broker minimum macOS version does not match the payload.");
     const policySource = join(scratch, "CompiledAuthenticatedActivationPolicy.c");
     const policyObject = join(scratch, "CompiledAuthenticatedActivationPolicy.o");
     const compilerInputs = await capturePolicyCompilerInputs(

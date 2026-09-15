@@ -21,7 +21,14 @@ type Bridge = {
     signal: AbortSignal,
   ): Promise<BrowserWebMCPResult>;
 };
-type Binding = { bindingId: string; documentId: string; origin: string; expiresAt: number };
+export type BrowserBinding = {
+  bindingId: string;
+  documentId: string;
+  origin: string;
+  url: string;
+  expiresAt: number;
+  availability: "webmcp" | "accessibility";
+};
 type Tool = { handle: string; name: string; inputSchema: unknown };
 const exact = (value: unknown, keys: readonly string[]): Record<string, unknown> => {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error();
@@ -37,7 +44,7 @@ const id = (value: unknown): string => {
     throw new Error();
   return value;
 };
-const revision = (binding: Binding): string =>
+export const browserBindingRevision = (binding: BrowserBinding): string =>
   createHash("sha256")
     .update(binding.bindingId)
     .update("\0")
@@ -77,7 +84,7 @@ export class BrowserWebMCPOperations {
     if (checked.type === "cancel") throw new Error();
     return browserWebMCPResult(await this.bridge.request(checked, signal));
   }
-  private async binding(signal: AbortSignal): Promise<Binding | "unbound" | "unsupported"> {
+  async bindingStatus(signal: AbortSignal): Promise<BrowserBinding | "unbound" | "unsupported"> {
     const response = await this.call(
       { protocol: BROWSER_WEBMCP_PROTOCOL, id: randomUUID(), type: "binding.status" },
       signal,
@@ -110,13 +117,15 @@ export class BrowserWebMCPOperations {
     if (url.origin !== origin.origin || url.username || url.password) throw new Error();
     if (!Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= Date.now())
       throw new Error();
-    const checked = {
+    const checked: BrowserBinding = {
       bindingId: id(value.bindingId),
       documentId: id(value.documentId),
       origin: origin.origin,
+      url: url.href,
       expiresAt: Number(value.expiresAt),
+      availability,
     };
-    const nextRevision = revision(checked);
+    const nextRevision = browserBindingRevision(checked);
     if (this.currentRevision !== nextRevision) {
       this.observed.clear();
       this.currentRevision = nextRevision;
@@ -140,7 +149,7 @@ export class BrowserWebMCPOperations {
     return found[0]!;
   }
   private async tool(
-    binding: Binding,
+    binding: BrowserBinding,
     reviewed: ReviewedBrowserBinding,
     signal: AbortSignal,
   ): Promise<Tool> {
@@ -195,9 +204,9 @@ export class BrowserWebMCPOperations {
   }
   async execute(raw: unknown, signal: AbortSignal): Promise<BrowserWebMCPOperationResult> {
     const action = browserWebMCPAction(raw);
-    let binding: Binding | "unbound" | "unsupported";
+    let binding: BrowserBinding | "unbound" | "unsupported";
     try {
-      binding = await this.binding(signal);
+      binding = await this.bindingStatus(signal);
     } catch {
       if (action.tool === "browser.status") {
         return browserWebMCPOperationResult({
@@ -210,25 +219,34 @@ export class BrowserWebMCPOperations {
     }
     if (action.tool === "browser.status")
       return browserWebMCPOperationResult({
-        ok: typeof binding === "object",
+        ok: typeof binding === "object" && binding.availability === "webmcp",
         message:
-          typeof binding === "object"
+          typeof binding === "object" && binding.availability === "webmcp"
             ? "Browser tab connected."
-            : binding === "unsupported"
+            : binding === "unsupported" ||
+                (typeof binding === "object" && binding.availability === "accessibility")
               ? "The connected page does not offer reviewed WebMCP tools."
               : "No reviewed browser tab is connected.",
         browser:
-          typeof binding === "object"
+          typeof binding === "object" && binding.availability === "webmcp"
             ? {
                 source: "webmcp",
                 operation: "status",
                 status: "connected",
-                revision: revision(binding),
+                revision: browserBindingRevision(binding),
                 origin: binding.origin,
               }
-            : { source: "webmcp", operation: "status", status: binding },
+            : {
+                source: "webmcp",
+                operation: "status",
+                status: typeof binding === "object" ? "unsupported" : binding,
+              },
       });
-    if (typeof binding !== "object" || revision(binding) !== action.revision)
+    if (
+      typeof binding !== "object" ||
+      binding.availability !== "webmcp" ||
+      browserBindingRevision(binding) !== action.revision
+    )
       throw new Error("Browser page changed before the requested action.");
     const operation = action.tool.slice("browser.".length) as ReviewedBrowserBinding["operation"];
     const key = action.tool === "browser.read" ? action.view : operation;
