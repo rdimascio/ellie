@@ -1681,7 +1681,7 @@ function Chat({
           New
         </button>
       </div>
-      {uncertainRequest && (
+      {uncertainRequest && !busy && (
         <div className="request-recovery" role="status">
           <div>
             <strong>

@@ -88,7 +88,20 @@ export class BrowserWebMCPOperations {
       return response.status === "unbound" ? "unbound" : "unsupported";
     }
     if (response.status !== "ok") throw new Error();
-    const value = exact(response.value, ["bindingId", "documentId", "origin", "url", "expiresAt"]);
+    const hasAvailability =
+      response.value !== null &&
+      typeof response.value === "object" &&
+      Object.hasOwn(response.value, "availability");
+    const value = exact(response.value, [
+      "bindingId",
+      "documentId",
+      "origin",
+      "url",
+      "expiresAt",
+      ...(hasAvailability ? ["availability"] : []),
+    ]);
+    const availability = hasAvailability ? value.availability : "webmcp";
+    if (availability !== "webmcp" && availability !== "accessibility") throw new Error();
     if (typeof value.origin !== "string" || typeof value.url !== "string") throw new Error();
     const origin = new URL(value.origin);
     const url = new URL(value.url);
@@ -107,6 +120,11 @@ export class BrowserWebMCPOperations {
     if (this.currentRevision !== nextRevision) {
       this.observed.clear();
       this.currentRevision = nextRevision;
+    }
+    if (availability === "accessibility") {
+      this.observed.clear();
+      this.currentRevision = undefined;
+      return "unsupported";
     }
     return checked;
   }
