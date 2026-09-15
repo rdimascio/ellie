@@ -98,6 +98,29 @@ ambiguous, or incomplete evidence retains the journal and remains blocked; selec
 a service or removes a release. The unloaded check covers the managed LaunchAgent labels. It does
 not coordinate arbitrary foreground processes; a shared runtime lease remains future work.
 
+Before selection, run the native installer's
+`preflight-select RELEASE --roles coordinator|node|coordinator,node` against an already staged
+development release. It checks the candidate, existing receipt and applications, destination
+collisions, transaction evidence, selection lock and requested LaunchAgent states. It reads the
+existing installation without creating directories or a lock, repairing a transaction, selecting
+a release, or changing launchd. A fresh installation can pass with no receipt or lock yet.
+
+Valid invocations return one redacted JSON object with `version`, `command`, `releaseID`, `roles`,
+`ready` and `status`. Exit status is zero only for `ready`; invalid arguments produce a fixed error
+before inspecting the installation. Roles must use the order shown above. The report describes an
+observation, not a reservation: a later `select` revalidates the installation and can still refuse.
+It does not establish endpoint readiness, permission continuity or production authenticity.
+
+| Status                 | Meaning and next step                                                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ready`                | The staged development release and observed stopped destination passed preflight. Continue only with the reviewed selection/rollout.         |
+| `loaded`               | A requested managed role is loaded. Let work settle, explicitly stop it and check its status before trying again.                            |
+| `busy`                 | Selection state is in use or a lock appeared during observation. Wait for the other operation to finish, then rerun the read-only preflight. |
+| `recovery_required`    | Transaction evidence or installed state is incomplete, unsafe or changed. Preserve it and use the applicable reviewed recovery procedure.    |
+| `destination_conflict` | An unmanaged role application/plist or changed destination blocks selection. Existing checkout services need the migration workflow.         |
+| `candidate_invalid`    | The requested staged development release is absent or fails verification. Check its release ID and the retained stage/inspection result.     |
+| `unavailable`          | The logged-in GUI launchd domain or role state could not be observed reliably. Restore that context and rerun preflight.                     |
+
 The same native installer exposes read-only `status coordinator|node|all` and explicit
 `start coordinator|node` and `stop coordinator|node` commands. They accept only a complete,
 verified selection with no pending journal and share the selector lock. Status does not create an

@@ -247,6 +247,26 @@ async function files(root: string, current = root): Promise<object[]> {
   }
   return result;
 }
+async function exactTree(root: string, current = root): Promise<object[]> {
+  const result: object[] = [];
+  for (const name of (await readdir(current)).sort()) {
+    const path = join(current, name);
+    const info = await lstat(path, { bigint: true });
+    const relativePath = relative(root, path).split(sep).join("/");
+    result.push({
+      path: relativePath,
+      type: info.isDirectory() ? "directory" : info.isFile() ? "file" : "other",
+      dev: info.dev.toString(),
+      ino: info.ino.toString(),
+      uid: info.uid.toString(),
+      mode: Number(info.mode & 0o7777n),
+      size: info.size.toString(),
+      sha256: info.isFile() ? digest(await readFile(path)) : undefined,
+    });
+    if (info.isDirectory()) result.push(...(await exactTree(root, path)));
+  }
+  return result;
+}
 async function removeOwned(root: string) {
   const makeWritable = async (path: string) => {
     const info = await lstat(path);
@@ -1714,6 +1734,230 @@ test(
       const staged = run(installer, ["stage", release, "--test-services-root", services]);
       assert.equal(staged.status, 0, staged.stderr);
       assert.equal((await lstat(incompleteRelease)).mode & 0o7777, 0o555);
+    });
+  },
+);
+
+test(
+  "selection preflight reports readiness without changing synthetic homes",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const prepareHome = async (name: string, destinations = false) => {
+        const home = join(root, name);
+        const services = join(home, "Library/Application Support/Ellie/Services");
+        await mkdir(services, { recursive: true, mode: 0o700 });
+        await chmod(join(home, "Library"), 0o700);
+        await chmod(join(home, "Library/Application Support"), 0o700);
+        await chmod(join(home, "Library/Application Support/Ellie"), 0o700);
+        if (destinations) {
+          await mkdir(join(home, "Applications"), { mode: 0o700 });
+          await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+        }
+        assert.equal(
+          run(installer, ["stage", release, "--test-services-root", services]).status,
+          0,
+        );
+        return { home, services };
+      };
+      const preflight = (
+        home: string,
+        roles: "coordinator" | "node" | "coordinator,node",
+        status:
+          | "ready"
+          | "loaded"
+          | "busy"
+          | "recovery_required"
+          | "destination_conflict"
+          | "candidate_invalid"
+          | "unavailable",
+        extra: string[] = [],
+        releaseID = id,
+      ) => {
+        const result = run(installer, [
+          "preflight-select",
+          releaseID,
+          "--roles",
+          roles,
+          "--test-home-root",
+          home,
+          ...extra,
+        ]);
+        assert.equal(result.error, undefined);
+        assert.equal(result.signal, null);
+        assert.equal(result.status, status === "ready" ? 0 : 1, result.stderr);
+        const expected = {
+          command: "preflight-select",
+          ready: status === "ready",
+          releaseID,
+          roles: roles.split(","),
+          status,
+          version: 1,
+        };
+        assert.equal(result.stdout, canonicalJSON(expected));
+        assert.deepEqual(JSON.parse(result.stdout), expected);
+      };
+
+      const fresh = await prepareHome("preflight-fresh");
+      const freshBefore = await exactTree(fresh.home);
+      preflight(fresh.home, "coordinator,node", "ready");
+      assert.deepEqual(await exactTree(fresh.home), freshBefore);
+      assert.equal(
+        await lstat(join(fresh.home, "Applications"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      assert.equal(
+        await lstat(join(fresh.home, "Library/LaunchAgents"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      assert.equal(
+        await lstat(join(fresh.services, "selection.lock"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const recoveredFresh = await prepareHome("preflight-recovered-fresh");
+      assert.equal(run(installer, ["recover", "--test-home-root", recoveredFresh.home]).status, 0);
+      const recoveredFreshBefore = await exactTree(recoveredFresh.home);
+      preflight(recoveredFresh.home, "coordinator", "ready");
+      assert.deepEqual(await exactTree(recoveredFresh.home), recoveredFreshBefore);
+      assert.deepEqual(await readdir(join(recoveredFresh.services, "receipts")), []);
+
+      const lockOnly = await prepareHome("preflight-lock-only");
+      await writeFile(join(lockOnly.services, "selection.lock"), "", { mode: 0o600 });
+      preflight(lockOnly.home, "coordinator", "recovery_required");
+
+      const receiptsOnly = await prepareHome("preflight-receipts-only");
+      await mkdir(join(receiptsOnly.services, "receipts"), { mode: 0o700 });
+      preflight(receiptsOnly.home, "coordinator", "recovery_required");
+
+      const selected = await prepareHome("preflight-selected", true);
+      assert.equal(
+        run(installer, ["select", id, "--roles", "coordinator", "--test-home-root", selected.home])
+          .status,
+        0,
+      );
+      const selectedBefore = await exactTree(selected.home);
+      preflight(selected.home, "coordinator", "ready");
+      assert.deepEqual(await exactTree(selected.home), selectedBefore);
+      preflight(selected.home, "coordinator", "loaded", ["--test-loaded", "coordinator"]);
+      assert.deepEqual(await exactTree(selected.home), selectedBefore);
+      preflight(selected.home, "coordinator", "unavailable", [
+        "--test-preflight-launchctl-unavailable",
+      ]);
+      assert.deepEqual(await exactTree(selected.home), selectedBefore);
+
+      const selectedLock = join(selected.services, "selection.lock");
+      const selectedReceipts = join(selected.services, "receipts");
+      await rm(selectedLock);
+      preflight(selected.home, "coordinator", "recovery_required");
+      await writeFile(selectedLock, "", { mode: 0o600 });
+      await chmod(selectedReceipts, 0o755);
+      preflight(selected.home, "coordinator", "recovery_required");
+      await chmod(selectedReceipts, 0o700);
+
+      for (const target of ["services-mode", "receipts-mode", "lock-mode"]) {
+        preflight(selected.home, "coordinator", "recovery_required", [
+          "--test-preflight-before-final",
+          target,
+        ]);
+        await chmod(
+          target === "services-mode"
+            ? selected.services
+            : target === "receipts-mode"
+              ? selectedReceipts
+              : selectedLock,
+          target === "lock-mode" ? 0o600 : 0o700,
+        );
+      }
+
+      const unsafeCandidate = join(fresh.services, "releases", id, "manifest.json");
+      await chmod(unsafeCandidate, 0o600);
+      const candidateBefore = await exactTree(fresh.home);
+      preflight(fresh.home, "coordinator", "candidate_invalid");
+      assert.deepEqual(await exactTree(fresh.home), candidateBefore);
+      await chmod(unsafeCandidate, 0o444);
+
+      const receipt = join(selected.services, "receipts/installed.json");
+      const receiptBytes = await readFile(receipt);
+      await chmod(receipt, 0o600);
+      await writeFile(receipt, "malformed\n");
+      const receiptBefore = await exactTree(selected.home);
+      preflight(selected.home, "coordinator", "recovery_required");
+      assert.deepEqual(await exactTree(selected.home), receiptBefore);
+      await writeFile(receipt, receiptBytes);
+
+      const collision = await prepareHome("preflight-collision", true);
+      await mkdir(join(collision.home, "Applications/Ellie Coordinator.app"), { mode: 0o700 });
+      const collisionBefore = await exactTree(collision.home);
+      preflight(collision.home, "coordinator", "destination_conflict");
+      assert.deepEqual(await exactTree(collision.home), collisionBefore);
+
+      const pending = await prepareHome("preflight-pending");
+      for (const relativeName of [
+        "selection-journal.json",
+        "migration-switch-journal.json",
+        "legacy-restore-journal.json",
+        "migrations/migration-preparation.json",
+      ]) {
+        const path = join(pending.services, relativeName);
+        await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+        await writeFile(path, "malformed\n", { mode: 0o600 });
+        const before = await exactTree(pending.home);
+        preflight(pending.home, "coordinator", "recovery_required");
+        assert.deepEqual(await exactTree(pending.home), before);
+        await rm(path);
+      }
+      await writeFile(join(pending.services, "selection-journal.json"), "malformed\n", {
+        mode: 0o600,
+      });
+      preflight(pending.home, "coordinator", "recovery_required", [], `${id}-missing`);
+      await rm(join(pending.services, "selection-journal.json"));
+
+      const contention = await prepareHome("preflight-contention");
+      const holder = spawn(
+        installer,
+        ["recover", "--test-home-root", contention.home, "--test-hold-lock-ms", "500"],
+        { stdio: "ignore" },
+      );
+      const holderExit = new Promise<number | null>((resolve) => holder.once("exit", resolve));
+      const ready = join(contention.services, ".test-selection-lock-ready");
+      const deadline = performance.now() + 2_000;
+      while (
+        !(await lstat(ready)
+          .then(() => true)
+          .catch(() => false))
+      ) {
+        assert.ok(performance.now() < deadline, "selection lock holder did not become ready");
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const contentionBefore = await exactTree(contention.home);
+      preflight(contention.home, "coordinator", "busy");
+      assert.deepEqual(await exactTree(contention.home), contentionBefore);
+      assert.equal(await holderExit, 0);
+
+      const malformedHome = join(root, "preflight-malformed");
+      for (const args of [
+        ["preflight-select"],
+        ["preflight-select", id, "--roles", "node,coordinator"],
+        ["preflight-select", `${id}\n`, "--roles", "coordinator"],
+        ["preflight-select", id, "--roles", "coordinator", "extra"],
+      ]) {
+        const result = run(installer, [...args, "--test-home-root", malformedHome]);
+        assert.notEqual(result.status, 0);
+        assert.equal(result.stdout, "");
+        assert.equal(
+          await lstat(malformedHome)
+            .then(() => true)
+            .catch(() => false),
+          false,
+        );
+      }
     });
   },
 );

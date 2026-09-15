@@ -6,6 +6,21 @@ import Security
 private enum SelectionFailure: Error {
   case rejected, recoveryRequired, loaded, launchctlUnavailable
 }
+private enum SelectionPreflightStatus: String, Codable {
+  case ready, loaded, busy
+  case recoveryRequired = "recovery_required"
+  case destinationConflict = "destination_conflict"
+  case candidateInvalid = "candidate_invalid"
+  case unavailable
+}
+private struct SelectionPreflightReport: Codable {
+  let version: Int
+  let command: String
+  let releaseID: String
+  let roles: [String]
+  let ready: Bool
+  let status: SelectionPreflightStatus
+}
 private let selectionError = "Ellie service selection failed; existing services were preserved."
 
 private enum SelectedRole: String, Codable, CaseIterable {
@@ -638,6 +653,335 @@ private func validateSelection(
       else { throw SelectionFailure.rejected }
     }
   }
+}
+
+private func selectionPreflightReport(
+  releaseID: String, roles: [SelectedRole], testHome: String?, testLoaded: Set<SelectedRole>,
+  testUnavailable: Bool, testBeforeFinal: String?
+) -> SelectionPreflightReport {
+  func report(_ status: SelectionPreflightStatus) -> SelectionPreflightReport {
+    SelectionPreflightReport(
+      version: 1, command: "preflight-select", releaseID: releaseID,
+      roles: roles.map(\.rawValue), ready: status == .ready, status: status)
+  }
+  func migrationPreparationPending(_ services: Int32) throws -> Bool {
+    guard
+      let migrations = try selectionOpenOwnedDirectoryIfPresent(
+        parent: services, name: "migrations")
+    else { return false }
+    defer { close(migrations) }
+    return try entry(migrations, "migration-preparation.json") != nil
+  }
+  do {
+    let paths = try selectionPaths(testHome: testHome)
+    let home = try selectionOpenDirectory(paths.home, privateMode: false)
+    defer { close(home) }
+    guard let library = try selectionOpenOwnedDirectoryIfPresent(parent: home, name: "Library")
+    else { return report(.candidateInvalid) }
+    defer { close(library) }
+    guard
+      let support = try selectionOpenOwnedDirectoryIfPresent(
+        parent: library, name: "Application Support")
+    else { return report(.candidateInvalid) }
+    defer { close(support) }
+    guard let ellie = try selectionOpenOwnedDirectoryIfPresent(parent: support, name: "Ellie")
+    else { return report(.candidateInvalid) }
+    defer { close(ellie) }
+    guard let services = try selectionOpenOwnedDirectoryIfPresent(parent: ellie, name: "Services")
+    else { return report(.candidateInvalid) }
+    defer { close(services) }
+    var servicesInfo = stat()
+    guard fstat(services, &servicesInfo) == 0, (servicesInfo.st_mode & 0o7777) == 0o700 else {
+      return report(.recoveryRequired)
+    }
+
+    if try migrationSwitchPending(services) { return report(.recoveryRequired) }
+    if try entry(services, paths.journalName) != nil { return report(.recoveryRequired) }
+    if try migrationPreparationPending(services) { return report(.recoveryRequired) }
+
+    let lockInfo = try entry(services, "selection.lock")
+    let receiptsInfo = try entry(services, "receipts")
+    guard (lockInfo == nil) == (receiptsInfo == nil) else {
+      return report(.recoveryRequired)
+    }
+    var lock: Int32 = -1
+    if lockInfo != nil {
+      lock = openat(
+        services, "selection.lock", O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+      var verified = stat()
+      guard lock >= 0, fstat(lock, &verified) == 0, (verified.st_mode & S_IFMT) == S_IFREG,
+        verified.st_uid == getuid(), verified.st_nlink == 1,
+        (verified.st_mode & 0o7777) == 0o600
+      else {
+        if lock >= 0 { close(lock) }
+        return report(.recoveryRequired)
+      }
+      if flock(lock, LOCK_SH | LOCK_NB) != 0 {
+        let lockError = errno
+        close(lock)
+        lock = -1
+        return report(lockError == EWOULDBLOCK ? .busy : .recoveryRequired)
+      }
+    }
+    defer {
+      if lock >= 0 {
+        flock(lock, LOCK_UN)
+        close(lock)
+      }
+    }
+
+    if try migrationSwitchPending(services) { return report(.recoveryRequired) }
+    if try entry(services, paths.journalName) != nil { return report(.recoveryRequired) }
+    if try migrationPreparationPending(services) { return report(.recoveryRequired) }
+
+    // Candidate verification is deliberately the existing development-v1 policy.
+    do {
+      for role in roles {
+        _ = try verifiedSelectionRelease(
+          servicesRoot: paths.services, releaseID: releaseID, role: role.rawValue)
+      }
+    } catch { return report(.candidateInvalid) }
+
+    let receipts = try selectionOpenOwnedDirectoryIfPresent(parent: services, name: "receipts")
+    defer { if let receipts { close(receipts) } }
+    guard (lock >= 0) == (receipts != nil) else { return report(.recoveryRequired) }
+    if let receipts {
+      var info = stat()
+      guard fstat(receipts, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+        info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o700
+      else { return report(.recoveryRequired) }
+    }
+    let applications = try selectionOpenOwnedDirectoryIfPresent(parent: home, name: "Applications")
+    defer { if let applications { close(applications) } }
+    let agents = try selectionOpenOwnedDirectoryIfPresent(parent: library, name: "LaunchAgents")
+    defer { if let agents { close(agents) } }
+    let receiptData = try receipts.flatMap {
+      try readPrivateAt($0, paths.receiptName, maximum: 32 * 1024, missing: true)
+    }
+    let receipt = try decodedReceipt(receiptData)
+    for role in SelectedRole.allCases {
+      if let record = receipt[role] {
+        guard let applications, let agents else { return report(.recoveryRequired) }
+        let directories = SelectionDirectories(
+          services: services, receipts: receipts!, applications: applications, agents: agents)
+        do {
+          try validateAsset(
+            paths: paths, directories: directories, role: role, record: record,
+            asset: .application, name: role.appName)
+          try validateAsset(
+            paths: paths, directories: directories, role: role, record: record,
+            asset: .plist, name: role.plistName)
+        } catch { return report(.recoveryRequired) }
+      } else {
+        if let applications, try entry(applications, role.appName) != nil {
+          return report(.destinationConflict)
+        }
+        if let agents, try entry(agents, role.plistName) != nil {
+          return report(.destinationConflict)
+        }
+      }
+    }
+    for role in roles {
+      if testUnavailable { return report(.unavailable) }
+      if try roleLoaded(role, testLoaded: testLoaded) { return report(.loaded) }
+    }
+
+    #if ELLIE_INSTALLER_TESTING
+      if let testBeforeFinal {
+        let target: Int32
+        switch testBeforeFinal {
+        case "services-mode": target = services
+        case "receipts-mode":
+          guard let receipts else { return report(.recoveryRequired) }
+          target = receipts
+        case "lock-mode":
+          guard lock >= 0 else { return report(.recoveryRequired) }
+          target = lock
+        default: return report(.recoveryRequired)
+        }
+        guard fchmod(target, 0o755) == 0 else { return report(.recoveryRequired) }
+      }
+    #endif
+
+    // This remains advisory, but do not report ready from descriptors that have already been
+    // detached from their canonical names while the bounded launchctl observations ran.
+    func sameDirectory(_ held: Int32, _ fresh: Int32) throws {
+      var first = stat()
+      var second = stat()
+      guard fstat(held, &first) == 0, fstat(fresh, &second) == 0,
+        first.st_dev == second.st_dev, first.st_ino == second.st_ino
+      else { throw SelectionFailure.recoveryRequired }
+    }
+    let freshHome = try selectionOpenDirectory(paths.home, privateMode: false)
+    defer { close(freshHome) }
+    try sameDirectory(home, freshHome)
+    let freshLibrary = try selectionOpenOwnedDirectory(parent: freshHome, name: "Library")
+    defer { close(freshLibrary) }
+    try sameDirectory(library, freshLibrary)
+    let freshSupport = try selectionOpenOwnedDirectory(
+      parent: freshLibrary, name: "Application Support")
+    defer { close(freshSupport) }
+    try sameDirectory(support, freshSupport)
+    let freshEllie = try selectionOpenOwnedDirectory(parent: freshSupport, name: "Ellie")
+    defer { close(freshEllie) }
+    try sameDirectory(ellie, freshEllie)
+    let freshServices = try selectionOpenOwnedDirectory(parent: freshEllie, name: "Services")
+    defer { close(freshServices) }
+    try sameDirectory(services, freshServices)
+    var finalServicesInfo = stat()
+    guard fstat(freshServices, &finalServicesInfo) == 0,
+      (finalServicesInfo.st_mode & S_IFMT) == S_IFDIR, finalServicesInfo.st_uid == getuid(),
+      (finalServicesInfo.st_mode & 0o7777) == 0o700
+    else { return report(.recoveryRequired) }
+    guard try entry(freshServices, paths.journalName) == nil,
+      try migrationSwitchPending(freshServices) == false
+    else { return report(.recoveryRequired) }
+    if try migrationPreparationPending(freshServices) { return report(.recoveryRequired) }
+    if lock >= 0 {
+      var heldLock = stat()
+      guard fstat(lock, &heldLock) == 0, let namedLock = try entry(freshServices, "selection.lock"),
+        (heldLock.st_mode & S_IFMT) == S_IFREG, heldLock.st_uid == getuid(),
+        heldLock.st_nlink == 1, (heldLock.st_mode & 0o7777) == 0o600,
+        heldLock.st_dev == namedLock.st_dev, heldLock.st_ino == namedLock.st_ino,
+        heldLock.st_uid == namedLock.st_uid, heldLock.st_nlink == namedLock.st_nlink,
+        heldLock.st_mode == namedLock.st_mode, heldLock.st_size == namedLock.st_size,
+        heldLock.st_mtimespec.tv_sec == namedLock.st_mtimespec.tv_sec,
+        heldLock.st_mtimespec.tv_nsec == namedLock.st_mtimespec.tv_nsec,
+        heldLock.st_ctimespec.tv_sec == namedLock.st_ctimespec.tv_sec,
+        heldLock.st_ctimespec.tv_nsec == namedLock.st_ctimespec.tv_nsec
+      else { return report(.recoveryRequired) }
+    } else if let appearedLock = try entry(freshServices, "selection.lock") {
+      guard (appearedLock.st_mode & S_IFMT) == S_IFREG, appearedLock.st_uid == getuid(),
+        appearedLock.st_nlink == 1, (appearedLock.st_mode & 0o7777) == 0o600
+      else { return report(.recoveryRequired) }
+      return report(.busy)
+    }
+    let freshReceipts = try selectionOpenOwnedDirectoryIfPresent(
+      parent: freshServices, name: "receipts")
+    defer { if let freshReceipts { close(freshReceipts) } }
+    if let freshReceipts {
+      var info = stat()
+      guard fstat(freshReceipts, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
+        info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o700
+      else { return report(.recoveryRequired) }
+    }
+    let freshApplications = try selectionOpenOwnedDirectoryIfPresent(
+      parent: freshHome, name: "Applications")
+    defer { if let freshApplications { close(freshApplications) } }
+    let freshAgents = try selectionOpenOwnedDirectoryIfPresent(
+      parent: freshLibrary, name: "LaunchAgents")
+    defer { if let freshAgents { close(freshAgents) } }
+    if let receipts, let freshReceipts {
+      try sameDirectory(receipts, freshReceipts)
+    } else if (receipts == nil) != (freshReceipts == nil) {
+      return report(.recoveryRequired)
+    }
+    if let applications, let freshApplications {
+      try sameDirectory(applications, freshApplications)
+    } else if (applications == nil) != (freshApplications == nil) {
+      return report(.destinationConflict)
+    }
+    if let agents, let freshAgents {
+      try sameDirectory(agents, freshAgents)
+    } else if (agents == nil) != (freshAgents == nil) {
+      return report(.destinationConflict)
+    }
+    let freshReceiptData = try freshReceipts.flatMap {
+      try readPrivateAt($0, paths.receiptName, maximum: 32 * 1024, missing: true)
+    }
+    guard freshReceiptData == receiptData else { return report(.recoveryRequired) }
+    for role in roles {
+      do {
+        _ = try verifiedSelectionRelease(
+          servicesRoot: paths.services, releaseID: releaseID, role: role.rawValue)
+      } catch { return report(.candidateInvalid) }
+    }
+    for role in SelectedRole.allCases {
+      if let record = receipt[role] {
+        guard let freshApplications, let freshAgents, let freshReceipts else {
+          return report(.recoveryRequired)
+        }
+        let fresh = SelectionDirectories(
+          services: freshServices, receipts: freshReceipts, applications: freshApplications,
+          agents: freshAgents)
+        do {
+          try validateAsset(
+            paths: paths, directories: fresh, role: role, record: record,
+            asset: .application, name: role.appName)
+          try validateAsset(
+            paths: paths, directories: fresh, role: role, record: record, asset: .plist,
+            name: role.plistName)
+        } catch { return report(.recoveryRequired) }
+      } else {
+        if let freshApplications, try entry(freshApplications, role.appName) != nil {
+          return report(.destinationConflict)
+        }
+        if let freshAgents, try entry(freshAgents, role.plistName) != nil {
+          return report(.destinationConflict)
+        }
+      }
+    }
+    return report(.ready)
+  } catch is LifecycleSelectionBusy {
+    return report(.busy)
+  } catch let error as SelectionFailure {
+    if case .launchctlUnavailable = error { return report(.unavailable) }
+    return report(.recoveryRequired)
+  } catch {
+    return report(.recoveryRequired)
+  }
+}
+
+func runSelectionPreflightCommand(_ input: [String]) -> Never {
+  var args = input
+  guard args.first == "preflight-select" else { failSelectionCommand(SelectionFailure.rejected) }
+  args.removeFirst()
+  var testHome: String?
+  var testLoaded = Set<SelectedRole>()
+  var testUnavailable = false
+  var testBeforeFinal: String?
+  #if ELLIE_INSTALLER_TESTING
+    if let index = args.firstIndex(of: "--test-home-root"), index + 1 < args.count {
+      testHome = args[index + 1]
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-loaded"), index + 1 < args.count {
+      let values = args[index + 1].split(separator: ",").map(String.init)
+      guard !values.isEmpty, values.allSatisfy({ SelectedRole(rawValue: $0) != nil }) else {
+        failSelectionCommand(SelectionFailure.rejected)
+      }
+      testLoaded = Set(values.compactMap(SelectedRole.init(rawValue:)))
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-preflight-launchctl-unavailable") {
+      testUnavailable = true
+      args.remove(at: index)
+    }
+    if let index = args.firstIndex(of: "--test-preflight-before-final"), index + 1 < args.count {
+      let value = args[index + 1]
+      guard ["services-mode", "receipts-mode", "lock-mode"].contains(value) else {
+        failSelectionCommand(SelectionFailure.rejected)
+      }
+      testBeforeFinal = value
+      args.removeSubrange(index...index + 1)
+    }
+  #endif
+  guard args.count == 3, args[1] == "--roles",
+    exact(args[0], "[A-Za-z0-9._-]+", count: 128)
+  else { failSelectionCommand(SelectionFailure.rejected) }
+  let roles: [SelectedRole]
+  switch args[2] {
+  case "coordinator": roles = [.coordinator]
+  case "node": roles = [.node]
+  case "coordinator,node": roles = [.coordinator, .node]
+  default: failSelectionCommand(SelectionFailure.rejected)
+  }
+  let value = selectionPreflightReport(
+    releaseID: args[0], roles: roles, testHome: testHome, testLoaded: testLoaded,
+    testUnavailable: testUnavailable, testBeforeFinal: testBeforeFinal)
+  guard let data = try? canonical(value) else { failSelectionCommand(SelectionFailure.rejected) }
+  FileHandle.standardOutput.write(data)
+  exit(value.ready ? 0 : 1)
 }
 private func validateRole(
   paths: SelectionPaths, directories: SelectionDirectories, receipt: Receipt, role: SelectedRole
