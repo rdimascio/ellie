@@ -10,7 +10,38 @@ const bindingLifetimeMs = 15 * 60 * 1000;
 const reviewedWebMCPBindings = Object.freeze({});
 let webMCPBinding;
 let nativePort;
+let nativeConnectionStatus = "idle";
 let activeWebMCP;
+
+const nativeConnectionStatuses = new Set([
+  "idle",
+  "waiting",
+  "connected",
+  "missing",
+  "disconnected",
+]);
+
+function publishNativeConnectionStatus(value) {
+  if (!nativeConnectionStatuses.has(value)) return;
+  nativeConnectionStatus = value;
+  try {
+    const sent = chrome.runtime.sendMessage({
+      protocol: "ellie.browser-native-status.v1",
+      status: value,
+    });
+    sent?.catch(() => {});
+  } catch {
+    // The popup is usually closed. Connection state remains available in the bind response.
+  }
+}
+
+function nativeHostMissing(message) {
+  return (
+    typeof message === "string" &&
+    (/specified native messaging host not found/i.test(message) ||
+      /native messaging host .* not found/i.test(message))
+  );
+}
 
 function allowedOrigin(url) {
   try {
@@ -175,6 +206,7 @@ async function bindWebMCP(tabId) {
     origin,
     expiresAt: binding.expiresAt,
     availability: binding.availability,
+    nativeConnectionStatus,
   };
 }
 
@@ -322,28 +354,37 @@ async function handleNativeRequest(request) {
 }
 
 function connectNativeHost() {
-  if (nativePort) return;
-  nativePort = chrome.runtime.connectNative(nativeHost);
-  nativePort.onDisconnect.addListener(() => {
-    nativePort = undefined;
+  if (nativePort) return nativeConnectionStatus;
+  const port = chrome.runtime.connectNative(nativeHost);
+  nativePort = port;
+  publishNativeConnectionStatus("waiting");
+  port.onDisconnect.addListener(() => {
+    const missing = nativeHostMissing(chrome.runtime.lastError?.message);
+    if (nativePort === port) nativePort = undefined;
     activeWebMCP?.controller.abort();
+    publishNativeConnectionStatus(missing ? "missing" : "disconnected");
   });
-  nativePort.onMessage.addListener((request) => {
+  port.onMessage.addListener((request) => {
+    if (nativePort !== port) return;
+    publishNativeConnectionStatus("connected");
     Promise.resolve()
       .then(() => handleNativeRequest(request))
-      .then((value) =>
-        nativePort?.postMessage({
-          protocol: nativeProtocol,
-          id: request.id,
-          type: "result",
-          status: "ok",
-          value,
-        }),
+      .then(
+        (value) =>
+          nativePort === port &&
+          port.postMessage({
+            protocol: nativeProtocol,
+            id: request.id,
+            type: "result",
+            status: "ok",
+            value,
+          }),
       )
       .catch((error) => {
         const status =
           error instanceof Error && nativeErrors.has(error.message) ? error.message : "unavailable";
-        nativePort?.postMessage({
+        if (nativePort !== port) return;
+        port.postMessage({
           protocol: nativeProtocol,
           id: request?.id || "invalid",
           type: "result",
@@ -351,6 +392,7 @@ function connectNativeHost() {
         });
       });
   });
+  return nativeConnectionStatus;
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

@@ -1,6 +1,7 @@
 let snapshot;
 let selectedTab;
 let pending;
+let selectedBinding = false;
 const status = document.querySelector("#status");
 const titles = document.querySelector("#titles");
 const stop = document.querySelector("#stop");
@@ -101,9 +102,29 @@ document.querySelector("#webmcp").onclick = async () => {
 
 document.querySelector("#bind-webmcp").onclick = async () => {
   const value = await run({ type: "bindWebMCP", actionId: crypto.randomUUID() });
-  if (value)
-    status.textContent =
-      value.availability === "accessibility"
-        ? "Page selected for Accessibility controls"
-        : "Page selected for WebMCP tools";
+  if (!value) return;
+  selectedBinding = true;
+  showNativeConnection(value.nativeConnectionStatus);
 };
+
+function showNativeConnection(value) {
+  const messages = {
+    waiting: "Page selected. Waiting for Mac connection…",
+    connected: "Page selected. Mac connected.",
+    missing: "Page selected. Ellie’s Mac connection is not installed.",
+    disconnected: "Page selected. The Mac connection was lost.",
+  };
+  status.textContent = messages[value] || "Page selected. Mac connection unavailable.";
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (
+    !selectedBinding ||
+    !message ||
+    Object.keys(message).sort().join() !== "protocol,status" ||
+    message.protocol !== "ellie.browser-native-status.v1" ||
+    !["waiting", "connected", "missing", "disconnected"].includes(message.status)
+  )
+    return;
+  showNativeConnection(message.status);
+});
