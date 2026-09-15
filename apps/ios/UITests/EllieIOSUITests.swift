@@ -48,7 +48,14 @@ final class EllieIOSUITests: XCTestCase {
 
         XCUIDevice.shared.press(.home)
         let backgrounded = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "state != %d", XCUIApplication.State.runningForeground.rawValue),
+            predicate: NSPredicate { value, _ in
+                guard let application = value as? XCUIApplication else { return false }
+                switch application.state {
+                case .runningBackground, .runningBackgroundSuspended: return true
+                case .unknown, .notRunning, .runningForeground: return false
+                @unknown default: return false
+                }
+            },
             object: app)
         XCTAssertEqual(XCTWaiter.wait(for: [backgrounded], timeout: 5), .completed)
         app.activate()
