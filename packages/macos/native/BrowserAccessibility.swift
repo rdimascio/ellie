@@ -481,13 +481,13 @@ final class BrowserAccessibilityAdapter {
 }
 
 enum BrowserAccessibilityTraversalLimits {
-  // A full Arc YouTube window exposed about 960 elements, 403 relevant nodes, and depth 10.
+  // A full Arc YouTube window exposed 1,782 elements, 483 relevant nodes, and depth 21.
   // Keep finite headroom for browser chrome and dynamic page content while rejecting trees that
   // cannot be inspected completely for ambiguous controls.
-  private static let maximumElements = 1_280
+  private static let maximumElements = 2_560
   private static let maximumNodes = 768
   private static let maximumChildren = 512
-  private static let maximumDepth = 12
+  private static let maximumDepth = 32
   private static let maximumCalls = 6_144
 
   static func permitsElement(count: Int, depth: Int) -> Bool {
