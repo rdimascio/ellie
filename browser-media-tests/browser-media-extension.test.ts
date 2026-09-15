@@ -8,7 +8,7 @@ import { chromium, type BrowserContext, type Page } from "@playwright/test";
 
 const source = new URL("../apps/browser-media-extension/", import.meta.url).pathname;
 
-async function fixture() {
+async function fixture(options: { accessibilityOnly?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "ellie-media-test-"));
   const extension = join(root, "extension");
   await cp(source, extension, { recursive: true });
@@ -23,6 +23,9 @@ async function fixture() {
   const background = await readFile(backgroundPath, "utf8");
   const reviewedNeedle = "const reviewedWebMCPBindings = Object.freeze({});";
   assert.equal(background.split(reviewedNeedle).length - 1, 1);
+  const accessibilityNeedle =
+    'const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);';
+  assert.equal(background.split(accessibilityNeedle).length - 1, 1);
   const tabGetNeedle = `async function executeWebMCP(request, controller) {
   const binding = liveBinding();
   const before = await chrome.tabs.get(binding.tabId);`;
@@ -32,7 +35,15 @@ async function fixture() {
     background
       .replace(
         reviewedNeedle,
-        `const reviewedWebMCPBindings = Object.freeze({"http://127.0.0.1:PORT":[{name:"ellie_fixture_action",inputSchema:{type:"object",additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false,consequentialHint:false}}]});`,
+        options.accessibilityOnly
+          ? reviewedNeedle
+          : `const reviewedWebMCPBindings = Object.freeze({"http://127.0.0.1:PORT":[{name:"ellie_fixture_action",inputSchema:{type:"object",additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false,consequentialHint:false}}]});`,
+      )
+      .replace(
+        accessibilityNeedle,
+        options.accessibilityOnly
+          ? 'const accessibilityBindingOrigins = new Set(["http://127.0.0.1:PORT"]);'
+          : accessibilityNeedle,
       )
       .replace(
         tabGetNeedle,
@@ -55,6 +66,40 @@ async function fixture() {
   await writeFile(manifestPath, JSON.stringify(manifest));
   return { root, extension };
 }
+
+test(
+  "explicit reviewed-origin binding reports accessibility before any WebMCP dispatch",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ accessibilityOnly: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
+      const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
+      assert.ok(tab?.id);
+      const bound = await launched.worker.evaluate((tabId) => {
+        return globalThis["__ellieTestWebMCP"].bind(tabId);
+      }, tab.id);
+      assert.equal(bound.availability, "accessibility");
+      const status = await launched.worker.evaluate(() =>
+        globalThis["__ellieTestWebMCP"].request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      assert.equal(status.availability, "accessibility");
+      assert.match(status.url, /^http:\/\/127\.0\.0\.1:/);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
 
 const html = `<!doctype html><style>
 body{margin:0}.spacer{height:760px}.row{display:flex;gap:12px;width:360px;overflow-x:auto}.card{flex:0 0 260px;height:120px;background:#ddd}.player{display:none}video{width:320px;height:180px}
@@ -279,14 +324,24 @@ test(
         await launched.page.evaluate(() => Boolean((globalThis as any).__ellieHistoryMutation)),
         false,
       );
-      const refreshed = await launched.worker.evaluate(() =>
-        globalThis.__ellieTestWebMCP.request({
-          protocol: "ellie.browser-webmcp.v1",
-          id: "status-fresh",
-          type: "binding.status",
-        }),
+      const invalidated = await launched.worker.evaluate(async () => {
+        try {
+          await globalThis.__ellieTestWebMCP.request({
+            protocol: "ellie.browser-webmcp.v1",
+            id: "status-fresh",
+            type: "binding.status",
+          });
+          return "retained";
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
+      });
+      assert.equal(invalidated, "unbound");
+      const rebound = await launched.worker.evaluate(
+        (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+        tab.id,
       );
-      assert.notEqual(refreshed.bindingId, binding.bindingId);
+      assert.notEqual(rebound.bindingId, binding.bindingId);
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server.close(() => resolve()));

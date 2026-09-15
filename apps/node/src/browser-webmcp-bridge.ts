@@ -120,6 +120,13 @@ type Pending = {
 export type BrowserWebMCPBridge = {
   readonly socketPath: string;
   connected(): boolean;
+  connectionContext():
+    | {
+        reportedNativeHostParentPid: number;
+        connectionId: string;
+        authenticated: false;
+      }
+    | undefined;
   request(
     request: Exclude<BrowserWebMCPRequest, { type: "cancel" }>,
     signal: AbortSignal,
@@ -138,7 +145,15 @@ export async function startBrowserWebMCPBridge(options: {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  let client: Socket | undefined, active: Pending | undefined;
+  let client: Socket | undefined,
+    context:
+      | {
+          reportedNativeHostParentPid: number;
+          connectionId: string;
+          authenticated: false;
+        }
+      | undefined,
+    active: Pending | undefined;
   const server: Server = createServer((candidate) => {
     candidate.on("error", () => {});
     if (client && !client.destroyed) {
@@ -146,8 +161,12 @@ export async function startBrowserWebMCPBridge(options: {
       return;
     }
     client = candidate;
+    let acceptedHello = false;
     candidate.once("close", () => {
-      if (client === candidate) client = undefined;
+      if (client === candidate) {
+        client = undefined;
+        context = undefined;
+      }
       if (active?.owner === candidate) {
         active.resolve(
           browserWebMCPResultFor(active.request.id, active.dispatched ? "unknown" : "unavailable"),
@@ -157,6 +176,29 @@ export async function startBrowserWebMCPBridge(options: {
     });
     acceptFrames(candidate, (raw) => {
       if (client !== candidate) return;
+      if (!acceptedHello) {
+        if (
+          !raw ||
+          typeof raw !== "object" ||
+          Array.isArray(raw) ||
+          Object.keys(raw).sort().join() !== "parentPid,type,version" ||
+          (raw as { type?: unknown }).type !== "native-host.hello" ||
+          (raw as { version?: unknown }).version !== 1 ||
+          !Number.isInteger((raw as { parentPid?: unknown }).parentPid) ||
+          Number((raw as { parentPid: number }).parentPid) < 1 ||
+          Number((raw as { parentPid: number }).parentPid) > 0x7fffffff
+        ) {
+          candidate.destroy(new Error("Invalid browser native host hello."));
+          return;
+        }
+        acceptedHello = true;
+        context = {
+          reportedNativeHostParentPid: Number((raw as { parentPid: number }).parentPid),
+          connectionId: randomUUID(),
+          authenticated: false,
+        };
+        return;
+      }
       let result;
       try {
         result = browserWebMCPResult(raw);
@@ -194,13 +236,14 @@ export async function startBrowserWebMCPBridge(options: {
   let closed = false;
   return {
     socketPath,
-    connected: () => Boolean(client && !client.destroyed),
+    connected: () => Boolean(client && !client.destroyed && context),
+    connectionContext: () => (context ? { ...context } : undefined),
     request: (request, signal) => {
       const checked = browserWebMCPRequest(request) as Exclude<
         BrowserWebMCPRequest,
         { type: "cancel" }
       >;
-      if (closed || !client || client.destroyed)
+      if (closed || !client || client.destroyed || !context)
         return Promise.resolve(browserWebMCPResultFor(checked.id, "unavailable"));
       if (signal.aborted) return Promise.resolve(browserWebMCPResultFor(checked.id, "cancelled"));
       if (active) return Promise.resolve(browserWebMCPResultFor(checked.id, "busy"));

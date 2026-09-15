@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, lstat, mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { once } from "node:events";
 import { connect } from "node:net";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { setImmediate as yieldEventLoop } from "node:timers/promises";
 import test from "node:test";
 import {
   BROWSER_WEBMCP_LIMITS,
@@ -18,8 +20,12 @@ import {
 } from "../apps/node/src/browser-webmcp-bridge.ts";
 import {
   browserWebMCPNativeHostManifest,
+  ELLIE_BROWSER_EXTENSION_ID,
+  ellieBrowserWebMCPNativeHostManifest,
   runBrowserWebMCPNativeHost,
 } from "../apps/node/src/browser-native-host.ts";
+import { browserWebMCPHostInstallationPlan } from "../scripts/browser-webmcp-host-setup.ts";
+import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
 
 const statusRequest = (id = "request-1") => ({
   protocol: BROWSER_WEBMCP_PROTOCOL,
@@ -47,6 +53,19 @@ function frameQueue(stream: PassThrough) {
             });
           }),
   };
+}
+
+async function waitForBridge(
+  bridge: { connected(): boolean; connectionContext(): unknown },
+  connected: boolean,
+): Promise<void> {
+  const deadline = performance.now() + 2_000;
+  while (
+    connected ? !bridge.connected() || !bridge.connectionContext() : bridge.connectionContext()
+  ) {
+    if (performance.now() >= deadline) throw new Error("bridge state timeout");
+    await yieldEventLoop();
+  }
 }
 
 test("WebMCP wire grammar is exact and bounded", () => {
@@ -93,6 +112,28 @@ test("native host manifest fixes one extension and executable", () => {
   });
   assert.throws(() => browserWebMCPNativeHostManifest("extension", "/tmp/host"), /Invalid/);
   assert.throws(() => browserWebMCPNativeHostManifest("a".repeat(32), "relative"), /Invalid/);
+  const fixed = JSON.parse(ellieBrowserWebMCPNativeHostManifest("/release/payload/bin/host"));
+  assert.deepEqual(fixed.allowed_origins, [`chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/`]);
+  const plan = browserWebMCPHostInstallationPlan("/captured/release-id");
+  assert.equal(plan.executablePath, "/captured/release-id/payload/bin/ellie-browser-webmcp-host");
+  assert.equal(JSON.parse(plan.manifest).path, plan.executablePath);
+  assert.throws(() => browserWebMCPHostInstallationPlan("relative"), /Invalid/);
+  assert.throws(() => browserWebMCPHostInstallationPlan("/captured/../other"), /Invalid/);
+});
+
+test("extension manifest public key has the fixed reviewed extension identity", async () => {
+  const manifest = JSON.parse(
+    await readFile(
+      new URL("../apps/browser-media-extension/manifest.json", import.meta.url),
+      "utf8",
+    ),
+  );
+  const alphabet = "abcdefghijklmnop";
+  const digest = createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex");
+  const extensionId = Array.from(digest.slice(0, 32))
+    .map((value) => alphabet[Number.parseInt(value, 16)])
+    .join("");
+  assert.equal(extensionId, ELLIE_BROWSER_EXTENSION_ID);
 });
 
 test(
@@ -108,9 +149,12 @@ test(
     const replies = frameQueue(output);
     const host = runBrowserWebMCPNativeHost({ home, input, output });
     try {
-      for (let count = 0; !bridge.connected() && count < 100; count += 1)
-        await new Promise((resolve) => setTimeout(resolve, 5));
+      await waitForBridge(bridge, true);
       assert.equal(bridge.connected(), true);
+      const connection = bridge.connectionContext();
+      assert.equal(connection?.reportedNativeHostParentPid, process.ppid);
+      assert.equal(connection?.authenticated, false);
+      assert.match(connection?.connectionId ?? "", /^[0-9a-f-]{36}$/);
       assert.equal(Number((await lstat(bridge.socketPath, { bigint: true })).mode & 0o777n), 0o600);
       const status = bridge.request(statusRequest(), new AbortController().signal);
       assert.deepEqual(await replies.next(), statusRequest());
@@ -130,6 +174,57 @@ test(
         }),
       );
       assert.equal((await status).status, "ok");
+
+      const operations = new BrowserWebMCPOperations(bridge, { version: 1, bindings: [] });
+      const operationStatus = operations.execute(
+        { tool: "browser.status" },
+        AbortSignal.timeout(2_000),
+      );
+      const operationRequest = browserWebMCPRequest(await replies.next());
+      input.write(
+        browserWebMCPFrame.encode({
+          protocol: BROWSER_WEBMCP_PROTOCOL,
+          id: operationRequest.id,
+          type: "result",
+          status: "ok",
+          value: {
+            bindingId: "binding",
+            documentId: "document",
+            origin: "https://www.youtube.com",
+            url: "https://www.youtube.com/watch?v=abcdefghijk",
+            expiresAt: Date.now() + 60_000,
+            availability: "accessibility",
+          },
+        }),
+      );
+      assert.deepEqual((await operationStatus).browser, {
+        source: "webmcp",
+        operation: "status",
+        status: "unsupported",
+      });
+
+      const malformedStatus = operations.execute(
+        { tool: "browser.status" },
+        AbortSignal.timeout(2_000),
+      );
+      const malformedRequest = browserWebMCPRequest(await replies.next());
+      input.write(
+        browserWebMCPFrame.encode({
+          protocol: BROWSER_WEBMCP_PROTOCOL,
+          id: malformedRequest.id,
+          type: "result",
+          status: "ok",
+          value: {
+            bindingId: "binding",
+            documentId: "document",
+            origin: "https://www.youtube.com",
+            url: "https://www.youtube.com/",
+            expiresAt: Date.now() + 60_000,
+            availability: "dom",
+          },
+        }),
+      );
+      assert.equal((await malformedStatus).browser.status, "unavailable");
 
       const controller = new AbortController();
       const executionId = "e".repeat(BROWSER_WEBMCP_LIMITS.maximumIdentifierLength);
@@ -179,6 +274,8 @@ test(
       );
       input.end();
       await host;
+      await waitForBridge(bridge, false);
+      assert.equal(bridge.connectionContext(), undefined);
     } finally {
       input.destroy();
       output.destroy();
@@ -198,6 +295,22 @@ test(
     await chmod(join(home, "Library", "Application Support", "Ellie"), 0o700);
     const bridge = await startBrowserWebMCPBridge({ home });
     try {
+      const sameUser = connect(bridge.socketPath);
+      sameUser.on("error", () => {});
+      await once(sameUser, "connect");
+      sameUser.write(
+        browserWebMCPFrame.encode({ type: "native-host.hello", version: 1, parentPid: 1 }),
+      );
+      await waitForBridge(bridge, true);
+      assert.deepEqual(
+        { ...bridge.connectionContext(), connectionId: "redacted" },
+        { reportedNativeHostParentPid: 1, connectionId: "redacted", authenticated: false },
+      );
+      sameUser.end();
+      await once(sameUser, "close");
+      await waitForBridge(bridge, false);
+      assert.equal(bridge.connectionContext(), undefined);
+
       const malformed = connect(bridge.socketPath);
       malformed.on("error", () => {});
       await once(malformed, "connect");
@@ -214,18 +327,17 @@ test(
         input: badInput,
         output: badOutput,
       });
-      for (let count = 0; !bridge.connected() && count < 100; count += 1)
-        await new Promise((resolve) => setTimeout(resolve, 5));
+      await waitForBridge(bridge, true);
       badInput.write(oversized);
       await malformedHost;
       badOutput.destroy();
+      await waitForBridge(bridge, false);
 
       const input = new PassThrough();
       const output = new PassThrough();
       const requests = frameQueue(output);
       const host = runBrowserWebMCPNativeHost({ home, input, output });
-      for (let count = 0; !bridge.connected() && count < 100; count += 1)
-        await new Promise((resolve) => setTimeout(resolve, 5));
+      await waitForBridge(bridge, true);
       const result = bridge.request(statusRequest("disconnect-1"), new AbortController().signal);
       assert.equal(((await requests.next()) as any).id, "disconnect-1");
       input.end();

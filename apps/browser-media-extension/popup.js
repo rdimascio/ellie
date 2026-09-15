@@ -100,5 +100,10 @@ document.querySelector("#webmcp").onclick = async () => {
 };
 
 document.querySelector("#bind-webmcp").onclick = async () => {
-  await run({ type: "bindWebMCP", actionId: crypto.randomUUID() });
+  const value = await run({ type: "bindWebMCP", actionId: crypto.randomUUID() });
+  if (value)
+    status.textContent =
+      value.availability === "accessibility"
+        ? "Page selected for Accessibility controls"
+        : "Page selected for WebMCP tools";
 };
