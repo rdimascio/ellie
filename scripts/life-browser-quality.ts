@@ -51,6 +51,16 @@ if (
 )
   throw new Error(`LIFE_QUALITY_SCENARIOS must contain: ${selectableScenarioNames.join(", ")}.`);
 if (requestedScenarios.size === 0) throw new Error("LIFE_QUALITY_SCENARIOS cannot be empty.");
+const planningPrompts = {
+  compound:
+    "Help me tidy the kitchen. Make a checklist with exactly two items: wipe the counter, then take out the recycling.",
+  direct:
+    "Make a checklist for tidying the kitchen with exactly two items: wipe the counter and take out the recycling.",
+} as const;
+const planningVariant = process.env.LIFE_QUALITY_PLANNING_VARIANT ?? "compound";
+if (planningVariant !== "compound" && planningVariant !== "direct")
+  throw new Error("LIFE_QUALITY_PLANNING_VARIANT must be compound or direct.");
+const planningPrompt = planningPrompts[planningVariant];
 const commandLog: Array<{ command: string; durationMs: number; ok: boolean }> = [];
 let launchSecret = "";
 let publicOrigin = "";
@@ -451,8 +461,6 @@ async function main() {
           const empty = await snapshot(receipt, "empty-plans", false);
           assert.match(empty.text, /No saved plans yet/i);
           await click(receipt, "open-orb", "button", "Talk to Ellie");
-          const planningPrompt =
-            "Help me tidy the kitchen. Make a checklist with exactly two items: wipe the counter, then take out the recycling.";
           const beforeModelCalls = fixture.captures.modelMessages.length;
           await sendChat(receipt, "create-plan", planningPrompt, 90_000);
           const modelCalls = fixture.captures.modelMessages.length - beforeModelCalls;
@@ -545,6 +553,8 @@ async function main() {
             join(reportRoot, evidence),
             `${JSON.stringify(
               {
+                planningVariant,
+                planningPrompt,
                 modelCalls,
                 planId: persisted.record.id,
                 revision: persisted.record.revision,
@@ -562,6 +572,7 @@ async function main() {
           receipt.snapshots.push(evidence);
           receipt.checks.push(
             "fresh Plans view was empty before the prompt",
+            `planning variant ${planningVariant} submitted exact prompt: ${planningPrompt}`,
             `loopback model transport was called ${modelCalls} time(s), including any schema repair`,
             "one two-step plan was saved with both steps initially open",
             "first checkbox persisted through reload while the second remained open",
@@ -813,6 +824,7 @@ async function main() {
     version: 1,
     createdAt: new Date().toISOString(),
     modelMode: fixture.modelMode,
+    planningVariant,
     evidenceSource: fixture.source,
     runtime: {
       node: process.version,
