@@ -1172,6 +1172,9 @@ private func stage(
         failSelectionCommand(error)
       }
     }
+    if arguments.first == "preflight-select" {
+      runSelectionPreflightCommand(arguments)
+    }
     guard arguments.count >= 2 else { fail() }
     let command = arguments.removeFirst()
     let source = arguments.removeFirst()
