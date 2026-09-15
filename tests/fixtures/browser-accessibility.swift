@@ -504,6 +504,53 @@ private func scenario(_ name: String) throws {
       label: "Invalid URL", enabled: true, path: [0, 2, 5], actions: ["press"],
       identifier: nil, placeholder: nil, rawURL: NSNumber(value: 1), insideWebArea: true)
     try expect(invalidURL?.value == nil, "non-URL AXLink value admitted")
+
+    let textAreaReference = BrowserAccessibilityElementReference(Token())
+    let textArea = browserAccessibilityProjectNode(
+      reference: textAreaReference, role: "AXTextArea", browser: .arc,
+      label: nil, enabled: true, path: [0, 3, 1], actions: ["set-value", "press"],
+      identifier: nil, placeholder: nil, rawURL: nil, insideWebArea: true)
+    try expect(textArea?.kind == .search, "inside-webarea AXTextArea not projected as search")
+    let searchButton = browserAccessibilityProjectNode(
+      reference: BrowserAccessibilityElementReference(Token()), role: "AXButton",
+      browser: .arc, label: "Search", enabled: true, path: [0, 3, 2], actions: ["press"],
+      identifier: nil, placeholder: nil, rawURL: nil, insideWebArea: true)
+    guard let textArea, let searchButton else { throw BrowserAccessibilityFailure.unavailable }
+    let textAreaBackend = MockBackend(
+      nodes: [MockBackend.defaultNodes()[0], textArea, searchButton])
+    let textAreaAdapter = BrowserAccessibilityAdapter(backend: textAreaBackend)
+    let textAreaPage = try bind(textAreaAdapter)
+    let textAreaView = try textAreaAdapter.read(textAreaPage)
+    let textAreaResult = try textAreaAdapter.perform(
+      .search(
+        query: "nature", generation: textAreaView.generation,
+        documentRevision: textAreaView.documentRevision), on: textAreaPage)
+    try expect(textAreaResult.status == .dispatchedUnverified, "AXTextArea search status")
+    try expect(textAreaBackend.actions == ["set:nature", "press"], "AXTextArea search chain")
+
+    let outsideTextArea = browserAccessibilityProjectNode(
+      reference: BrowserAccessibilityElementReference(Token()), role: "AXTextArea",
+      browser: .arc, label: nil, enabled: true, path: [4], actions: ["set-value"],
+      identifier: nil, placeholder: nil, rawURL: nil, insideWebArea: false)
+    try expect(outsideTextArea == nil, "outside-webarea AXTextArea admitted")
+
+    let secondTextArea = browserAccessibilityProjectNode(
+      reference: BrowserAccessibilityElementReference(Token()), role: "AXTextArea",
+      browser: .arc, label: nil, enabled: true, path: [0, 3, 3], actions: ["set-value"],
+      identifier: nil, placeholder: nil, rawURL: nil, insideWebArea: true)
+    guard let secondTextArea else { throw BrowserAccessibilityFailure.unavailable }
+    let ambiguousBackend = MockBackend(
+      nodes: [MockBackend.defaultNodes()[0], textArea, searchButton, secondTextArea])
+    let ambiguousAdapter = BrowserAccessibilityAdapter(backend: ambiguousBackend)
+    let ambiguousPage = try bind(ambiguousAdapter)
+    let ambiguousView = try ambiguousAdapter.read(ambiguousPage)
+    try expectFailure(.ambiguous) {
+      _ = try ambiguousAdapter.perform(
+        .search(
+          query: "nature", generation: ambiguousView.generation,
+          documentRevision: ambiguousView.documentRevision), on: ambiguousPage)
+    }
+    try expect(ambiguousBackend.actions.isEmpty, "ambiguous AXTextArea search mutated field")
   case "real-tree-bounds":
     try expect(
       BrowserAccessibilityTraversalLimits.permitsElement(count: 1_782, depth: 21),
