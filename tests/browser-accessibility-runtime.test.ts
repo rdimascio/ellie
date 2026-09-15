@@ -20,13 +20,14 @@ import { startBrowserKernelBridge } from "../apps/node/src/browser-kernel-bridge
 import { browserWebMCPFrame } from "../apps/node/src/browser-webmcp-bridge.ts";
 import { fixture } from "./helpers.ts";
 
-async function compileSession(executable: string): Promise<void> {
+async function compileSession(executable: string, flags: string[] = []): Promise<void> {
   const child = spawn(
     "/usr/bin/xcrun",
     [
       "swiftc",
       "-D",
       "ELLIE_AX_TEST_BACKEND",
+      ...flags.flatMap((flag) => ["-D", flag]),
       new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
       new URL("../packages/macos/native/BrowserAccessibilitySession.swift", import.meta.url)
         .pathname,
@@ -175,6 +176,100 @@ for await (const line of createInterface({ input: process.stdin })) {
     else t.diagnostic(`Retained browser AX runtime fixture: ${root}`);
   }
 });
+
+test(
+  "large Unicode AX summaries cross the Swift session and Node result contract",
+  { skip: process.platform !== "darwin", timeout: 30_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-summary-"));
+    let runtime: BrowserAccessibilityRuntime | undefined;
+    let completed = false;
+    try {
+      const executable = join(root, "ellie-browser-accessibility");
+      await compileSession(executable, ["ELLIE_AX_LARGE_SUMMARY"]);
+      runtime = new BrowserAccessibilityRuntime(executable, () => ({
+        browserProcessPid: process.pid,
+        browserStartSeconds: 1,
+        browserStartMicroseconds: 0,
+        browserCodeHash: "00".repeat(20),
+        connectionId: "summary-connection",
+        authenticated: true,
+      }));
+      const result = await runtime.execute(
+        browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+        {
+          availability: "accessibility",
+          documentId: "document-1",
+          url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+          revision: "revision-1",
+        },
+        new AbortController().signal,
+      );
+      assert.equal(result.browser.source, "accessibility");
+      if (result.browser.operation !== "read" || result.browser.status !== "completed")
+        throw new Error("Expected a completed read.");
+      const summary = result.browser.view.summary;
+      assert.equal(summary, Array(2).fill("🌙".repeat(200)).join(" "));
+      assert.ok(Buffer.byteLength(summary) <= 2_000);
+      assert.deepEqual(
+        result.browser.view.items.map((item) => item.label),
+        ["Earth from space"],
+      );
+      completed = true;
+    } finally {
+      await runtime?.close();
+      if (completed) await rm(root, { recursive: true });
+      else t.diagnostic(`Retained browser AX summary fixture: ${root}`);
+    }
+  },
+);
+
+test(
+  "large AX result collections fit the persistent Swift session frame",
+  { skip: process.platform !== "darwin", timeout: 30_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-items-"));
+    let runtime: BrowserAccessibilityRuntime | undefined;
+    let completed = false;
+    try {
+      const executable = join(root, "ellie-browser-accessibility");
+      await compileSession(executable, ["ELLIE_AX_LARGE_ITEMS"]);
+      runtime = new BrowserAccessibilityRuntime(executable, () => ({
+        browserProcessPid: process.pid,
+        browserStartSeconds: 1,
+        browserStartMicroseconds: 0,
+        browserCodeHash: "00".repeat(20),
+        connectionId: "items-connection",
+        authenticated: true,
+      }));
+      const result = await runtime.execute(
+        browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+        {
+          availability: "accessibility",
+          documentId: "document-1",
+          url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+          revision: "revision-1",
+        },
+        new AbortController().signal,
+      );
+      if (result.browser.operation !== "read" || result.browser.status !== "completed")
+        throw new Error("Expected a completed read.");
+      const items = result.browser.view.items;
+      assert.equal(items[0]?.label, "Earth from space");
+      assert.ok(items.length > 1 && items.length < 64);
+      assert.equal(new Set(items.map((item) => item.id)).size, items.length);
+      for (const item of items.slice(1)) {
+        assert.match(item.label, /^Video [0-9]{2} x{241}$/);
+        assert.equal(item.label.length, 250);
+      }
+      completed = true;
+    } finally {
+      await runtime?.close();
+      if (completed) await rm(root, { recursive: true });
+      else t.diagnostic(`Retained browser AX items fixture: ${root}`);
+    }
+  },
+);
 
 test("adapter selection happens once before dispatch and never falls through", async () => {
   let webCalls = 0;
