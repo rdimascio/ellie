@@ -47,17 +47,22 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
 
         XCUIDevice.shared.press(.home)
+        let stateHistory = ApplicationStateHistory()
         let backgrounded = XCTNSPredicateExpectation(
-            predicate: NSPredicate { value, _ in
-                guard let application = value as? XCUIApplication else { return false }
-                switch application.state {
+            predicate: NSPredicate { _, _ in
+                let state = app.state
+                stateHistory.record(state)
+                switch state {
                 case .runningBackground, .runningBackgroundSuspended: return true
                 case .unknown, .notRunning, .runningForeground: return false
                 @unknown default: return false
                 }
             },
-            object: app)
-        XCTAssertEqual(XCTWaiter.wait(for: [backgrounded], timeout: 5), .completed)
+            object: NSObject())
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [backgrounded], timeout: 5),
+            .completed,
+            "Observed app states: \(stateHistory.summary)")
         app.activate()
         XCTAssertTrue(
             app.descendants(matching: .any)["browser-status-unknown"].waitForExistence(timeout: 5))
@@ -160,4 +165,35 @@ final class EllieIOSUITests: XCTestCase {
     }
 
     private enum InputFailure: Error { case notReady, valueMismatch }
+}
+
+private final class ApplicationStateHistory {
+    private let lock = NSLock()
+    private var states: [String] = []
+
+    func record(_ state: XCUIApplication.State) {
+        lock.lock()
+        defer { lock.unlock() }
+        states.append("\(name(of: state))(\(state.rawValue))")
+        if states.count > 16 {
+            states.removeFirst(states.count - 16)
+        }
+    }
+
+    var summary: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return states.joined(separator: ", ")
+    }
+
+    private func name(of state: XCUIApplication.State) -> String {
+        switch state {
+        case .unknown: return "unknown"
+        case .notRunning: return "notRunning"
+        case .runningBackgroundSuspended: return "runningBackgroundSuspended"
+        case .runningBackground: return "runningBackground"
+        case .runningForeground: return "runningForeground"
+        @unknown default: return "unrecognized"
+        }
+    }
 }
