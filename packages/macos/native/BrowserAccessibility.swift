@@ -40,7 +40,7 @@ struct BrowserAccessibilityOutcome: Equatable, Sendable {
   let documentRevision: String
 }
 
-struct BrowserAccessibilityItem: Equatable, Sendable {
+struct BrowserAccessibilityItem: Encodable, Equatable, Sendable {
   let id: String
   let label: String
 }
@@ -154,10 +154,19 @@ final class BrowserAccessibilityAdapter {
     let submission: SearchSubmission
   }
 
+  private struct ReadContent: Encodable {
+    let title: String?
+    let summary: String?
+    let items: [BrowserAccessibilityItem]
+  }
+
   private static let maximumQueryUTF16 = 200
   private static let maximumLabelBytes = 500
   private static let maximumTextBytes = 2_000
   private static let maximumItems = 64
+  // The session frame is 16,384 bytes. This leaves more than 4 KiB for the response envelope,
+  // including its bounded request, session, generation, and revision identifiers.
+  private static let maximumReadContentBytes = 12_000
   private let backend: BrowserAccessibilityBackend
   private var observed: Observed?
 
@@ -188,8 +197,6 @@ final class BrowserAccessibilityAdapter {
     guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
     let snapshot = try rebound(page)
     guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
-    var items: [BrowserAccessibilityItem] = []
-    var retained: [String: BrowserAccessibilityNode] = [:]
     var text: [String] = []
     var textBytes = 0
     for node in snapshot.nodes {
@@ -202,18 +209,31 @@ final class BrowserAccessibilityAdapter {
         }
       }
     }
-    for node in selectableVideoLinks(snapshot.nodes).prefix(Self.maximumItems) {
+    let title = snapshot.title.flatMap { validLabel($0) ? $0 : nil }
+    let summary = text.isEmpty ? nil : text.joined(separator: " ")
+    var items: [BrowserAccessibilityItem] = []
+    var retained: [String: BrowserAccessibilityNode] = [:]
+    guard let initialBytes = encodedReadContentBytes(title: title, summary: summary, items: items),
+      initialBytes <= Self.maximumReadContentBytes
+    else { throw BrowserAccessibilityFailure.unavailable }
+    for node in selectableVideoLinks(snapshot.nodes) {
+      guard items.count < Self.maximumItems else { break }
       guard let label = node.label else { continue }
       let id = UUID().uuidString.lowercased()
-      items.append(BrowserAccessibilityItem(id: id, label: label))
+      let item = BrowserAccessibilityItem(id: id, label: label)
+      let proposed = items + [item]
+      guard let encodedBytes = encodedReadContentBytes(
+        title: title, summary: summary, items: proposed)
+      else { throw BrowserAccessibilityFailure.unavailable }
+      guard encodedBytes <= Self.maximumReadContentBytes else { continue }
+      items.append(item)
       retained[id] = node
     }
     let generation = UUID().uuidString.lowercased()
     observed = Observed(generation: generation, page: page, items: retained)
     return BrowserAccessibilityObservation(
       generation: generation, documentRevision: page.documentRevision,
-      title: snapshot.title.flatMap { validLabel($0) ? $0 : nil },
-      summary: text.isEmpty ? nil : text.joined(separator: " "), items: items)
+      title: title, summary: summary, items: items)
   }
 
   func perform(
@@ -384,6 +404,14 @@ final class BrowserAccessibilityAdapter {
   private func validLabel(_ value: String) -> Bool {
     !value.isEmpty && value.utf16.count <= 256 && value.utf8.count <= Self.maximumLabelBytes
       && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  }
+
+  private func encodedReadContentBytes(
+    title: String?, summary: String?, items: [BrowserAccessibilityItem]
+  ) -> Int? {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return try? encoder.encode(ReadContent(title: title, summary: summary, items: items)).count
   }
 
   private func selectableVideoLinks(_ nodes: [BrowserAccessibilityNode]) -> [BrowserAccessibilityNode] {
