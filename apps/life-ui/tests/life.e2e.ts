@@ -689,9 +689,24 @@ try {
     `.history-list article[data-conversation-id="${recoveredConversation}"]`,
   );
   await activeHistory.waitFor();
+  const deletion = page.waitForResponse(
+    (response) =>
+      response.request().method() === "DELETE" &&
+      new URL(response.url()).pathname ===
+        `/api/life/conversations/${encodeURIComponent(recoveredConversation)}`,
+  );
   page.once("dialog", (dialog) => void dialog.accept());
   await activeHistory.locator(".history-delete").click();
-  await page.getByText("Conversation deleted").waitFor();
+  assert.equal((await deletion).status(), 204, "conversation deletion is acknowledged");
+  await activeHistory.waitFor({ state: "detached" });
+  assert.equal(
+    await page.evaluate(
+      async (id) => (await fetch(`/api/life/conversations/${encodeURIComponent(id)}`)).status,
+      recoveredConversation,
+    ),
+    403,
+    "deleted conversation detail is no longer accessible",
+  );
   await page.getByRole("button", { name: "Close conversation history" }).click();
   await page.getByRole("heading", { name: /What can I help with/ }).waitFor();
   await page.getByRole("button", { name: "History" }).click();
