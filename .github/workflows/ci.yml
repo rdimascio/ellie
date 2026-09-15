@@ -80,6 +80,7 @@ jobs:
       - run: bun run demo:build
       - run: node node_modules/@playwright/test/cli.js install --with-deps chromium webkit
       - run: bun run demo:test
+      - run: bun run test:browser-media
       - name: Preserve browser failure traces
         if: failure()
         uses: actions/upload-artifact@v4
