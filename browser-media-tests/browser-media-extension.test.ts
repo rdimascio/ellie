@@ -483,7 +483,7 @@ test("explicit refresh renews only the retained same-page selection authority", 
   assert.equal(injectionCount, beforeDisconnect);
 });
 
-test("popup distinguishes page selection, missing host, and later disconnect without extra actions", async () => {
+test("popup reports a failed native connection without claiming page selection", async () => {
   const popup = await readFile(join(source, "popup.js"), "utf8");
   const html = await readFile(join(source, "popup.html"), "utf8");
   assert.match(html, />Select this page</);
@@ -522,11 +522,8 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
           return new Promise((resolve) => {
             context.resolveBind = () =>
               resolve({
-                ok: true,
-                value: {
-                  availability: "accessibility",
-                  nativeConnection: { status: "waiting", revision: 1 },
-                },
+                ok: false,
+                error: "page_changed",
               });
           });
         },
@@ -559,9 +556,9 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
   await binding;
   assert.equal(
     elements.get("connection-status").textContent,
-    "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
+    "Ellie’s Mac connection could not be found. Check browser setup.",
   );
-  assert.equal(elements.get("status").textContent, "Done");
+  assert.equal(elements.get("status").textContent, "The action could not be verified.");
   assert.equal(sent.length, 1);
   assert.equal(sent[0].command.type, "bindWebMCP");
   elements.get("status").textContent = "The result is unknown. Check the Mac before trying again.";
@@ -572,17 +569,14 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
   });
   assert.equal(
     elements.get("connection-status").textContent,
-    "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
+    "Ellie’s Mac connection could not be found. Check browser setup.",
   );
   runtimeMessages.emit({
     protocol: "ellie.browser-native-status.v1",
     status: "disconnected",
     revision: 4,
   });
-  assert.equal(
-    elements.get("connection-status").textContent,
-    "Page selected. The Mac connection was lost.",
-  );
+  assert.equal(elements.get("connection-status").textContent, "The Mac connection was lost.");
   assert.equal(
     elements.get("status").textContent,
     "The result is unknown. Check the Mac before trying again.",
@@ -590,18 +584,25 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
   runtimeMessages.emit({
     protocol: "ellie.browser-native-status.v1",
     status: "missing",
+    revision: 3,
+  });
+  assert.equal(elements.get("connection-status").textContent, "The Mac connection was lost.");
+  runtimeMessages.emit({
+    protocol: "ellie.browser-native-status.v1",
+    status: "missing",
     revision: 5,
     error: "sensitive-detail",
   });
-  assert.equal(
-    elements.get("connection-status").textContent,
-    "Page selected. The Mac connection was lost.",
-  );
+  assert.equal(elements.get("connection-status").textContent, "The Mac connection was lost.");
   assert.equal(sent.length, 1);
 });
 
 async function fixture(
-  options: { accessibilityOnly?: boolean; argumentEncoding?: "object" | "json-string" } = {},
+  options: {
+    accessibilityOnly?: boolean;
+    argumentEncoding?: "object" | "json-string";
+    stableNativePort?: boolean;
+  } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "ellie-media-test-"));
   const extension = join(root, "extension");
@@ -645,6 +646,19 @@ async function fixture(
   if (globalThis.__ellieTestBeforeTabGet) await globalThis.__ellieTestBeforeTabGet;
   const before = await chrome.tabs.get(binding.tabId);`,
       ) +
+      (options.stableNativePort
+        ? `
+// Loaded-extension fixture only: keep the native transport stable while exercising WebMCP semantics.
+connectNativeHost = () => {
+  if (!nativePort) {
+    nativePort = { postMessage() {} };
+    nativePortGeneration += 1;
+    publishNativeConnectionStatus("connected");
+  }
+  return nativeConnectionStatus;
+};
+`
+        : "") +
       "\nglobalThis.__ellieTestWebMCP = { bind: bindWebMCP, request: handleNativeRequest, nativeStatus: () => nativeConnectionStatus };\n",
   );
   const controllerPath = join(extension, "media-controller.js");
@@ -663,7 +677,7 @@ async function fixture(
 }
 
 test(
-  "explicit reviewed-origin binding reports accessibility before any WebMCP dispatch",
+  "missing native host leaves reviewed-origin status and refresh unbound",
   { timeout: 30_000 },
   async () => {
     const owned = await fixture({ accessibilityOnly: true });
@@ -675,11 +689,15 @@ test(
       const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
       const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
       assert.ok(tab?.id);
-      const bound = await launched.worker.evaluate((tabId) => {
-        return globalThis["__ellieTestWebMCP"].bind(tabId);
+      const initial = await launched.worker.evaluate(async (tabId) => {
+        try {
+          await globalThis["__ellieTestWebMCP"].bind(tabId);
+          return "bound";
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
       }, tab.id);
-      assert.equal(bound.availability, "accessibility");
-      assert.equal(bound.nativeConnection.status, "waiting");
+      assert.ok(["bound", "page_changed"].includes(initial));
       let nativeStatus = "waiting";
       for (let attempt = 0; attempt < 50 && nativeStatus === "waiting"; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -688,15 +706,21 @@ test(
         );
       }
       assert.equal(nativeStatus, "missing");
-      const status = await launched.worker.evaluate(() =>
-        globalThis["__ellieTestWebMCP"].request({
-          protocol: "ellie.browser-webmcp.v1",
-          id: crypto.randomUUID(),
-          type: "binding.status",
-        }),
-      );
-      assert.equal(status.availability, "accessibility");
-      assert.match(status.url, /^http:\/\/127\.0\.0\.1:/);
+      for (const type of ["binding.status", "binding.refresh"]) {
+        const result = await launched.worker.evaluate(async (requestType) => {
+          try {
+            await globalThis["__ellieTestWebMCP"].request({
+              protocol: "ellie.browser-webmcp.v1",
+              id: crypto.randomUUID(),
+              type: requestType,
+            });
+            return "bound";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        }, type);
+        assert.equal(result, "unbound");
+      }
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
@@ -737,19 +761,39 @@ async function launch(extension: string, root: string) {
       value.replaceAll("http://127.0.0.1:PORT", `http://127.0.0.1:${address.port}`),
     );
   }
-  const context = await chromium.launchPersistentContext(join(root, "profile"), {
-    headless: true,
-    channel: "chromium",
-    args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
-  });
-  let worker = context.serviceWorkers()[0];
-  if (!worker) worker = await context.waitForEvent("serviceworker", { timeout: 10_000 });
-  const extensionId = new URL(worker.url()).host;
-  const page = await context.newPage();
-  await page.goto(`http://127.0.0.1:${address.port}/`);
-  const harness = await context.newPage();
-  await harness.goto(`chrome-extension://${extensionId}/popup.html`);
-  return { context, worker, harness, page, server };
+  let context: BrowserContext | undefined;
+  try {
+    context = await chromium.launchPersistentContext(join(root, "profile"), {
+      headless: true,
+      channel: "chromium",
+      args: [`--disable-extensions-except=${extension}`, `--load-extension=${extension}`],
+    });
+    let worker = context.serviceWorkers()[0];
+    if (!worker) worker = await context.waitForEvent("serviceworker", { timeout: 10_000 });
+    const extensionId = new URL(worker.url()).host;
+    const page = await context.newPage();
+    await page.goto(`http://127.0.0.1:${address.port}/`);
+    const harness = await context.newPage();
+    await harness.goto(`chrome-extension://${extensionId}/popup.html`);
+    await page.bringToFront();
+    const selected = await worker.evaluate(async (expectedUrl) => {
+      const tabs = await globalThis["chrome"].tabs.query({});
+      const tab = tabs.find((item: any) => item.url === expectedUrl);
+      if (!tab?.id || !Number.isInteger(tab.windowId)) return undefined;
+      const browserWindow = await globalThis["chrome"].windows.get(tab.windowId);
+      return {
+        active: tab.active,
+        focused: browserWindow.focused,
+        status: tab.status,
+      };
+    }, page.url());
+    assert.deepEqual(selected, { active: true, focused: true, status: "complete" });
+    return { context, worker, harness, page, server };
+  } catch (error) {
+    await context?.close();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw error;
+  }
 }
 
 async function command(harness: Page, tabId: number, value: Record<string, unknown>) {
@@ -842,7 +886,7 @@ test(
   "connected WebMCP tab aborts a stale history action and blocks rebinding",
   { timeout: 30_000 },
   async () => {
-    const owned = await fixture();
+    const owned = await fixture({ stableNativePort: true });
     let context: BrowserContext | undefined;
     let server: ReturnType<typeof createServer> | undefined;
     try {
@@ -958,7 +1002,7 @@ test(
   "serialized schema uses the reviewed object argument dialect",
   { timeout: 30_000 },
   async () => {
-    const owned = await fixture();
+    const owned = await fixture({ stableNativePort: true });
     let context: BrowserContext | undefined;
     let server: ReturnType<typeof createServer> | undefined;
     try {
@@ -1037,7 +1081,7 @@ test(
   "JSON-string tool results are bounded before parsing and never retried",
   { timeout: 30_000 },
   async () => {
-    const owned = await fixture({ argumentEncoding: "json-string" });
+    const owned = await fixture({ argumentEncoding: "json-string", stableNativePort: true });
     let context: BrowserContext | undefined;
     let server: ReturnType<typeof createServer> | undefined;
     try {
