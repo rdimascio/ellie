@@ -59,10 +59,10 @@ private final class MockBackend: BrowserAccessibilityBackend {
       node(.webArea, "Catalogue", [0], ["scroll-up", "scroll-down"], reference: web),
       node(.text, "Featured titles", [0, 0], []),
       node(.search, "Search", [0, 1], ["set-value", "confirm"]),
-      node(.link, "Nature", [0, 2], ["press"]),
+      node(.link, "Nature", [0, 2], ["press"], value: "https://www.youtube.com/watch?v=iTHUUjTA-LI&pp=fixture"),
       node(.link, "Disabled", [0, 6], ["press"], enabled: false),
-      node(.button, "Play", [0, 3], ["press"]),
-      node(.button, "Pause", [0, 4], ["press"]),
+      node(.button, "Play keyboard shortcut k", [0, 3], ["press"]),
+      node(.button, "Pause (k)", [0, 4], ["press"]),
     ]
   }
 }
@@ -95,7 +95,7 @@ private func scenario(_ name: String) throws {
     let view = try adapter.read(page)
     try expect(view.title == "Catalogue", "title")
     try expect(view.summary == "Featured titles", "summary")
-    try expect(view.items.map(\.label) == ["Nature", "Play", "Pause"], "items")
+    try expect(view.items.map(\.label) == ["Nature"], "items")
     let nature = view.items[0]
     let result = try adapter.perform(
       .select(itemID: nature.id, generation: view.generation, documentRevision: view.documentRevision),
@@ -150,7 +150,9 @@ private func scenario(_ name: String) throws {
     try expect(backend.actions.isEmpty, "reused process dispatched")
   case "cancel-and-bounds":
     let many = [MockBackend.defaultNodes()[0]] + (0..<80).map {
-      MockBackend.node(.link, "Item \($0)", [0, $0 + 1], ["press"])
+      MockBackend.node(
+        .link, "Item \($0)", [0, $0 + 1], ["press"],
+        value: "https://www.youtube.com/watch?v=vid\(String(format: "%08d", $0))")
     }
     let backend = MockBackend(nodes: many)
     let adapter = BrowserAccessibilityAdapter(backend: backend)
@@ -189,7 +191,7 @@ private func scenario(_ name: String) throws {
     try expect(backend.actions == ["set:nature"], "partial search replayed")
   case "ambiguous-and-playback":
     let nodes = MockBackend.defaultNodes() + [
-      MockBackend.node(.button, "Play", [0, 5], ["press"])
+      MockBackend.node(.button, "Play keyboard shortcut k", [0, 5], ["press"])
     ]
     let backend = MockBackend(nodes: nodes)
     let adapter = BrowserAccessibilityAdapter(backend: backend)
@@ -219,6 +221,39 @@ private func scenario(_ name: String) throws {
         .play, generation: failedView.generation, documentRevision: failedView.documentRevision),
       on: failedPage)
     try expect(uncertain.status == .unknown, "failed AX dispatch was replayable")
+  case "youtube-item-policy":
+    let web = MockBackend.defaultNodes()[0]
+    let nodes = [
+      web,
+      MockBackend.node(
+        .link, "Unique video", [0, 1], ["press"],
+        value: "https://www.youtube.com/watch?v=abcdefghijk"),
+      MockBackend.node(
+        .link, "Duplicate video one", [0, 2], ["press"],
+        value: "https://www.youtube.com/watch?v=lmnopqrstuv"),
+      MockBackend.node(
+        .link, "Duplicate video two", [0, 3], ["press"],
+        value: "https://www.youtube.com/watch?v=lmnopqrstuv&pp=tracking"),
+      MockBackend.node(
+        .link, "Wrong host", [0, 4], ["press"],
+        value: "https://example.test/watch?v=abcdefghijk"),
+      MockBackend.node(
+        .link, "Unknown query", [0, 5], ["press"],
+        value: "https://www.youtube.com/watch?v=01234567890&list=private"),
+      MockBackend.node(.button, "Subscribe", [0, 6], ["press"]),
+      MockBackend.node(.button, "Share", [0, 7], ["press"]),
+    ]
+    let backend = MockBackend(nodes: nodes)
+    let adapter = BrowserAccessibilityAdapter(backend: backend)
+    let page = try bind(adapter)
+    let view = try adapter.read(page)
+    try expect(view.items.map(\.label) == ["Unique video"], "unsafe selectable item admitted")
+    let result = try adapter.perform(
+      .select(
+        itemID: view.items[0].id, generation: view.generation,
+        documentRevision: view.documentRevision), on: page)
+    try expect(result.status == .dispatchedUnverified, "video selection overclaimed")
+    try expect(backend.actions == ["press"], "video selection dispatch")
   case "typed-browser-topology":
     try expect(
       browserAccessibilityAddressRole(
