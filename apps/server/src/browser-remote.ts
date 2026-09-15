@@ -1,4 +1,5 @@
-import { identifier, nativeLabel } from "@ellie/protocol";
+import { browserWebMCPOperationResult, identifier, nativeLabel, result } from "@ellie/protocol";
+import type { Action, BrowserAction, Capability, Result } from "@ellie/protocol";
 import type { BrowserClient } from "./browser-auth.ts";
 
 export const PHONE_APPS = { arc: "Arc", safari: "Safari", messages: "Messages" } as const;
@@ -7,7 +8,7 @@ export interface BrowserRemoteNode {
   id: string;
   label: string;
   online: boolean;
-  capabilities: "app.open"[];
+  capabilities: Capability[];
 }
 export interface BrowserRemote {
   nodes(options?: { signal?: AbortSignal }): Promise<BrowserRemoteNode[]>;
@@ -16,6 +17,11 @@ export interface BrowserRemote {
     app: PhoneApp,
     options?: { signal?: AbortSignal },
   ): Promise<{ ok: boolean; message: string }>;
+  execute?(
+    nodeId: string,
+    action: BrowserAction,
+    options?: { signal?: AbortSignal },
+  ): Promise<Result>;
 }
 
 export function canOpenApps(client: BrowserClient, nodeId: string): boolean {
@@ -97,9 +103,12 @@ export function createBrowserRemote(
         const node = targets
           ? response.find((item) => item?.id === target.id)
           : registered.find((item) => item.id === target.id)?.item;
-        const available =
-          Array.isArray(node?.executionCapabilities ?? node?.capabilities) &&
-          (node.executionCapabilities ?? node.capabilities).includes("app.open");
+        const advertised = Array.isArray(node?.executionCapabilities ?? node?.capabilities)
+          ? (node.executionCapabilities ?? node.capabilities)
+          : [];
+        const available = advertised.some((item: unknown) =>
+          ["app.open", "browser.read", "browser.control"].includes(String(item)),
+        );
         return {
           id: target.id,
           label: target.label,
@@ -109,7 +118,9 @@ export function createBrowserRemote(
             node.lastSeen <= Date.now() + 5000 &&
             Date.now() - node.lastSeen <= 60_000,
           ),
-          capabilities: available ? ["app.open"] : [],
+          capabilities: (["app.open", "browser.read", "browser.control"] as Capability[]).filter(
+            (capability) => advertised.includes(capability),
+          ),
         };
       });
     },
@@ -139,6 +150,34 @@ export function createBrowserRemote(
           ? `Opened ${PHONE_APPS[app]}.`
           : "The app could not be opened. Check the selected Mac.",
       };
+    },
+    async execute(nodeId, browserAction, options) {
+      if (targets && !targets.some((node) => node.id === nodeId))
+        throw new Error("Unknown target.");
+      identifier(nodeId);
+      const response = await upstream.call(
+        "POST",
+        "/v1/commands",
+        { nodeId, action: browserAction },
+        { timeoutMs: 35_000, ...(options?.signal ? { signal: options.signal } : {}) },
+      );
+      const parsed = result(response);
+      if (!Object.hasOwn(parsed, "browser")) throw new Error("Browser command outcome unknown.");
+      const checked = browserWebMCPOperationResult(parsed);
+      const expected =
+        browserAction.tool === "browser.status"
+          ? "status"
+          : browserAction.tool === "browser.read"
+            ? "read"
+            : "command";
+      if (checked.browser.operation !== expected)
+        throw new Error("Browser command outcome unknown.");
+      if (
+        browserAction.tool !== "browser.status" &&
+        checked.browser.revision !== browserAction.revision
+      )
+        throw new Error("Browser command outcome unknown.");
+      return checked;
     },
   };
 }

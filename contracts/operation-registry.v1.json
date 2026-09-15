@@ -296,6 +296,320 @@
           }
         }
       }
+    },
+    {
+      "id": "browser.status",
+      "requiredCapability": "browser.read",
+      "description": "Report the currently authorized browser page binding.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.status"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "browser.read",
+      "requiredCapability": "browser.read",
+      "description": "Read a bounded reviewed view from the authorized browser page.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "view",
+          "revision"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.read"
+          },
+          "view": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "browser.scroll",
+      "requiredCapability": "browser.control",
+      "description": "Scroll the authorized browser page in one fixed direction.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "direction",
+          "revision"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.scroll"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "up",
+              "down",
+              "left",
+              "right"
+            ]
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "browser.search",
+      "requiredCapability": "browser.control",
+      "description": "Submit a bounded search to the authorized browser page.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "query",
+          "revision"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.search"
+          },
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "format": "ellie-browser-query"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "browser.select",
+      "requiredCapability": "browser.control",
+      "description": "Select one opaque item observed in the current browser revision.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "itemId",
+          "revision"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.select"
+          },
+          "itemId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
+      "id": "browser.playback",
+      "requiredCapability": "browser.control",
+      "description": "Dispatch play or pause on the authorized browser page.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "action",
+          "revision"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.playback"
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "play",
+              "pause"
+            ]
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
     }
   ]
 }

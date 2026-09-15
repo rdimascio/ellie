@@ -1417,6 +1417,88 @@ test("native controls expose only granted inventory and finite redacted outcomes
   );
 });
 
+test("native browser commands require the exact read or control grant and preserve unknown", async (t) => {
+  const calls: unknown[] = [];
+  const f = await fixture(undefined, {
+    nodes: async () => [
+      {
+        ...nativeTarget,
+        capabilities: ["app.open", "browser.read", "browser.control"],
+      },
+    ],
+    openApp: async () => ({ ok: true, message: "opened" }),
+    execute: async (_id, action) => {
+      calls.push(action);
+      return {
+        ok: false,
+        message: "Browser action did not confirm completion.",
+        browser: {
+          source: "webmcp",
+          operation: "command",
+          status: "unknown",
+          revision: "a".repeat(64),
+        },
+      };
+    },
+  });
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Browser iPhone",
+    grants: [{ target: nativeTarget.id, capabilities: ["browser.control"] }],
+  });
+  const token = "e".repeat(64);
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token },
+        headers: { "x-ellie-version": "1" },
+      })
+    ).status,
+    200,
+  );
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  assert.deepEqual((await f.request("GET", "/native/v1/nodes", { headers })).body, {
+    nodes: [
+      {
+        id: nativeTarget.id,
+        label: nativeTarget.label,
+        online: true,
+        capabilities: ["browser.control"],
+      },
+    ],
+  });
+  const status = await f.request("POST", "/native/v1/commands", {
+    headers,
+    body: {
+      nodeId: nativeTarget.id,
+      action: { tool: "browser.scroll", direction: "right", revision: "a".repeat(64) },
+    },
+  });
+  assert.equal(status.status, 200);
+  assert.deepEqual(status.body, {
+    outcome: "unknown",
+    result: {
+      ok: false,
+      message: "Browser action did not confirm completion.",
+      browser: {
+        source: "webmcp",
+        operation: "command",
+        status: "unknown",
+        revision: "a".repeat(64),
+      },
+    },
+  });
+  const denied = await f.request("POST", "/native/v1/commands", {
+    headers,
+    body: {
+      nodeId: nativeTarget.id,
+      action: { tool: "browser.status" },
+    },
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(calls.length, 1);
+});
+
 test("native controls reject browser authority, ungranted targets and noncanonical actions before dispatch", async (t) => {
   let calls = 0;
   const f = await fixture(undefined, {

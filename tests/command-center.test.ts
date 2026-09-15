@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { CAPABILITIES, JOB_STATES, action } from "@ellie/protocol";
+import { DESKTOP_CAPABILITIES, JOB_STATES, action } from "@ellie/protocol";
 import {
   DEMO_ACTIONS,
   SCENARIOS,
@@ -10,10 +10,10 @@ import {
   scenarioState,
 } from "../apps/command-center/src/model.ts";
 
-test("synthetic controls follow every registered operation and all job states have honest labels", () => {
+test("synthetic controls keep the legacy desktop set and all job states have honest labels", () => {
   assert.deepEqual(
     DEMO_ACTIONS.map((command) => action(command.action).tool).sort(),
-    [...CAPABILITIES].sort(),
+    [...DESKTOP_CAPABILITIES].sort(),
   );
   assert.deepEqual(Object.keys(STATUS_COPY).sort(), [...JOB_STATES].sort());
   assert.match(STATUS_COPY.unknown.detail, /may have happened.*will not repeat/);

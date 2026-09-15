@@ -75,9 +75,11 @@ export function nativeGrants(value: unknown): NativeGrant[] {
     const checked = Array.isArray(grant.capabilities)
       ? ([...new Set(grant.capabilities)] as unknown[])
       : [];
+    const allowed: Capability[] = ["app.open", "browser.read", "browser.control"];
     if (
-      checked.length !== 1 ||
-      checked[0] !== "app.open" ||
+      checked.length < 1 ||
+      checked.length > allowed.length ||
+      checked.some((capability) => !allowed.includes(capability as Capability)) ||
       !Array.isArray(grant.capabilities) ||
       grant.capabilities.length !== checked.length
     )
