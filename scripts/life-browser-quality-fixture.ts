@@ -33,6 +33,23 @@ export interface LifeBrowserQualityFixture {
   };
   readonly captures: {
     modelMessages: Array<Array<{ role: string; content: string }>>;
+    modelResponseCount: number;
+    modelResponses: Array<{
+      index: number;
+      status?: number;
+      statusText?: string;
+      contentType?: string;
+      outcome: "streaming" | "complete" | "cancelled" | "error";
+      observedBytes: number;
+      truncated: boolean;
+      naturalEof: boolean;
+      bodyUtf8: string;
+      error?: { name: string; message: string };
+    }>;
+    modelResults: Array<
+      | { status: "fulfilled"; plan: unknown }
+      | { status: "rejected"; error: { name: string; message: string } }
+    >;
   };
   readonly syntheticModelGate?: {
     holdNext(): { entered: Promise<void>; release(): void };
@@ -101,7 +118,12 @@ export async function startLifeBrowserQualityFixture(
   const assetsDir = resolve("apps/life-ui/dist");
   const assets = await stat(join(assetsDir, "index.html"));
   if (!assets.isFile()) throw new Error("Build apps/life-ui before starting the quality fixture.");
-  const captures: LifeBrowserQualityFixture["captures"] = { modelMessages: [] };
+  const captures: LifeBrowserQualityFixture["captures"] = {
+    modelMessages: [],
+    modelResponseCount: 0,
+    modelResponses: [],
+    modelResults: [],
+  };
   const configuredModel = options.model ?? { mode: "synthetic" as const };
   let pendingGate:
     | { entered(): void; released: Promise<void>; release(): void; consumed: boolean }
@@ -125,7 +147,104 @@ export async function startLifeBrowserQualityFixture(
       messages: Array<{ role: string; content: string }>;
     };
     captures.modelMessages.push(structuredClone(body.messages));
-    if (configuredModel.mode === "loopback") return fetch(input, init);
+    if (configuredModel.mode === "loopback") {
+      const index = captures.modelResponseCount++;
+      const retained: Buffer[] = [];
+      let retainedBytes = 0;
+      const entry: LifeBrowserQualityFixture["captures"]["modelResponses"][number] = {
+        index,
+        outcome: "streaming",
+        observedBytes: 0,
+        truncated: false,
+        naturalEof: false,
+        bodyUtf8: "",
+      };
+      if (captures.modelResponses.length < 64) captures.modelResponses.push(entry);
+      let settled = false;
+      const finish = (outcome: typeof entry.outcome, naturalEof: boolean, error?: unknown) => {
+        if (settled) return false;
+        settled = true;
+        entry.outcome = outcome;
+        entry.naturalEof = naturalEof;
+        entry.bodyUtf8 = Buffer.concat(retained, retainedBytes).toString("utf8");
+        if (error !== undefined)
+          entry.error = {
+            name: error instanceof Error ? error.name.slice(0, 200) : "UnknownError",
+            message: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+          };
+        return true;
+      };
+      let response: Response;
+      try {
+        response = await fetch(input, init);
+      } catch (error) {
+        finish("error", false, error);
+        throw error;
+      }
+      entry.status = response.status;
+      entry.statusText = response.statusText;
+      entry.contentType = response.headers.get("content-type") ?? undefined;
+      if (!response.body) {
+        finish("complete", true);
+        return response;
+      }
+      const reader = response.body.getReader();
+      let released = false;
+      const releaseReader = () => {
+        if (released) return;
+        released = true;
+        try {
+          reader.releaseLock();
+        } catch {
+          // Capture cleanup must not replace the transport's original outcome.
+        }
+      };
+      const body = new ReadableStream<Uint8Array>(
+        {
+          async pull(controller) {
+            try {
+              const next = await reader.read();
+              if (settled) return;
+              if (next.done) {
+                finish("complete", true);
+                releaseReader();
+                controller.close();
+                return;
+              }
+              const chunk = next.value;
+              entry.observedBytes += chunk.byteLength;
+              const remaining = 32 * 1024 - retainedBytes;
+              if (remaining > 0) {
+                const kept = Buffer.from(chunk.subarray(0, remaining));
+                retained.push(kept);
+                retainedBytes += kept.byteLength;
+              }
+              if (chunk.byteLength > remaining) entry.truncated = true;
+              controller.enqueue(chunk);
+            } catch (error) {
+              if (settled) return;
+              finish("error", false, error);
+              releaseReader();
+              controller.error(error);
+            }
+          },
+          async cancel(reason) {
+            finish("cancelled", false, reason);
+            try {
+              await reader.cancel(reason);
+            } finally {
+              releaseReader();
+            }
+          },
+        },
+        { highWaterMark: 0 },
+      );
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    }
     const gate = pendingGate;
     if (gate && !gate.consumed) {
       gate.consumed = true;
@@ -160,10 +279,31 @@ export async function startLifeBrowserQualityFixture(
       ],
     });
   };
-  const model: LifeModel =
+  const underlyingModel: LifeModel =
     configuredModel.mode === "loopback"
       ? new LocalOpenAIModel(configuredModel.url, configuredModel.model, captureFetch)
       : new LocalOpenAIModel("http://127.0.0.1:8080/v1", "synthetic-browser-quality", captureFetch);
+  const model: LifeModel = {
+    async plan(request, signal, onProgress) {
+      try {
+        const plan = await underlyingModel.plan(request, signal, onProgress);
+        captures.modelResults.push({ status: "fulfilled", plan: structuredClone(plan) });
+        return plan;
+      } catch (error) {
+        captures.modelResults.push({
+          status: "rejected",
+          error: {
+            name: error instanceof Error ? error.name.slice(0, 200) : "UnknownError",
+            message: (error instanceof Error ? error.message : String(error)).slice(0, 2_000),
+          },
+        });
+        throw error;
+      }
+    },
+    suggestImprovement: underlyingModel.suggestImprovement?.bind(underlyingModel),
+    previewImprovement: underlyingModel.previewImprovement?.bind(underlyingModel),
+    build: underlyingModel.build?.bind(underlyingModel),
+  };
   const readiness = new LocalModelReadiness(
     configuredModel.mode === "loopback"
       ? { endpoint: configuredModel.url, model: configuredModel.model }
