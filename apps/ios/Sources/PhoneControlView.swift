@@ -3,11 +3,13 @@ import SwiftUI
 struct PhoneControlView: View {
   @Environment(\.scenePhase) private var scenePhase
   @StateObject private var store: PhoneControlStore
+  @StateObject private var browser: BrowserPhoneControlStore
   private let credential: NativeEnrollmentCredential
 
   init(credential: NativeEnrollmentCredential, store: PhoneControlStore? = nil) {
     self.credential = credential
     _store = StateObject(wrappedValue: store ?? PhoneControlStore(credential: credential))
+    _browser = StateObject(wrappedValue: BrowserPhoneControlStore(credential: credential))
   }
 
   var body: some View {
@@ -40,10 +42,17 @@ struct PhoneControlView: View {
 
       Section("Voice") {
         NavigationLink {
-          SpeechTurnView(credential: credential, controls: store)
+          SpeechTurnView(credential: credential, controls: store, browser: browser)
         } label: {
           Label("Record a command", systemImage: "waveform")
         }
+      }
+
+      Section("Browser") {
+        NavigationLink("Control selected Mac browser") {
+          BrowserControlView(controls: store, browser: browser)
+        }
+        .disabled(store.selectedNode == nil)
       }
 
       status

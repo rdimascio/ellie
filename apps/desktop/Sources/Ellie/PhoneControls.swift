@@ -12,7 +12,7 @@ struct PhoneControlNode: Equatable, Identifiable, Sendable {
   let label: String
   let online: Bool
   let capabilities: [String]
-  var canOpenApps: Bool { online && capabilities == ["app.open"] }
+  var canOpenApps: Bool { online && capabilities.contains("app.open") }
 }
 
 enum PhoneCommandOutcome: Equatable, Sendable {

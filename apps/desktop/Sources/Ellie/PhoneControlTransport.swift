@@ -28,7 +28,8 @@ final class PhoneControlTransport: PhoneControlTransporting, @unchecked Sendable
   ) async throws -> PhoneCommandOutcome {
     guard
       credential.client.grants.contains(where: {
-        $0.target == nodeID && $0.capabilities == ["app.open"]
+        $0.target == nodeID && validNativeCapabilities($0.capabilities)
+          && $0.capabilities.contains("app.open")
       })
     else { throw PhoneControlFailure.rejected }
     let body = try JSONSerialization.data(withJSONObject: [
@@ -101,20 +102,26 @@ func decodePhoneControlNodes(_ data: Data, grants: [NativeGrant]) throws -> [Pho
     Set(object.keys) == Set(["nodes"]), let rawNodes = object["nodes"] as? [[String: Any]],
     rawNodes.count <= 16
   else { throw PhoneControlFailure.invalidResponse }
-  let allowed = Set(grants.filter { $0.capabilities == ["app.open"] }.map(\.target))
+  guard let checkedGrants = try? validateNativeGrants(grants) else {
+    throw PhoneControlFailure.invalidResponse
+  }
+  let allowed = Dictionary(
+    uniqueKeysWithValues: checkedGrants.map { ($0.target, Set($0.capabilities)) })
   var seen = Set<String>()
   return try rawNodes.map { raw in
     guard Set(raw.keys) == Set(["id", "label", "online", "capabilities"]),
-      let id = raw["id"] as? String, validNativeIdentifier(id), allowed.contains(id),
+      let id = raw["id"] as? String, validNativeIdentifier(id), let granted = allowed[id],
       seen.insert(id).inserted,
       let label = raw["label"] as? String, validNativeLabel(label),
       let onlineValue = raw["online"] as? NSNumber,
       CFGetTypeID(onlineValue) == CFBooleanGetTypeID(),
       let capabilities = raw["capabilities"] as? [String],
-      capabilities == [] || capabilities == ["app.open"]
+      validNativeCapabilities(capabilities, allowEmpty: true),
+      Set(capabilities).isSubset(of: granted)
     else { throw PhoneControlFailure.invalidResponse }
     return PhoneControlNode(
-      id: id, label: label, online: onlineValue.boolValue, capabilities: capabilities)
+      id: id, label: label, online: onlineValue.boolValue,
+      capabilities: nativeCapabilityOrder.filter(capabilities.contains))
   }
 }
 

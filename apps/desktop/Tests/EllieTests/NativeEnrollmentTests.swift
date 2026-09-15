@@ -36,6 +36,54 @@ final class NativeEnrollmentTests: XCTestCase {
     XCTAssertFalse(validNativeIdentifier("éllie"))
   }
 
+  func testNativeGrantsAdmitOnlyExplicitUniqueCapabilitySubsetsAndPreserveOrder() throws {
+    XCTAssertEqual(
+      try validateNativeGrants([
+        NativeGrant(
+          target: "studio-mac", capabilities: ["browser.control", "app.open", "browser.read"])
+      ]),
+      [
+        NativeGrant(
+          target: "studio-mac", capabilities: ["browser.control", "app.open", "browser.read"])
+      ])
+    XCTAssertEqual(
+      try validateNativeGrants([
+        NativeGrant(target: "browser-mac", capabilities: ["browser.read"])
+      ]),
+      [NativeGrant(target: "browser-mac", capabilities: ["browser.read"])])
+    for capabilities in [
+      [], ["app.open", "app.open"], ["browser.read", "unknown"],
+      ["app.open", "browser.read", "browser.control", "unknown"],
+    ] {
+      XCTAssertThrowsError(
+        try validateNativeGrants([
+          NativeGrant(target: "studio-mac", capabilities: capabilities)
+        ]))
+    }
+  }
+
+  @MainActor
+  func testMixedGrantOrderSurvivesPairingAndExactClientCorrelation() async throws {
+    let json =
+      #"{"version":1,"origin":"https://ellie.local:8444","certificateSha256":"\#(String(repeating: "a", count: 64))","invitation":"\#(String(repeating: "b", count: 64))","expiresAt":1893456600000,"label":"Phone","grants":[{"target":"studio-mac","capabilities":["browser.control","app.open"]}]}"#
+    let vault = MemoryVault()
+    let transport = FakeTransport()
+    let store = NativeEnrollmentStore(vault: vault, transport: transport)
+    store.startScanning()
+    await eventually { if case .scanning = store.phase { true } else { false } }
+    store.scanned(envelope(json), now: referenceTime)
+    store.confirm()
+    await eventually { if case .enrolled = store.phase { true } else { false } }
+    guard case .active(let credential) = await vault.value else {
+      return XCTFail("Expected active credential")
+    }
+    XCTAssertEqual(
+      credential.client.grants,
+      [NativeGrant(target: "studio-mac", capabilities: ["browser.control", "app.open"])])
+    let pairCount = await transport.pairs
+    XCTAssertEqual(pairCount, 1)
+  }
+
   func testSharedCanonicalPairingFixtures() throws {
     struct Fixtures: Decodable {
       struct Valid: Decodable {
