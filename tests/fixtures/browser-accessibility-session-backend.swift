@@ -30,6 +30,14 @@ private final class SessionBackend: BrowserAccessibilityBackend {
         enabled: false, path: [0, index + 2], actions: [])
     }
     #endif
+    #if ELLIE_AX_LARGE_ITEMS
+    nodes += (0..<64).map { index in
+      BrowserAccessibilityNode(reference: BrowserAccessibilityElementReference(SessionToken()),
+        kind: .link, label: String(format: "Video %02d ", index) + String(repeating: "x", count: 241),
+        value: "https://www.youtube.com/watch?v=" + String(format: "%011d", index),
+        enabled: true, path: [0, index + 2], actions: ["press"])
+    }
+    #endif
     return BrowserAccessibilitySnapshot(
       browser: .arc, processID: processID, launchIdentity: "fixture-launch",
       exactURL: "https://www.youtube.com/watch?v=iTHUUjTA-LI", window: window,
