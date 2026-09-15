@@ -209,8 +209,8 @@ test(
       if (result.browser.operation !== "read" || result.browser.status !== "completed")
         throw new Error("Expected a completed read.");
       const summary = result.browser.view.summary;
-      assert.equal(summary, Array(4).fill("🌙".repeat(200)).join(" "));
-      assert.ok(summary.length <= 2_000);
+      assert.equal(summary, Array(2).fill("🌙".repeat(200)).join(" "));
+      assert.ok(Buffer.byteLength(summary) <= 2_000);
       assert.deepEqual(
         result.browser.view.items.map((item) => item.label),
         ["Earth from space"],
