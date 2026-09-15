@@ -172,10 +172,9 @@ final class BrowserAccessibilityAdapter {
           textBytes += size
         }
       }
-      guard items.count < Self.maximumItems,
-        (node.kind == .link || node.kind == .button), node.enabled,
-        let label = node.label, validLabel(label), node.actions.contains("press")
-      else { continue }
+    }
+    for node in selectableVideoLinks(snapshot.nodes).prefix(Self.maximumItems) {
+      guard let label = node.label else { continue }
       let id = UUID().uuidString.lowercased()
       items.append(BrowserAccessibilityItem(id: id, label: label))
       retained[id] = node
@@ -242,7 +241,7 @@ final class BrowserAccessibilityAdapter {
     case .playback(let playback, _, _):
       let candidates = snapshot.nodes.filter {
         $0.kind == .button && $0.enabled && $0.actions.contains("press")
-          && $0.label?.lowercased() == playback.rawValue
+          && playbackLabel($0.label, matches: playback)
       }
       guard candidates.count == 1, let control = candidates.first else {
         throw BrowserAccessibilityFailure.ambiguous
@@ -313,6 +312,52 @@ final class BrowserAccessibilityAdapter {
   private func validLabel(_ value: String) -> Bool {
     !value.isEmpty && value.utf16.count <= 256 && value.utf8.count <= 1_024
       && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  }
+
+  private func selectableVideoLinks(_ nodes: [BrowserAccessibilityNode]) -> [BrowserAccessibilityNode] {
+    var candidates: [(node: BrowserAccessibilityNode, videoID: String)] = []
+    var counts: [String: Int] = [:]
+    for node in nodes {
+      guard node.kind == .link, node.enabled, node.actions.contains("press"),
+        let label = node.label, validLabel(label), let value = node.value,
+        let videoID = youtubeWatchVideoID(value)
+      else { continue }
+      candidates.append((node, videoID))
+      counts[videoID, default: 0] += 1
+    }
+    return candidates.compactMap { counts[$0.videoID] == 1 ? $0.node : nil }
+  }
+
+  private func youtubeWatchVideoID(_ value: String) -> String? {
+    guard value.utf8.count <= 2_048, let components = URLComponents(string: value),
+      components.scheme == "https", components.host == "www.youtube.com",
+      components.user == nil, components.password == nil, components.fragment == nil,
+      components.path == "/watch", components.url?.absoluteString == value,
+      let queryItems = components.queryItems, !queryItems.isEmpty
+    else { return nil }
+    var videoID: String?
+    for item in queryItems {
+      guard (item.name == "v" || item.name == "pp"), let itemValue = item.value,
+        !itemValue.isEmpty, itemValue.utf8.count <= 256
+      else { return nil }
+      if item.name == "v" {
+        guard videoID == nil,
+          itemValue.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil
+        else { return nil }
+        videoID = itemValue
+      }
+    }
+    return videoID
+  }
+
+  private func playbackLabel(
+    _ label: String?, matches playback: BrowserAccessibilityPlayback
+  ) -> Bool {
+    guard let label, validLabel(label) else { return false }
+    switch playback {
+    case .play: return label == "Play (k)" || label == "Play keyboard shortcut k"
+    case .pause: return label == "Pause (k)" || label == "Pause keyboard shortcut k"
+    }
   }
 }
 
