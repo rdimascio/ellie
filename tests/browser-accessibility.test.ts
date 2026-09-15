@@ -105,11 +105,14 @@ test(
       "identity-and-generation",
       "cancel-and-bounds",
       "search-partial",
+      "search-submit-plans",
+      "search-target-revalidation",
       "ambiguous-and-playback",
       "youtube-item-policy",
       "typed-browser-topology",
       "raw-ax-projection",
       "real-tree-bounds",
+      "summary-contract-bound",
     ]) {
       const result = await runOwned(executable, [scenario], 5_000);
       assert.equal(result.signal, null, scenario);

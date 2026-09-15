@@ -40,7 +40,7 @@ struct BrowserAccessibilityOutcome: Equatable, Sendable {
   let documentRevision: String
 }
 
-struct BrowserAccessibilityItem: Equatable, Sendable {
+struct BrowserAccessibilityItem: Encodable, Equatable, Sendable {
   let id: String
   let label: String
 }
@@ -143,9 +143,30 @@ final class BrowserAccessibilityAdapter {
     let items: [String: BrowserAccessibilityNode]
   }
 
+  private enum SearchSubmission: Equatable {
+    case confirm
+    case press
+  }
+
+  private struct SearchPlan {
+    let field: BrowserAccessibilityNode
+    let target: BrowserAccessibilityNode
+    let submission: SearchSubmission
+  }
+
+  private struct ReadContent: Encodable {
+    let title: String?
+    let summary: String?
+    let items: [BrowserAccessibilityItem]
+  }
+
   private static let maximumQueryUTF16 = 200
-  private static let maximumTextBytes = 8_192
+  private static let maximumLabelBytes = 500
+  private static let maximumTextBytes = 2_000
   private static let maximumItems = 64
+  // The session frame is 16,384 bytes. This leaves more than 4 KiB for the response envelope,
+  // including its bounded request, session, generation, and revision identifiers.
+  private static let maximumReadContentBytes = 12_000
   private let backend: BrowserAccessibilityBackend
   private var observed: Observed?
 
@@ -176,31 +197,43 @@ final class BrowserAccessibilityAdapter {
     guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
     let snapshot = try rebound(page)
     guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
-    var items: [BrowserAccessibilityItem] = []
-    var retained: [String: BrowserAccessibilityNode] = [:]
     var text: [String] = []
     var textBytes = 0
     for node in snapshot.nodes {
       if node.kind == .text, let label = node.label, !label.isEmpty {
-        let size = label.utf8.count + (text.isEmpty ? 0 : 1)
-        if textBytes + size <= Self.maximumTextBytes {
+        let separatorSize = text.isEmpty ? 0 : 1
+        let byteSize = label.utf8.count + separatorSize
+        if textBytes + byteSize <= Self.maximumTextBytes {
           text.append(label)
-          textBytes += size
+          textBytes += byteSize
         }
       }
     }
-    for node in selectableVideoLinks(snapshot.nodes).prefix(Self.maximumItems) {
+    let title = snapshot.title.flatMap { validLabel($0) ? $0 : nil }
+    let summary = text.isEmpty ? nil : text.joined(separator: " ")
+    var items: [BrowserAccessibilityItem] = []
+    var retained: [String: BrowserAccessibilityNode] = [:]
+    guard let initialBytes = encodedReadContentBytes(title: title, summary: summary, items: items),
+      initialBytes <= Self.maximumReadContentBytes
+    else { throw BrowserAccessibilityFailure.unavailable }
+    for node in selectableVideoLinks(snapshot.nodes) {
+      guard items.count < Self.maximumItems else { break }
       guard let label = node.label else { continue }
       let id = UUID().uuidString.lowercased()
-      items.append(BrowserAccessibilityItem(id: id, label: label))
+      let item = BrowserAccessibilityItem(id: id, label: label)
+      let proposed = items + [item]
+      guard let encodedBytes = encodedReadContentBytes(
+        title: title, summary: summary, items: proposed)
+      else { throw BrowserAccessibilityFailure.unavailable }
+      guard encodedBytes <= Self.maximumReadContentBytes else { continue }
+      items.append(item)
       retained[id] = node
     }
     let generation = UUID().uuidString.lowercased()
     observed = Observed(generation: generation, page: page, items: retained)
     return BrowserAccessibilityObservation(
       generation: generation, documentRevision: page.documentRevision,
-      title: snapshot.title.flatMap { validLabel($0) ? $0 : nil },
-      summary: text.isEmpty ? nil : text.joined(separator: " "), items: items)
+      title: title, summary: summary, items: items)
   }
 
   func perform(
@@ -226,23 +259,34 @@ final class BrowserAccessibilityAdapter {
       return outcome(.scroll, .dispatchedUnverified, page)
     case .search(let query, _, _):
       guard validQuery(query) else { throw BrowserAccessibilityFailure.invalid }
-      let candidates = snapshot.nodes.filter {
-        $0.kind == .search && $0.enabled && $0.actions.contains("set-value")
-          && $0.actions.contains("confirm")
-      }
-      guard candidates.count == 1, let field = candidates.first else {
-        throw BrowserAccessibilityFailure.ambiguous
+      let selected = try searchPlan(in: snapshot.nodes)
+      guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+      let beforeSet: SearchPlan
+      do {
+        let fresh = try rebound(page)
+        guard let rebound = rebindSearchPlan(selected, in: fresh.nodes) else {
+          return outcome(.search, .unknown, page)
+        }
+        beforeSet = rebound
+      } catch {
+        return outcome(.search, .unknown, page)
       }
       guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
-      do { try backend.setValue(query, on: field.reference) }
+      do { try backend.setValue(query, on: beforeSet.field.reference) }
       catch { return outcome(.search, .unknown, page) }
       do {
         guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
         let afterSet = try rebound(page)
-        guard let reboundField = uniqueRebind(field, in: afterSet.nodes) else {
+        guard let ready = rebindSearchPlan(beforeSet, in: afterSet.nodes) else {
           throw BrowserAccessibilityFailure.partialUnknown
         }
-        try backend.perform("confirm", on: reboundField.reference)
+        guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
+        switch ready.submission {
+        case .confirm:
+          try backend.perform("confirm", on: ready.target.reference)
+        case .press:
+          try backend.perform("press", on: ready.target.reference)
+        }
         return outcome(.search, .dispatchedUnverified, page)
       } catch {
         return outcome(.search, .unknown, page)
@@ -292,6 +336,37 @@ final class BrowserAccessibilityAdapter {
     return matches.count == 1 ? matches[0] : nil
   }
 
+  private func searchPlan(in nodes: [BrowserAccessibilityNode]) throws -> SearchPlan {
+    let fields = nodes.filter {
+      $0.kind == .search && $0.enabled && $0.actions.contains("set-value")
+    }
+    guard fields.count == 1, let field = fields.first else {
+      throw BrowserAccessibilityFailure.ambiguous
+    }
+    if field.actions.contains("confirm") {
+      return SearchPlan(field: field, target: field, submission: .confirm)
+    }
+    let buttons = nodes.filter {
+      $0.kind == .button && $0.label == "Search" && $0.enabled && $0.actions.contains("press")
+    }
+    guard buttons.count == 1, let button = buttons.first else {
+      throw BrowserAccessibilityFailure.ambiguous
+    }
+    return SearchPlan(field: field, target: button, submission: .press)
+  }
+
+  private func rebindSearchPlan(
+    _ prior: SearchPlan, in nodes: [BrowserAccessibilityNode]
+  ) -> SearchPlan? {
+    guard let selected = try? searchPlan(in: nodes), selected.submission == prior.submission,
+      let field = uniqueRebind(prior.field, in: nodes),
+      let target = uniqueRebind(prior.target, in: nodes),
+      backend.same(selected.field.reference, field.reference),
+      backend.same(selected.target.reference, target.reference)
+    else { return nil }
+    return SearchPlan(field: field, target: target, submission: prior.submission)
+  }
+
   private func commandValues(_ command: BrowserAccessibilityCommand) -> (generation: String, revision: String) {
     switch command {
     case .scroll(_, let generation, let revision), .search(_, let generation, let revision),
@@ -327,8 +402,16 @@ final class BrowserAccessibilityAdapter {
   }
 
   private func validLabel(_ value: String) -> Bool {
-    !value.isEmpty && value.utf16.count <= 256 && value.utf8.count <= 1_024
+    !value.isEmpty && value.utf16.count <= 256 && value.utf8.count <= Self.maximumLabelBytes
       && !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+  }
+
+  private func encodedReadContentBytes(
+    title: String?, summary: String?, items: [BrowserAccessibilityItem]
+  ) -> Int? {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+    return try? encoder.encode(ReadContent(title: title, summary: summary, items: items)).count
   }
 
   private func selectableVideoLinks(_ nodes: [BrowserAccessibilityNode]) -> [BrowserAccessibilityNode] {
@@ -348,13 +431,19 @@ final class BrowserAccessibilityAdapter {
   private func youtubeWatchVideoID(_ value: String) -> String? {
     guard value.utf8.count <= 2_048, let components = URLComponents(string: value),
       components.scheme == "https", components.host == "www.youtube.com",
-      components.user == nil, components.password == nil, components.fragment == nil,
+      components.port == nil, components.user == nil, components.password == nil,
+      components.fragment == nil,
       components.path == "/watch", components.url?.absoluteString == value,
-      let queryItems = components.queryItems, !queryItems.isEmpty
+      let queryItems = components.queryItems, !queryItems.isEmpty,
+      let encodedQuery = components.percentEncodedQuery
     else { return nil }
+    let encodedItems = encodedQuery.split(separator: "&", omittingEmptySubsequences: false)
+    guard encodedItems.count == queryItems.count else { return nil }
     var videoID: String?
-    for item in queryItems {
-      guard (item.name == "v" || item.name == "pp"), let itemValue = item.value,
+    var timestampSeen = false
+    for (item, encodedItem) in zip(queryItems, encodedItems) {
+      guard (item.name == "v" || item.name == "pp" || item.name == "t"),
+        let itemValue = item.value,
         !itemValue.isEmpty, itemValue.utf8.count <= 256
       else { return nil }
       if item.name == "v" {
@@ -362,9 +451,22 @@ final class BrowserAccessibilityAdapter {
           itemValue.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil
         else { return nil }
         videoID = itemValue
+      } else if item.name == "t" {
+        guard !timestampSeen, encodedItem == "t=\(itemValue)",
+          validYoutubeTimestamp(itemValue)
+        else { return nil }
+        timestampSeen = true
       }
     }
     return videoID
+  }
+
+  private func validYoutubeTimestamp(_ value: String) -> Bool {
+    guard value.range(of: #"^(0|[1-9][0-9]{0,4})s?$"#, options: .regularExpression) != nil
+    else { return false }
+    let digits = value.last == "s" ? value.dropLast() : value[...]
+    guard let seconds = Int(digits) else { return false }
+    return seconds <= 86_400
   }
 
   private func playbackLabel(
