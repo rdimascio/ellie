@@ -8,6 +8,8 @@ In-page media control is a core requirement: catalogue scrolling, row navigation
 
 A separate, opt-in **Ellie Life** web client exercises conversational memory, teaching, background work and generated applications against persistent local stores; see its [implementation checkpoint](overnight-build.md) and [runbook](life-runbook.md). It has not been connected to native clients or paired-device identity.
 
+The [continuous improvement queue foundation](continuous-improvement-queue.md) provides private work records and fail-closed owner leases for one Life quality scenario. Candidate commit and review references remain unverified proposals. It does not launch autonomous workers, requeue uncertain work, create or merge pull requests, deploy changes or grant release acceptance.
+
 ## Current foundation
 
 The repository currently provides a developer milestone, not a household product:
