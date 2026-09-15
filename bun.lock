@@ -10,6 +10,7 @@
         "@types/qrcode": "1.5.6",
         "@types/react": "19.3.0",
         "@types/react-dom": "19.3.0",
+        "agent-browser": "0.37.1",
         "oxfmt": "0.67.0",
         "oxlint": "1.82.0",
         "typescript": "^5.9.0",
@@ -444,6 +445,8 @@
     "@types/react": ["@types/react@19.3.0", "", { "dependencies": { "csstype": "^3.2.2" } }, "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg=="],
 
     "@types/react-dom": ["@types/react-dom@19.3.0", "", { "peerDependencies": { "@types/react": "^19.3.0" } }, "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q=="],
+
+    "agent-browser": ["agent-browser@0.37.1", "", { "bin": { "agent-browser": "./bin/agent-browser.js" } }, "sha512-NDojTSXrIq7zS090T0VwI1uzBryZWvewgxXvS0swj8/5GGnziBZLmyhEkfETO8n4n3DsJpZbZkq9F/MV2rIQKw=="],
 
     "ansi-regex": ["ansi-regex@5.0.1", "", {}, "sha512-quJQXlTSUGL2LH9SUXo8VwsY4soanhgo6LNSm84E1LBcE8s3O0wpdiRzyR9z/ZZJMlMWv37qOOb9pdJlMUEKFQ=="],
 
