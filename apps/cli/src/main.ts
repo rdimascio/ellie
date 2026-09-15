@@ -1,9 +1,10 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, lstat, readFile, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
+import { homedir } from "node:os";
 import {
   stateDir,
   ensureState,
@@ -24,6 +25,11 @@ import { JobStore } from "../../server/src/jobs.ts";
 import { loadBrowserAssets } from "../../server/src/browser-assets.ts";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
+import { BrowserNodeExecutor } from "../../node/src/browser-executor.ts";
+import { BrowserWebMCPOperations } from "../../node/src/browser-operations.ts";
+import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
+import { startBrowserWebMCPBridge } from "../../node/src/browser-webmcp-bridge.ts";
+import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
 
 import { generateCertificate } from "./certificate.ts";
 import { generateBrowserTlsIdentity } from "./certificate.ts";
@@ -146,6 +152,15 @@ function interruptSignal(): { signal: AbortSignal; dispose: () => void } {
   };
 }
 async function main(): Promise<void> {
+  if (args[0] === "browser-webmcp" && args[1] === "native-host") {
+    if (args.length !== 2) throw new Error("Browser native host invocation rejected.");
+    try {
+      await runBrowserWebMCPNativeHost({ home: homedir() });
+    } catch {
+      throw new Error("Browser native host unavailable.");
+    }
+    return;
+  }
   if (args[0] === "life") {
     const { runLife } = await import("../../life/src/main.ts");
     await runLife(args.slice(1));
@@ -524,10 +539,33 @@ async function main(): Promise<void> {
         }
       });
     const native = new MacOSExecutor();
+    let browserBridge: Awaited<ReturnType<typeof startBrowserWebMCPBridge>> | undefined;
     try {
+      const browserRegistryPath = join(stateDir, "browser-operations.json");
+      const browserEnabled =
+        config.executionEnabled &&
+        (await lstat(browserRegistryPath).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT") return false;
+            throw new Error("Reviewed browser configuration is unavailable.");
+          },
+        ));
+      const browserRegistry = browserEnabled
+        ? loadReviewedBrowserRegistry(browserRegistryPath)
+        : undefined;
+      browserBridge = browserRegistry
+        ? await startBrowserWebMCPBridge({ home: dirname(stateDir) })
+        : undefined;
+      const executor = browserBridge
+        ? new BrowserNodeExecutor(
+            native,
+            new BrowserWebMCPOperations(browserBridge, browserRegistry!),
+          )
+        : native;
       await runNode({
         client,
-        executor: config.executionEnabled ? native : undefined,
+        executor: config.executionEnabled ? executor : undefined,
         worker: config.inferenceWorker
           ? new LocalInferenceWorker(config.inferenceWorker)
           : undefined,
@@ -538,6 +576,7 @@ async function main(): Promise<void> {
         onEvent: (event) => serviceLog?.write(event),
       });
     } finally {
+      await browserBridge?.close();
       client.close();
     }
     return;

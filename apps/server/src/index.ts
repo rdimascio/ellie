@@ -429,7 +429,18 @@ export function createEllieServer(options: {
             identifier(body.id) !== session.pending.job.id
           )
             return send(res, 409, { error: "No matching in-flight command." });
-          if (!session.pending.finish(result(body.result)))
+          const outcome = result(body.result);
+          const browserStatus =
+            "browser" in outcome && outcome.browser.operation === "command"
+              ? outcome.browser.status
+              : undefined;
+          const terminal =
+            browserStatus === "unknown"
+              ? ({ state: "unknown", code: "operation_failed" } as const)
+              : browserStatus === "timed_out"
+                ? ({ state: "unknown", code: "timed_out" } as const)
+                : undefined;
+          if (!session.pending.finish(outcome, terminal))
             return send(res, 503, { error: "Job outcome could not be committed." });
           return send(res, 200, { ok: true });
         }
@@ -480,7 +491,17 @@ export function createEllieServer(options: {
             });
           if (node.pending)
             return send(res, 409, { error: "Node is busy. Wait for the current command." });
-          const plan = route(string(body.text, 500), node.context, options.preferences);
+          const suppliedAction = Object.hasOwn(body, "action") ? actions([body.action]) : undefined;
+          if (suppliedAction && !suppliedAction[0]!.tool.startsWith("browser."))
+            return send(res, 400, { error: "Command request rejected." });
+          if (
+            (suppliedAction && (Object.keys(body).length !== 2 || Object.hasOwn(body, "text"))) ||
+            (!suppliedAction && (Object.keys(body).length !== 2 || Object.hasOwn(body, "action")))
+          )
+            return send(res, 400, { error: "Command request rejected." });
+          const plan = suppliedAction
+            ? { actions: suppliedAction, nextContext: node.context }
+            : route(string(body.text, 500), node.context, options.preferences);
           if (!plan)
             return send(res, 200, {
               ok: false,

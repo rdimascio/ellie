@@ -29,6 +29,7 @@ import {
   unavailableActivationPolicySource,
   verifyActivationPolicyBuildDirectory,
 } from "./activation-policy-source.mjs";
+import { browserWebMCPHostWrapper } from "./browser-webmcp-host-wrapper.ts";
 
 const unavailablePolicyBytes = Buffer.from("ELLIE-ACTIVATION-POLICY-UNAVAILABLE-V1\n");
 
@@ -971,6 +972,11 @@ export async function buildServicePayload(options) {
       destination: payload,
       architecture,
     });
+    await writeFile(join(payload, "bin/ellie-browser-webmcp-host"), browserWebMCPHostWrapper(), {
+      mode: 0o755,
+      flag: "wx",
+    });
+    await chmod(join(payload, "bin/ellie-browser-webmcp-host"), 0o755);
     const components = await stageApplication(buildSource, payload, {
       created,
     });
