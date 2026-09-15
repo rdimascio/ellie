@@ -51,19 +51,24 @@ struct NativePairingPayload: Codable, Equatable, Sendable {
       let label = object["label"] as? String, validNativeLabel(label),
       let rawGrants = object["grants"] as? [[String: Any]], (1...16).contains(rawGrants.count)
     else { throw NativeEnrollmentFailure.invalidCode }
-    let grants = try validateNativeGrants(
-      rawGrants.map { raw in
+    let decodedGrants = try rawGrants.map { raw in
         guard Set(raw.keys) == Set(["target", "capabilities"]),
           let target = raw["target"] as? String,
           let capabilities = raw["capabilities"] as? [String]
         else { throw NativeEnrollmentFailure.invalidCode }
         return NativeGrant(target: target, capabilities: capabilities)
-      })
-    let result = Self(
+      }
+    guard (try? validateNativeGrants(decodedGrants)) != nil else {
+      throw NativeEnrollmentFailure.invalidCode
+    }
+    let canonical = Self(
       version: 1, origin: origin, certificateSha256: pin, invitation: invitation,
-      expiresAt: expires.int64Value, label: label, grants: grants)
-    guard canonicalJSON(result) == data else { throw NativeEnrollmentFailure.invalidCode }
-    return result
+      expiresAt: expires.int64Value, label: label, grants: decodedGrants)
+    guard canonicalJSON(canonical) == data else { throw NativeEnrollmentFailure.invalidCode }
+    return Self(
+      version: 1, origin: origin, certificateSha256: pin, invitation: invitation,
+      expiresAt: expires.int64Value, label: label,
+      grants: try validateNativeGrants(decodedGrants))
   }
 }
 
@@ -266,7 +271,8 @@ private func canonicalJSON(_ payload: NativePairingPayload) -> Data? {
   var encodedGrants: [String] = []
   for grant in payload.grants {
     guard let target = quote(grant.target) else { return nil }
-    encodedGrants.append(#"{"target":\#(target),"capabilities":["app.open"]}"#)
+    let capabilities = grant.capabilities.map { #""\#($0)""# }.joined(separator: ",")
+    encodedGrants.append(#"{"target":\#(target),"capabilities":[\#(capabilities)]}"#)
   }
   return
     #"{"version":1,"origin":\#(origin),"certificateSha256":\#(pin),"invitation":\#(invitation),"expiresAt":\#(payload.expiresAt),"label":\#(label),"grants":[\#(encodedGrants.joined(separator: ","))]}"#
@@ -306,10 +312,23 @@ func validNativeLabel(_ value: String) -> Bool {
 }
 func validateNativeGrants(_ grants: [NativeGrant]) throws -> [NativeGrant] {
   guard (1...16).contains(grants.count),
-    grants.allSatisfy({ validNativeIdentifier($0.target) && $0.capabilities == ["app.open"] }),
+    grants.allSatisfy({
+      validNativeIdentifier($0.target) && validNativeCapabilities($0.capabilities)
+    }),
     Set(grants.map(\.target)).count == grants.count
   else { throw NativeEnrollmentFailure.invalidCode }
   return grants
+}
+
+let nativeCapabilityOrder = ["app.open", "browser.read", "browser.control"]
+
+func validNativeCapabilities(_ capabilities: [String], allowEmpty: Bool = false) -> Bool {
+  guard capabilities.count <= nativeCapabilityOrder.count,
+    allowEmpty || !capabilities.isEmpty,
+    Set(capabilities).count == capabilities.count,
+    capabilities.allSatisfy({ nativeCapabilityOrder.contains($0) })
+  else { return false }
+  return true
 }
 func canonicalNativeOrigin(_ value: String) -> URL? {
   guard value.utf8.count <= 2_048, value.hasPrefix("https://"), let url = URL(string: value),

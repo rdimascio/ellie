@@ -130,6 +130,11 @@ export class BrowserWebMCPOperations {
       this.observed.clear();
       this.currentRevision = nextRevision;
     }
+    if (availability === "accessibility") {
+      this.observed.clear();
+      this.currentRevision = undefined;
+      return "unsupported";
+    }
     return checked;
   }
   private reviewed(
