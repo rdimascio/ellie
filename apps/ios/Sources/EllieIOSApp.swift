@@ -8,8 +8,17 @@ struct EllieIOSApp: App {
 
     var body: some Scene {
         WindowGroup {
+            #if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
+                BrowserVoiceUITestFixtureView()
+            } else {
+                IOSDashboardList(store: store, enrollment: enrollment)
+                    .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
+            }
+            #else
             IOSDashboardList(store: store, enrollment: enrollment)
                 .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
+            #endif
         }
     }
 }

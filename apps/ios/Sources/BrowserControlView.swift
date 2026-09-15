@@ -48,6 +48,7 @@ struct BrowserControlView: View {
               Button("\(index + 1). \(item.label)") {
                 browser.perform(.openResult(index: index + 1), on: controls.selectedNode)
               }
+              .accessibilityIdentifier("browser-result-\(index + 1)")
               .disabled(browser.isBusy)
             }
           }
@@ -74,7 +75,11 @@ struct BrowserControlView: View {
     case .sending(let label): Section { ProgressView("Sending \(label)…") }
     case .cancelling: Section { ProgressView("Stopping…") }
     case .outcome(let message): Section("Result") { Label(message, systemImage: "checkmark.circle") }
-    case .unknown(let message): Section("Result") { Label(message, systemImage: "questionmark.circle") }
+    case .unknown(let message):
+      Section("Result") {
+        Label(message, systemImage: "questionmark.circle")
+          .accessibilityIdentifier("browser-status-unknown")
+      }
     case .failed(let message): Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked: Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
     }
