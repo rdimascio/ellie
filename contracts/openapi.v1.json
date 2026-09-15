@@ -1578,6 +1578,18 @@
             "type": "object",
             "additionalProperties": false,
             "required": [
+              "tool"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.refresh"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
               "tool",
               "view",
               "revision"

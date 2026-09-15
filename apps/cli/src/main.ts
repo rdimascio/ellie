@@ -612,7 +612,8 @@ async function main(): Promise<void> {
           ? new BrowserNodeExecutor(
               native,
               new BrowserOperationSelector(
-                (signal) => webmcp.bindingStatus(signal),
+                (signal, refresh) =>
+                  refresh ? webmcp.bindingRefresh(signal) : webmcp.bindingStatus(signal),
                 webmcp,
                 browserAccessibility,
               ),

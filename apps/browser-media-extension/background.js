@@ -9,7 +9,10 @@ const bindingLifetimeMs = 15 * 60 * 1000;
 // Shipping execution remains closed until a provider origin and exact schema receive review.
 const reviewedWebMCPBindings = Object.freeze({});
 let webMCPBinding;
+let webMCPSelection;
+let pendingWebMCPBind;
 let nativePort;
+let nativePortGeneration = 0;
 let nativeConnectionStatus = "idle";
 let nativeConnectionRevision = 0;
 let activeWebMCP;
@@ -46,7 +49,9 @@ function supportedNativeRequest(request) {
   return (
     request?.protocol === nativeProtocol &&
     typeof request.id === "string" &&
-    ["cancel", "binding.status", "tools.list", "tool.execute"].includes(request.type)
+    ["cancel", "binding.status", "binding.refresh", "tools.list", "tool.execute"].includes(
+      request.type,
+    )
   );
 }
 
@@ -169,12 +174,56 @@ function bindingAvailability(origin) {
       : undefined;
 }
 
+function clearWebMCPSelection() {
+  webMCPBinding = undefined;
+  webMCPSelection = undefined;
+}
+
+function liveSelection() {
+  if (!webMCPSelection) throw new Error("unbound");
+  if (Date.now() >= webMCPSelection.expiresAt) {
+    clearWebMCPSelection();
+    throw new Error("unbound");
+  }
+  return webMCPSelection;
+}
+
+async function selectedAnchorTab(selection) {
+  if (!nativePort || selection.nativePortGeneration !== nativePortGeneration)
+    throw new Error("unbound");
+  const tab = await chrome.tabs.get(selection.tabId);
+  if (tab.id !== selection.tabId || tab.windowId !== selection.windowId) {
+    clearWebMCPSelection();
+    throw new Error("page_changed");
+  }
+  if (!tab.url) {
+    clearWebMCPSelection();
+    throw new Error("page_changed");
+  }
+  if (tab.active !== true || tab.status !== "complete") throw new Error("page_changed");
+  const browserWindow = await chrome.windows.get(selection.windowId);
+  if (browserWindow.id !== selection.windowId || browserWindow.focused !== true)
+    throw new Error("page_changed");
+  let origin;
+  try {
+    origin = new URL(tab.url).origin;
+  } catch {
+    clearWebMCPSelection();
+    throw new Error("unsupported_origin");
+  }
+  if (origin !== selection.origin) {
+    clearWebMCPSelection();
+    throw new Error("unsupported_origin");
+  }
+  return tab;
+}
+
 async function currentWebMCPDocument(binding) {
   const tab = await chrome.tabs.get(binding.tabId);
   if (!tab.url) throw new Error("page_changed");
   const url = new URL(tab.url);
   if (url.origin !== binding.origin) {
-    webMCPBinding = undefined;
+    clearWebMCPSelection();
     throw new Error("unsupported_origin");
   }
   if (binding.documentId !== "pending" && tab.url !== binding.url) {
@@ -198,39 +247,139 @@ async function currentWebMCPDocument(binding) {
 }
 
 async function bindWebMCP(tabId) {
-  if (activeWebMCP) throw new Error("busy");
-  const tab = await chrome.tabs.get(tabId);
-  if (!tab.url) throw new Error("unsupported_page");
+  if (activeWebMCP || pendingWebMCPBind) throw new Error("busy");
+  const initial = await chrome.tabs.get(tabId);
+  if (
+    !initial.url ||
+    initial.id !== tabId ||
+    !Number.isInteger(initial.windowId) ||
+    initial.active !== true ||
+    initial.status !== "complete"
+  ) {
+    throw new Error("unsupported_page");
+  }
+  const browserWindow = await chrome.windows.get(initial.windowId);
+  if (browserWindow.id !== initial.windowId || browserWindow.focused !== true) {
+    throw new Error("unsupported_page");
+  }
+  const tab = initial;
   const origin = new URL(tab.url).origin;
   const availability = bindingAvailability(origin);
   if (!availability) throw new Error("unsupported_origin");
-  const binding = await currentWebMCPDocument({
-    bindingId: crypto.randomUUID(),
-    tabId,
-    documentId: "pending",
-    origin,
-    url: tab.url,
-    expiresAt: Date.now() + bindingLifetimeMs,
-    availability,
-    tools: new Map(),
-  });
-  webMCPBinding = binding;
-  connectNativeHost();
-  return {
-    bindingId: binding.bindingId,
-    origin,
-    expiresAt: binding.expiresAt,
-    availability: binding.availability,
-    nativeConnection: nativeConnectionSnapshot(),
-  };
+  const pending = { tabId, navigationGeneration: 0 };
+  pendingWebMCPBind = pending;
+  try {
+    connectNativeHost();
+    const generation = nativePortGeneration;
+    const binding = await currentWebMCPDocument({
+      bindingId: crypto.randomUUID(),
+      tabId,
+      windowId: tab.windowId,
+      documentId: "pending",
+      origin,
+      url: tab.url,
+      expiresAt: Date.now() + bindingLifetimeMs,
+      availability,
+      tools: new Map(),
+    });
+    const after = await chrome.tabs.get(tabId);
+    const afterWindow = await chrome.windows.get(tab.windowId);
+    if (
+      activeWebMCP ||
+      pendingWebMCPBind !== pending ||
+      pending.navigationGeneration !== 0 ||
+      !nativePort ||
+      generation !== nativePortGeneration ||
+      after.id !== tabId ||
+      after.windowId !== tab.windowId ||
+      after.active !== true ||
+      after.status !== "complete" ||
+      after.url !== binding.url ||
+      afterWindow.id !== tab.windowId ||
+      afterWindow.focused !== true
+    )
+      throw new Error("page_changed");
+    webMCPSelection = {
+      tabId,
+      windowId: tab.windowId,
+      origin,
+      expiresAt: binding.expiresAt,
+      availability,
+      nativePortGeneration: generation,
+      navigationGeneration: 0,
+    };
+    webMCPBinding = binding;
+    return {
+      bindingId: binding.bindingId,
+      origin,
+      expiresAt: binding.expiresAt,
+      availability: binding.availability,
+      nativeConnection: nativeConnectionSnapshot(),
+    };
+  } finally {
+    if (pendingWebMCPBind === pending) pendingWebMCPBind = undefined;
+  }
 }
 
 function liveBinding() {
-  if (!webMCPBinding || Date.now() >= webMCPBinding.expiresAt) {
-    webMCPBinding = undefined;
+  if (!webMCPBinding) throw new Error("unbound");
+  if (Date.now() >= webMCPBinding.expiresAt) {
+    clearWebMCPSelection();
     throw new Error("unbound");
   }
   return webMCPBinding;
+}
+
+async function refreshWebMCPBinding(controller) {
+  const selection = liveSelection();
+  const navigationGeneration = selection.navigationGeneration;
+  webMCPBinding = undefined;
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const before = await selectedAnchorTab(selection);
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const injection = chrome.scripting.executeScript({
+    target: { tabId: selection.tabId },
+    world: "MAIN",
+    files: ["webmcp-controller.js"],
+  });
+  let timer;
+  let cancel;
+  const interrupted = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("timed_out")), 2000);
+    cancel = () => reject(new Error("cancelled"));
+    controller.signal.addEventListener("abort", cancel, { once: true });
+  });
+  let installed;
+  try {
+    installed = await Promise.race([injection, interrupted]);
+  } finally {
+    clearTimeout(timer);
+    controller.signal.removeEventListener("abort", cancel);
+  }
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const documentId = installed[0]?.documentId;
+  const after = await selectedAnchorTab(selection);
+  if (
+    !documentId ||
+    webMCPSelection !== selection ||
+    selection.navigationGeneration !== navigationGeneration ||
+    Date.now() >= selection.expiresAt ||
+    before.url !== after.url
+  )
+    throw new Error("page_changed");
+  const binding = {
+    bindingId: crypto.randomUUID(),
+    tabId: selection.tabId,
+    windowId: selection.windowId,
+    documentId,
+    origin: selection.origin,
+    url: after.url,
+    expiresAt: selection.expiresAt,
+    availability: selection.availability,
+    tools: new Map(),
+  };
+  webMCPBinding = binding;
+  return binding;
 }
 
 async function listWebMCPTools() {
@@ -360,6 +509,17 @@ async function handleNativeRequest(request) {
         availability: binding.availability,
       };
     }
+    if (request.type === "binding.refresh") {
+      const binding = await refreshWebMCPBinding(controller);
+      return {
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        origin: binding.origin,
+        url: binding.url,
+        expiresAt: binding.expiresAt,
+        availability: binding.availability,
+      };
+    }
     if (request.type === "tools.list") return await listWebMCPTools();
     if (request.type === "tool.execute") return await executeWebMCP(request, controller);
     throw new Error("unavailable");
@@ -372,10 +532,14 @@ function connectNativeHost() {
   if (nativePort) return nativeConnectionStatus;
   const port = chrome.runtime.connectNative(nativeHost);
   nativePort = port;
+  nativePortGeneration += 1;
   publishNativeConnectionStatus("waiting");
   port.onDisconnect.addListener(() => {
     const missing = nativeHostMissing(chrome.runtime.lastError?.message);
-    if (nativePort === port) nativePort = undefined;
+    if (nativePort === port) {
+      nativePort = undefined;
+      clearWebMCPSelection();
+    }
     activeWebMCP?.controller.abort();
     publishNativeConnectionStatus(missing ? "missing" : "disconnected");
   });
@@ -473,13 +637,35 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   mutationLedgers.delete(tabId);
-  if (webMCPBinding?.tabId === tabId) {
+  if (pendingWebMCPBind?.tabId === tabId) pendingWebMCPBind.navigationGeneration += 1;
+  if (webMCPSelection?.tabId === tabId) {
     activeWebMCP?.controller.abort();
-    webMCPBinding = undefined;
+    clearWebMCPSelection();
   }
 });
 chrome.tabs.onUpdated.addListener((tabId, change) => {
-  if (!webMCPBinding || webMCPBinding.tabId !== tabId || !change.url) return;
+  if (change.url || change.status === "loading") {
+    if (pendingWebMCPBind?.tabId === tabId) pendingWebMCPBind.navigationGeneration += 1;
+  } else {
+    return;
+  }
+  if (!webMCPSelection || webMCPSelection.tabId !== tabId) return;
   activeWebMCP?.controller.abort();
   webMCPBinding = undefined;
+  webMCPSelection.navigationGeneration += 1;
+  if (Date.now() >= webMCPSelection.expiresAt) {
+    clearWebMCPSelection();
+    return;
+  }
+  try {
+    if (change.url && new URL(change.url).origin !== webMCPSelection.origin) clearWebMCPSelection();
+  } catch {
+    clearWebMCPSelection();
+  }
+});
+chrome.tabs.onReplaced.addListener((_addedTabId, removedTabId) => {
+  if (pendingWebMCPBind?.tabId === removedTabId) pendingWebMCPBind.navigationGeneration += 1;
+  if (webMCPSelection?.tabId !== removedTabId) return;
+  activeWebMCP?.controller.abort();
+  clearWebMCPSelection();
 });
