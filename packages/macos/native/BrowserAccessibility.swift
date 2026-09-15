@@ -143,6 +143,17 @@ final class BrowserAccessibilityAdapter {
     let items: [String: BrowserAccessibilityNode]
   }
 
+  private enum SearchSubmission: Equatable {
+    case confirm
+    case press
+  }
+
+  private struct SearchPlan {
+    let field: BrowserAccessibilityNode
+    let target: BrowserAccessibilityNode
+    let submission: SearchSubmission
+  }
+
   private static let maximumQueryUTF16 = 200
   private static let maximumTextBytes = 8_192
   private static let maximumTextUTF16 = 2_000
@@ -233,23 +244,34 @@ final class BrowserAccessibilityAdapter {
       return outcome(.scroll, .dispatchedUnverified, page)
     case .search(let query, _, _):
       guard validQuery(query) else { throw BrowserAccessibilityFailure.invalid }
-      let candidates = snapshot.nodes.filter {
-        $0.kind == .search && $0.enabled && $0.actions.contains("set-value")
-          && $0.actions.contains("confirm")
-      }
-      guard candidates.count == 1, let field = candidates.first else {
-        throw BrowserAccessibilityFailure.ambiguous
+      let selected = try searchPlan(in: snapshot.nodes)
+      guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
+      let beforeSet: SearchPlan
+      do {
+        let fresh = try rebound(page)
+        guard let rebound = rebindSearchPlan(selected, in: fresh.nodes) else {
+          return outcome(.search, .unknown, page)
+        }
+        beforeSet = rebound
+      } catch {
+        return outcome(.search, .unknown, page)
       }
       guard !cancelled() else { throw BrowserAccessibilityFailure.cancelled }
-      do { try backend.setValue(query, on: field.reference) }
+      do { try backend.setValue(query, on: beforeSet.field.reference) }
       catch { return outcome(.search, .unknown, page) }
       do {
         guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
         let afterSet = try rebound(page)
-        guard let reboundField = uniqueRebind(field, in: afterSet.nodes) else {
+        guard let ready = rebindSearchPlan(beforeSet, in: afterSet.nodes) else {
           throw BrowserAccessibilityFailure.partialUnknown
         }
-        try backend.perform("confirm", on: reboundField.reference)
+        guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
+        switch ready.submission {
+        case .confirm:
+          try backend.perform("confirm", on: ready.target.reference)
+        case .press:
+          try backend.perform("press", on: ready.target.reference)
+        }
         return outcome(.search, .dispatchedUnverified, page)
       } catch {
         return outcome(.search, .unknown, page)
@@ -297,6 +319,37 @@ final class BrowserAccessibilityAdapter {
         && backend.same($0.reference, prior.reference)
     }
     return matches.count == 1 ? matches[0] : nil
+  }
+
+  private func searchPlan(in nodes: [BrowserAccessibilityNode]) throws -> SearchPlan {
+    let fields = nodes.filter {
+      $0.kind == .search && $0.enabled && $0.actions.contains("set-value")
+    }
+    guard fields.count == 1, let field = fields.first else {
+      throw BrowserAccessibilityFailure.ambiguous
+    }
+    if field.actions.contains("confirm") {
+      return SearchPlan(field: field, target: field, submission: .confirm)
+    }
+    let buttons = nodes.filter {
+      $0.kind == .button && $0.label == "Search" && $0.enabled && $0.actions.contains("press")
+    }
+    guard buttons.count == 1, let button = buttons.first else {
+      throw BrowserAccessibilityFailure.ambiguous
+    }
+    return SearchPlan(field: field, target: button, submission: .press)
+  }
+
+  private func rebindSearchPlan(
+    _ prior: SearchPlan, in nodes: [BrowserAccessibilityNode]
+  ) -> SearchPlan? {
+    guard let selected = try? searchPlan(in: nodes), selected.submission == prior.submission,
+      let field = uniqueRebind(prior.field, in: nodes),
+      let target = uniqueRebind(prior.target, in: nodes),
+      backend.same(selected.field.reference, field.reference),
+      backend.same(selected.target.reference, target.reference)
+    else { return nil }
+    return SearchPlan(field: field, target: target, submission: prior.submission)
   }
 
   private func commandValues(_ command: BrowserAccessibilityCommand) -> (generation: String, revision: String) {

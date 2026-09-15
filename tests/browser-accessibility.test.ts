@@ -105,6 +105,8 @@ test(
       "identity-and-generation",
       "cancel-and-bounds",
       "search-partial",
+      "search-submit-plans",
+      "search-target-revalidation",
       "ambiguous-and-playback",
       "youtube-item-policy",
       "typed-browser-topology",

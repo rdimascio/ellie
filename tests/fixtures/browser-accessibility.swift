@@ -6,6 +6,7 @@ private final class MockBackend: BrowserAccessibilityBackend {
   var current: BrowserAccessibilitySnapshot
   var actions: [String] = []
   var afterSet: (() -> Void)?
+  var beforeSnapshot: ((Int) -> Void)?
   var snapshotFailure: BrowserAccessibilityFailure?
   var actionFailure = false
   var snapshots = 0
@@ -24,6 +25,7 @@ private final class MockBackend: BrowserAccessibilityBackend {
     -> BrowserAccessibilitySnapshot
   {
     snapshots += 1
+    beforeSnapshot?(snapshots)
     if let snapshotFailure { throw snapshotFailure }
     return current
   }
@@ -65,6 +67,15 @@ private final class MockBackend: BrowserAccessibilityBackend {
       node(.button, "Pause (k)", [0, 4], ["press"]),
     ]
   }
+
+  static func buttonSearchNodes() -> [BrowserAccessibilityNode] {
+    defaultNodes().map { node in
+      guard node.kind == .search else { return node }
+      return MockBackend.node(
+        node.kind, node.label, node.path, ["set-value"], value: node.value,
+        enabled: node.enabled, reference: node.reference)
+    } + [node(.button, "Search", [0, 7], ["press"])]
+  }
 }
 
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
@@ -84,6 +95,22 @@ private func bind(_ adapter: BrowserAccessibilityAdapter) throws -> BrowserAcces
   try adapter.bindAuthorizedPage(
     browser: .safari, processID: 42,
     exactURL: "https://media.example.test/catalogue?row=1", documentRevision: "revision-1")
+}
+
+private func replacingSearchButton(
+  in snapshot: BrowserAccessibilitySnapshot
+) -> BrowserAccessibilitySnapshot {
+  BrowserAccessibilitySnapshot(
+    browser: snapshot.browser, processID: snapshot.processID,
+    launchIdentity: snapshot.launchIdentity, exactURL: snapshot.exactURL,
+    window: snapshot.window, webArea: snapshot.webArea, address: snapshot.address,
+    title: snapshot.title,
+    nodes: snapshot.nodes.map { node in
+      guard node.kind == .button, node.label == "Search" else { return node }
+      return MockBackend.node(
+        node.kind, node.label, node.path, node.actions, value: node.value,
+        enabled: node.enabled)
+    })
 }
 
 private func scenario(_ name: String) throws {
@@ -214,6 +241,102 @@ private func scenario(_ name: String) throws {
       on: page)
     try expect(result.status == .unknown, "partial search was not unknown")
     try expect(backend.actions == ["set:nature"], "partial search replayed")
+  case "search-submit-plans":
+    let confirmBackend = MockBackend()
+    let confirmAdapter = BrowserAccessibilityAdapter(backend: confirmBackend)
+    let confirmPage = try bind(confirmAdapter)
+    let confirmView = try confirmAdapter.read(confirmPage)
+    let confirmResult = try confirmAdapter.perform(
+      .search(
+        query: "nature", generation: confirmView.generation,
+        documentRevision: confirmView.documentRevision), on: confirmPage)
+    try expect(confirmResult.status == .dispatchedUnverified, "confirm search status")
+    try expect(confirmBackend.actions == ["set:nature", "confirm"], "confirm search chain")
+
+    let buttonBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    let buttonAdapter = BrowserAccessibilityAdapter(backend: buttonBackend)
+    let buttonPage = try bind(buttonAdapter)
+    let buttonView = try buttonAdapter.read(buttonPage)
+    let buttonResult = try buttonAdapter.perform(
+      .search(
+        query: "nature", generation: buttonView.generation,
+        documentRevision: buttonView.documentRevision), on: buttonPage)
+    try expect(buttonResult.status == .dispatchedUnverified, "button search status")
+    try expect(buttonBackend.actions == ["set:nature", "press"], "button search chain")
+
+    let preferredBackend = MockBackend(
+      nodes: MockBackend.defaultNodes() + [MockBackend.node(.button, "Search", [0, 7], ["press"])])
+    let preferredAdapter = BrowserAccessibilityAdapter(backend: preferredBackend)
+    let preferredPage = try bind(preferredAdapter)
+    let preferredView = try preferredAdapter.read(preferredPage)
+    _ = try preferredAdapter.perform(
+      .search(
+        query: "nature", generation: preferredView.generation,
+        documentRevision: preferredView.documentRevision), on: preferredPage)
+    try expect(preferredBackend.actions == ["set:nature", "confirm"], "confirm not preferred")
+
+    let noSubmitNodes = MockBackend.buttonSearchNodes().filter {
+      !($0.kind == .button && $0.label == "Search")
+    }
+    let noSubmitBackend = MockBackend(nodes: noSubmitNodes)
+    let noSubmitAdapter = BrowserAccessibilityAdapter(backend: noSubmitBackend)
+    let noSubmitPage = try bind(noSubmitAdapter)
+    let noSubmitView = try noSubmitAdapter.read(noSubmitPage)
+    try expectFailure(.ambiguous) {
+      _ = try noSubmitAdapter.perform(
+        .search(
+          query: "nature", generation: noSubmitView.generation,
+          documentRevision: noSubmitView.documentRevision), on: noSubmitPage)
+    }
+    try expect(noSubmitBackend.actions.isEmpty, "missing submit method mutated field")
+
+    let ambiguousBackend = MockBackend(
+      nodes: MockBackend.buttonSearchNodes()
+        + [MockBackend.node(.button, "Search", [0, 8], ["press"])])
+    let ambiguousAdapter = BrowserAccessibilityAdapter(backend: ambiguousBackend)
+    let ambiguousPage = try bind(ambiguousAdapter)
+    let ambiguousView = try ambiguousAdapter.read(ambiguousPage)
+    try expectFailure(.ambiguous) {
+      _ = try ambiguousAdapter.perform(
+        .search(
+          query: "nature", generation: ambiguousView.generation,
+          documentRevision: ambiguousView.documentRevision), on: ambiguousPage)
+    }
+    try expect(ambiguousBackend.actions.isEmpty, "ambiguous Search buttons mutated field")
+  case "search-target-revalidation":
+    let beforeBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    let beforeAdapter = BrowserAccessibilityAdapter(backend: beforeBackend)
+    let beforePage = try bind(beforeAdapter)
+    let beforeView = try beforeAdapter.read(beforePage)
+    beforeBackend.beforeSnapshot = { count in
+      if count == 4 {
+        beforeBackend.current = replacingSearchButton(in: beforeBackend.current)
+      }
+    }
+    let beforeResult = try beforeAdapter.perform(
+      .search(
+        query: "nature", generation: beforeView.generation,
+        documentRevision: beforeView.documentRevision), on: beforePage)
+    try expect(beforeResult.status == .unknown, "pre-set target change was not unknown")
+    try expect(beforeBackend.actions.isEmpty, "pre-set target change mutated field")
+
+    let afterBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    let afterAdapter = BrowserAccessibilityAdapter(backend: afterBackend)
+    let afterPage = try bind(afterAdapter)
+    let afterView = try afterAdapter.read(afterPage)
+    afterBackend.afterSet = {
+      afterBackend.current = replacingSearchButton(in: afterBackend.current)
+    }
+    let afterCommand = BrowserAccessibilityCommand.search(
+      query: "nature", generation: afterView.generation,
+      documentRevision: afterView.documentRevision)
+    let afterResult = try afterAdapter.perform(afterCommand, on: afterPage)
+    try expect(afterResult.status == .unknown, "post-set target change was not unknown")
+    try expect(afterBackend.actions == ["set:nature"], "post-set target change dispatched submit")
+    try expectFailure(.stale) {
+      _ = try afterAdapter.perform(afterCommand, on: afterPage)
+    }
+    try expect(afterBackend.actions == ["set:nature"], "unknown search was replayed")
   case "ambiguous-and-playback":
     let nodes = MockBackend.defaultNodes() + [
       MockBackend.node(.button, "Play keyboard shortcut k", [0, 5], ["press"])
