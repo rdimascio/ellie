@@ -1,4 +1,5 @@
-import { action } from "./operations.ts";
+import { action, operationDefinition, OPERATION_REGISTRY } from "./operations.ts";
+import type { Action, BrowserAction, Capability } from "./operations.ts";
 import { identifier, record } from "./index.ts";
 import { nativeSessionSchemas } from "./native-session-contract.ts";
 
@@ -14,6 +15,7 @@ export const NATIVE_CONTROL_CONTRACT = {
   },
 } as const;
 export type NativePhoneApp = (typeof NATIVE_CONTROL_CONTRACT.apps)[number];
+export type NativeCommandAction = Extract<Action, { tool: "app.open" }> | BrowserAction;
 
 /** Native commands use one canonical operation, never arbitrary text or extra fields. */
 export function nativeAppCommand(value: unknown): {
@@ -43,8 +45,41 @@ export function nativeAppCommand(value: unknown): {
   };
 }
 
+/** Parse the closed native command union without accepting text, page identity or process authority. */
+export function nativeCommand(value: unknown): { nodeId: string; action: NativeCommandAction } {
+  const body = record(value);
+  if (
+    Object.keys(body).length !== 2 ||
+    !Object.hasOwn(body, "nodeId") ||
+    !Object.hasOwn(body, "action")
+  )
+    throw new Error("Invalid native command.");
+  const operation = action(body.action);
+  if (operation.tool === "app.open") return nativeAppCommand(value);
+  if (!operation.tool.startsWith("browser.")) throw new Error("Invalid native command.");
+  return { nodeId: identifier(body.nodeId), action: operation as NativeCommandAction };
+}
+
+export function nativeCommandCapability(command: NativeCommandAction): Capability {
+  return operationDefinition(command.tool).requiredCapability;
+}
+
 export function nativeControlSchemas() {
   const shared = nativeSessionSchemas();
+  const nativeActions = [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["tool", "app"],
+      properties: {
+        tool: { const: "app.open" },
+        app: { type: "string", enum: [...NATIVE_CONTROL_CONTRACT.apps] },
+      },
+    },
+    ...OPERATION_REGISTRY.operations
+      .filter((operation) => operation.id.startsWith("browser."))
+      .map((operation) => operation.input),
+  ];
   return {
     NativeControlNode: {
       type: "object",
@@ -54,7 +89,12 @@ export function nativeControlSchemas() {
         id: shared.NativeGrant.properties.target,
         label: shared.NativeClient.properties.label,
         online: { type: "boolean" },
-        capabilities: { type: "array", maxItems: 1, items: { const: "app.open" } },
+        capabilities: {
+          type: "array",
+          maxItems: 3,
+          uniqueItems: true,
+          items: { enum: ["app.open", "browser.read", "browser.control"] },
+        },
       },
     },
     NativeNodesResponse: {
@@ -78,13 +118,7 @@ export function nativeControlSchemas() {
       properties: {
         nodeId: shared.NativeGrant.properties.target,
         action: {
-          type: "object",
-          additionalProperties: false,
-          required: ["tool", "app"],
-          properties: {
-            tool: { const: "app.open" },
-            app: { type: "string", enum: [...NATIVE_CONTROL_CONTRACT.apps] },
-          },
+          oneOf: nativeActions,
         },
       },
     },
@@ -92,7 +126,10 @@ export function nativeControlSchemas() {
       type: "object",
       additionalProperties: false,
       required: ["outcome"],
-      properties: { outcome: { enum: ["completed", "failed"] } },
+      properties: {
+        outcome: { enum: ["completed", "failed", "unknown"] },
+        result: { type: "object" },
+      },
     },
     NativeUnknownResponse: {
       type: "object",

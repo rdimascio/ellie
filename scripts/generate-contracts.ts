@@ -1329,7 +1329,7 @@ function nativeOpenApi(): Json {
           operationId: NATIVE_CONTROL_CONTRACT.routes.nodes.operationId,
           summary: "List configured devices allowed by this native credential",
           description:
-            "Read-only, bounded to 16 configured targets and 8192 response bytes. Returns only explicitly granted app.open targets, labels, online state and the app.open capability; no household telemetry. Discovery has a five-second deadline.",
+            "Read-only, bounded to 16 configured targets and 8192 response bytes. Returns only explicitly granted targets and the intersection of app.open, browser.read and browser.control capabilities; no household telemetry. Discovery has a five-second deadline.",
           responses: {
             ...errors,
             "200": response("Granted configured devices.", ref("NativeNodesResponse")),
@@ -1340,9 +1340,9 @@ function nativeOpenApi(): Json {
         post: {
           ...common,
           operationId: NATIVE_CONTROL_CONTRACT.routes.commands.operationId,
-          summary: "Explicitly open an allowed app on a granted device",
+          summary: "Run one explicit allowed app or browser action on a granted device",
           description:
-            "Only app.open for Arc, Safari or Messages. Revalidates authority and live inventory before dispatch. Shares per-device reservations with browser commands. No persistence or automatic retry. Command dispatch has a 35-second deadline after bounded discovery. A timeout, disconnect or 502 may follow execution; check the Mac before issuing another action. Cancellation requests upstream cancellation but does not undo a launched app. 409 also means the device is offline, incapable or has an unfinished command.",
+            "Accepts the closed canonical app.open and browser operation union. Revalidates the exact target grant and live capability immediately before dispatch. Shares per-device reservations across commands. No payload persistence or automatic retry. Command dispatch has a 35-second deadline after bounded discovery. Unknown or timed-out browser results remain unknown; check the Mac before issuing another action.",
           requestBody: request(ref("NativeAppRequest")),
           responses: {
             ...errors,
@@ -1367,7 +1367,7 @@ function nativeOpenApi(): Json {
       },
       schemas: { ...nativeSessionSchemas(), ...nativeControlSchemas(), ...householdSchemas },
     },
-  } as Json;
+  } as unknown as Json;
 }
 
 function serialized(value: Json): string {

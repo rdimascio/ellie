@@ -139,10 +139,15 @@ test("native app contract accepts only exact canonical finite commands", () => {
   ])
     assert.throws(() => nativeAppCommand(command));
   const document = JSON.parse(generatedContracts()["native-openapi.v1.json"]!);
-  assert.deepEqual(
-    document.components.schemas.NativeAppRequest.properties.action.properties.app.enum,
-    [...NATIVE_CONTROL_CONTRACT.apps],
+  const alternatives = document.components.schemas.NativeAppRequest.properties.action.oneOf;
+  const appOpen = alternatives.filter(
+    (candidate: any) => candidate.properties?.tool?.const === "app.open",
   );
+  assert.equal(appOpen.length, 1);
+  assert.equal(appOpen[0].additionalProperties, false);
+  assert.deepEqual(appOpen[0].required, ["tool", "app"]);
+  assert.deepEqual(Object.keys(appOpen[0].properties).sort(), ["app", "tool"]);
+  assert.deepEqual(appOpen[0].properties.app.enum, [...NATIVE_CONTROL_CONTRACT.apps]);
   assert.equal(document.components.schemas.NativeNodesResponse.properties.nodes.maxItems, 16);
   assert.ok(document.paths[NATIVE_CONTROL_CONTRACT.routes.commands.path].post.responses[502]);
 });

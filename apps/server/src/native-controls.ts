@@ -1,8 +1,10 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import {
+  browserWebMCPOperationResult,
   identifier,
   nativeLabel,
-  nativeAppCommand,
+  nativeCommand,
+  nativeCommandCapability,
   NATIVE_CONTROL_CONTRACT,
 } from "@ellie/protocol";
 import { readJson } from "@ellie/transport";
@@ -10,9 +12,11 @@ import type { NativeAuth, NativeClient } from "./native-auth.ts";
 import type { BrowserRemote, BrowserRemoteNode } from "./browser-remote.ts";
 
 type Reply = (status: number, body: unknown) => void;
-const allowed = (client: NativeClient, id: string) =>
+const allowed = (client: NativeClient, id: string, capability = "app.open") =>
   client.role === "native_phone_controller" &&
-  client.grants.some((grant) => grant.target === id && grant.capabilities.includes("app.open"));
+  client.grants.some(
+    (grant) => grant.target === id && grant.capabilities.includes(capability as never),
+  );
 
 function projectNodes(nodes: BrowserRemoteNode[]): BrowserRemoteNode[] {
   if (!Array.isArray(nodes) || nodes.length > NATIVE_CONTROL_CONTRACT.maximumNodes)
@@ -27,7 +31,9 @@ function projectNodes(nodes: BrowserRemoteNode[]): BrowserRemoteNode[] {
       id,
       label: nativeLabel(node.label),
       online: node.online,
-      capabilities: node.capabilities.includes("app.open") ? ["app.open" as const] : [],
+      capabilities: (["app.open", "browser.read", "browser.control"] as const).filter(
+        (capability) => node.capabilities.includes(capability),
+      ),
     };
   });
   if (
@@ -118,21 +124,36 @@ export class NativeControls {
           ),
         );
         const client = current();
-        if (client && !controller.signal.aborted)
-          reply(200, { nodes: nodes.filter((node) => allowed(client, node.id)) });
+        if (client && !controller.signal.aborted) {
+          const visible = nodes.flatMap((node) => {
+            const grant = client.grants.find((item) => item.target === node.id);
+            if (!grant) return [];
+            const capabilities = node.capabilities.filter((capability) =>
+              grant.capabilities.includes(capability),
+            );
+            return capabilities.length ? [{ ...node, capabilities }] : [];
+          });
+          reply(200, { nodes: visible });
+        }
         return true;
       }
       let command;
       try {
-        command = nativeAppCommand(await readJson(request, 4096));
+        command = nativeCommand(await readJson(request, 4096));
       } catch {
         reply(400, { error: "Native app request rejected." });
         return true;
       }
       const client = current();
       if (!client) return true;
-      if (!allowed(client, command.nodeId)) {
-        reply(403, { error: "App opening is not allowed on this device." });
+      const capability = nativeCommandCapability(command.action);
+      if (!allowed(client, command.nodeId, capability)) {
+        reply(403, {
+          error:
+            capability === "app.open"
+              ? "App opening is not allowed on this device."
+              : "This browser action is not allowed on this device.",
+        });
         return true;
       }
       if (this.busy.has(command.nodeId)) {
@@ -153,14 +174,14 @@ export class NativeControls {
         reply(404, { error: "The granted device is not configured." });
         return true;
       }
-      if (!target.online || !target.capabilities.includes("app.open")) {
-        reply(409, { error: "This device is offline or cannot open apps." });
+      if (!target.online || !target.capabilities.includes(capability)) {
+        reply(409, { error: "This device is offline or cannot perform this action." });
         return true;
       }
       if (controller.signal.aborted || response.destroyed || this.stopped) return true;
       const nodeId = command.nodeId;
       const admitted = await bounded(
-        () => auth.withAuthenticated(bearer, (fresh) => allowed(fresh, nodeId)),
+        () => auth.withAuthenticated(bearer, (fresh) => allowed(fresh, nodeId, capability)),
         controller,
         NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs,
       );
@@ -173,7 +194,13 @@ export class NativeControls {
       dispatched = true;
       const operation = Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
-        return remote.openApp(nodeId, command.action.app, { signal: controller.signal });
+        return command.action.tool === "app.open"
+          ? remote.openApp(nodeId, command.action.app as "arc" | "safari" | "messages", {
+              signal: controller.signal,
+            })
+          : remote.execute
+            ? remote.execute(nodeId, command.action, { signal: controller.signal })
+            : Promise.reject(new Error("Browser execution is unavailable."));
       });
       operation.then(
         () => {
@@ -191,7 +218,19 @@ export class NativeControls {
         NATIVE_CONTROL_CONTRACT.commandDeadlineMs,
       );
       if (!result || typeof result.ok !== "boolean") throw new Error();
-      reply(200, { outcome: result.ok ? "completed" : "failed" });
+      if (Object.hasOwn(result, "browser")) {
+        const checked = browserWebMCPOperationResult(result);
+        const status = checked.browser.status;
+        reply(200, {
+          outcome:
+            status === "completed" || status === "connected"
+              ? "completed"
+              : status === "unknown" || status === "timed_out"
+                ? "unknown"
+                : "failed",
+          result: checked,
+        });
+      } else reply(200, { outcome: result.ok ? "completed" : "failed" });
     } catch {
       if (!response.destroyed && !this.stopped) {
         if (dispatched) reply(502, { outcome: "unknown" });

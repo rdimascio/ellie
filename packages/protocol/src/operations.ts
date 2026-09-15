@@ -21,8 +21,8 @@ const BROWSER_IDENTIFIER = {
 const BROWSER_REVISION = {
   type: "string",
   minLength: 1,
-  maxLength: 128,
-  pattern: "^[A-Za-z0-9._-]{1,128}$",
+  maxLength: 100,
+  pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$",
 } as const;
 const BROWSER_QUERY = {
   type: "string",
