@@ -108,6 +108,10 @@
         "@ellie/protocol": "*",
       },
     },
+    "packages/improvement-queue": {
+      "name": "@ellie/improvement-queue",
+      "version": "0.1.0",
+    },
     "packages/knowledge": {
       "name": "@ellie/knowledge",
       "version": "0.1.0",
@@ -269,6 +273,8 @@
     "@ellie/compute": ["@ellie/compute@workspace:packages/compute"],
 
     "@ellie/config": ["@ellie/config@workspace:packages/config"],
+
+    "@ellie/improvement-queue": ["@ellie/improvement-queue@workspace:packages/improvement-queue"],
 
     "@ellie/knowledge": ["@ellie/knowledge@workspace:packages/knowledge"],
 
