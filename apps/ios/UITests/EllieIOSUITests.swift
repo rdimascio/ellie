@@ -45,6 +45,9 @@ final class EllieIOSUITests: XCTestCase {
         let mutationCount = app.staticTexts["browser-fixture-mutation-count"]
         XCTAssertTrue(mutationCount.waitForExistence(timeout: 5))
         XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
+        let backgroundCount = app.staticTexts["browser-fixture-background-count"]
+        XCTAssertTrue(backgroundCount.waitForExistence(timeout: 5))
+        XCTAssertEqual(backgroundCount.label, "Fixture backgrounds: 0")
 
         XCUIDevice.shared.press(.home)
         let stateHistory = ApplicationStateHistory()
@@ -59,11 +62,22 @@ final class EllieIOSUITests: XCTestCase {
                 }
             },
             object: NSObject())
-        XCTAssertEqual(
-            XCTWaiter.wait(for: [backgrounded], timeout: 5),
-            .completed,
-            "Observed app states: \(stateHistory.summary)")
+        let stateResult = XCTWaiter.wait(for: [backgrounded], timeout: 5)
+        let stateDiagnostic =
+            "XCUIApplication background observation: result=\(stateResult.rawValue), "
+            + "states=\(stateHistory.summary)"
+        print(stateDiagnostic)
+        XCTContext.runActivity(named: "XCUIApplication background observation") { activity in
+            let attachment = XCTAttachment(string: stateDiagnostic)
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
         app.activate()
+        XCTAssertTrue(backgroundCount.waitForExistence(timeout: 5))
+        let recordedBackground = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture backgrounds: 1"),
+            object: backgroundCount)
+        XCTAssertEqual(XCTWaiter.wait(for: [recordedBackground], timeout: 5), .completed)
         XCTAssertTrue(
             app.descendants(matching: .any)["browser-status-unknown"].waitForExistence(timeout: 5))
         XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
