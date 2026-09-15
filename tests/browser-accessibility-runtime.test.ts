@@ -20,13 +20,14 @@ import { startBrowserKernelBridge } from "../apps/node/src/browser-kernel-bridge
 import { browserWebMCPFrame } from "../apps/node/src/browser-webmcp-bridge.ts";
 import { fixture } from "./helpers.ts";
 
-async function compileSession(executable: string): Promise<void> {
+async function compileSession(executable: string, largeSummary = false): Promise<void> {
   const child = spawn(
     "/usr/bin/xcrun",
     [
       "swiftc",
       "-D",
       "ELLIE_AX_TEST_BACKEND",
+      ...(largeSummary ? ["-D", "ELLIE_AX_LARGE_SUMMARY"] : []),
       new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
       new URL("../packages/macos/native/BrowserAccessibilitySession.swift", import.meta.url)
         .pathname,
@@ -175,6 +176,53 @@ for await (const line of createInterface({ input: process.stdin })) {
     else t.diagnostic(`Retained browser AX runtime fixture: ${root}`);
   }
 });
+
+test(
+  "large Unicode AX summaries cross the Swift session and Node result contract",
+  { skip: process.platform !== "darwin", timeout: 30_000 },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-summary-"));
+    let runtime: BrowserAccessibilityRuntime | undefined;
+    let completed = false;
+    try {
+      const executable = join(root, "ellie-browser-accessibility");
+      await compileSession(executable, true);
+      runtime = new BrowserAccessibilityRuntime(executable, () => ({
+        browserProcessPid: process.pid,
+        browserStartSeconds: 1,
+        browserStartMicroseconds: 0,
+        browserCodeHash: "00".repeat(20),
+        connectionId: "summary-connection",
+        authenticated: true,
+      }));
+      const result = await runtime.execute(
+        browserWebMCPAction({ tool: "browser.read", view: "page", revision: "revision-1" }),
+        {
+          availability: "accessibility",
+          documentId: "document-1",
+          url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+          revision: "revision-1",
+        },
+        new AbortController().signal,
+      );
+      assert.equal(result.browser.source, "accessibility");
+      if (result.browser.operation !== "read" || result.browser.status !== "completed")
+        throw new Error("Expected a completed read.");
+      const summary = result.browser.view.summary;
+      assert.equal(summary, Array(4).fill("🌙".repeat(200)).join(" "));
+      assert.ok(summary.length <= 2_000);
+      assert.deepEqual(
+        result.browser.view.items.map((item) => item.label),
+        ["Earth from space"],
+      );
+      completed = true;
+    } finally {
+      await runtime?.close();
+      if (completed) await rm(root, { recursive: true });
+      else t.diagnostic(`Retained browser AX summary fixture: ${root}`);
+    }
+  },
+);
 
 test("adapter selection happens once before dispatch and never falls through", async () => {
   let webCalls = 0;
