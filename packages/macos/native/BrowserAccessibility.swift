@@ -355,8 +355,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     let webAreas = nodes.filter { $0.kind == .webArea }
     let addresses = nodes.filter { $0.kind == .address }
     guard webAreas.count == 1, addresses.count == 1, let webArea = webAreas.first,
-      let address = addresses.first, let addressValue = address.value,
-      let exactURL = canonicalAddress(addressValue)
+      let address = addresses.first, let exactURL = webArea.value
     else { throw BrowserAccessibilityFailure.ambiguous }
     let title = try string(window, kAXTitleAttribute)
     return BrowserAccessibilitySnapshot(
@@ -420,11 +419,15 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     AXUIElementSetMessagingTimeout(element, Self.timeout)
     let role = try string(element, kAXRoleAttribute)
     let label = try string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute)
-    let value = try string(element, kAXValueAttribute)
     let enabled = (try boolean(element, kAXEnabledAttribute)) ?? false
     let actionNames = try actions(element)
     let webArea = role == "AXWebArea"
-    let isAddress = !insideWebArea && addressRole(role, browser: browser, label: label)
+    let identifier = !insideWebArea ? try string(element, kAXIdentifierAttribute) : nil
+    let placeholder = !insideWebArea ? try string(element, kAXPlaceholderValueAttribute) : nil
+    let isAddress = !insideWebArea
+      && browserAccessibilityAddressRole(
+        role: role, browser: browser, label: label, identifier: identifier,
+        placeholder: placeholder)
     let kind: BrowserAccessibilityNode.Kind?
     if webArea { kind = .webArea }
     else if isAddress { kind = .address }
@@ -436,6 +439,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     else if insideWebArea && role == kAXScrollAreaRole { kind = .scrollArea }
     else { kind = nil }
     if let kind {
+      let value = webArea ? try pageURL(element, kAXURLAttribute) : nil
       nodes.append(
         BrowserAccessibilityNode(
           reference: BrowserAccessibilityElementReference(element), kind: kind, label: label,
@@ -447,24 +451,6 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
         child, browser: browser, depth: depth + 1, path: path + [index],
         insideWebArea: insideWebArea || webArea, nodes: &nodes, visited: &visited)
     }
-  }
-
-  private func addressRole(
-    _ role: String?, browser: BrowserAccessibilityBrowser, label: String?
-  ) -> Bool {
-    guard role == kAXTextFieldRole || role == kAXComboBoxRole else { return false }
-    switch browser {
-    case .safari: return label == "Smart Search Field"
-    case .arc: return label == "Address and Search"
-    }
-  }
-
-  private func canonicalAddress(_ value: String) -> String? {
-    guard value.utf8.count <= 2_048, let url = URL(string: value), url.scheme == "https",
-      url.host != nil, url.user == nil, url.password == nil, url.fragment == nil,
-      url.absoluteString == value
-    else { return nil }
-    return value
   }
 
   private func check() throws {
@@ -558,6 +544,11 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     return result
   }
 
+  private func pageURL(_ element: AXUIElement, _ attribute: String) throws -> String? {
+    guard let value = try raw(element, attribute) else { return nil }
+    return browserAccessibilityCanonicalPageURL(value)
+  }
+
   private func boolean(_ element: AXUIElement, _ attribute: String) throws -> Bool? {
     guard let value = try raw(element, attribute) else { return nil }
     guard CFGetTypeID(value) == CFBooleanGetTypeID() else {
@@ -598,4 +589,31 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     guard status == .success else { throw BrowserAccessibilityFailure.unavailable }
     return value.boolValue
   }
+}
+
+func browserAccessibilityAddressRole(
+  role: String?, browser: BrowserAccessibilityBrowser, label: String?, identifier: String?,
+  placeholder: String?
+) -> Bool {
+  switch browser {
+  case .safari:
+    return (role == kAXTextFieldRole || role == kAXComboBoxRole) && label == "Smart Search Field"
+  case .arc:
+    guard placeholder == "Search or Enter URL…" else { return false }
+    return (role == kAXStaticTextRole && identifier == "commandBarPlaceholderTextField")
+      || (role == kAXTextFieldRole && identifier == "commandBarTextField")
+  }
+}
+
+func browserAccessibilityCanonicalPageURL(_ value: Any) -> String? {
+  let text: String
+  if let value = value as? URL { text = value.absoluteString }
+  else if let value = value as? NSURL { text = value.absoluteString ?? "" }
+  else if let value = value as? String { text = value }
+  else { return nil }
+  guard text.utf8.count <= 2_048, let url = URL(string: text), url.scheme == "https",
+    url.host != nil, url.user == nil, url.password == nil, url.fragment == nil,
+    url.absoluteString == text
+  else { return nil }
+  return text
 }

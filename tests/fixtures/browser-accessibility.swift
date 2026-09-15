@@ -219,6 +219,29 @@ private func scenario(_ name: String) throws {
         .play, generation: failedView.generation, documentRevision: failedView.documentRevision),
       on: failedPage)
     try expect(uncertain.status == .unknown, "failed AX dispatch was replayable")
+  case "typed-browser-topology":
+    try expect(
+      browserAccessibilityAddressRole(
+        role: "AXStaticText", browser: .arc, label: nil,
+        identifier: "commandBarPlaceholderTextField", placeholder: "Search or Enter URL…"),
+      "resting Arc chrome rejected")
+    try expect(
+      browserAccessibilityAddressRole(
+        role: "AXTextField", browser: .arc, label: nil,
+        identifier: "commandBarTextField", placeholder: "Search or Enter URL…"),
+      "focused Arc chrome rejected")
+    try expect(
+      !browserAccessibilityAddressRole(
+        role: "AXStaticText", browser: .arc, label: "example.com", identifier: nil,
+        placeholder: nil), "spoofable page text admitted")
+    try expect(
+      browserAccessibilityCanonicalPageURL("https://example.com/") == "https://example.com/",
+      "String URL rejected")
+    try expect(
+      browserAccessibilityCanonicalPageURL(NSURL(string: "https://example.com/")!)
+        == "https://example.com/", "NSURL rejected")
+    try expect(browserAccessibilityCanonicalPageURL("example.com") == nil, "scheme inferred")
+    try expect(browserAccessibilityCanonicalPageURL(NSNumber(value: 1)) == nil, "numeric URL admitted")
   default:
     throw NSError(domain: "BrowserAccessibilityFixture", code: 3)
   }
