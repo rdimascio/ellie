@@ -145,6 +145,7 @@ final class BrowserAccessibilityAdapter {
 
   private static let maximumQueryUTF16 = 200
   private static let maximumTextBytes = 8_192
+  private static let maximumTextUTF16 = 2_000
   private static let maximumItems = 64
   private let backend: BrowserAccessibilityBackend
   private var observed: Observed?
@@ -180,12 +181,18 @@ final class BrowserAccessibilityAdapter {
     var retained: [String: BrowserAccessibilityNode] = [:]
     var text: [String] = []
     var textBytes = 0
+    var textUTF16 = 0
     for node in snapshot.nodes {
       if node.kind == .text, let label = node.label, !label.isEmpty {
-        let size = label.utf8.count + (text.isEmpty ? 0 : 1)
-        if textBytes + size <= Self.maximumTextBytes {
+        let separatorSize = text.isEmpty ? 0 : 1
+        let byteSize = label.utf8.count + separatorSize
+        let utf16Size = label.utf16.count + separatorSize
+        if textBytes + byteSize <= Self.maximumTextBytes,
+          textUTF16 + utf16Size <= Self.maximumTextUTF16
+        {
           text.append(label)
-          textBytes += size
+          textBytes += byteSize
+          textUTF16 += utf16Size
         }
       }
     }
