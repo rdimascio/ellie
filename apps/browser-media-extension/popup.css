@@ -1,0 +1,35 @@
+body {
+  font: 13px system-ui;
+  width: 320px;
+  margin: 14px;
+  color: #171717;
+}
+h1 {
+  font-size: 17px;
+  margin: 0 0 12px;
+}
+.controls {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+}
+button {
+  padding: 7px 9px;
+}
+#status {
+  min-height: 18px;
+  color: #555;
+}
+ul {
+  padding: 0;
+  list-style: none;
+}
+li {
+  display: flex;
+  gap: 5px;
+  margin: 5px 0;
+}
+li button:first-child {
+  flex: 1;
+  text-align: left;
+}
