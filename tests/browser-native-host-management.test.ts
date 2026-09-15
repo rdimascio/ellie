@@ -10,6 +10,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -291,6 +292,36 @@ test("unsafe manifest and ownership paths are rejected without replacement", asy
   await symlink(target, join(directory, plan.manifestName));
   await assert.rejects(installBrowserNativeHost(f.home, f.release), /unsafe/);
   assert.equal(await readFile(target, "utf8"), "foreign\n");
+  f.done();
+});
+
+test("a symlinked browser ancestor blocks preflight, install, and uninstall without cleanup", async (t) => {
+  const f = await fixture(t);
+  await installBrowserNativeHost(f.home, f.release);
+  const plan = browserWebMCPHostInstallationPlan(f.release);
+  const applicationSupport = join(f.home, "Library/Application Support");
+  const google = join(applicationSupport, "Google");
+  const preservedGoogle = join(applicationSupport, "Google-preserved");
+  const redirect = join(f.home, "redirected-google");
+  const redirectManifests = join(redirect, "Chrome/NativeMessagingHosts");
+  await rename(google, preservedGoogle);
+  await mkdir(redirectManifests, { recursive: true, mode: 0o700 });
+  const marker = join(redirectManifests, "preserve.txt");
+  await writeFile(marker, "redirect evidence\n", { mode: 0o600 });
+  await symlink(redirect, google);
+
+  assert.equal((await browserNativeHostPreflight(f.home, f.release)).status, "conflict");
+  await assert.rejects(installBrowserNativeHost(f.home, f.release), /unsafe/);
+  await assert.rejects(uninstallBrowserNativeHost(f.home, f.release), /unsafe/);
+  assert.equal(await readFile(marker, "utf8"), "redirect evidence\n");
+  assert.equal(
+    await readFile(join(preservedGoogle, "Chrome/NativeMessagingHosts", plan.manifestName), "utf8"),
+    plan.manifest,
+  );
+  assert.equal(
+    (await lstat(join(f.home, ".ellie/browser-native-hosts/arc-native-host.json"))).mode & 0o777,
+    0o600,
+  );
   f.done();
 });
 
