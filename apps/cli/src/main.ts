@@ -1,7 +1,6 @@
 import { access, lstat, readFile, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
@@ -33,6 +32,7 @@ import { BrowserOperationSelector } from "../../node/src/browser-operation-selec
 import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
 import { startBrowserKernelBridge } from "../../node/src/browser-kernel-bridge.ts";
 import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
+import { packagedBrowserHelpers } from "./browser-runtime-paths.ts";
 
 import { generateCertificate } from "./certificate.ts";
 import { generateBrowserTlsIdentity } from "./certificate.ts";
@@ -560,21 +560,19 @@ async function main(): Promise<void> {
       const browserRegistry = browserEnabled
         ? loadReviewedBrowserRegistry(browserRegistryPath)
         : undefined;
+      const browserHelpers = browserRegistry ? packagedBrowserHelpers() : undefined;
       browserBridge = browserRegistry
         ? await startBrowserKernelBridge({
             home: dirname(stateDir),
-            executable: fileURLToPath(
-              new URL("../../../helpers/ellie-browser-runtime-broker", import.meta.url),
-            ),
+            executable: browserHelpers!.broker,
           })
         : undefined;
       const webmcp = browserBridge
         ? new BrowserWebMCPOperations(browserBridge, browserRegistry!)
         : undefined;
       browserAccessibility = browserBridge
-        ? new BrowserAccessibilityRuntime(
-            fileURLToPath(new URL("../../../helpers/ellie-browser-accessibility", import.meta.url)),
-            () => browserBridge?.connectionContext(),
+        ? new BrowserAccessibilityRuntime(browserHelpers!.accessibility, () =>
+            browserBridge?.connectionContext(),
           )
         : undefined;
       const executor =

@@ -55,10 +55,23 @@ async function compileSession(executable: string): Promise<void> {
   assert.deepEqual(result, { code: 0, signal: null });
 }
 
-async function compileSwift(executable: string, files: string[], flags: string[] = []) {
+async function compileSwift(
+  label: string,
+  executable: string,
+  files: string[],
+  flags: string[] = [],
+) {
   const child = spawn("/usr/bin/xcrun", ["swiftc", ...flags, ...files, "-o", executable], {
-    stdio: ["ignore", "ignore", "ignore"],
+    stdio: ["ignore", "pipe", "pipe"],
   });
+  const output: Buffer[] = [];
+  let outputBytes = 0;
+  const capture = (value: Buffer) => {
+    outputBytes += value.length;
+    if (outputBytes <= 64 * 1024) output.push(Buffer.from(value));
+  };
+  child.stdout.on("data", capture);
+  child.stderr.on("data", capture);
   let expired = false;
   const deadline = setTimeout(() => {
     expired = true;
@@ -69,8 +82,13 @@ async function compileSwift(executable: string, files: string[], flags: string[]
     child.once("close", resolve);
   });
   clearTimeout(deadline);
-  assert.equal(expired, false, "Swift compilation exceeded its deadline");
-  assert.equal(code, 0);
+  assert.equal(expired, false, `${label} Swift compilation exceeded its deadline`);
+  assert.ok(outputBytes <= 64 * 1024, `${label} Swift compiler output exceeded its bound`);
+  assert.equal(
+    code,
+    0,
+    `${label} Swift compilation failed:\n${Buffer.concat(output).toString("utf8")}`,
+  );
 }
 
 test("persistent accessibility helper binds, reads and reports mutations as unverified", async (t) => {
@@ -413,6 +431,7 @@ test(
       const productionBroker = join(helpers, "production-browser-runtime-broker");
       const peer = join(bin, "node");
       await compileSwift(
+        "test broker",
         broker,
         [
           new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
@@ -421,6 +440,7 @@ test(
         ["-D", "ELLIE_AX_BROKER_TEST", "-lbsm"],
       );
       await compileSwift(
+        "production broker",
         productionBroker,
         [
           new URL("../packages/macos/native/BrowserAccessibility.swift", import.meta.url).pathname,
@@ -429,6 +449,7 @@ test(
         ["-lbsm"],
       );
       await compileSwift(
+        "peer",
         peer,
         [new URL("fixtures/browser-kernel-peer.swift", import.meta.url).pathname],
         ["-parse-as-library"],
