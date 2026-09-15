@@ -350,6 +350,24 @@ private func scenario(_ name: String) throws {
     try expect(
       !BrowserAccessibilityTraversalLimits.permitsCall(count: 6_145),
       "over-budget AX reads admitted")
+  case "summary-contract-bound":
+    let web = MockBackend.defaultNodes()[0]
+    let first = String(repeating: "🧭", count: 500)
+    let second = String(repeating: "🌎", count: 499)
+    let nodes = [web,
+      MockBackend.node(.text, first, [0, 1], []),
+      MockBackend.node(.text, second, [0, 2], []),
+      MockBackend.node(.text, "excluded", [0, 3], []),
+    ]
+    let backend = MockBackend(nodes: nodes)
+    let adapter = BrowserAccessibilityAdapter(backend: backend)
+    let page = try bind(adapter)
+    guard let summary = try adapter.read(page).summary else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
+    try expect(summary == "\(first) \(second)", "bounded Unicode summary changed")
+    try expect(summary.utf16.count == 1_999, "summary UTF-16 accounting changed")
+    try expect(summary.utf8.count <= 8_192, "summary byte bound exceeded")
   default:
     throw NSError(domain: "BrowserAccessibilityFixture", code: 3)
   }

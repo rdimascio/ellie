@@ -110,6 +110,7 @@ test(
       "typed-browser-topology",
       "raw-ax-projection",
       "real-tree-bounds",
+      "summary-contract-bound",
     ]) {
       const result = await runOwned(executable, [scenario], 5_000);
       assert.equal(result.signal, null, scenario);
