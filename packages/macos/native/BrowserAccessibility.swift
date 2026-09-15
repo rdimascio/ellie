@@ -286,7 +286,8 @@ final class BrowserAccessibilityAdapter {
   ) -> BrowserAccessibilityNode? {
     let matches = nodes.filter {
       $0.kind == prior.kind && $0.path == prior.path && $0.label == prior.label
-        && $0.enabled && $0.actions == prior.actions && backend.same($0.reference, prior.reference)
+        && $0.value == prior.value && $0.enabled && $0.actions == prior.actions
+        && backend.same($0.reference, prior.reference)
     }
     return matches.count == 1 ? matches[0] : nil
   }
@@ -377,12 +378,36 @@ final class BrowserAccessibilityAdapter {
   }
 }
 
+enum BrowserAccessibilityTraversalLimits {
+  // A full Arc YouTube window exposed about 960 elements, 403 relevant nodes, and depth 10.
+  // Keep finite headroom for browser chrome and dynamic page content while rejecting trees that
+  // cannot be inspected completely for ambiguous controls.
+  private static let maximumElements = 1_280
+  private static let maximumNodes = 768
+  private static let maximumChildren = 512
+  private static let maximumDepth = 12
+  private static let maximumCalls = 6_144
+
+  static func permitsElement(count: Int, depth: Int) -> Bool {
+    count > 0 && count <= maximumElements && depth >= 0 && depth <= maximumDepth
+  }
+
+  static func permitsNode(count: Int) -> Bool {
+    count > 0 && count <= maximumNodes
+  }
+
+  static func permitsChildren(count: Int) -> Bool {
+    count >= 0 && count <= maximumChildren
+  }
+
+  static func permitsCall(count: Int) -> Bool {
+    count > 0 && count <= maximumCalls
+  }
+}
+
 final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
-  private static let maximumNodes = 256
-  private static let maximumDepth = 8
-  private static let maximumCalls = 512
   private static let timeout: Float = 0.25
-  private static let totalSeconds = 2.0
+  private static let totalSeconds = 4.0
   private var calls = 0
   private var deadline = 0.0
 
@@ -494,7 +519,9 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     insideWebArea: Bool,
     nodes: inout [BrowserAccessibilityNode], visited: inout [AXUIElement]
   ) throws {
-    guard depth <= Self.maximumDepth, nodes.count < Self.maximumNodes else {
+    guard BrowserAccessibilityTraversalLimits.permitsElement(
+      count: visited.count + 1, depth: depth)
+    else {
       throw BrowserAccessibilityFailure.unavailable
     }
     guard !visited.contains(where: { CFEqual($0, element) }) else {
@@ -503,32 +530,46 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     visited.append(element)
     AXUIElementSetMessagingTimeout(element, Self.timeout)
     let role = try string(element, kAXRoleAttribute)
-    let label = try string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute)
-    let enabled = (try boolean(element, kAXEnabledAttribute)) ?? false
-    let actionNames = try actions(element)
     let webArea = role == "AXWebArea"
-    let identifier = !insideWebArea ? try string(element, kAXIdentifierAttribute) : nil
-    let placeholder = !insideWebArea ? try string(element, kAXPlaceholderValueAttribute) : nil
-    let isAddress = !insideWebArea
-      && browserAccessibilityAddressRole(
-        role: role, browser: browser, label: label, identifier: identifier,
-        placeholder: placeholder)
-    let kind: BrowserAccessibilityNode.Kind?
-    if webArea { kind = .webArea }
-    else if isAddress { kind = .address }
-    else if insideWebArea && (role == "AXSearchField" || role == kAXTextFieldRole) {
-      kind = .search
-    } else if insideWebArea && role == "AXLink" { kind = .link }
-    else if insideWebArea && role == kAXButtonRole { kind = .button }
-    else if insideWebArea && role == kAXStaticTextRole { kind = .text }
-    else if insideWebArea && role == kAXScrollAreaRole { kind = .scrollArea }
-    else { kind = nil }
-    if let kind {
-      let value = webArea ? try pageURL(element, kAXURLAttribute) : nil
+    let addressCandidate = !insideWebArea && browserAccessibilityAddressCandidate(
+      role: role, browser: browser)
+    let labeledContent = insideWebArea
+      && (role == "AXSearchField" || role == kAXTextFieldRole || role == "AXLink"
+        || role == kAXButtonRole || role == kAXStaticTextRole)
+    let needsLabel = labeledContent || (addressCandidate && browser == .safari)
+    let label = needsLabel
+      ? try string(element, kAXTitleAttribute) ?? string(element, kAXDescriptionAttribute) : nil
+    let identifier = addressCandidate && browser == .arc
+      ? try string(element, kAXIdentifierAttribute) : nil
+    let placeholder = addressCandidate && browser == .arc
+      ? try string(element, kAXPlaceholderValueAttribute) : nil
+    let kind = browserAccessibilityNodeKind(
+      role: role, browser: browser, label: label, identifier: identifier,
+      placeholder: placeholder, insideWebArea: insideWebArea)
+    let enabled = kind == .search || kind == .link || kind == .button
+      ? (try boolean(element, kAXEnabledAttribute)) ?? false : false
+    let actionNames: Set<String>
+    switch kind {
+    case .webArea, .link, .button, .scrollArea:
+      actionNames = try actions(element, includeSetValue: false)
+    case .search:
+      actionNames = try actions(element, includeSetValue: true)
+    default:
+      actionNames = []
+    }
+    let rawURL = kind == .webArea || kind == .link
+      ? try raw(element, kAXURLAttribute) : nil
+    if let node = browserAccessibilityProjectNode(
+      reference: BrowserAccessibilityElementReference(element), role: role, browser: browser,
+      label: label, enabled: enabled, path: path, actions: actionNames,
+      identifier: identifier, placeholder: placeholder, rawURL: rawURL,
+      insideWebArea: insideWebArea)
+    {
+      guard BrowserAccessibilityTraversalLimits.permitsNode(count: nodes.count + 1) else {
+        throw BrowserAccessibilityFailure.unavailable
+      }
       nodes.append(
-        BrowserAccessibilityNode(
-          reference: BrowserAccessibilityElementReference(element), kind: kind, label: label,
-          value: value, enabled: enabled, path: path, actions: actionNames))
+        node)
     }
     let children = try elements(element, kAXChildrenAttribute)
     for (index, child) in children.enumerated() {
@@ -540,7 +581,9 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
 
   private func check() throws {
     calls += 1
-    guard calls <= Self.maximumCalls, ProcessInfo.processInfo.systemUptime <= deadline else {
+    guard BrowserAccessibilityTraversalLimits.permitsCall(count: calls),
+      ProcessInfo.processInfo.systemUptime <= deadline
+    else {
       throw BrowserAccessibilityFailure.deadline
     }
   }
@@ -610,7 +653,9 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
 
   private func elements(_ element: AXUIElement, _ attribute: String) throws -> [AXUIElement] {
     guard let value = try raw(element, attribute) else { return [] }
-    guard let values = value as? [Any], values.count <= Self.maximumNodes else {
+    guard let values = value as? [Any],
+      BrowserAccessibilityTraversalLimits.permitsChildren(count: values.count)
+    else {
       throw BrowserAccessibilityFailure.unavailable
     }
     var result: [AXUIElement] = []
@@ -631,11 +676,6 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     return result
   }
 
-  private func pageURL(_ element: AXUIElement, _ attribute: String) throws -> String? {
-    guard let value = try raw(element, attribute) else { return nil }
-    return browserAccessibilityCanonicalPageURL(value)
-  }
-
   private func boolean(_ element: AXUIElement, _ attribute: String) throws -> Bool? {
     guard let value = try raw(element, attribute) else { return nil }
     guard CFGetTypeID(value) == CFBooleanGetTypeID() else {
@@ -644,7 +684,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     return CFBooleanGetValue((value as! CFBoolean))
   }
 
-  private func actions(_ element: AXUIElement) throws -> Set<String> {
+  private func actions(_ element: AXUIElement, includeSetValue: Bool) throws -> Set<String> {
     try check()
     var names: CFArray?
     let status = AXUIElementCopyActionNames(element, &names)
@@ -664,7 +704,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
       default: break
       }
     }
-    if try settable(element, kAXValueAttribute) { result.insert("set-value") }
+    if includeSetValue, try settable(element, kAXValueAttribute) { result.insert("set-value") }
     return result
   }
 
@@ -676,6 +716,61 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     guard status == .success else { throw BrowserAccessibilityFailure.unavailable }
     return value.boolValue
   }
+}
+
+func browserAccessibilityAddressCandidate(
+  role: String?, browser: BrowserAccessibilityBrowser
+) -> Bool {
+  switch browser {
+  case .safari:
+    role == kAXTextFieldRole || role == kAXComboBoxRole
+  case .arc:
+    role == kAXStaticTextRole || role == kAXTextFieldRole
+  }
+}
+
+func browserAccessibilityNodeKind(
+  role: String?, browser: BrowserAccessibilityBrowser, label: String?, identifier: String?,
+  placeholder: String?, insideWebArea: Bool
+) -> BrowserAccessibilityNode.Kind? {
+  if role == "AXWebArea" { return .webArea }
+  if !insideWebArea,
+    browserAccessibilityAddressRole(
+      role: role, browser: browser, label: label, identifier: identifier,
+      placeholder: placeholder)
+  {
+    return .address
+  }
+  guard insideWebArea else { return nil }
+  switch role {
+  case "AXSearchField", kAXTextFieldRole: return .search
+  case "AXLink": return .link
+  case kAXButtonRole: return .button
+  case kAXStaticTextRole: return .text
+  case kAXScrollAreaRole: return .scrollArea
+  default: return nil
+  }
+}
+
+func browserAccessibilityProjectNode(
+  reference: BrowserAccessibilityElementReference, role: String?,
+  browser: BrowserAccessibilityBrowser, label: String?, enabled: Bool, path: [Int],
+  actions: Set<String>, identifier: String?, placeholder: String?, rawURL: Any?,
+  insideWebArea: Bool
+) -> BrowserAccessibilityNode? {
+  guard let kind = browserAccessibilityNodeKind(
+    role: role, browser: browser, label: label, identifier: identifier,
+    placeholder: placeholder, insideWebArea: insideWebArea)
+  else { return nil }
+  let value: String?
+  if kind == .webArea || kind == .link, let rawURL {
+    value = browserAccessibilityCanonicalPageURL(rawURL)
+  } else {
+    value = nil
+  }
+  return BrowserAccessibilityNode(
+    reference: reference, kind: kind, label: label, value: value, enabled: enabled,
+    path: path, actions: actions)
 }
 
 func browserAccessibilityAddressRole(
