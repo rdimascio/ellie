@@ -136,7 +136,14 @@ private func scenario(_ name: String) throws {
     }
     try expect(backend.actions == ["press"], "no replay")
   case "link-url-rebind":
-    let backend = MockBackend()
+    let nodes = MockBackend.defaultNodes().map { node in
+      guard node.kind == .link, node.label == "Nature" else { return node }
+      return MockBackend.node(
+        node.kind, node.label, node.path, node.actions,
+        value: "https://www.youtube.com/watch?v=iTHUUjTA-LI&t=10s&pp=fixture",
+        enabled: node.enabled, reference: node.reference)
+    }
+    let backend = MockBackend(nodes: nodes)
     let adapter = BrowserAccessibilityAdapter(backend: backend)
     let page = try bind(adapter)
     let view = try adapter.read(page)
@@ -150,7 +157,7 @@ private func scenario(_ name: String) throws {
         guard node.kind == .link, node.label == "Nature" else { return node }
         return MockBackend.node(
           node.kind, node.label, node.path, node.actions,
-          value: "https://www.youtube.com/watch?v=abcdefghijk&pp=fixture",
+          value: "https://www.youtube.com/watch?v=iTHUUjTA-LI&t=11s&pp=fixture",
           enabled: node.enabled, reference: node.reference)
       })
     try expectFailure(.stale) {
@@ -388,14 +395,63 @@ private func scenario(_ name: String) throws {
       MockBackend.node(
         .link, "Unknown query", [0, 5], ["press"],
         value: "https://www.youtube.com/watch?v=01234567890&list=private"),
-      MockBackend.node(.button, "Subscribe", [0, 6], ["press"]),
-      MockBackend.node(.button, "Share", [0, 7], ["press"]),
+      MockBackend.node(
+        .link, "Timestamp zero", [0, 6], ["press"],
+        value: "https://www.youtube.com/watch?v=01234567890&t=0"),
+      MockBackend.node(
+        .link, "Timestamp second", [0, 7], ["press"],
+        value: "https://www.youtube.com/watch?v=ABCDEFGHIJK&t=1s"),
+      MockBackend.node(
+        .link, "Timestamp day", [0, 8], ["press"],
+        value: "https://www.youtube.com/watch?v=ZYXWVUTSRQP&t=86400s"),
+      MockBackend.node(
+        .link, "Timestamp zero suffix", [0, 9], ["press"],
+        value: "https://www.youtube.com/watch?v=aaaaaaaaaaa&t=0s"),
+      MockBackend.node(
+        .link, "Timestamp second decimal", [0, 10], ["press"],
+        value: "https://www.youtube.com/watch?v=bbbbbbbbbbb&t=1"),
+      MockBackend.node(
+        .link, "Timestamp day decimal", [0, 11], ["press"],
+        value: "https://www.youtube.com/watch?v=ccccccccccc&t=86400"),
+      MockBackend.node(
+        .link, "Timestamp too large", [0, 12], ["press"],
+        value: "https://www.youtube.com/watch?v=11111111111&t=86401"),
+      MockBackend.node(
+        .link, "Timestamp negative", [0, 13], ["press"],
+        value: "https://www.youtube.com/watch?v=22222222222&t=-1"),
+      MockBackend.node(
+        .link, "Timestamp fractional", [0, 14], ["press"],
+        value: "https://www.youtube.com/watch?v=33333333333&t=1.5"),
+      MockBackend.node(
+        .link, "Timestamp encoded name", [0, 15], ["press"],
+        value: "https://www.youtube.com/watch?v=44444444444&%74=1"),
+      MockBackend.node(
+        .link, "Timestamp encoded value", [0, 16], ["press"],
+        value: "https://www.youtube.com/watch?v=55555555555&t=%31s"),
+      MockBackend.node(
+        .link, "Timestamp duplicate", [0, 17], ["press"],
+        value: "https://www.youtube.com/watch?v=66666666666&t=1&t=2"),
+      MockBackend.node(
+        .link, "Video duplicate", [0, 18], ["press"],
+        value: "https://www.youtube.com/watch?v=77777777777&v=88888888888"),
+      MockBackend.node(
+        .link, "Unexpected port", [0, 19], ["press"],
+        value: "https://www.youtube.com:443/watch?v=99999999999&t=1"),
+      MockBackend.node(
+        .link, "Timestamp leading zero", [0, 20], ["press"],
+        value: "https://www.youtube.com/watch?v=ddddddddddd&t=01"),
+      MockBackend.node(.button, "Subscribe", [0, 21], ["press"]),
+      MockBackend.node(.button, "Share", [0, 22], ["press"]),
     ]
     let backend = MockBackend(nodes: nodes)
     let adapter = BrowserAccessibilityAdapter(backend: backend)
     let page = try bind(adapter)
     let view = try adapter.read(page)
-    try expect(view.items.map(\.label) == ["Unique video"], "unsafe selectable item admitted")
+    try expect(
+      view.items.map(\.label)
+        == ["Unique video", "Timestamp zero", "Timestamp second", "Timestamp day",
+          "Timestamp zero suffix", "Timestamp second decimal", "Timestamp day decimal"],
+      "unsafe selectable item admitted")
     let result = try adapter.perform(
       .select(
         itemID: view.items[0].id, generation: view.generation,

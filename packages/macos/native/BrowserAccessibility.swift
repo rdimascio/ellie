@@ -431,13 +431,19 @@ final class BrowserAccessibilityAdapter {
   private func youtubeWatchVideoID(_ value: String) -> String? {
     guard value.utf8.count <= 2_048, let components = URLComponents(string: value),
       components.scheme == "https", components.host == "www.youtube.com",
-      components.user == nil, components.password == nil, components.fragment == nil,
+      components.port == nil, components.user == nil, components.password == nil,
+      components.fragment == nil,
       components.path == "/watch", components.url?.absoluteString == value,
-      let queryItems = components.queryItems, !queryItems.isEmpty
+      let queryItems = components.queryItems, !queryItems.isEmpty,
+      let encodedQuery = components.percentEncodedQuery
     else { return nil }
+    let encodedItems = encodedQuery.split(separator: "&", omittingEmptySubsequences: false)
+    guard encodedItems.count == queryItems.count else { return nil }
     var videoID: String?
-    for item in queryItems {
-      guard (item.name == "v" || item.name == "pp"), let itemValue = item.value,
+    var timestampSeen = false
+    for (item, encodedItem) in zip(queryItems, encodedItems) {
+      guard (item.name == "v" || item.name == "pp" || item.name == "t"),
+        let itemValue = item.value,
         !itemValue.isEmpty, itemValue.utf8.count <= 256
       else { return nil }
       if item.name == "v" {
@@ -445,9 +451,22 @@ final class BrowserAccessibilityAdapter {
           itemValue.range(of: #"^[A-Za-z0-9_-]{11}$"#, options: .regularExpression) != nil
         else { return nil }
         videoID = itemValue
+      } else if item.name == "t" {
+        guard !timestampSeen, encodedItem == "t=\(itemValue)",
+          validYoutubeTimestamp(itemValue)
+        else { return nil }
+        timestampSeen = true
       }
     }
     return videoID
+  }
+
+  private func validYoutubeTimestamp(_ value: String) -> Bool {
+    guard value.range(of: #"^(0|[1-9][0-9]{0,4})s?$"#, options: .regularExpression) != nil
+    else { return false }
+    let digits = value.last == "s" ? value.dropLast() : value[...]
+    guard let seconds = Int(digits) else { return false }
+    return seconds <= 86_400
   }
 
   private func playbackLabel(
