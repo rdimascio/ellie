@@ -108,7 +108,14 @@ protocol BrowserAccessibilityBackend: AnyObject {
     _ second: BrowserAccessibilityElementReference
   ) -> Bool
   func setValue(_ value: String, on element: BrowserAccessibilityElementReference) throws
+  func value(on element: BrowserAccessibilityElementReference) throws -> String?
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws
+}
+
+extension BrowserAccessibilityBackend {
+  func value(on element: BrowserAccessibilityElementReference) throws -> String? {
+    throw BrowserAccessibilityFailure.unavailable
+  }
 }
 
 final class BrowserAccessibilityAuthorizedPage: @unchecked Sendable {
@@ -161,6 +168,8 @@ final class BrowserAccessibilityAdapter {
   }
 
   private static let maximumQueryUTF16 = 200
+  private static let searchAcknowledgementSeconds = 0.5
+  private static let searchAcknowledgementPollSeconds = 0.01
   private static let maximumLabelBytes = 500
   private static let maximumTextBytes = 2_000
   private static let maximumItems = 64
@@ -275,7 +284,8 @@ final class BrowserAccessibilityAdapter {
       do { try backend.setValue(query, on: beforeSet.field.reference) }
       catch { return outcome(.search, .unknown, page) }
       do {
-        guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
+        try acknowledgeSearchValue(
+          query, on: beforeSet.field.reference, cancelled: cancelled)
         let afterSet = try rebound(page)
         guard let ready = rebindSearchPlan(beforeSet, in: afterSet.nodes) else {
           throw BrowserAccessibilityFailure.partialUnknown
@@ -365,6 +375,28 @@ final class BrowserAccessibilityAdapter {
       backend.same(selected.target.reference, target.reference)
     else { return nil }
     return SearchPlan(field: field, target: target, submission: prior.submission)
+  }
+
+  private func acknowledgeSearchValue(
+    _ expected: String, on field: BrowserAccessibilityElementReference,
+    cancelled: () -> Bool
+  ) throws {
+    guard validQuery(expected) else { throw BrowserAccessibilityFailure.invalid }
+    let deadline = ProcessInfo.processInfo.systemUptime + Self.searchAcknowledgementSeconds
+    while true {
+      guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
+      let value = try backend.value(on: field)
+      let remaining = deadline - ProcessInfo.processInfo.systemUptime
+      guard remaining >= 0 else { throw BrowserAccessibilityFailure.deadline }
+      guard !cancelled() else { throw BrowserAccessibilityFailure.partialUnknown }
+      guard value == expected else {
+        guard remaining > 0 else { throw BrowserAccessibilityFailure.deadline }
+        Thread.sleep(
+          forTimeInterval: min(Self.searchAcknowledgementPollSeconds, remaining))
+        continue
+      }
+      return
+    }
   }
 
   private func commandValues(_ command: BrowserAccessibilityCommand) -> (generation: String, revision: String) {
@@ -593,6 +625,13 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     guard AXUIElementSetAttributeValue(target, kAXValueAttribute as CFString, value as CFString)
       == .success
     else { throw BrowserAccessibilityFailure.unavailable }
+  }
+
+  func value(on element: BrowserAccessibilityElementReference) throws -> String? {
+    guard CFGetTypeID(element.value) == AXUIElementGetTypeID() else {
+      throw BrowserAccessibilityFailure.invalid
+    }
+    return try string(element.value as! AXUIElement, kAXValueAttribute)
   }
 
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws {
