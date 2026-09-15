@@ -3,7 +3,7 @@
   "name": "Ellie Media Companion",
   "version": "0.1.0",
   "description": "Explicit, local controls for the active Netflix or YouTube tab.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "nativeMessaging"],
   "background": { "service_worker": "background.js" },
   "action": { "default_popup": "popup.html", "default_title": "Ellie Media Companion" }
 }
