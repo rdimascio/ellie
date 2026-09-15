@@ -165,7 +165,7 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
     _ action: BrowserPhoneAction, nodeID: String, credential: NativeEnrollmentCredential
   ) async throws -> BrowserPhoneResponse {
     switch action {
-    case .status:
+    case .status, .refresh:
       return .status(
         source: .webmcp, connected: true, revision: BrowserVoiceUITestFixture.revision)
     case .read:

@@ -27,6 +27,7 @@ test("native host status reports a delayed missing-host failure without reconnec
   const nativeMessages = extensionEvent();
   const runtimeMessages = extensionEvent();
   const removed = extensionEvent();
+  const replaced = extensionEvent();
   const updated = extensionEvent();
   const posted: unknown[] = [];
   const notifications: unknown[] = [];
@@ -49,7 +50,11 @@ test("native host status reports a delayed missing-host failure without reconnec
     },
   };
   const context: Record<string, any> = {
-    chrome: { runtime, tabs: { onRemoved: removed, onUpdated: updated } },
+    chrome: {
+      runtime,
+      tabs: { onRemoved: removed, onReplaced: replaced, onUpdated: updated },
+      windows: { get: async () => ({ id: 1, focused: true }) },
+    },
     AbortController,
     URL,
     Promise,
@@ -120,7 +125,12 @@ test("native host is connected only after a request and reports a later disconne
           return Promise.resolve();
         },
       },
-      tabs: { onRemoved: extensionEvent(), onUpdated: extensionEvent() },
+      tabs: {
+        onRemoved: extensionEvent(),
+        onReplaced: extensionEvent(),
+        onUpdated: extensionEvent(),
+      },
+      windows: { get: async () => ({ id: 1, focused: true }) },
     },
     AbortController,
     URL,
@@ -167,6 +177,310 @@ test("native host is connected only after a request and reports a later disconne
     notifications.map((value) => value.status),
     ["waiting", "connected", "disconnected"],
   );
+});
+
+test("explicit refresh renews only the retained same-page selection authority", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const disconnect = extensionEvent();
+  const removed = extensionEvent();
+  const replaced = extensionEvent();
+  const updated = extensionEvent();
+  let now = 1_000;
+  let documentId = "document-1";
+  let injectionCount = 0;
+  let focused = true;
+  let pendingTools = false;
+  let pendingRefresh = false;
+  let armWindowReadAfterInjection = false;
+  let pauseNextWindowRead = false;
+  let settleTools: ((value: unknown) => void) | undefined;
+  let settleRefresh: ((value: unknown) => void) | undefined;
+  let settleWindowRead: ((value: unknown) => void) | undefined;
+  const tab = {
+    id: 7,
+    windowId: 3,
+    active: true,
+    status: "complete",
+    url: "https://www.youtube.com/watch?v=abcdefghijk",
+  };
+  class FixtureDate extends Date {
+    static override now() {
+      return now;
+    }
+  }
+  const context: Record<string, any> = {
+    chrome: {
+      runtime: {
+        onMessage: extensionEvent(),
+        connectNative() {
+          return {
+            onDisconnect: disconnect,
+            onMessage: extensionEvent(),
+            postMessage() {},
+          };
+        },
+        sendMessage() {
+          return Promise.resolve();
+        },
+      },
+      tabs: {
+        get: async () => ({ ...tab }),
+        onRemoved: removed,
+        onReplaced: replaced,
+        onUpdated: updated,
+      },
+      windows: {
+        get: async () => {
+          if (pauseNextWindowRead) {
+            pauseNextWindowRead = false;
+            return new Promise((resolve) => {
+              settleWindowRead = resolve;
+            });
+          }
+          return { id: 3, focused };
+        },
+      },
+      scripting: {
+        executeScript(options: { files?: string[] }) {
+          if (options.files && pendingRefresh) {
+            return new Promise((resolve) => {
+              settleRefresh = resolve;
+            });
+          }
+          if (!options.files && pendingTools) {
+            return new Promise((resolve) => {
+              settleTools = resolve;
+            });
+          }
+          injectionCount += 1;
+          if (options.files && armWindowReadAfterInjection) {
+            armWindowReadAfterInjection = false;
+            pauseNextWindowRead = true;
+          }
+          return Promise.resolve([{ documentId }]);
+        },
+      },
+    },
+    AbortController,
+    URL,
+    Promise,
+    Set,
+    Map,
+    Date: FixtureDate,
+    Error,
+    Object,
+    Array,
+    String,
+    Number,
+    RegExp,
+    crypto,
+    setTimeout,
+    clearTimeout,
+  };
+  runInNewContext(
+    `${background}\n;globalThis.__refreshTest={bind:bindWebMCP,request:handleNativeRequest,state:()=>({binding:webMCPBinding,selection:webMCPSelection})};`,
+    context,
+  );
+  const request = (type: string, id: string) =>
+    context.__refreshTest.request({ protocol: "ellie.browser-webmcp.v1", id, type });
+
+  const initialExecute = context.chrome.scripting.executeScript;
+  context.chrome.scripting.executeScript = (options: { files?: string[] }) => {
+    const result = initialExecute(options);
+    if (options.files) {
+      tab.status = "loading";
+      updated.emit(7, { status: "loading" });
+      tab.status = "complete";
+    }
+    return result;
+  };
+  await assert.rejects(context.__refreshTest.bind(7), /page_changed/);
+  assert.equal(injectionCount, 1);
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  assert.equal(context.__refreshTest.state().selection, undefined);
+  context.chrome.scripting.executeScript = initialExecute;
+  injectionCount = 0;
+
+  focused = false;
+  await assert.rejects(context.__refreshTest.bind(7), /unsupported_page/);
+  assert.equal(injectionCount, 0, "an unfocused popup selection injected a document");
+  assert.equal(context.__refreshTest.state().selection, undefined);
+  focused = true;
+
+  const initial = await context.__refreshTest.bind(7);
+  assert.equal(initial.expiresAt, 901_000);
+  assert.equal(injectionCount, 1);
+  const first = context.__refreshTest.state().binding;
+
+  tab.url = "https://www.youtube.com/results?search_query=public";
+  documentId = "document-2";
+  updated.emit(7, { url: tab.url });
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  assert.ok(context.__refreshTest.state().selection);
+  await assert.rejects(request("binding.status", "ordinary-status"), /unbound/);
+  assert.equal(injectionCount, 1, "ordinary status injected a fresh document");
+
+  const refreshed = await request("binding.refresh", "explicit-refresh");
+  assert.equal(refreshed.expiresAt, initial.expiresAt);
+  assert.notEqual(refreshed.bindingId, first.bindingId);
+  assert.notEqual(refreshed.documentId, first.documentId);
+  assert.equal(refreshed.url, tab.url);
+  assert.equal(injectionCount, 2);
+  await assert.rejects(
+    context.__refreshTest.request({
+      protocol: "ellie.browser-webmcp.v1",
+      id: "stale-tool",
+      type: "tool.execute",
+      bindingId: first.bindingId,
+      documentId: first.documentId,
+      toolHandle: "old-handle",
+      args: {},
+    }),
+    /stale_tool/,
+  );
+  assert.equal(injectionCount, 2, "stale action was replayed");
+
+  tab.status = "loading";
+  updated.emit(7, { status: "loading" });
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  assert.ok(context.__refreshTest.state().selection);
+  await assert.rejects(request("binding.status", "same-url-reload-status"), /unbound/);
+  await assert.rejects(request("binding.refresh", "same-url-reload-loading"), /page_changed/);
+  assert.equal(injectionCount, 2, "loading same-URL reload injected a document");
+  tab.status = "complete";
+  documentId = "document-after-same-url-reload";
+  const afterSameURLReload = await request("binding.refresh", "same-url-reload-complete");
+  assert.equal(afterSameURLReload.documentId, documentId);
+
+  tab.url = "https://www.youtube.com/results?search_query=next";
+  documentId = "document-3";
+  updated.emit(7, { url: tab.url });
+  focused = false;
+  await assert.rejects(request("binding.refresh", "unfocused"), /page_changed/);
+  assert.equal(injectionCount, 3, "unfocused refresh injected a document");
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  focused = true;
+
+  const afterFocus = await request("binding.refresh", "after-focus");
+  assert.equal(afterFocus.documentId, documentId);
+  pendingTools = true;
+  const active = request("tools.list", "pending-read");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const beforeBusy = injectionCount;
+  await assert.rejects(request("binding.refresh", "while-active"), /busy/);
+  assert.equal(injectionCount, beforeBusy, "busy refresh replayed work");
+  settleTools?.([{ documentId, result: [] }]);
+  await active;
+  pendingTools = false;
+
+  tab.url = "https://www.youtube.com/results?search_query=cancelled";
+  documentId = "document-cancelled";
+  updated.emit(7, { url: tab.url });
+  pendingRefresh = true;
+  const cancelled = request("binding.refresh", "cancelled-refresh");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const cancellation = await context.__refreshTest.request({
+    protocol: "ellie.browser-webmcp.v1",
+    id: "cancel-request",
+    type: "cancel",
+    targetId: "cancelled-refresh",
+  });
+  assert.equal(cancellation.cancelled, true);
+  await assert.rejects(cancelled, /cancelled/);
+  settleRefresh?.([{ documentId }]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  pendingRefresh = false;
+
+  tab.url = "https://www.youtube.com/results?search_query=cancel-final-check";
+  documentId = "document-cancel-final-check";
+  updated.emit(7, { url: tab.url });
+  armWindowReadAfterInjection = true;
+  const cancelledFinalCheck = request("binding.refresh", "cancel-final-check");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const finalCheckCancellation = await context.__refreshTest.request({
+    protocol: "ellie.browser-webmcp.v1",
+    id: "cancel-final-check-request",
+    type: "cancel",
+    targetId: "cancel-final-check",
+  });
+  assert.equal(finalCheckCancellation.cancelled, true);
+  settleWindowRead?.({ id: 3, focused: true });
+  await assert.rejects(cancelledFinalCheck, /cancelled/);
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  settleWindowRead = undefined;
+
+  tab.url = "https://www.youtube.com/results?search_query=race";
+  documentId = "document-4";
+  updated.emit(7, { url: tab.url });
+  const execute = context.chrome.scripting.executeScript;
+  context.chrome.scripting.executeScript = (options: { files?: string[] }) => {
+    const result = execute(options);
+    if (options.files) tab.active = false;
+    return result;
+  };
+  await assert.rejects(request("binding.refresh", "focus-race"), /page_changed/);
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  tab.active = true;
+  context.chrome.scripting.executeScript = execute;
+
+  tab.status = "complete";
+  context.chrome.scripting.executeScript = (options: { files?: string[] }) => {
+    const result = execute(options);
+    if (options.files) {
+      tab.status = "loading";
+      updated.emit(7, { status: "loading" });
+    }
+    return result;
+  };
+  await assert.rejects(request("binding.refresh", "reload-race"), /cancelled/);
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  tab.status = "complete";
+  context.chrome.scripting.executeScript = execute;
+
+  tab.url = "https://www.youtube.com/results?search_query=navigation-race";
+  updated.emit(7, { url: tab.url });
+  context.chrome.scripting.executeScript = (options: { files?: string[] }) => {
+    const result = execute(options);
+    if (options.files) {
+      tab.url = "https://www.youtube.com/results?search_query=navigated-during-refresh";
+      updated.emit(7, { url: tab.url });
+    }
+    return result;
+  };
+  await assert.rejects(request("binding.refresh", "navigation-race"), /cancelled/);
+  assert.equal(context.__refreshTest.state().binding, undefined);
+  context.chrome.scripting.executeScript = execute;
+
+  tab.url = "https://example.test/other";
+  updated.emit(7, { url: tab.url });
+  const beforeCrossOrigin = injectionCount;
+  tab.url = "https://www.youtube.com/returned";
+  await assert.rejects(request("binding.refresh", "cross-origin-return"), /unbound/);
+  assert.equal(injectionCount, beforeCrossOrigin);
+
+  documentId = "document-5";
+  const removal = await context.__refreshTest.bind(7);
+  removed.emit(7);
+  await assert.rejects(request("binding.refresh", "removed"), /unbound/);
+  assert.equal(removal.expiresAt, initial.expiresAt);
+
+  await context.__refreshTest.bind(7);
+  replaced.emit(8, 7);
+  await assert.rejects(request("binding.refresh", "replaced"), /unbound/);
+
+  const expiring = await context.__refreshTest.bind(7);
+  now = expiring.expiresAt;
+  const beforeExpiry = injectionCount;
+  await assert.rejects(request("binding.refresh", "expired"), /unbound/);
+  assert.equal(injectionCount, beforeExpiry);
+
+  now = 2_000;
+  await context.__refreshTest.bind(7);
+  disconnect.emit();
+  const beforeDisconnect = injectionCount;
+  await assert.rejects(request("binding.refresh", "disconnected"), /unbound/);
+  assert.equal(injectionCount, beforeDisconnect);
 });
 
 test("popup distinguishes page selection, missing host, and later disconnect without extra actions", async () => {

@@ -67,6 +67,9 @@ final class BrowserPhoneControlTests: XCTestCase {
       capabilities: ["browser.read", "browser.control"])
     store.refresh(on: node)
     await eventually { store.phase == .ready }
+    XCTAssertEqual(
+      Array((await transport.actions).prefix(2)),
+      [.refresh, .read(revision: String(repeating: "a", count: 64))])
     XCTAssertEqual(store.page?.items.first?.id, "opaque-1")
     store.perform(.openResult(index: 1), on: node)
     await eventually { await transport.actions.count == 3 }
@@ -246,7 +249,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     actions.append(action)
     let revision = String(repeating: "a", count: 64)
     switch action {
-    case .status: return .status(source: source, connected: true, revision: revision)
+    case .status, .refresh: return .status(source: source, connected: true, revision: revision)
     case .read:
       if delayRead { await withCheckedContinuation { readContinuation = $0 } }
       return .page(

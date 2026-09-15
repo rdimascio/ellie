@@ -18,7 +18,13 @@ export const BROWSER_WEBMCP_LIMITS = Object.freeze({
 } as const);
 
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
-const requestTypes = ["binding.status", "tools.list", "tool.execute", "cancel"] as const;
+const requestTypes = [
+  "binding.status",
+  "binding.refresh",
+  "tools.list",
+  "tool.execute",
+  "cancel",
+] as const;
 export const BROWSER_WEBMCP_STATUSES = [
   "ok",
   "unbound",
@@ -36,6 +42,7 @@ export const BROWSER_WEBMCP_STATUSES = [
 export type BrowserWebMCPStatus = (typeof BROWSER_WEBMCP_STATUSES)[number];
 export type BrowserWebMCPRequest =
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.status" }
+  | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.refresh" }
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "tools.list" }
   | {
       protocol: typeof BROWSER_WEBMCP_PROTOCOL;
@@ -128,7 +135,11 @@ export function browserWebMCPRequest(value: unknown): BrowserWebMCPRequest {
   )
     throw new Error("Invalid message.");
   const base = { protocol: BROWSER_WEBMCP_PROTOCOL, id: identifier(body.id) };
-  if (body.type === "binding.status" || body.type === "tools.list") {
+  if (
+    body.type === "binding.status" ||
+    body.type === "binding.refresh" ||
+    body.type === "tools.list"
+  ) {
     exactKeys(body, ["protocol", "id", "type"]);
     return { ...base, type: body.type };
   }

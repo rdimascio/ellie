@@ -70,6 +70,10 @@ async function waitForBridge(
 
 test("WebMCP wire grammar is exact and bounded", () => {
   assert.deepEqual(browserWebMCPRequest(statusRequest()), statusRequest());
+  assert.deepEqual(
+    browserWebMCPRequest({ ...statusRequest("refresh-1"), type: "binding.refresh" }),
+    { ...statusRequest("refresh-1"), type: "binding.refresh" },
+  );
   assert.throws(() => browserWebMCPRequest({ ...statusRequest(), extra: true }), /Invalid/);
   assert.throws(
     () =>

@@ -89,6 +89,29 @@ test("browser remote rejects malformed coordinator responses", async () => {
   await assert.rejects(commandRemote.openApp("living-room-mini", "arc"), /outcome unknown/i);
 });
 
+test("browser remote preserves the explicit refresh operation and validates a status result", async () => {
+  const upstream = upstreamReturning({
+    ok: true,
+    message: "Browser tab connected.",
+    browser: {
+      source: "accessibility",
+      operation: "status",
+      status: "connected",
+      revision: "fresh-revision",
+      origin: "https://www.youtube.com",
+    },
+  });
+  const remote = createBrowserRemote(upstream, [{ id: "living-room-mini", label: "Living room" }]);
+  assert.ok(remote.execute);
+  const result = await remote.execute("living-room-mini", { tool: "browser.refresh" });
+  assert.ok("browser" in result);
+  assert.equal(result.browser.operation, "status");
+  assert.deepEqual(upstream.calls[0]?.body, {
+    nodeId: "living-room-mini",
+    action: { tool: "browser.refresh" },
+  });
+});
+
 test("browser remote replaces upstream failure detail with a fixed public result", async () => {
   const upstream = upstreamReturning({
     ok: false,
