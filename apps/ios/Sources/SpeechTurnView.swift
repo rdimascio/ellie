@@ -4,13 +4,16 @@ struct SpeechTurnView: View {
   @Environment(\.dismiss) private var dismiss
   @Environment(\.scenePhase) private var scenePhase
   @ObservedObject private var controlStore: PhoneControlStore
+  @ObservedObject private var browserStore: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
 
   init(
     credential: NativeEnrollmentCredential, controls: PhoneControlStore,
+    browser: BrowserPhoneControlStore,
     speech: SpeechTurnStore? = nil
   ) {
     controlStore = controls
+    browserStore = browser
     _speech = StateObject(
       wrappedValue: speech
         ?? SpeechTurnStore(credential: credential, recorder: IOSSpeechRecorder()))
@@ -27,6 +30,7 @@ struct SpeechTurnView: View {
         controlsBody
       }
       status
+      browserStatus
       if speech.phase == .reviewing {
         Section("Review transcript") {
           TextEditor(text: $speech.transcript)
@@ -50,8 +54,16 @@ struct SpeechTurnView: View {
             .disabled(controlsBusy)
             Text("This selects \(app.label). Use the separate Open button to send the command.")
               .font(.footnote).foregroundStyle(.secondary)
+          } else if let intent = BrowserVoiceIntentParser.parse(speech.transcript) {
+            Button("Run \(intent.displayLabel) on selected Mac") {
+              browserStore.perform(intent, on: controlStore.selectedNode)
+              speech.discardReview()
+            }
+            .disabled(controlsBusy || browserStore.isBusy || controlStore.selectedNode == nil)
+            Text("The command uses the current reviewed browser page. Read the page first for controls and results.")
+              .font(.footnote).foregroundStyle(.secondary)
           } else {
-            Text("Say or enter “Open Safari,” “Open Arc,” or “Open Messages.”")
+            Text("Say an app command or a reviewed browser command such as “Scroll down” or “Search for local news.”")
               .font(.footnote).foregroundStyle(.secondary)
           }
           Button("Discard transcript", role: .destructive) { speech.discardReview() }
@@ -62,6 +74,21 @@ struct SpeechTurnView: View {
     .onDisappear { speech.cancelAndDiscard() }
     .onChange(of: scenePhase) { _, phase in
       if phase != .active { speech.cancelAndDiscard() }
+    }
+  }
+
+  @ViewBuilder private var browserStatus: some View {
+    switch browserStore.phase {
+    case .idle, .ready: EmptyView()
+    case .checking: Section { ProgressView("Checking browser connection…") }
+    case .reading: Section { ProgressView("Reading current page…") }
+    case .sending(let label): Section { ProgressView("Sending \(label)…") }
+    case .cancelling: Section { ProgressView("Stopping…") }
+    case .outcome(let message): Section("Browser result") { Label(message, systemImage: "checkmark.circle") }
+    case .unknown(let message): Section("Browser result") { Label(message, systemImage: "questionmark.circle") }
+    case .failed(let message): Section { Label(message, systemImage: "exclamationmark.triangle") }
+    case .revoked:
+      Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
     }
   }
 
