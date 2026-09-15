@@ -259,7 +259,8 @@ test(
       assert.ok(items.length > 1 && items.length < 64);
       assert.equal(new Set(items.map((item) => item.id)).size, items.length);
       for (const item of items.slice(1)) {
-        assert.match(item.label, /^Video [0-9]{2} x{241}$/);
+        assert.match(item.label, /^Video [0-9]{2} /);
+        assert.equal(item.label.slice(9), '"\\'.repeat(120) + "x");
         assert.equal(item.label.length, 250);
       }
       completed = true;

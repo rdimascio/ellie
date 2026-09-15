@@ -33,7 +33,8 @@ private final class SessionBackend: BrowserAccessibilityBackend {
     #if ELLIE_AX_LARGE_ITEMS
     nodes += (0..<64).map { index in
       BrowserAccessibilityNode(reference: BrowserAccessibilityElementReference(SessionToken()),
-        kind: .link, label: String(format: "Video %02d ", index) + String(repeating: "x", count: 241),
+        kind: .link, label: String(format: "Video %02d ", index)
+          + String(repeating: "\"\\", count: 120) + "x",
         value: "https://www.youtube.com/watch?v=" + String(format: "%011d", index),
         enabled: true, path: [0, index + 2], actions: ["press"])
     }
