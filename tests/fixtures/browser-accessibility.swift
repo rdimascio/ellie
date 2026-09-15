@@ -475,12 +475,12 @@ private func scenario(_ name: String) throws {
       "over-budget AX reads admitted")
   case "summary-contract-bound":
     let web = MockBackend.defaultNodes()[0]
-    let first = String(repeating: "🧭", count: 500)
-    let second = String(repeating: "🌎", count: 499)
+    let first = String(repeating: "🧭", count: 200)
+    let second = String(repeating: "🌎", count: 200)
     let nodes = [web,
       MockBackend.node(.text, first, [0, 1], []),
       MockBackend.node(.text, second, [0, 2], []),
-      MockBackend.node(.text, "excluded", [0, 3], []),
+      MockBackend.node(.text, String(repeating: "🌙", count: 200), [0, 3], []),
     ]
     let backend = MockBackend(nodes: nodes)
     let adapter = BrowserAccessibilityAdapter(backend: backend)
@@ -489,8 +489,28 @@ private func scenario(_ name: String) throws {
       throw BrowserAccessibilityFailure.unavailable
     }
     try expect(summary == "\(first) \(second)", "bounded Unicode summary changed")
-    try expect(summary.utf16.count == 1_999, "summary UTF-16 accounting changed")
-    try expect(summary.utf8.count <= 8_192, "summary byte bound exceeded")
+    try expect(summary.utf8.count == 1_601, "summary UTF-8 accounting changed")
+    try expect(summary.utf8.count <= 2_000, "summary byte bound exceeded")
+
+    let safeLabel = String(repeating: "🌍", count: 125)
+    let oversizedLabel = String(repeating: "🌍", count: 126)
+    let labelBackend = MockBackend(nodes: [web,
+      MockBackend.node(.link, safeLabel, [0, 4], ["press"],
+        value: "https://www.youtube.com/watch?v=abcdefghijk"),
+      MockBackend.node(.link, oversizedLabel, [0, 5], ["press"],
+        value: "https://www.youtube.com/watch?v=lmnopqrstuv"),
+    ])
+    labelBackend.current = BrowserAccessibilitySnapshot(
+      browser: labelBackend.current.browser, processID: labelBackend.current.processID,
+      launchIdentity: labelBackend.current.launchIdentity,
+      exactURL: labelBackend.current.exactURL, window: labelBackend.current.window,
+      webArea: labelBackend.current.webArea, address: labelBackend.current.address,
+      title: oversizedLabel, nodes: labelBackend.current.nodes)
+    let labelAdapter = BrowserAccessibilityAdapter(backend: labelBackend)
+    let labelPage = try bind(labelAdapter)
+    let labelView = try labelAdapter.read(labelPage)
+    try expect(labelView.title == nil, "oversized UTF-8 title emitted")
+    try expect(labelView.items.map(\.label) == [safeLabel], "oversized UTF-8 item label emitted")
   default:
     throw NSError(domain: "BrowserAccessibilityFixture", code: 3)
   }
