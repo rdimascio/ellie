@@ -1,9 +1,11 @@
 # Browser WebMCP bridge
 
 This slice connects an explicitly selected browser tab to a local native-messaging host and
-private node-side Unix socket. It is a transport prerequisite, not a phone-control endpoint.
-The shipping reviewed origin/tool map is empty. Installation, reviewed real-site bindings,
-canonical job permissions and native phone controls follow separately.
+private node-side Unix socket. Canonical job permissions and native browser controls consume
+this transport through the node executor. The shipping reviewed origin/tool map is empty;
+installation and real-site acceptance remain open. The packaged node uses the authenticated
+Swift broker and [Accessibility runtime](browser-accessibility.md) when an explicitly bound
+page does not offer reviewed WebMCP tools.
 
 The browser uses the current `document.modelContext.getTools()` and
 `executeTool(RegisteredTool, arguments, { signal })` interface. Only exact reviewed tool
@@ -17,11 +19,13 @@ are private to the user. Requests and responses have closed, size-bounded framin
 grammar. There is one outstanding request. Cancellation reaches pending discovery as well
 as dispatched execution, and an interrupted operation retains its reservation while its
 outcome remains uncertain. A post-dispatch disconnection or unknown result never authorizes
-a retry or an accessibility fallback. The future job caller must supply its deadline signal.
+a retry or an accessibility fallback. The job caller supplies its deadline signal.
 
 Malformed frames close their connection without crashing the node. Old connections cannot
 settle a new connection's pending request. Cleanup removes only the socket whose identity
-the bridge retained. Existing sockets are refused rather than replaced automatically.
+the bridge retained. The original Node transport seam refuses existing sockets; the packaged
+Swift broker can recover a verified stale socket using its retained private lock record.
+Neither path replaces a live or foreign socket.
 
 The isolated Chromium fixtures exercise loaded extension scripts against synthetic WebMCP
 tools, including cancellation before injection, delayed discovery, same-origin navigation,
