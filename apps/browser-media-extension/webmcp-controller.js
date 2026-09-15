@@ -2,6 +2,7 @@
   const controllerName = "__ellieWebMCPControllerV1";
   if (Object.hasOwn(globalThis, controllerName)) return;
   const maximumTools = 16;
+  const maximumSchemaBytes = 8_192;
   const maximumResultBytes = 16_384;
   const snapshots = new Map();
   const executions = new Map();
@@ -12,10 +13,28 @@
     untrustedContentHint: tool?.annotations?.untrustedContentHint === true,
     consequentialHint: tool?.annotations?.consequentialHint === true,
   });
+  const inputSchema = (tool) => {
+    let value = tool?.inputSchema;
+    if (typeof value === "string") {
+      if (new TextEncoder().encode(value).length > maximumSchemaBytes)
+        throw new Error("invalid_tools");
+      try {
+        value = JSON.parse(value);
+      } catch {
+        throw new Error("invalid_tools");
+      }
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new Error("invalid_tools");
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined || new TextEncoder().encode(encoded).length > maximumSchemaBytes)
+      throw new Error("invalid_tools");
+    return JSON.parse(encoded);
+  };
   const metadata = (tool) => ({
     name: typeof tool?.name === "string" ? tool.name.slice(0, 100) : "",
     description: typeof tool?.description === "string" ? tool.description.slice(0, 300) : "",
-    inputSchema: tool?.inputSchema,
+    inputSchema: inputSchema(tool),
     annotations: annotations(tool),
   });
   const canonical = (value) => {
@@ -80,9 +99,23 @@
         if (matching.length !== 1) throw new Error("stale_tool");
         const current = matching[0];
         controller.signal.throwIfAborted();
-        const result = await context.executeTool(current, args, { signal: controller.signal });
+        const stringEncoded = typeof current.inputSchema === "string";
+        const result = await context.executeTool(
+          current,
+          stringEncoded ? JSON.stringify(args) : args,
+          { signal: controller.signal },
+        );
         if (result === null) return { navigation: true };
-        return { navigation: false, value: bounded(result) };
+        let value = result;
+        if (stringEncoded) {
+          if (typeof result !== "string") throw new Error("invalid_result");
+          try {
+            value = JSON.parse(result);
+          } catch {
+            throw new Error("invalid_result");
+          }
+        }
+        return { navigation: false, value: bounded(value) };
       } finally {
         executions.delete(executionId);
       }

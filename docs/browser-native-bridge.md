@@ -33,3 +33,33 @@ stale handles and media-companion regressions. Native-host stream tests exercise
 Unix relay, malformed framing and disconnected outcomes. These tests do not establish
 WebMCP availability on Netflix, YouTube, Disney+, Safari or Arc, an installed extension,
 actual player effects, or the physical iPhone voice flow.
+
+## Real-browser acceptance runner
+
+`bun run accept:browser-webmcp` drives an owned HTTPS page through an isolated
+agent-browser profile, the production extension scripts, the captured packaged native host, the
+real Unix bridge seam and the canonical browser-operation executor. The page registers its read
+and scroll tools with the browser's native `document.modelContext.registerTool()` implementation.
+The runner records the exact source, release, extension fixture changes, browser executable,
+registry, snapshots and screenshots. It requires a measured scroll offset and visible text change,
+then reverses that one action only after both the WebMCP result and page effect are known. An
+unknown result forbids replay, Accessibility fallback and rollback dispatch.
+
+Use a captured immutable development release and an explicit Chrome for Testing executable:
+
+```sh
+ELLIE_BROWSER_ACCEPTANCE_RELEASE=/absolute/path/to/captured-release \
+ELLIE_BROWSER_ACCEPTANCE_BROWSER=/absolute/path/to/Google\ Chrome\ for\ Testing \
+bun run accept:browser-webmcp
+```
+
+The gate requires a clean checkout. A developer can set
+`ELLIE_BROWSER_ACCEPTANCE_ALLOW_DIRTY=1` while iterating, but that run records dirty source and is
+not release evidence.
+
+All browser profiles, manifests, private runtime state and certificates are created beneath one
+owned temporary root. The HTTPS exception is scoped to the fixture leaf's SPKI and hostname; the
+runner does not change the user trust store or cross a security interstitial. A passing run proves
+the Chrome WebMCP representation, extension, packaged native host and reviewed Node Unix bridge
+seam. It does not prove the packaged Swift broker's Arc ancestry check, an Arc WebMCP
+implementation, Accessibility, a streaming provider, or a physical phone path.

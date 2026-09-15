@@ -351,6 +351,80 @@ test(
 );
 
 test(
+  "connected WebMCP tab handles the browser's JSON-string schema and execution representation",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture();
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
+      const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
+      assert.ok(tab?.id);
+      await launched.page.evaluate(() => {
+        const schema = { type: "object", additionalProperties: false };
+        const tool = {
+          name: "ellie_fixture_action",
+          description: "Synthetic action",
+          inputSchema: JSON.stringify(schema),
+          annotations: {
+            readOnlyHint: false,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+        };
+        Object.defineProperty(document, "modelContext", {
+          configurable: true,
+          value: {
+            getTools: async () => [tool],
+            executeTool: async (_tool: unknown, args: unknown) => {
+              if (typeof args !== "string" || JSON.stringify(JSON.parse(args)) !== "{}")
+                throw new Error("unexpected_arguments");
+              return JSON.stringify({ applied: true });
+            },
+          },
+        });
+      });
+      const binding = await launched.worker.evaluate(
+        (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+        tab.id,
+      );
+      const listed = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: "list-string-schema",
+          type: "tools.list",
+        }),
+      );
+      assert.deepEqual(listed.tools[0].inputSchema, {
+        type: "object",
+        additionalProperties: false,
+      });
+      const executed = await launched.worker.evaluate(
+        ({ binding, listed }) =>
+          globalThis.__ellieTestWebMCP.request({
+            protocol: "ellie.browser-webmcp.v1",
+            id: "execute-string-schema",
+            type: "tool.execute",
+            bindingId: binding.bindingId,
+            documentId: listed.documentId,
+            toolHandle: listed.tools[0].handle,
+            args: {},
+          }),
+        { binding, listed },
+      );
+      assert.deepEqual(executed, { applied: true });
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "rejects unsupported origins, stale candidates, and ambiguous videos",
   { timeout: 30_000 },
   async () => {
