@@ -28,11 +28,16 @@ struct NativeEnrollmentView: View {
         }
         Section("Requested access") {
           ForEach(payload.grants, id: \.target) { grant in
-            Label("Open apps on \(grant.target)", systemImage: "macbook")
+            if let access = nativeEnrollmentAccessDescription(grant) {
+              Label("\(access) on \(grant.target)", systemImage: "macbook")
+            } else {
+              Label("Unsupported access on \(grant.target)", systemImage: "exclamationmark.triangle")
+            }
           }
         }
         Section {
           Button("Pair this iPhone") { store.confirm() }
+            .disabled(payload.grants.contains { nativeEnrollmentAccessDescription($0) == nil })
           Button("Cancel", role: .cancel) { store.cancelTransient() }
         }
       case .checking, .working: ProgressView("Waiting…")
@@ -139,6 +144,18 @@ struct NativeEnrollmentView: View {
     catch { syncCleanupError = true }
   }
   private func shortPin(_ pin: String) -> String { "\(pin.prefix(12))…\(pin.suffix(12))" }
+}
+
+func nativeEnrollmentAccessDescription(_ grant: NativeGrant) -> String? {
+  guard validNativeCapabilities(grant.capabilities) else { return nil }
+  return grant.capabilities.map { capability in
+    switch capability {
+    case "app.open": "Open applications"
+    case "browser.read": "Read the current browser page"
+    case "browser.control": "Control the current browser page"
+    default: capability
+    }
+  }.joined(separator: ", ")
 }
 
 private struct NativeQRScanner: UIViewControllerRepresentable {

@@ -60,12 +60,14 @@ struct SpeechTurnView: View {
                 speech.discardReview()
               }
             }
+            .accessibilityIdentifier("speech-browser-run")
             .disabled(
               controlsBusy || !browserStore.canPerform(intent, on: controlStore.selectedNode))
             if !browserStore.canPerform(intent, on: controlStore.selectedNode) {
               Button("Read current browser page", systemImage: "doc.text.magnifyingglass") {
                 browserStore.refresh(on: controlStore.selectedNode)
               }
+              .accessibilityIdentifier("speech-browser-read")
               .disabled(controlsBusy || !browserStore.canRefresh(on: controlStore.selectedNode))
             }
             Text(
@@ -122,10 +124,12 @@ struct SpeechTurnView: View {
           } label: {
             Label("Review observed results and controls", systemImage: "list.bullet.rectangle")
           }
+          .accessibilityIdentifier("speech-browser-continue")
         } else {
           Button("Read updated browser page", systemImage: "doc.text.magnifyingglass") {
             browserStore.refresh(on: controlStore.selectedNode)
           }
+          .accessibilityIdentifier("speech-browser-read-updated")
           .disabled(controlsBusy || !browserStore.canRefresh(on: controlStore.selectedNode))
         }
         Text(

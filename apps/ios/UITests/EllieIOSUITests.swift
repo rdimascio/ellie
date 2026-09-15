@@ -1,6 +1,141 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testReviewedBrowserVoiceNavigationAndBackgroundCancellationNeverReplay() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-reviewed-browser-fixture"]
+        app.launch()
+
+        let check = app.buttons["speech-check"]
+        XCTAssertTrue(check.waitForExistence(timeout: 5))
+        check.tap()
+        let record = app.buttons["speech-record"]
+        XCTAssertTrue(record.waitForExistence(timeout: 5))
+        record.tap()
+        let stop = app.buttons["speech-stop"]
+        XCTAssertTrue(stop.waitForExistence(timeout: 5))
+        stop.tap()
+
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for public video")
+
+        let initialRead = app.buttons["speech-browser-read"]
+        XCTAssertTrue(initialRead.waitForExistence(timeout: 5))
+        let readEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: initialRead)
+        XCTAssertEqual(XCTWaiter.wait(for: [readEnabled], timeout: 5), .completed)
+        initialRead.tap()
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertTrue(run.isEnabled)
+        run.tap()
+
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 5))
+        updatedRead.tap()
+        let continuation = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continuation.waitForExistence(timeout: 5))
+        continuation.tap()
+        XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
+
+        let result = app.buttons["browser-result-1"]
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        result.tap()
+        let mutationCount = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(mutationCount.waitForExistence(timeout: 5))
+        XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
+        let backgroundCount = app.staticTexts["browser-fixture-background-count"]
+        XCTAssertTrue(backgroundCount.waitForExistence(timeout: 5))
+        XCTAssertEqual(backgroundCount.label, "Fixture backgrounds: 0")
+
+        XCUIDevice.shared.press(.home)
+        let stateHistory = ApplicationStateHistory()
+        let backgrounded = XCTNSPredicateExpectation(
+            predicate: NSPredicate { _, _ in
+                let state = app.state
+                stateHistory.record(state)
+                switch state {
+                case .runningBackground, .runningBackgroundSuspended: return true
+                case .unknown, .notRunning, .runningForeground: return false
+                @unknown default: return false
+                }
+            },
+            object: NSObject())
+        let stateResult = XCTWaiter.wait(for: [backgrounded], timeout: 5)
+        let stateDiagnostic =
+            "XCUIApplication background observation: result=\(stateResult.rawValue), "
+            + "states=\(stateHistory.summary)"
+        print(stateDiagnostic)
+        XCTContext.runActivity(named: "XCUIApplication background observation") { activity in
+            let attachment = XCTAttachment(string: stateDiagnostic)
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
+        app.activate()
+        XCTAssertTrue(backgroundCount.waitForExistence(timeout: 5))
+        let recordedBackground = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture backgrounds: 1"),
+            object: backgroundCount)
+        XCTAssertEqual(XCTWaiter.wait(for: [recordedBackground], timeout: 5), .completed)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["browser-status-unknown"].waitForExistence(timeout: 5))
+        XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
+        let noReplay = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", "Fixture mutations: 2"),
+            object: mutationCount)
+        noReplay.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+    }
+
+    func testChangingMacThroughPhoneControlClearsObservedBrowserPage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-target-fixture"]
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Mac controls"].waitForExistence(timeout: 5))
+        let browser = app.buttons["Control selected Mac browser"]
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+
+        let read = app.buttons["Read current page"]
+        XCTAssertTrue(read.waitForExistence(timeout: 5))
+        read.tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["browser-result-1"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a")
+
+        app.navigationBars["Browser control"].buttons["Mac controls"].tap()
+        let target = app.descendants(matching: .any)["phone-target-picker"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        let macB = app.buttons["Fixture Mac B"]
+        XCTAssertTrue(macB.waitForExistence(timeout: 5))
+        macB.tap()
+        app.buttons["Control selected Mac browser"].tap()
+
+        XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Mac A page"].exists)
+        XCTAssertFalse(app.buttons["browser-result-1"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a")
+
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac B page"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["browser-result-1"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a,ui-fixture-mac-b")
+    }
+
     func testCoordinatorNavigationDoesNotStartEnrollment() {
         let app = XCUIApplication()
         app.launch()
@@ -92,4 +227,35 @@ final class EllieIOSUITests: XCTestCase {
     }
 
     private enum InputFailure: Error { case notReady, valueMismatch }
+}
+
+private final class ApplicationStateHistory {
+    private let lock = NSLock()
+    private var states: [String] = []
+
+    func record(_ state: XCUIApplication.State) {
+        lock.lock()
+        defer { lock.unlock() }
+        states.append("\(name(of: state))(\(state.rawValue))")
+        if states.count > 16 {
+            states.removeFirst(states.count - 16)
+        }
+    }
+
+    var summary: String {
+        lock.lock()
+        defer { lock.unlock() }
+        return states.joined(separator: ", ")
+    }
+
+    private func name(of state: XCUIApplication.State) -> String {
+        switch state {
+        case .unknown: return "unknown"
+        case .notRunning: return "notRunning"
+        case .runningBackgroundSuspended: return "runningBackgroundSuspended"
+        case .runningBackground: return "runningBackground"
+        case .runningForeground: return "runningForeground"
+        @unknown default: return "unrecognized"
+        }
+    }
 }

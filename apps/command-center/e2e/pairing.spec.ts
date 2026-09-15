@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
+import { captureFullPage } from "./screenshot.ts";
 
 const code = "ab".repeat(32);
 const client = {
@@ -66,7 +67,7 @@ test("pairing sends a code once without placing it in URLs or browser storage", 
   page.on("request", (request) => urls.push(request.url()));
   await page.goto("/pair/");
   await expect(page.getByRole("heading", { name: "Connect this device" })).toBeVisible();
-  await page.screenshot({ path: test.info().outputPath("pairing.png"), fullPage: true });
+  await captureFullPage(page, test.info(), "pairing.png");
   await page.getByLabel("Pairing code", { exact: true }).fill(code);
   await page.getByRole("button", { name: "Connect to Ellie", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Connected to Ellie" })).toBeVisible();

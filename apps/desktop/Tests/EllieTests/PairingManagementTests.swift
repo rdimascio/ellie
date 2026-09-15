@@ -1,18 +1,23 @@
-import XCTest
 import Vision
+import XCTest
 
 @testable import Ellie
 
 private actor PairingFixture: CoordinatorManaging {
   var calls: [String] = []
   func recordedCalls() -> [String] { calls }
-  func createNativeInvitation(connection: CoordinatorConnection, label: String, nodeIDs: [String])
+  func createNativeInvitation(
+    connection: CoordinatorConnection, label: String, grants: [ManagedNativeGrant]
+  )
     async throws -> NativeInvitation
   {
-    calls.append("invite:\(label):\(nodeIDs.joined(separator: ","))")
+    calls.append(
+      "invite:\(label):"
+        + grants.map {
+          "\($0.target)=\($0.capabilities.joined(separator: "+"))"
+        }.joined(separator: ","))
     return NativeInvitation(
-      label: label,
-      grants: nodeIDs.map { ManagedNativeGrant(target: $0, capabilities: ["app.open"]) },
+      label: label, grants: grants,
       expiresAt: Date(timeIntervalSince1970: 600), qr: "ellie-native:v1:test")
   }
   func nativeClients(connection: CoordinatorConnection) async throws -> [ManagedNativeClient] {
@@ -30,12 +35,13 @@ private actor PairingFixture: CoordinatorManaging {
   }
 }
 private actor SlowRevokeFixture: CoordinatorManaging {
-  func createNativeInvitation(connection: CoordinatorConnection, label: String, nodeIDs: [String])
+  func createNativeInvitation(
+    connection: CoordinatorConnection, label: String, grants: [ManagedNativeGrant]
+  )
     async throws -> NativeInvitation
   {
     NativeInvitation(
-      label: label,
-      grants: nodeIDs.map { ManagedNativeGrant(target: $0, capabilities: ["app.open"]) },
+      label: label, grants: grants,
       expiresAt: Date().addingTimeInterval(600), qr: "ellie-native:v1:test")
   }
   func nativeClients(connection: CoordinatorConnection) async throws -> [ManagedNativeClient] { [] }
@@ -55,7 +61,8 @@ final class PairingManagementTests: XCTestCase {
     let request = VNDetectBarcodesRequest()
     request.symbologies = [.qr]
     try VNImageRequestHandler(cgImage: cgImage).perform([request])
-    let decoded = try XCTUnwrap((request.results?.first as? VNBarcodeObservation)?.payloadStringValue)
+    let decoded = try XCTUnwrap(
+      (request.results?.first as? VNBarcodeObservation)?.payloadStringValue)
     XCTAssertEqual(decoded, envelope)
   }
 
@@ -67,9 +74,12 @@ final class PairingManagementTests: XCTestCase {
     let connection = CoordinatorConnection(
       origin: URL(string: "https://controller.example:8443")!, certificateDER: certificate,
       token: String(repeating: "a", count: 64))
-    let grants = [ManagedNativeGrant(target: "mac-1", capabilities: ["app.open"])]
+    let grants = [
+      ManagedNativeGrant(
+        target: "mac-1", capabilities: ["app.open", "browser.read", "browser.control"])
+    ]
     let canonical = Data(
-      #"{"version":1,"origin":"https://listener.example:9443","certificateSha256":"\#(pin)","invitation":"\#(String(repeating: "b", count: 64))","expiresAt":\#(expires),"label":"My phone","grants":[{"target":"mac-1","capabilities":["app.open"]}]}"#
+      #"{"version":1,"origin":"https://listener.example:9443","certificateSha256":"\#(pin)","invitation":"\#(String(repeating: "b", count: 64))","expiresAt":\#(expires),"label":"My phone","grants":[{"target":"mac-1","capabilities":["app.open","browser.read","browser.control"]}]}"#
         .utf8)
     let value = try PinnedCoordinatorClient.decodeInvitationPayload(
       canonical, connection: connection, label: "My phone", grants: grants, now: now)
@@ -82,6 +92,9 @@ final class PairingManagementTests: XCTestCase {
       String(decoding: canonical, as: UTF8.self).replacingOccurrences(of: pin, with: pin + #"\n"#),
       String(decoding: canonical, as: UTF8.self).replacingOccurrences(
         of: "https://listener.example:9443", with: "https://LISTENER.example:9443"),
+      String(decoding: canonical, as: UTF8.self).replacingOccurrences(
+        of: #""app.open","browser.read","browser.control""#,
+        with: #""browser.read","app.open","browser.control""#),
       String(decoding: canonical, as: UTF8.self).dropLast() + #",\"extra\":true}"#,
     ] {
       XCTAssertThrowsError(
@@ -97,17 +110,34 @@ final class PairingManagementTests: XCTestCase {
     }
   }
 
+  func testCapabilityValidationAndDescriptionsStayExact() {
+    XCTAssertEqual(managedNativeCapabilities(["app.open"]), ["app.open"])
+    XCTAssertEqual(
+      managedNativeCapabilities(["browser.control", "browser.read"]),
+      ["browser.control", "browser.read"])
+    for invalid in [[], ["browser.read", "browser.read"], ["browser.read", "window.place"]] {
+      XCTAssertNil(managedNativeCapabilities(invalid))
+    }
+    XCTAssertEqual(
+      managedNativeAccessDescription(
+        ManagedNativeGrant(
+          target: "mac-123456789", capabilities: ["browser.read", "browser.control"])),
+      "Read the current browser page, Control the current browser page on Mac mac-1234")
+  }
+
   func testClientListRejectsWrongRoleGrantShapeAndLifetime() throws {
     let now = Date(timeIntervalSince1970: 2_000_000)
     let created = Int64(now.timeIntervalSince1970 * 1_000)
     let expires = created + 90 * 24 * 60 * 60 * 1_000
     let valid =
-      #"[{"id":"phone-1","role":"native_phone_controller","label":"My phone","grants":[{"target":"mac-1","capabilities":["app.open"]}],"createdAt":\#(created),"expiresAt":\#(expires)}]"#
+      #"[{"id":"phone-1","role":"native_phone_controller","label":"My phone","grants":[{"target":"mac-1","capabilities":["browser.read","browser.control"]}],"createdAt":\#(created),"expiresAt":\#(expires)}]"#
     XCTAssertEqual(
       try PinnedCoordinatorClient.decodeManagedClients(Data(valid.utf8), now: now).count, 1)
     for invalid in [
       valid.replacingOccurrences(of: "native_phone_controller", with: "controller"),
-      valid.replacingOccurrences(of: "app.open", with: "url.open"),
+      valid.replacingOccurrences(of: "browser.control", with: "url.open"),
+      valid.replacingOccurrences(of: #""browser.control""#, with: #""browser.read""#),
+      valid.replacingOccurrences(of: #""browser.read","browser.control""#, with: ""),
       valid.replacingOccurrences(of: String(expires), with: String(expires + 1)),
       valid.dropLast() + #",{"id":"phone-1"}]"#,
     ] {
@@ -132,26 +162,50 @@ final class PairingManagementTests: XCTestCase {
     XCTAssertFalse(store.working)
   }
 
+  @MainActor func testInviteRejectsEmptyOrUnknownAccessBeforeRequest() async {
+    let connection = CoordinatorConnection(
+      origin: URL(string: "https://example.test")!, certificateDER: Data(), token: "synthetic")
+    for capabilities in [Set<String>(), Set(["browser.read", "unknown"])] {
+      let fixture = PairingFixture()
+      let store = PairingManagementStore(client: fixture)
+      store.label = "My phone"
+      store.selected = ["mac-1"]
+      store.selectedCapabilities = capabilities
+
+      store.invite(connection)
+
+      XCTAssertFalse(store.working)
+      XCTAssertNotNil(store.message)
+      let calls = await fixture.recordedCalls()
+      XCTAssertTrue(calls.isEmpty)
+    }
+  }
+
   @MainActor func testExplicitInviteHideListAndRevoke() async {
     let fixture = PairingFixture()
     let store = PairingManagementStore(client: fixture)
     let connection = CoordinatorConnection(
       origin: URL(string: "https://example.test")!, certificateDER: Data(), token: "synthetic")
+    XCTAssertEqual(store.selectedCapabilities, ["app.open"])
     store.load(connection)
     await wait { store.clients.count == 1 }
     store.label = "My phone"
     store.selected = ["mac-1"]
+    store.selectedCapabilities = ["browser.read", "browser.control"]
     store.invite(connection)
     await wait { store.invitation != nil }
     XCTAssertEqual(
-      store.invitation?.grants, [ManagedNativeGrant(target: "mac-1", capabilities: ["app.open"])])
+      store.invitation?.grants,
+      [ManagedNativeGrant(target: "mac-1", capabilities: ["browser.read", "browser.control"])])
     store.hideInvitation()
     XCTAssertNil(store.invitation)
     XCTAssertTrue(store.message?.contains("remains valid") == true)
     store.revoke("phone-1", connection: connection)
     await wait { store.clients.isEmpty }
     let calls = await fixture.recordedCalls()
-    XCTAssertEqual(calls, ["clients", "invite:My phone:mac-1", "revoke:phone-1"])
+    XCTAssertEqual(
+      calls,
+      ["clients", "invite:My phone:mac-1=browser.read+browser.control", "revoke:phone-1"])
   }
   @MainActor private func wait(_ condition: @escaping () -> Bool) async {
     let deadline = ContinuousClock.now.advanced(by: .seconds(2))

@@ -6,10 +6,14 @@ struct PhoneControlView: View {
   @StateObject private var browser: BrowserPhoneControlStore
   private let credential: NativeEnrollmentCredential
 
-  init(credential: NativeEnrollmentCredential, store: PhoneControlStore? = nil) {
+  init(
+    credential: NativeEnrollmentCredential, store: PhoneControlStore? = nil,
+    browser: BrowserPhoneControlStore? = nil
+  ) {
     self.credential = credential
     _store = StateObject(wrappedValue: store ?? PhoneControlStore(credential: credential))
-    _browser = StateObject(wrappedValue: BrowserPhoneControlStore(credential: credential))
+    _browser = StateObject(
+      wrappedValue: browser ?? BrowserPhoneControlStore(credential: credential))
   }
 
   var body: some View {
@@ -25,6 +29,7 @@ struct PhoneControlView: View {
               Text("\(node.label)\(node.online ? "" : " — Offline")").tag(Optional(node.id))
             }
           }
+          .accessibilityIdentifier("phone-target-picker")
           .disabled(isBusy)
         }
         Button("Refresh Macs", systemImage: "arrow.clockwise") { store.refresh() }
@@ -65,6 +70,9 @@ struct PhoneControlView: View {
       }
     }
     .navigationTitle("Mac controls")
+    .onChange(of: store.selectedNodeID) { _, value in
+      browser.clearIfTargetChanged(to: value)
+    }
     .onDisappear {
       store.cancel()
       browser.cancel()

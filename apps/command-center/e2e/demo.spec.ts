@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { captureFullPage } from "./screenshot.ts";
 
 test("demo actions stay in-browser, identify the target, and report completion", async ({
   page,
@@ -12,7 +13,7 @@ test("demo actions stay in-browser, identify the target, and report completion",
   await page.goto("/");
   await expect(page.getByText("Sample home. Commands stay in this browser.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Living room Mac", exact: true })).toBeVisible();
-  await page.screenshot({ path: test.info().outputPath("remote.png"), fullPage: true });
+  await captureFullPage(page, test.info(), "remote.png");
   await page.getByRole("button", { name: "Tile Arc left", exact: false }).click();
   await expect(page.getByRole("status")).toContainText("Waiting");
   await expect(page.getByRole("status")).toContainText("Completed");
