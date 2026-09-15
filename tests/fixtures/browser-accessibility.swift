@@ -10,6 +10,10 @@ private final class MockBackend: BrowserAccessibilityBackend {
   var snapshotFailure: BrowserAccessibilityFailure?
   var actionFailure = false
   var snapshots = 0
+  var valueReads = 0
+  var valueProvider: ((Int, String?) throws -> String?)?
+  var valueReferences: [BrowserAccessibilityElementReference] = []
+  private var lastSetValue: String?
 
   init(nodes: [BrowserAccessibilityNode] = MockBackend.defaultNodes()) {
     let window = BrowserAccessibilityElementReference(Token())
@@ -37,7 +41,15 @@ private final class MockBackend: BrowserAccessibilityBackend {
 
   func setValue(_ value: String, on element: BrowserAccessibilityElementReference) throws {
     actions.append("set:\(value)")
+    lastSetValue = value
     afterSet?()
+  }
+
+  func value(on element: BrowserAccessibilityElementReference) throws -> String? {
+    valueReads += 1
+    valueReferences.append(element)
+    if let valueProvider { return try valueProvider(valueReads, lastSetValue) }
+    return lastSetValue
   }
 
   func perform(_ action: String, on element: BrowserAccessibilityElementReference) throws {
@@ -310,6 +322,77 @@ private func scenario(_ name: String) throws {
           documentRevision: ambiguousView.documentRevision), on: ambiguousPage)
     }
     try expect(ambiguousBackend.actions.isEmpty, "ambiguous Search buttons mutated field")
+  case "search-readback-acknowledgement":
+    let delayedBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    delayedBackend.valueProvider = { read, pending in read == 1 ? "old query" : pending }
+    let delayedAdapter = BrowserAccessibilityAdapter(backend: delayedBackend)
+    let delayedPage = try bind(delayedAdapter)
+    let delayedView = try delayedAdapter.read(delayedPage)
+    let delayedResult = try delayedAdapter.perform(
+      .search(
+        query: "nature", generation: delayedView.generation,
+        documentRevision: delayedView.documentRevision), on: delayedPage)
+    try expect(delayedResult.status == .dispatchedUnverified, "acknowledged search status")
+    try expect(delayedBackend.valueReads == 2, "search value was not read back")
+    try expect(delayedBackend.valueReferences.count == 2, "search value read count")
+    try expect(
+      delayedBackend.valueReferences.allSatisfy {
+        delayedBackend.same($0, delayedBackend.current.nodes.first { $0.kind == .search }!.reference)
+      }, "search readback changed field")
+    try expect(delayedBackend.actions == ["set:nature", "press"], "acknowledged search chain")
+
+    let failedBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    failedBackend.valueProvider = { _, _ in throw BrowserAccessibilityFailure.unavailable }
+    let failedAdapter = BrowserAccessibilityAdapter(backend: failedBackend)
+    let failedPage = try bind(failedAdapter)
+    let failedView = try failedAdapter.read(failedPage)
+    let failedResult = try failedAdapter.perform(
+      .search(
+        query: "nature", generation: failedView.generation,
+        documentRevision: failedView.documentRevision), on: failedPage)
+    try expect(failedResult.status == .unknown, "failed readback was not unknown")
+    try expect(failedBackend.actions == ["set:nature"], "failed readback dispatched submit")
+
+    let timeoutBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    timeoutBackend.valueProvider = { _, _ in nil }
+    let timeoutAdapter = BrowserAccessibilityAdapter(backend: timeoutBackend)
+    let timeoutPage = try bind(timeoutAdapter)
+    let timeoutView = try timeoutAdapter.read(timeoutPage)
+    let timeoutResult = try timeoutAdapter.perform(
+      .search(
+        query: "nature", generation: timeoutView.generation,
+        documentRevision: timeoutView.documentRevision), on: timeoutPage)
+    try expect(timeoutResult.status == .unknown, "readback timeout was not unknown")
+    try expect(timeoutBackend.valueReads > 1, "missing-value readback did not poll")
+    try expect(timeoutBackend.actions == ["set:nature"], "readback timeout dispatched submit")
+
+    let lateBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    lateBackend.valueProvider = { _, pending in
+      Thread.sleep(forTimeInterval: 0.51)
+      return pending
+    }
+    let lateAdapter = BrowserAccessibilityAdapter(backend: lateBackend)
+    let latePage = try bind(lateAdapter)
+    let lateView = try lateAdapter.read(latePage)
+    let lateResult = try lateAdapter.perform(
+      .search(
+        query: "nature", generation: lateView.generation,
+        documentRevision: lateView.documentRevision), on: latePage)
+    try expect(lateResult.status == .unknown, "late matching readback was accepted")
+    try expect(lateBackend.actions == ["set:nature"], "late readback dispatched submit")
+
+    let cancelledBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
+    cancelledBackend.valueProvider = { _, _ in "old query" }
+    let cancelledAdapter = BrowserAccessibilityAdapter(backend: cancelledBackend)
+    let cancelledPage = try bind(cancelledAdapter)
+    let cancelledView = try cancelledAdapter.read(cancelledPage)
+    let cancelledResult = try cancelledAdapter.perform(
+      .search(
+        query: "nature", generation: cancelledView.generation,
+        documentRevision: cancelledView.documentRevision), on: cancelledPage,
+      cancelled: { cancelledBackend.valueReads > 0 })
+    try expect(cancelledResult.status == .unknown, "post-set cancellation was not unknown")
+    try expect(cancelledBackend.actions == ["set:nature"], "cancelled readback dispatched submit")
   case "search-target-revalidation":
     let beforeBackend = MockBackend(nodes: MockBackend.buttonSearchNodes())
     let beforeAdapter = BrowserAccessibilityAdapter(backend: beforeBackend)
