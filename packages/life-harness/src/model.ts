@@ -2,6 +2,7 @@ import { GENERATED_APP_QUALITY_GUIDANCE } from "./build.ts";
 import type { LifeIntent } from "./operations.ts";
 import type { ModelWorldContext } from "../../life-context/src/model-world.ts";
 import { planMessages } from "./model-context.ts";
+import { isDirectPlanRequest } from "./direct-plan-request.ts";
 import {
   improvementCandidate,
   improvementMessages,
@@ -317,6 +318,37 @@ export function validateModelPlan(value: unknown): LifeModelPlan {
   return { reply: bounded(row.reply, 8000), actions };
 }
 
+function validatedPlanForRequest(request: LifeModelRequest, value: unknown): LifeModelPlan {
+  const plan = validateModelPlan(value);
+  if (!isDirectPlanRequest(request.message)) return plan;
+  const hasCreatePlan = plan.actions.some(
+    (action) => action.type === "life_operation" && action.intent.kind === "create_plan",
+  );
+  const hasClarify = plan.actions.some(
+    (action) => action.type === "life_operation" && action.intent.kind === "clarify",
+  );
+  const clarifyOnly =
+    hasClarify &&
+    plan.actions.every(
+      (action) =>
+        action.type === "reply" ||
+        action.type === "search_sources" ||
+        (action.type === "life_operation" && action.intent.kind === "clarify"),
+    );
+  const clearRefusal =
+    plan.actions.length === 0 &&
+    /^(?:sorry[,—:\s]+)?i\s+(?:can't|cannot|won't|am unable to)\b/i.test(plan.reply.trim());
+  if (!hasCreatePlan && !clarifyOnly && !clearRefusal) throw new MissingCreatePlanError();
+  return plan;
+}
+
+class MissingCreatePlanError extends Error {
+  constructor() {
+    super("Invalid model plan: a directly requested checklist was not saved.");
+    this.name = "MissingCreatePlanError";
+  }
+}
+
 function loopback(url: URL): void {
   const host = url.hostname.replace(/^\[|\]$/g, "");
   if (
@@ -397,7 +429,7 @@ export class LocalOpenAIModel implements LifeModel {
         ...(replyPreview(response) ? { text: replyPreview(response) } : {}),
       });
       try {
-        return validateModelPlan(JSON.parse(response));
+        return validatedPlanForRequest(request, JSON.parse(response));
       } catch (error) {
         if (combined.aborted) throw cancellation(combined);
         // One schema repair is allowed before the host receives any proposal.
@@ -407,7 +439,12 @@ export class LocalOpenAIModel implements LifeModel {
           messages = planMessages(request, {
             repair: {
               candidate: response,
-              reason: error instanceof SyntaxError ? "invalid-json" : "invalid-action-plan",
+              reason:
+                error instanceof SyntaxError
+                  ? "invalid-json"
+                  : error instanceof MissingCreatePlanError
+                    ? "missing-create-plan"
+                    : "invalid-action-plan",
             },
           });
         } catch {
@@ -427,7 +464,7 @@ export class LocalOpenAIModel implements LifeModel {
           phase: "validating",
           ...(replyPreview(repaired) ? { text: replyPreview(repaired) } : {}),
         });
-        return validateModelPlan(JSON.parse(repaired));
+        return validatedPlanForRequest(request, JSON.parse(repaired));
       }
     } finally {
       lease.finishRequested = true;

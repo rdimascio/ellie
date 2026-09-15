@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { copyFile, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { defaults } from "@ellie/config";
 import { nativeCommand, record, type Action } from "@ellie/protocol";
@@ -13,8 +14,40 @@ import { BrowserNodeExecutor } from "../apps/node/src/browser-executor.ts";
 import type { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
 import { fixture } from "./helpers.ts";
 import { browserWebMCPHostWrapper } from "../scripts/browser-webmcp-host-wrapper.ts";
+import { packagedBrowserHelpers } from "../apps/cli/src/browser-runtime-paths.ts";
 
 const revision = "a".repeat(64);
+
+test("packaged CLI resolves and launches helpers from the payload root", async (t) => {
+  assert.throws(packagedBrowserHelpers, /requires a packaged Ellie installation/);
+  const root = await mkdtemp(join(tmpdir(), "ellie-browser-layout-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cli = join(root, "lib/ellie/apps/cli/src");
+  mkdirSync(cli, { recursive: true });
+  mkdirSync(join(root, "helpers"));
+  writeFileSync(join(root, "lib/ellie/package.json"), '{"type":"module"}');
+  const module = join(cli, "browser-runtime-paths.ts");
+  await copyFile(new URL("../apps/cli/src/browser-runtime-paths.ts", import.meta.url), module);
+  for (const name of ["ellie-browser-runtime-broker", "ellie-browser-accessibility"]) {
+    const helper = join(root, "helpers", name);
+    writeFileSync(helper, `#!/bin/sh\nprintf '%s\\n' '${name}'\n`, { mode: 0o755 });
+    chmodSync(helper, 0o755);
+  }
+  const captured = (await import(pathToFileURL(module).href)) as {
+    packagedBrowserHelpers: typeof packagedBrowserHelpers;
+  };
+  const paths = captured.packagedBrowserHelpers();
+  const physicalRoot = await realpath(root);
+  assert.deepEqual(paths, {
+    broker: join(physicalRoot, "helpers/ellie-browser-runtime-broker"),
+    accessibility: join(physicalRoot, "helpers/ellie-browser-accessibility"),
+  });
+  for (const [kind, executable] of Object.entries(paths))
+    assert.equal(
+      execFileSync(executable, [], { encoding: "utf8", timeout: 2_000, maxBuffer: 1_024 }).trim(),
+      kind === "broker" ? "ellie-browser-runtime-broker" : "ellie-browser-accessibility",
+    );
+});
 
 test("packaged native-host wrapper invokes only the immutable CLI entrypoint in a clean environment", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ellie-browser-host-wrapper-"));

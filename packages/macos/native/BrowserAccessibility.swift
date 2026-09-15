@@ -8,7 +8,7 @@ enum BrowserAccessibilityFailure: Error, Equatable {
   case partialUnknown
 }
 
-enum BrowserAccessibilityBrowser: String, Sendable {
+enum BrowserAccessibilityBrowser: String, Equatable, Sendable {
   case safari
   case arc
 
@@ -82,6 +82,22 @@ struct BrowserAccessibilitySnapshot: Sendable {
   let address: BrowserAccessibilityElementReference
   let title: String?
   let nodes: [BrowserAccessibilityNode]
+}
+
+struct BrowserProcessIdentity: Equatable, Sendable {
+  let processID: Int32
+  let startSeconds: UInt64
+  let startMicroseconds: UInt64
+  let codeHash: Data
+}
+
+func browserProcessStartIdentity(_ processID: Int32) -> (UInt64, UInt64)? {
+  var info = proc_bsdinfo()
+  let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+  guard processID > 0, proc_pidinfo(processID, PROC_PIDTBSDINFO, 0, &info, size) == size,
+    info.pbi_start_tvsec > 0, info.pbi_start_tvusec < 1_000_000
+  else { return nil }
+  return (UInt64(info.pbi_start_tvsec), UInt64(info.pbi_start_tvusec))
 }
 
 protocol BrowserAccessibilityBackend: AnyObject {
@@ -384,7 +400,8 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
       app.bundleIdentifier == browser.bundleIdentifier, let launched = app.launchDate,
       let executableURL = app.executableURL?.standardizedFileURL
     else { throw BrowserAccessibilityFailure.unauthorized }
-    try verifyRunningBrowser(app, browser: browser, processID: processID, executableURL: executableURL)
+    _ = try verifyRunningBrowser(
+      app, browser: browser, processID: processID, executableURL: executableURL)
     let executable = executableURL.path
     let application = AXUIElementCreateApplication(processID)
     AXUIElementSetMessagingTimeout(application, Self.timeout)
@@ -408,6 +425,29 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
       launchIdentity: "\(processID):\(launched.timeIntervalSinceReferenceDate):\(executable)",
       exactURL: exactURL, window: BrowserAccessibilityElementReference(window),
       webArea: webArea.reference, address: address.reference, title: title, nodes: nodes)
+  }
+
+  func browserProcessIdentity(
+    browser: BrowserAccessibilityBrowser, processID: Int32
+  ) throws -> BrowserProcessIdentity {
+    guard let app = NSRunningApplication(processIdentifier: processID), !app.isTerminated,
+      app.bundleIdentifier == browser.bundleIdentifier,
+      let executableURL = app.executableURL?.standardizedFileURL,
+      let (seconds, microseconds) = browserProcessStartIdentity(processID)
+    else { throw BrowserAccessibilityFailure.unauthorized }
+    let codeHash = try verifyRunningBrowser(app, browser: browser, processID: processID,
+      executableURL: executableURL)
+    guard codeHash.count == 20 || codeHash.count == 32,
+      let finalStart = browserProcessStartIdentity(processID), finalStart.0 == seconds,
+      finalStart.1 == microseconds
+    else { throw BrowserAccessibilityFailure.unauthorized }
+    return BrowserProcessIdentity(
+      processID: processID, startSeconds: seconds, startMicroseconds: microseconds,
+      codeHash: codeHash)
+  }
+
+  func verifyBrowserProcess(browser: BrowserAccessibilityBrowser, processID: Int32) throws {
+    _ = try browserProcessIdentity(browser: browser, processID: processID)
   }
 
   func same(
@@ -508,7 +548,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
   private func verifyRunningBrowser(
     _ app: NSRunningApplication, browser: BrowserAccessibilityBrowser, processID: Int32,
     executableURL: URL
-  ) throws {
+  ) throws -> Data {
     let requirementText: String
     switch browser {
     case .safari:
@@ -539,7 +579,8 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
       == errSecSuccess, let values = information as? [String: Any],
       values[kSecCodeInfoIdentifier as String] as? String == browser.bundleIdentifier,
       let signedExecutable = values[kSecCodeInfoMainExecutable as String] as? URL,
-      signedExecutable.standardizedFileURL == executableURL
+      signedExecutable.standardizedFileURL == executableURL,
+      let codeHash = values[kSecCodeInfoUnique as String] as? Data
     else { throw BrowserAccessibilityFailure.unauthorized }
     if browser == .arc {
       guard values[kSecCodeInfoTeamIdentifier as String] as? String == "S6N382Y83G" else {
@@ -549,6 +590,7 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     guard app.executableURL?.standardizedFileURL == executableURL else {
       throw BrowserAccessibilityFailure.unauthorized
     }
+    return codeHash
   }
 
   private func raw(_ element: AXUIElement, _ attribute: String) throws -> CFTypeRef? {

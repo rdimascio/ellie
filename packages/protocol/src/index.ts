@@ -22,6 +22,7 @@ export type {
   BrowserWebMCPAction,
   BrowserAction,
   BrowserCapability,
+  BrowserExecutionSource,
   BrowserWebMCPCapability,
   BrowserWebMCPOperationResult,
   BrowserWebMCPStructuredResult,

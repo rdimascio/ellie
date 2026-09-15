@@ -27,14 +27,17 @@ import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { runNode } from "../../node/src/index.ts";
 import { BrowserNodeExecutor } from "../../node/src/browser-executor.ts";
 import { BrowserWebMCPOperations } from "../../node/src/browser-operations.ts";
+import { BrowserAccessibilityRuntime } from "../../node/src/browser-accessibility-runtime.ts";
+import { BrowserOperationSelector } from "../../node/src/browser-operation-selector.ts";
 import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
-import { startBrowserWebMCPBridge } from "../../node/src/browser-webmcp-bridge.ts";
+import { startBrowserKernelBridge } from "../../node/src/browser-kernel-bridge.ts";
 import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
 import {
   browserNativeHostPreflight,
   installBrowserNativeHost,
   uninstallBrowserNativeHost,
 } from "./browser-native-host-management.ts";
+import { packagedBrowserHelpers } from "./browser-runtime-paths.ts";
 
 import { generateCertificate } from "./certificate.ts";
 import { generateBrowserTlsIdentity } from "./certificate.ts";
@@ -571,7 +574,10 @@ async function main(): Promise<void> {
         }
       });
     const native = new MacOSExecutor();
-    let browserBridge: Awaited<ReturnType<typeof startBrowserWebMCPBridge>> | undefined;
+    let browserBridge: Awaited<ReturnType<typeof startBrowserKernelBridge>> | undefined;
+    let browserAccessibility: BrowserAccessibilityRuntime | undefined;
+    let nodeFailure: unknown;
+    let nodeFailed = false;
     try {
       const browserRegistryPath = join(stateDir, "browser-operations.json");
       const browserEnabled =
@@ -586,15 +592,32 @@ async function main(): Promise<void> {
       const browserRegistry = browserEnabled
         ? loadReviewedBrowserRegistry(browserRegistryPath)
         : undefined;
+      const browserHelpers = browserRegistry ? packagedBrowserHelpers() : undefined;
       browserBridge = browserRegistry
-        ? await startBrowserWebMCPBridge({ home: dirname(stateDir) })
+        ? await startBrowserKernelBridge({
+            home: dirname(stateDir),
+            executable: browserHelpers!.broker,
+          })
         : undefined;
-      const executor = browserBridge
-        ? new BrowserNodeExecutor(
-            native,
-            new BrowserWebMCPOperations(browserBridge, browserRegistry!),
+      const webmcp = browserBridge
+        ? new BrowserWebMCPOperations(browserBridge, browserRegistry!)
+        : undefined;
+      browserAccessibility = browserBridge
+        ? new BrowserAccessibilityRuntime(browserHelpers!.accessibility, () =>
+            browserBridge?.connectionContext(),
           )
-        : native;
+        : undefined;
+      const executor =
+        browserBridge && webmcp && browserAccessibility
+          ? new BrowserNodeExecutor(
+              native,
+              new BrowserOperationSelector(
+                (signal) => webmcp.bindingStatus(signal),
+                webmcp,
+                browserAccessibility,
+              ),
+            )
+          : native;
       await runNode({
         client,
         executor: config.executionEnabled ? executor : undefined,
@@ -607,10 +630,20 @@ async function main(): Promise<void> {
         onStatus: serviceLog ? undefined : console.log,
         onEvent: (event) => serviceLog?.write(event),
       });
-    } finally {
-      await browserBridge?.close();
-      client.close();
+    } catch (error) {
+      nodeFailed = true;
+      nodeFailure = error;
     }
+    const browserCleanup = await Promise.allSettled([
+      browserAccessibility?.close(),
+      browserBridge?.close(),
+    ]);
+    client.close();
+    if (browserCleanup.some((result) => result.status === "rejected"))
+      throw new Error("Browser runtime cleanup was incomplete.", {
+        cause: nodeFailed ? nodeFailure : undefined,
+      });
+    if (nodeFailed) throw nodeFailure;
     return;
   }
   if (args[0] === "doctor") {
