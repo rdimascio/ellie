@@ -1,6 +1,6 @@
 # Shared development release coordination
 
-The release and Life tasks work toward one installable development candidate. One active scheduled coordinator resumes work every 30 minutes; the older overnight Life schedule stays paused. Life engineers continue in their existing task. An idle task receives a continuation only when it has an actionable unfinished item.
+The release and Life tasks work toward one installable development candidate. One release coordinator resumes work every 30 minutes. The owner separately authorized the existing Life schedule to become an independent [quality lab](life-quality-lab.md) every two hours. It evaluates isolated scenarios and prepares focused regression PRs; it does not duplicate release ownership. An idle task receives a continuation only when it has an actionable unfinished item.
 
 ## Ownership
 
@@ -8,6 +8,7 @@ The release and Life tasks work toward one installable development candidate. On
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | Release coordinator | Service dependency closure, packages, signing and trust, installer lifecycle, release channels, updates, health and rollback; shared integration and merge queue | Exact candidate source and artifact digest, supported runtime contract, acceptance results and remaining rollout gates                                 |
 | Life integration    | Authenticated coordinator routes, user binding, native Life client access, Life runtime and UI, focused tests and Life documentation                             | Reviewed PR/head, API and grant contract, runtime entrypoint and dependencies, asset output path, configuration names, readiness and shutdown behavior |
+| Quality lab         | Isolated conversation, memory, proactivity, failure and latency evaluation; source/scenario coverage ledger and focused regression fixes                         | Exact source and scenario identities, observed outcome, test evidence and limitations; no independent merge, deployment or shared hardware use         |
 
 Each task keeps one owner for each file and resumes existing agents before assigning new work. Overlapping files require an explicit handoff. The release coordinator owns this document and the delivery queue; the Life task owns its feature implementation checkpoint. Neither task changes the other's worktree.
 
