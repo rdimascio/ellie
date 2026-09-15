@@ -2639,7 +2639,7 @@
             "oneOf": [
               {
                 "type": "object",
-                "additionalProperties": true,
+                "additionalProperties": false,
                 "required": [
                   "tool",
                   "app"
@@ -2650,9 +2650,11 @@
                   },
                   "app": {
                     "type": "string",
-                    "minLength": 1,
-                    "maxLength": 100,
-                    "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+                    "enum": [
+                      "arc",
+                      "safari",
+                      "messages"
+                    ]
                   }
                 }
               },

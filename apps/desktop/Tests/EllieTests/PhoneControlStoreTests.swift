@@ -4,16 +4,42 @@ import XCTest
 
 final class PhoneControlStoreTests: XCTestCase {
   func testWireModelsRejectUnknownFieldsScopeEscalationAndWrongOutcomes() throws {
-    let grants = [NativeGrant(target: "mac-a", capabilities: ["app.open"])]
+    let grants = [
+      NativeGrant(
+        target: "mac-a", capabilities: ["app.open", "browser.read", "browser.control"])
+    ]
     let valid = Data(
-      #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":["app.open"]}]}"#
+      #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":["browser.control","app.open","browser.read"]}]}"#
         .utf8)
     XCTAssertEqual(
-      try decodePhoneControlNodes(valid, grants: grants), [node("mac-a", label: "Studio")])
+      try decodePhoneControlNodes(valid, grants: grants),
+      [
+        PhoneControlNode(
+          id: "mac-a", label: "Studio", online: true,
+          capabilities: ["app.open", "browser.read", "browser.control"])
+      ])
+    XCTAssertEqual(
+      try decodePhoneControlNodes(
+        Data(
+          #"{"nodes":[{"id":"browser-mac","label":"Browser","online":true,"capabilities":["browser.read"]}]}"#
+            .utf8),
+        grants: [NativeGrant(target: "browser-mac", capabilities: ["browser.read"])]),
+      [
+        PhoneControlNode(
+          id: "browser-mac", label: "Browser", online: true, capabilities: ["browser.read"])
+      ])
+    XCTAssertThrowsError(
+      try decodePhoneControlNodes(
+        Data(
+          #"{"nodes":[{"id":"browser-mac","label":"Browser","online":true,"capabilities":["browser.read","browser.control"]}]}"#
+            .utf8),
+        grants: [NativeGrant(target: "browser-mac", capabilities: ["browser.read"])]))
     for invalid in [
       #"{"nodes":[{"id":"mac-b","label":"Other","online":true,"capabilities":["app.open"]}]}"#,
       #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":["app.open"],"token":"secret"}]}"#,
       #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":["desktop.run"]}]}"#,
+      #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":["app.open","app.open"]}]}"#,
+      #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":["app.open","browser.read","browser.control","desktop.run"]}]}"#,
       #"{"nodes":[],"extra":true}"#,
       #"{"nodes":[{"id":"mac-a","label":"Studio","online":1,"capabilities":["app.open"]}]}"#,
       #"{"nodes":[{"id":"mac-a","label":"Studio","online":true,"capabilities":[]},{"id":"mac-a","label":"Duplicate","online":true,"capabilities":[]}]}"#,
@@ -29,6 +55,28 @@ final class PhoneControlStoreTests: XCTestCase {
     XCTAssertThrowsError(
       try validatePhoneControlErrorEnvelope(Data(#"{"error":"fixed","detail":"raw"}"#.utf8)))
     XCTAssertThrowsError(try validatePhoneControlErrorEnvelope(Data(#"{"error":""}"#.utf8)))
+  }
+
+  @MainActor
+  func testBrowserOnlyGrantNeverEnablesAppOpening() async {
+    let browserOnly = PhoneControlNode(
+      id: "browser-mac", label: "Browser Mac", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    XCTAssertFalse(browserOnly.canOpenApps)
+    let mixed = PhoneControlNode(
+      id: "mixed-mac", label: "Mixed Mac", online: true,
+      capabilities: ["app.open", "browser.read"])
+    XCTAssertTrue(mixed.canOpenApps)
+
+    let transport = PhoneControlFakeTransport(nodes: [browserOnly])
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = browserOnly.id
+    XCTAssertFalse(store.canSend)
+    store.send()
+    let commandCount = await transport.commandCalls.count
+    XCTAssertEqual(commandCount, 0)
   }
 
   func testCommandResponseOnlyTrustsCanonicalPredispatchErrors() throws {
