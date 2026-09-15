@@ -12,6 +12,7 @@ struct BrowserVoiceUITestFixtureView: View {
 
   init() {
     let credential = BrowserVoiceUITestFixture.credential
+    precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport()
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
@@ -56,7 +57,7 @@ private enum BrowserVoiceUITestFixture {
       grants: [
         NativeGrant(
           target: nodeID,
-          capabilities: ["speech.transcribe", "browser.read", "browser.control"])
+          capabilities: ["browser.read", "browser.control"])
       ],
       createdAt: 1, expiresAt: 2),
     token: String(repeating: "c", count: 64))
