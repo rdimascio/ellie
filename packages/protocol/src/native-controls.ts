@@ -66,9 +66,20 @@ export function nativeCommandCapability(command: NativeCommandAction): Capabilit
 
 export function nativeControlSchemas() {
   const shared = nativeSessionSchemas();
-  const nativeActions = OPERATION_REGISTRY.operations
-    .filter((operation) => operation.id === "app.open" || operation.id.startsWith("browser."))
-    .map((operation) => operation.input);
+  const nativeActions = [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["tool", "app"],
+      properties: {
+        tool: { const: "app.open" },
+        app: { type: "string", enum: [...NATIVE_CONTROL_CONTRACT.apps] },
+      },
+    },
+    ...OPERATION_REGISTRY.operations
+      .filter((operation) => operation.id.startsWith("browser."))
+      .map((operation) => operation.input),
+  ];
   return {
     NativeControlNode: {
       type: "object",
