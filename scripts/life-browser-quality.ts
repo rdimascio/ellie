@@ -37,7 +37,7 @@ const reportRoot = resolve(
 const session = `elq-${process.pid}-${randomUUID().slice(0, 4)}`;
 const browserConfigPath = join(reportRoot, "agent-browser-config.json");
 const scenarioNames = ["memory", "pending-status", "reminder", "arcade", "mlb"] as const;
-const selectableScenarioNames = [...scenarioNames, "planning"] as const;
+const selectableScenarioNames = [...scenarioNames, "planning", "real-memory"] as const;
 const requestedScenarios = new Set(
   (process.env.LIFE_QUALITY_SCENARIOS ?? scenarioNames.join(","))
     .split(",")
@@ -235,6 +235,18 @@ async function sendChat(
   return snapshot(receipt, `${step}-result`, false);
 }
 
+async function latestAssistantText(): Promise<string> {
+  const raw = await browser([
+    "--json",
+    "eval",
+    `(() => { if (document.querySelector('.typing,.provisional-reply')) return null; const articles = document.querySelectorAll('.messages article.ellie'); const article = articles.item(articles.length - 1); return article?.querySelector(':scope > div > p')?.textContent ?? null; })()`,
+  ]);
+  const parsed = JSON.parse(raw) as { data?: { result?: unknown } };
+  const result = parsed.data?.result;
+  if (typeof result !== "string") throw new Error("No completed assistant response was rendered.");
+  return result;
+}
+
 async function openHome(receipt: ScenarioReceipt) {
   await browser(["open", publicOrigin]);
   await browser(["wait", "--load", "networkidle"]);
@@ -299,9 +311,12 @@ async function main() {
   await mkdir(reportRoot, { recursive: true, mode: 0o700 });
   await writeFile(browserConfigPath, "{}\n", { mode: 0o600 });
   const model = configuredModel();
-  if (requestedScenarios.has("planning") && model.mode !== "loopback")
+  if (
+    (requestedScenarios.has("planning") || requestedScenarios.has("real-memory")) &&
+    model.mode !== "loopback"
+  )
     throw new Error(
-      "The planning scenario requires LIFE_QUALITY_MODEL_URL and LIFE_QUALITY_MODEL_ID for an explicit loopback model.",
+      "The planning and real-memory scenarios require LIFE_QUALITY_MODEL_URL and LIFE_QUALITY_MODEL_ID for an explicit loopback model.",
     );
   const fixture = await startLifeBrowserQualityFixture({ model });
   publicOrigin = fixture.url;
@@ -365,6 +380,251 @@ async function main() {
         await screenshot(receipt, "complete");
       }),
     );
+
+    if (requestedScenarios.has("real-memory"))
+      receipts.push(
+        await runScenario("real-memory", async (receipt) => {
+          const actor = { userId: fixture.actorId };
+          const scope = { type: "user" as const, id: fixture.actorId };
+          const evidence: Record<string, unknown> = {
+            prompts: {
+              preference: "I prefer jasmine tea after lunch.",
+              recall: "Which tea preference should guide your suggestions?",
+              forget: "Forget jasmine tea.",
+              final: "Which drink preferences should guide you now?",
+            },
+          };
+          const evidenceName = `${receipt.name}-evidence.json`;
+          const conversationIds = () =>
+            fixture
+              .stores()
+              .life.listConversations(actor, { scope, limit: 50 })
+              .items.map((item) => item.id);
+          const newConversationId = (before: Set<string>) => {
+            const added = conversationIds().filter((id) => !before.has(id));
+            assert.equal(added.length, 1, "Expected exactly one newly persisted conversation.");
+            return added[0]!;
+          };
+          const exactPromptInBatch = (
+            batch: Array<Array<{ role: string; content: string }>>,
+            prompt: string,
+          ) =>
+            batch.every((messages) =>
+              messages.some((message) => {
+                if (message.role !== "user") return false;
+                try {
+                  return (JSON.parse(message.content) as { message?: unknown }).message === prompt;
+                } catch {
+                  return false;
+                }
+              }),
+            );
+          const modeledTurn = async (receiptStep: string, prompt: string) => {
+            const before = fixture.captures.modelMessages.length;
+            await sendChat(receipt, receiptStep, prompt, 90_000);
+            const batch = fixture.captures.modelMessages.slice(before);
+            assert.ok(
+              batch.length >= 1 && batch.length <= 2,
+              `${receiptStep} used ${batch.length} calls.`,
+            );
+            assert.ok(
+              exactPromptInBatch(batch, prompt),
+              `${receiptStep} did not capture its exact prompt.`,
+            );
+            return batch;
+          };
+          try {
+            assert.equal(conversationIds().length, 0, "real-memory requires fresh conversations.");
+            assert.equal(
+              fixture.stores().life.listAutomaticPromptMemories(actor, { scope, limit: 100 }).items
+                .length,
+              0,
+              "real-memory requires a fresh automatic-memory store.",
+            );
+            await openHome(receipt);
+            await click(receipt, "open-orb", "button", "Talk to Ellie");
+            const beforeA = new Set(conversationIds());
+            const t1 = await modeledTurn("preference", "I prefer jasmine tea after lunch.");
+            const conversationA = newConversationId(beforeA);
+            evidence.preference = { conversationId: conversationA, modelCalls: t1.length };
+            const sourceBefore = fixture
+              .stores()
+              .life.listAutomaticPromptMemories(actor, { scope, limit: 100 })
+              .items.filter((item) => item.prompt === "I prefer jasmine tea after lunch.");
+            assert.equal(sourceBefore.length, 1);
+            assert.equal(sourceBefore[0]!.conversationId, conversationA);
+            assert.equal(sourceBefore[0]!.suppressed, false);
+            evidence.sourceMemory = {
+              id: sourceBefore[0]!.id,
+              turnId: sourceBefore[0]!.turnId,
+              beforeSuppressed: sourceBefore[0]!.suppressed,
+            };
+            assert.ok(
+              fixture
+                .stores()
+                .life.automaticPromptSelectionMemories(actor, { scope, limit: 200 })
+                .some((item) => item.id === sourceBefore[0]!.id),
+            );
+
+            await click(receipt, "new-for-recall", "button", "New");
+            const beforeB = new Set(conversationIds());
+            const t2 = await modeledTurn(
+              "recall",
+              "Which tea preference should guide your suggestions?",
+            );
+            const conversationB = newConversationId(beforeB);
+            const recallText = await latestAssistantText();
+            evidence.recall = {
+              conversationId: conversationB,
+              modelCalls: t2.length,
+              assistant: recallText,
+            };
+            assert.match(recallText, /jasmine/i);
+            assert.match(recallText, /\b(?:after|following|post)[\s\u2010-\u2015-]+lunch\b/i);
+            assert.ok(
+              t2.some((messages) =>
+                messages.some(
+                  (message) =>
+                    message.role === "system" &&
+                    /I prefer jasmine tea after lunch\./i.test(message.content),
+                ),
+              ),
+              "Recall model context omitted the complete qualified preference.",
+            );
+            await screenshot(receipt, "recall");
+
+            const beforeForgetCalls = fixture.captures.modelMessages.length;
+            const beforeForgetConversationIds = new Set(conversationIds());
+            await sendChat(receipt, "forget", "Forget jasmine tea.", 90_000);
+            assert.equal(fixture.captures.modelMessages.length, beforeForgetCalls);
+            assert.deepEqual(new Set(conversationIds()), beforeForgetConversationIds);
+            const sourceAfter = fixture
+              .stores()
+              .life.listAutomaticPromptMemories(actor, { scope, limit: 100 })
+              .items.find((item) => item.id === sourceBefore[0]!.id);
+            assert.ok(sourceAfter);
+            assert.equal(sourceAfter.suppressed, true);
+            evidence.forget = {
+              conversationId: conversationB,
+              modelCalls: 0,
+              sourceMemoryId: sourceAfter.id,
+              suppressed: sourceAfter.suppressed,
+            };
+            assert.ok(
+              fixture
+                .stores()
+                .life.getConversation(actor, conversationB, { limit: 100 })
+                .turns.items.some((turn) => turn.user === "Forget jasmine tea."),
+              "Forget was not retained in the active authoritative conversation.",
+            );
+            assert.ok(
+              !fixture
+                .stores()
+                .life.automaticPromptSelectionMemories(actor, { scope, limit: 200 })
+                .some((item) => item.id === sourceBefore[0]!.id),
+            );
+
+            await click(receipt, "new-for-final", "button", "New");
+            const beforeC = new Set(conversationIds());
+            const t4 = await modeledTurn(
+              "final-probe",
+              "Which drink preferences should guide you now?",
+            );
+            const conversationC = newConversationId(beforeC);
+            assert.equal(new Set([conversationA, conversationB, conversationC]).size, 3);
+            const finalText = await latestAssistantText();
+            evidence.final = {
+              conversationId: conversationC,
+              modelCalls: t4.length,
+              assistant: finalText,
+            };
+            assert.doesNotMatch(finalText, /jasmine/i);
+            evidence.wordingReviewFlags = [
+              /\byou\s+(?:never|haven't|have not|didn't|did not)\s+(?:tell|told|mention|mentioned|share|shared)\b/i,
+              /\byou(?:'ve|’ve)\s+never\s+(?:told|mentioned|shared)\b/i,
+            ]
+              .filter((pattern) => pattern.test(finalText))
+              .map((pattern) => pattern.source);
+            assert.ok(
+              t4.every((messages) =>
+                messages.every((message) => !/jasmine/i.test(message.content)),
+              ),
+              "Final model batch retransmitted the forgotten preference.",
+            );
+            await screenshot(receipt, "final");
+
+            const modeledCalls = t1.length + t2.length + t4.length;
+            assert.ok(modeledCalls >= 3 && modeledCalls <= 6);
+            const selectedFinal = fixture
+              .stores()
+              .life.automaticPromptSelectionMemories(actor, { scope, limit: 200 });
+            assert.ok(selectedFinal.every((item) => !item.suppressed));
+            assert.ok(
+              selectedFinal.every(
+                (item) => !/jasmine/i.test(`${item.prompt}\n${item.summary}\n${item.markdown}`),
+              ),
+            );
+            assert.ok(
+              fixture
+                .stores()
+                .life.getConversation(actor, conversationA, { limit: 100 })
+                .turns.items.some((turn) => turn.user === "I prefer jasmine tea after lunch."),
+              "The original persisted conversation no longer retained its user prompt.",
+            );
+
+            await click(receipt, "open-history", "button", "History");
+            const titleA = fixture
+              .stores()
+              .life.listConversations(actor, { scope, limit: 50 })
+              .items.find((item) => item.id === conversationA)!.title;
+            await click(
+              receipt,
+              "reopen-original",
+              "button",
+              new RegExp(titleA.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i"),
+            );
+            const originalTranscript = await browser(["get", "text", ".messages article.you"]);
+            assert.match(originalTranscript, /I prefer jasmine tea after lunch\./i);
+            await screenshot(receipt, "original-transcript-retained");
+
+            evidence.conversations = [conversationA, conversationB, conversationC];
+            evidence.modelCalls = {
+              preference: t1.length,
+              recall: t2.length,
+              forget: 0,
+              final: t4.length,
+              total: modeledCalls,
+            };
+            evidence.sourceMemory = {
+              id: sourceBefore[0]!.id,
+              turnId: sourceBefore[0]!.turnId,
+              beforeSuppressed: false,
+              afterSuppressed: sourceAfter.suppressed,
+            };
+            evidence.finalSelectedMemories = selectedFinal.map((item) => ({
+              id: item.id,
+              category: item.category,
+              summary: item.summary,
+            }));
+            receipt.checks.push(
+              "three distinct persisted conversations separated the original preference, recall/forget, and final probe",
+              `modeled turns used ${modeledCalls} outbound call(s); deterministic Forget used none`,
+              "recall answer and system context retained the full after-lunch qualification",
+              "the original stable automatic-memory row became suppressed and left model selection",
+              "every final outbound message and the final assistant reply excluded jasmine",
+              "final wording was retained with review flags for manual semantic adjudication",
+              "the original user transcript remained visible after reopening its conversation",
+            );
+          } finally {
+            await writeFile(
+              join(reportRoot, evidenceName),
+              `${JSON.stringify(evidence, null, 2)}\n`,
+              { mode: 0o600 },
+            );
+            receipt.snapshots.push(evidenceName);
+          }
+        }),
+      );
 
     receipts.push(
       await runScenario("pending-status", async (receipt) => {
