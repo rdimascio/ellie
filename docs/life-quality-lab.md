@@ -23,6 +23,8 @@ Reuse Sol engineers for bounded independent evaluation or fixes. Astra reviews t
 
 The private ledger lives outside the repository in an operator-selected directory. It separates execution status from scenario outcomes: a completed evaluation may contain failures. It includes the report hash so changing a report cannot silently reuse its old acceptance. The source revision and scenario digest also prevent old passing results being carried forward to a new candidate.
 
+The [continuous improvement queue foundation](continuous-improvement-queue.md) can ingest a failing or errored `memory` scenario from the version 1 browser-quality report into a separate private queue. It records evidence references and bounded ownership without starting a worker or changing release authority. Uncertain work cannot requeue in this first slice. Other scenarios, discovery, registered reconciliation, worker launch, PR creation and promotion remain later adapters.
+
 ## Evaluation tracks
 
 | Track                   | Useful evidence                                                                                                                                                            |
