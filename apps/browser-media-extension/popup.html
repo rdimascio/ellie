@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>Ellie Media</h1>
+    <div class="controls">
+      <button id="inspect">Inspect titles</button><button id="up">↑</button
+      ><button id="down" aria-label="Scroll one viewport down">↓</button>
+    </div>
+    <div class="controls">
+      <button id="play">Play</button><button id="pause">Pause</button><button id="back">−10s</button
+      ><button id="forward">+10s</button>
+    </div>
+    <button id="webmcp">Discover WebMCP</button><button id="stop" disabled>Stop waiting</button>
+    <p id="status" role="status">Ready</p>
+    <ul id="titles"></ul>
+    <script src="popup.js"></script>
+  </body>
+</html>

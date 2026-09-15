@@ -1,0 +1,39 @@
+# Browser media companion development slice
+
+This is an unpacked development extension for exercising page controls inside a selected browser tab. It is not installed by an Ellie service and is not yet connected to the native Mac, iPhone or Apple Watch interfaces. The product remote remains SwiftUI.
+
+The source is `apps/browser-media-extension`. Its production manifest requests only `activeTab` and `scripting`. Its code permits the exact HTTPS origins `www.netflix.com` and `www.youtube.com`; there are no persistent all-site permissions, website-to-native HTTP server, browser-cookie reads or household credentials.
+
+## Scope
+
+The popup provides explicit inspection, vertical scrolling, rightward movement within a scrollable title row, opening an inspected title, and play/pause/seek for an unambiguous visible HTML video. Inspection returns transient title handles and bounded playback state. Selection validates the existing element and snapshot before acting. There are no arbitrary JavaScript, selector or tool-name commands.
+
+Player actions distinguish observed playback from a submitted request: play requires advancing media time, pause requires the paused state and navigation alone is not playback. Cancellation stops waiting where possible; an already submitted action may still have taken effect. Unknown outcomes must be recovered by inspection, not automatic resubmission.
+
+Mutation IDs are retained per tab by the extension worker, including across document reload, up to 256 actions. Capacity is refused instead of evicting replay protection. This ledger is not durable across a worker/browser restart; the companion never automatically resubmits old actions. The worker supplies an absolute deadline checked by the controller before mutation so an invocation that starts late cannot act after its deadline. Downloads and explicit new-window title links are excluded.
+
+Both production origins are experimental. A synthetic catalogue passing tests does not establish Netflix or YouTube support. The current title adapter recognizes same-origin title/video links and scrollable row containers; it does not cover every service layout, carousel implementation, overlay or player. The public Netflix landing page uses title buttons and does not provide authenticated playback. YouTube TV and Disney+ are not enabled by this slice. No DRM, authentication or subscription behavior is bypassed.
+
+WebMCP discovery is read-only and bounded. It checks the current `document.modelContext.getTools` surface, reports legacy API presence separately, and distinguishes unavailable, failed and timed-out discovery. Returned tool metadata is untrusted. No discovered tool is executed or treated as a media grant. No streaming-service WebMCP implementation has been accepted.
+
+## Development use
+
+Use a separate browser profile for development. In a Chromium browser that supports unpacked Manifest V3 extensions, open the Extensions page, enable developer mode in that profile and load `apps/browser-media-extension`. Open a permitted service and invoke **Ellie Media Companion** on the intended tab. The extension's local user gesture supplies temporary `activeTab` access; receiving a phone command cannot create this browser grant.
+
+Use **Inspect titles** after navigation or when a title list changes. Select only an inspected title, and check the page when an action cannot be verified. The popup is a temporary developer control surface; it is not a substitute for the future native remote. Arc extension and native-messaging compatibility require separate validation.
+
+The next slice connects an explicitly selected tab to an authenticated Ellie node through a native messaging host, adds independent page-control grants, and presents the same observed media session in the SwiftUI phone remote. Apple Watch controls depend on that session and command path. They are not included in this extension.
+
+## Automated validation
+
+With Node 24, Bun 1.4.2 and the repository's frozen dependencies:
+
+```sh
+bun install --frozen-lockfile
+node node_modules/@playwright/test/cli.js install chromium
+bun run test:browser-media
+```
+
+The browser tests copy the extension into an owned temporary directory and replace its exact production allowlist with a fixture origin. The test manifest grants that loopback origin access, so these tests do not validate the real user's `activeTab` gesture. They load the actual service worker and controller into a separate Chromium profile and send commands from an extension page. Synthetic HTML media is generated locally; no streaming account or household credential is used. Ordinary Node checks separately validate the shipping permission/origin policy.
+
+Keep evidence separate: extension-driven synthetic browser tests, actual public-site behavior, authenticated streaming playback, installed-browser access, and the physical phone/watch-to-Mac path. Only claim the stages recorded in the dated validation document.

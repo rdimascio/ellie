@@ -38,7 +38,8 @@
     "demo:build": "node node_modules/vite/bin/vite.js build --config apps/command-center/vite.config.ts",
     "demo:preview": "node node_modules/vite/bin/vite.js preview --config apps/command-center/vite.config.ts",
     "demo:test": "node node_modules/@playwright/test/cli.js test --config apps/command-center/playwright.config.ts",
-    "test:ios-ats": "node scripts/test-ios-ats.mjs"
+    "test:ios-ats": "node scripts/test-ios-ats.mjs",
+    "test:browser-media": "node --test browser-media-tests/browser-media-extension.test.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
