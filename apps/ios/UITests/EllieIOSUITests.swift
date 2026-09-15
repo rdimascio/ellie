@@ -62,6 +62,54 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
     }
 
+    func testChangingMacThroughPhoneControlClearsObservedBrowserPage() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-target-fixture"]
+        app.launch()
+
+        XCTAssertTrue(app.navigationBars["Mac controls"].waitForExistence(timeout: 5))
+        let browser = app.buttons["Control selected Mac browser"]
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+
+        let read = app.buttons["Read current page"]
+        XCTAssertTrue(read.waitForExistence(timeout: 5))
+        read.tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["browser-result-1"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a")
+
+        app.navigationBars["Browser control"].buttons["Mac controls"].tap()
+        let target = app.descendants(matching: .any)["phone-target-picker"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        let macB = app.buttons["Fixture Mac B"]
+        XCTAssertTrue(macB.waitForExistence(timeout: 5))
+        macB.tap()
+        app.buttons["Control selected Mac browser"].tap()
+
+        XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Mac A page"].exists)
+        XCTAssertFalse(app.buttons["browser-result-1"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a")
+
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac B page"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["browser-result-1"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a,ui-fixture-mac-b")
+    }
+
     func testCoordinatorNavigationDoesNotStartEnrollment() {
         let app = XCUIApplication()
         app.launch()

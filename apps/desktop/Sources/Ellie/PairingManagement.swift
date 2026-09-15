@@ -7,6 +7,29 @@ struct ManagedNativeGrant: Codable, Equatable, Sendable {
   let target: String
   let capabilities: [String]
 }
+let managedNativeCapabilityOrder = ["app.open", "browser.read", "browser.control"]
+
+func managedNativeCapabilities(_ value: [String]) -> [String]? {
+  guard !value.isEmpty, value.count <= managedNativeCapabilityOrder.count,
+    Set(value).count == value.count,
+    value.allSatisfy({ managedNativeCapabilityOrder.contains($0) })
+  else { return nil }
+  return value
+}
+
+func managedNativeCapabilityLabel(_ value: String) -> String {
+  switch value {
+  case "app.open": "Open applications"
+  case "browser.read": "Read the current browser page"
+  case "browser.control": "Control the current browser page"
+  default: value
+  }
+}
+
+func managedNativeAccessDescription(_ grant: ManagedNativeGrant) -> String {
+  let access = grant.capabilities.map(managedNativeCapabilityLabel).joined(separator: ", ")
+  return "\(access) on Mac \(grant.target.prefix(8))"
+}
 struct NativeInvitation: Equatable, Sendable {
   let label: String
   let grants: [ManagedNativeGrant]
@@ -22,7 +45,9 @@ struct ManagedNativeClient: Codable, Identifiable, Equatable, Sendable {
   let expiresAt: Int64
 }
 protocol CoordinatorManaging: Sendable {
-  func createNativeInvitation(connection: CoordinatorConnection, label: String, nodeIDs: [String])
+  func createNativeInvitation(
+    connection: CoordinatorConnection, label: String, grants: [ManagedNativeGrant]
+  )
     async throws -> NativeInvitation
   func nativeClients(connection: CoordinatorConnection) async throws -> [ManagedNativeClient]
   func revokeNativeClient(connection: CoordinatorConnection, id: String) async throws -> Bool
@@ -34,6 +59,7 @@ enum PairingManagementFailure: Error, Equatable {
 @MainActor final class PairingManagementStore: ObservableObject {
   @Published var label = ""
   @Published var selected = Set<String>()
+  @Published var selectedCapabilities = Set(["app.open"])
   @Published private(set) var invitation: NativeInvitation?
   @Published private(set) var clients: [ManagedNativeClient] = []
   @Published private(set) var loadedClients = false
@@ -50,18 +76,20 @@ enum PairingManagementFailure: Error, Equatable {
   func invite(_ connection: CoordinatorConnection) {
     let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
     let nodes = selected.sorted()
+    let capabilities = managedNativeCapabilityOrder.filter(selectedCapabilities.contains)
     guard validManagedNativeLabel(label), trimmed == label, nodes.count > 0,
-      nodes.count <= 16
+      nodes.count <= 16, capabilities.count == selectedCapabilities.count, !capabilities.isEmpty
     else {
-      message = "Enter a label and choose at least one eligible Mac."
+      message = "Enter a label, choose access, and select at least one eligible Mac."
       return
     }
+    let grants = nodes.map { ManagedNativeGrant(target: $0, capabilities: capabilities) }
     guard !working else { return }
     invitation = nil
     start(.invite) { [client] in
       .invitation(
         try await client.createNativeInvitation(
-          connection: connection, label: trimmed, nodeIDs: nodes))
+          connection: connection, label: trimmed, grants: grants))
     }
   }
   func revoke(_ id: String, connection: CoordinatorConnection) {
@@ -98,6 +126,7 @@ enum PairingManagementFailure: Error, Equatable {
     clients = []
     loadedClients = false
     selected = []
+    selectedCapabilities = ["app.open"]
     label = ""
     message = nil
   }
@@ -189,10 +218,34 @@ struct PairingManagementView: View {
             invitation(invite)
           } else {
             TextField("Phone label", text: $store.label).textFieldStyle(.roundedBorder)
-            Text("Allow app opening on").font(.headline)
+            Text("Requested access").font(.headline)
+            ForEach(managedNativeCapabilityOrder, id: \.self) { capability in
+              Toggle(
+                managedNativeCapabilityLabel(capability),
+                isOn: Binding(
+                  get: { store.selectedCapabilities.contains(capability) },
+                  set: { enabled in
+                    if enabled {
+                      store.selectedCapabilities.insert(capability)
+                    } else {
+                      store.selectedCapabilities.remove(capability)
+                    }
+                    let eligible = Set(
+                      nodes.filter {
+                        store.selectedCapabilities.isSubset(of: Set($0.capabilities))
+                      }.map(\.id))
+                    store.selected.formIntersection(eligible)
+                  }))
+            }
+            Text("Allow requested access on").font(.headline)
             ScrollView {
               VStack(alignment: .leading) {
-                ForEach(nodes.filter { $0.capabilities.contains("app.open") }) { node in
+                ForEach(
+                  nodes.filter {
+                    !store.selectedCapabilities.isEmpty
+                      && store.selectedCapabilities.isSubset(of: Set($0.capabilities))
+                  }
+                ) { node in
                   Toggle(
                     "Mac · \(node.id.prefix(8))",
                     isOn: Binding(
@@ -228,8 +281,7 @@ struct PairingManagementView: View {
                 VStack(alignment: .leading) {
                   Text(client.label)
                   Text(
-                    client.grants.map { "Open apps on Mac \($0.target.prefix(8))" }.joined(
-                      separator: ", ")
+                    client.grants.map(managedNativeAccessDescription).joined(separator: "; ")
                   ).font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -239,7 +291,9 @@ struct PairingManagementView: View {
               }
             }
           }
-          if let message = store.message { Text(message).font(.caption).foregroundStyle(.secondary) }
+          if let message = store.message {
+            Text(message).font(.caption).foregroundStyle(.secondary)
+          }
         }
       }
     }.padding(24).frame(width: 520, height: 620).task { store.load(connection) }.onDisappear {
@@ -252,7 +306,7 @@ struct PairingManagementView: View {
         Image(nsImage: image).interpolation(.none)
       }
       Text(value.label).font(.headline)
-      Text(value.grants.map { "Open apps on Mac \($0.target.prefix(8))" }.joined(separator: "\n"))
+      Text(value.grants.map(managedNativeAccessDescription).joined(separator: "\n"))
         .multilineTextAlignment(.center)
       Text("Expires \(value.expiresAt.formatted(date: .omitted, time: .standard))").font(.caption)
       Button("Hide code") { store.hideInvitation() }

@@ -174,11 +174,21 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
         }
     }
 
-  func createNativeInvitation(connection: CoordinatorConnection, label: String, nodeIDs: [String])
-    async throws -> NativeInvitation
-  {
-    let grants = nodeIDs.map { ManagedNativeGrant(target: $0, capabilities: ["app.open"]) }
-    let data = try JSONEncoder().encode(NativeInvitationRequest(label: label, grants: grants))
+  func createNativeInvitation(
+    connection: CoordinatorConnection, label: String, grants: [ManagedNativeGrant]
+  ) async throws -> NativeInvitation {
+    guard (1...16).contains(grants.count), Set(grants.map(\.target)).count == grants.count,
+      grants.allSatisfy({
+        validManagedNativeIdentifier($0.target) && managedNativeCapabilities($0.capabilities) != nil
+      })
+    else { throw PairingManagementFailure.invalid }
+    let canonicalGrants = grants.map { grant in
+      ManagedNativeGrant(
+        target: grant.target,
+        capabilities: managedNativeCapabilityOrder.filter(grant.capabilities.contains))
+    }
+    let data = try JSONEncoder().encode(
+      NativeInvitationRequest(label: label, grants: canonicalGrants))
     let (body, status) = try await management(
       connection, path: "/v1/native/invitations", method: "POST", body: data)
     switch status {
@@ -189,7 +199,7 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
     }
     guard
       let value = try? Self.decodeInvitationPayload(
-        body, connection: connection, label: label, grants: grants, now: now())
+        body, connection: connection, label: label, grants: canonicalGrants, now: now())
     else { throw PairingManagementFailure.unknownOutcome }
     let encoded = body.base64EncodedString().replacingOccurrences(of: "+", with: "-")
       .replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
@@ -256,7 +266,7 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
       guard Set(raw.keys) == ["target", "capabilities"],
         let target = raw["target"] as? String,
         let capabilities = raw["capabilities"] as? [String],
-        validManagedNativeIdentifier(target), capabilities == ["app.open"]
+        validManagedNativeIdentifier(target), managedNativeCapabilities(capabilities) != nil
       else { throw PairingManagementFailure.unknownOutcome }
       return ManagedNativeGrant(target: target, capabilities: capabilities)
     }
@@ -300,7 +310,8 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
       let grants = try rawGrants.map { raw -> ManagedNativeGrant in
         guard Set(raw.keys) == ["target", "capabilities"],
           let target = raw["target"] as? String, validManagedNativeIdentifier(target),
-          let capabilities = raw["capabilities"] as? [String], capabilities == ["app.open"]
+          let capabilities = raw["capabilities"] as? [String],
+          managedNativeCapabilities(capabilities) != nil
         else { throw PairingManagementFailure.unavailable }
         return ManagedNativeGrant(target: target, capabilities: capabilities)
       }
@@ -340,7 +351,10 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
     var encodedGrants: [String] = []
     for grant in payload.grants {
       guard let target = quote(grant.target) else { return nil }
-      encodedGrants.append(#"{"target":\#(target),"capabilities":["app.open"]}"#)
+      let capabilities = grant.capabilities.compactMap(quote)
+      guard capabilities.count == grant.capabilities.count else { return nil }
+      encodedGrants.append(
+        #"{"target":\#(target),"capabilities":[\#(capabilities.joined(separator: ","))]}"#)
     }
     return
       #"{"version":1,"origin":\#(origin),"certificateSha256":\#(pin),"invitation":\#(invitation),"expiresAt":\#(payload.expiresAt),"label":\#(label),"grants":[\#(encodedGrants.joined(separator: ","))]}"#
@@ -425,7 +439,7 @@ struct PinnedCoordinatorClient: CoordinatorReading, CoordinatorActing {
     }
 
     private static let allowedCapabilities: Set<String> = [
-        "app.open", "url.open", "window.place", "window.adjacent",
+        "app.open", "browser.read", "browser.control", "url.open", "window.place", "window.adjacent",
     ]
 
     private static func validIdentifier(_ value: String) -> Bool {

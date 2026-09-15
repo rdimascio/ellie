@@ -8,12 +8,12 @@ final class CoordinatorTransportTests: XCTestCase {
     private let referenceDate = Date(timeIntervalSince1970: 2_000_000)
 
     func testDecodesPreferredCapabilitiesAndIgnoresTelemetry() throws {
-        let data = Data(#"[{"id":"living-room.mac_1","capabilities":["url.open"],"executionCapabilities":["app.open","window.place"],"lastSeen":1999999000,"telemetry":{"cpu":99},"computeCapabilities":{"model":"x"}}]"#.utf8)
+        let data = Data(#"[{"id":"living-room.mac_1","capabilities":["url.open"],"executionCapabilities":["app.open","browser.read","browser.control","window.place"],"lastSeen":1999999000,"telemetry":{"cpu":99},"computeCapabilities":{"model":"x"}}]"#.utf8)
         let nodes = try PinnedCoordinatorClient.decodeNodes(data, now: referenceDate)
 
         XCTAssertEqual(nodes, [CoordinatorNode(
             id: "living-room.mac_1",
-            capabilities: ["app.open", "window.place"],
+            capabilities: ["app.open", "browser.read", "browser.control", "window.place"],
             lastSeen: Date(timeIntervalSince1970: 1_999_999)
         )])
     }

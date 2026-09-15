@@ -3,6 +3,26 @@ import XCTest
 @testable import Ellie
 
 final class NativeEnrollmentATSTests: XCTestCase {
+  func testRequestedAccessDescriptionsCoverBrowserOnlyMixedAndInvalidScopes() {
+    XCTAssertEqual(
+      nativeEnrollmentAccessDescription(
+        NativeGrant(target: "mac", capabilities: ["browser.read", "browser.control"])),
+      "Read the current browser page, Control the current browser page")
+    XCTAssertEqual(
+      nativeEnrollmentAccessDescription(
+        NativeGrant(
+          target: "mac", capabilities: ["browser.control", "app.open", "browser.read"])),
+      "Control the current browser page, Open applications, Read the current browser page")
+    XCTAssertNil(
+      nativeEnrollmentAccessDescription(
+        NativeGrant(target: "mac", capabilities: ["browser.read", "unknown"])))
+    XCTAssertNil(
+      nativeEnrollmentAccessDescription(
+        NativeGrant(target: "mac", capabilities: ["browser.read", "browser.read"])))
+    XCTAssertNil(
+      nativeEnrollmentAccessDescription(NativeGrant(target: "mac", capabilities: [])))
+  }
+
   func testProductionTransportConnectsToPinnedLocalHTTPSUnderATS() async throws {
     let diagnostics = NativeATSDiagnostics()
     let bundle = try XCTUnwrap(Bundle.allBundles.first { $0.bundleURL.pathExtension == "xctest" })

@@ -8,6 +8,8 @@ Mac labels initially use the registered node ID; friendly device names remain se
 
 An enrolled iPhone with separate `speech.transcribe`, `browser.read` and `browser.control` grants can use push-to-talk for the browser workflow. Transcription produces editable text and does not dispatch anything. The person must tap the reviewed command, and the selected Mac must have a current page snapshot before a search, result selection or playback action is admitted.
 
+The controller CLI accepts a comma-separated explicit native scope such as `--allow app.open,browser.read,browser.control`. The Mac pairing sheet starts with only `app.open` selected and lets the controller choose each browser capability separately. The reviewed search, selection and playback demo requires both `browser.read` and `browser.control`; selecting control alone does not add read access. Neither surface infers browser or speech access. Both show the exact requested capabilities before the one-time code is used.
+
 The voice screen keeps the transcript when that snapshot is missing and offers a read-only page request. After an explicitly dispatched search, the old snapshot is invalidated. A separate read shows the updated observed results, then the native browser screen exposes only those result handles plus Play and Pause. Empty result lists reject selection without issuing a command.
 
 Leaving the controls or backgrounding the app cancels the active wait. Cancellation after dispatch reports an unknown outcome and clears the snapshot; reconnecting or reopening never repeats the mutation. The person must read the current page again before any further selection or playback command.
@@ -16,7 +18,7 @@ Leaving the controls or backgrounding the app cancels the active wait. Cancellat
 
 The optional client HTTPS listener adds two routes to `contracts/native-openapi.v1.json`:
 
-- `GET /native/v1/nodes`: at most 16 configured targets, filtered by the credential's explicit `app.open` grants. The response contains only ID, configured label, online state and app capability, bounded to 8192 bytes.
+- `GET /native/v1/nodes`: at most 16 configured targets, filtered by the credential's explicit native grants. The response contains only ID, configured label, online state and granted `app.open`, `browser.read` or `browser.control` capabilities, bounded to 8192 bytes.
 - `POST /native/v1/commands`: exact `{nodeId, action: {tool: "app.open", app}}`. Only `arc`, `safari` and `messages` are accepted. Authority is checked before discovery, after discovery and at dispatch.
 
 Both require the existing native bearer and version header with the exact listener Host, no Cookie, Origin or Sec-Fetch headers. Request JSON is bounded to 4096 bytes. The installed coordinator creates the bridge lazily only when the optional client listener is configured. It uses the existing controller identity and pinned loopback coordinator transport, and owns that client through startup, listener failure and shutdown. Inventory comes from currently registered authenticated coordinator nodes, bounded to 16, and every client sees only its granted targets. Existing node allowlists, the operation registry and scheduler still apply. No command is sent during service startup; missing bridge credentials leave controls unavailable while enrollment can remain reachable.

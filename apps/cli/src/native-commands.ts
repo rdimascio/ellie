@@ -1,4 +1,5 @@
 import {
+  type Capability,
   identifier,
   nativeGrants,
   nativeLabel,
@@ -13,11 +14,12 @@ interface Client {
   call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
 }
 export type NativeCommand =
-  | { action: "invite"; label: string; node: string }
+  | { action: "invite"; label: string; node: string; capabilities: Capability[] }
   | { action: "clients" }
   | { action: "revoke"; id: string };
 const NATIVE_USAGE =
-  "Use: bun run ellie native invite --label NAME --node ID --allow app.open | clients | revoke ID";
+  "Use: bun run ellie native invite --label NAME --node ID --allow app.open[,browser.read,browser.control] | clients | revoke ID";
+const NATIVE_CAPABILITY_ORDER: Capability[] = ["app.open", "browser.read", "browser.control"];
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]): boolean =>
   Object.keys(value).length === keys.length &&
   Object.keys(value).every((key) => keys.includes(key));
@@ -49,16 +51,24 @@ export function parseNativeCommand(args: string[]): NativeCommand {
     if (args[0] === "invite") {
       let label: string | undefined;
       let node: string | undefined;
-      let allow: string | undefined;
+      let allow: Capability[] | undefined;
       for (let i = 1; i < args.length; i += 2) {
         const value = args[i + 1];
         if (!value) throw new Error();
         if (args[i] === "--label" && !label) label = nativeLabel(value);
         else if (args[i] === "--node" && !node) node = identifier(value);
-        else if (args[i] === "--allow" && !allow) allow = value;
-        else throw new Error();
+        else if (args[i] === "--allow" && !allow) {
+          const requested = value.split(",").map((capability) => capability.trim());
+          const checked = nativeGrants([
+            { target: node ?? "pending", capabilities: requested },
+          ])[0]!;
+          allow = NATIVE_CAPABILITY_ORDER.filter((capability) =>
+            checked.capabilities.includes(capability),
+          );
+        } else throw new Error();
       }
-      if (label && node && allow === "app.open") return { action: "invite", label, node };
+      if (label && node && allow?.length)
+        return { action: "invite", label, node, capabilities: allow };
     }
   } catch {
     // All command-shape and value failures use the same actionable local guidance.
@@ -68,7 +78,15 @@ export function parseNativeCommand(args: string[]): NativeCommand {
 
 export async function runNativeCommand(client: Client, command: NativeCommand): Promise<string[]> {
   if (command.action === "invite") {
-    const grants = nativeGrants([{ target: command.node, capabilities: ["app.open"] }]);
+    const requested = nativeGrants([
+      { target: command.node, capabilities: command.capabilities },
+    ])[0]!;
+    const capabilities = NATIVE_CAPABILITY_ORDER.filter((capability) =>
+      requested.capabilities.includes(capability),
+    );
+    if (capabilities.length !== requested.capabilities.length)
+      throw new Error("Invalid native grants.");
+    const grants = nativeGrants([{ target: command.node, capabilities }]);
     const label = nativeLabel(command.label);
     try {
       const payload = nativePairingPayload(
@@ -82,7 +100,7 @@ export async function runNativeCommand(client: Client, command: NativeCommand): 
         `Origin: ${payload.origin}`,
         `Certificate SHA-256: ${payload.certificateSha256}`,
         `Label: ${payload.label}`,
-        `Access: app.open on ${command.node}`,
+        `Access: ${capabilities.join(", ")} on ${command.node}`,
         `Expires: ${new Date(payload.expiresAt).toISOString()}`,
       ];
     } catch {
