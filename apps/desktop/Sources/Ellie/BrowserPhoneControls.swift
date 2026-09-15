@@ -43,10 +43,35 @@ final class BrowserPhoneControlStore: ObservableObject {
     }
   }
 
-  func refresh(on node: PhoneControlNode?) {
+  func canRefresh(on node: PhoneControlNode?) -> Bool {
+    task == nil && node?.online == true && node?.capabilities.contains("browser.read") == true
+  }
+
+  func canPerform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) -> Bool {
+    guard task == nil, let node, node.online else { return false }
+    if intent == .inspect || intent == .refresh {
+      return node.capabilities.contains("browser.read")
+    }
+    guard node.capabilities.contains("browser.control"), let page, page.nodeID == node.id else {
+      return false
+    }
+    switch intent {
+    case .search(let query):
+      return query == query.trimmingCharacters(in: .whitespacesAndNewlines)
+        && !query.isEmpty && query.utf16.count <= 200 && query.utf8.count <= 512
+        && !query.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    case .openResult(let index): return index > 0 && index <= page.items.count
+    case .back: return false
+    case .scroll, .play, .pause: return true
+    case .inspect, .refresh: return false
+    }
+  }
+
+  @discardableResult
+  func refresh(on node: PhoneControlNode?) -> Bool {
     guard task == nil, let node, node.online, node.capabilities.contains("browser.read") else {
       if node != nil { phase = .failed("The selected Mac does not allow browser reading.") }
-      return
+      return false
     }
     page = nil
     phase = .checking
@@ -63,16 +88,18 @@ final class BrowserPhoneControlStore: ObservableObject {
       else { throw PhoneControlFailure.invalidResponse }
       return (.ready, page)
     }
+    return true
   }
 
-  func perform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) {
-    guard task == nil, let node else { return }
-    if intent == .inspect || intent == .refresh { refresh(on: node); return }
+  @discardableResult
+  func perform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) -> Bool {
+    guard task == nil, let node else { return false }
+    if intent == .inspect || intent == .refresh { return refresh(on: node) }
     guard node.online, node.capabilities.contains("browser.control"), let page,
       page.nodeID == node.id
     else {
       phase = .failed("Read the current browser page on the selected Mac first.")
-      return
+      return false
     }
     let action: BrowserPhoneAction
     switch intent {
@@ -83,20 +110,20 @@ final class BrowserPhoneControlStore: ObservableObject {
         !query.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
       else {
         phase = .failed("The search text is not valid.")
-        return
+        return false
       }
       action = .search(query, revision: page.revision)
     case .openResult(let index):
-      guard (1...page.items.count).contains(index) else {
+      guard index > 0, index <= page.items.count else {
         phase = .failed("That result is not in the current page list.")
-        return
+        return false
       }
       action = .select(page.items[index - 1].id, revision: page.revision)
     case .play, .pause: action = .playback(intent, revision: page.revision)
     case .back:
       phase = .failed("Back is not available for reviewed browser control yet.")
-      return
-    case .inspect, .refresh: return
+      return false
+    case .inspect, .refresh: return false
     }
     let label = intent.displayLabel
     phase = .sending(label)
@@ -116,6 +143,7 @@ final class BrowserPhoneControlStore: ObservableObject {
           .unknown("The result is unknown. Read the page before sending another command."), nil)
       }
     }
+    return true
   }
 
   func cancel() {

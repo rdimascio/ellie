@@ -65,9 +65,15 @@ struct PhoneControlView: View {
       }
     }
     .navigationTitle("Mac controls")
-    .onDisappear { store.cancel() }
+    .onDisappear {
+      store.cancel()
+      browser.cancel()
+    }
     .onChange(of: scenePhase) { _, phase in
-      if phase != .active { store.cancel() }
+      if phase != .active {
+        store.cancel()
+        browser.cancel()
+      }
     }
   }
 

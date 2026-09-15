@@ -4,6 +4,14 @@ Ellie's primary Mac and iPhone interfaces are SwiftUI. The enrolled iPhone's Coo
 
 Mac labels initially use the registered node ID; friendly device names remain separate work. The native credential remains in the existing device-only Keychain envelope. The client uses its confirmed listener origin, leaf certificate pin, hostname/validity checks and TLS 1.2 minimum. Enrollment and browser authority remain separate. These commands do not grant coordinator authority, create cookies or access unrelated telemetry.
 
+## Reviewed voice to browser controls
+
+An enrolled iPhone with separate `speech.transcribe`, `browser.read` and `browser.control` grants can use push-to-talk for the browser workflow. Transcription produces editable text and does not dispatch anything. The person must tap the reviewed command, and the selected Mac must have a current page snapshot before a search, result selection or playback action is admitted.
+
+The voice screen keeps the transcript when that snapshot is missing and offers a read-only page request. After an explicitly dispatched search, the old snapshot is invalidated. A separate read shows the updated observed results, then the native browser screen exposes only those result handles plus Play and Pause. Empty result lists reject selection without issuing a command.
+
+Leaving the controls or backgrounding the app cancels the active wait. Cancellation after dispatch reports an unknown outcome and clears the snapshot; reconnecting or reopening never repeats the mutation. The person must read the current page again before any further selection or playback command.
+
 ## Listener contract
 
 The optional client HTTPS listener adds two routes to `contracts/native-openapi.v1.json`:
