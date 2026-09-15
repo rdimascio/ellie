@@ -100,6 +100,7 @@ test(
     assert.equal(compiled.stderr, "");
     for (const scenario of [
       "read-select-stale",
+      "link-url-rebind",
       "page-rebind",
       "identity-and-generation",
       "cancel-and-bounds",
@@ -107,6 +108,8 @@ test(
       "ambiguous-and-playback",
       "youtube-item-policy",
       "typed-browser-topology",
+      "raw-ax-projection",
+      "real-tree-bounds",
     ]) {
       const result = await runOwned(executable, [scenario], 5_000);
       assert.equal(result.signal, null, scenario);

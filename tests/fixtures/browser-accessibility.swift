@@ -108,6 +108,31 @@ private func scenario(_ name: String) throws {
         on: page)
     }
     try expect(backend.actions == ["press"], "no replay")
+  case "link-url-rebind":
+    let backend = MockBackend()
+    let adapter = BrowserAccessibilityAdapter(backend: backend)
+    let page = try bind(adapter)
+    let view = try adapter.read(page)
+    let item = view.items[0]
+    backend.current = BrowserAccessibilitySnapshot(
+      browser: backend.current.browser, processID: backend.current.processID,
+      launchIdentity: backend.current.launchIdentity, exactURL: backend.current.exactURL,
+      window: backend.current.window, webArea: backend.current.webArea,
+      address: backend.current.address, title: backend.current.title,
+      nodes: backend.current.nodes.map { node in
+        guard node.kind == .link, node.label == "Nature" else { return node }
+        return MockBackend.node(
+          node.kind, node.label, node.path, node.actions,
+          value: "https://www.youtube.com/watch?v=abcdefghijk&pp=fixture",
+          enabled: node.enabled, reference: node.reference)
+      })
+    try expectFailure(.stale) {
+      _ = try adapter.perform(
+        .select(
+          itemID: item.id, generation: view.generation,
+          documentRevision: view.documentRevision), on: page)
+    }
+    try expect(backend.actions.isEmpty, "changed link URL dispatched")
   case "page-rebind":
     let backend = MockBackend()
     let adapter = BrowserAccessibilityAdapter(backend: backend)
@@ -277,6 +302,54 @@ private func scenario(_ name: String) throws {
         == "https://example.com/", "NSURL rejected")
     try expect(browserAccessibilityCanonicalPageURL("example.com") == nil, "scheme inferred")
     try expect(browserAccessibilityCanonicalPageURL(NSNumber(value: 1)) == nil, "numeric URL admitted")
+  case "raw-ax-projection":
+    let link = browserAccessibilityProjectNode(
+      reference: BrowserAccessibilityElementReference(Token()), role: "AXLink", browser: .arc,
+      label: "Projected video", enabled: true, path: [0, 2, 4], actions: ["press"],
+      identifier: nil, placeholder: nil,
+      rawURL: NSURL(string: "https://www.youtube.com/watch?v=abcdefghijk&pp=fixture")!,
+      insideWebArea: true)
+    try expect(link?.kind == .link, "raw AXLink role not projected")
+    try expect(
+      link?.value == "https://www.youtube.com/watch?v=abcdefghijk&pp=fixture",
+      "raw AXLink URL not projected")
+    guard let link else { throw BrowserAccessibilityFailure.unavailable }
+    let backend = MockBackend(nodes: [MockBackend.defaultNodes()[0], link])
+    let adapter = BrowserAccessibilityAdapter(backend: backend)
+    let page = try bind(adapter)
+    let view = try adapter.read(page)
+    try expect(view.items.map(\.label) == ["Projected video"],
+      "projected AXLink was not selectable")
+    let invalidURL = browserAccessibilityProjectNode(
+      reference: BrowserAccessibilityElementReference(Token()), role: "AXLink", browser: .arc,
+      label: "Invalid URL", enabled: true, path: [0, 2, 5], actions: ["press"],
+      identifier: nil, placeholder: nil, rawURL: NSNumber(value: 1), insideWebArea: true)
+    try expect(invalidURL?.value == nil, "non-URL AXLink value admitted")
+  case "real-tree-bounds":
+    try expect(
+      BrowserAccessibilityTraversalLimits.permitsElement(count: 960, depth: 10),
+      "observed full Arc tree rejected")
+    try expect(
+      BrowserAccessibilityTraversalLimits.permitsNode(count: 403),
+      "observed full Arc projection rejected")
+    try expect(
+      BrowserAccessibilityTraversalLimits.permitsCall(count: 4_500),
+      "bounded optimized reads rejected")
+    try expect(
+      !BrowserAccessibilityTraversalLimits.permitsElement(count: 1_281, depth: 10),
+      "oversized element tree admitted")
+    try expect(
+      !BrowserAccessibilityTraversalLimits.permitsElement(count: 960, depth: 13),
+      "over-depth tree admitted")
+    try expect(
+      !BrowserAccessibilityTraversalLimits.permitsNode(count: 769),
+      "oversized node projection admitted")
+    try expect(
+      !BrowserAccessibilityTraversalLimits.permitsChildren(count: 513),
+      "oversized child list admitted")
+    try expect(
+      !BrowserAccessibilityTraversalLimits.permitsCall(count: 6_145),
+      "over-budget AX reads admitted")
   default:
     throw NSError(domain: "BrowserAccessibilityFixture", code: 3)
   }
