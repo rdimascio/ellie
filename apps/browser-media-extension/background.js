@@ -11,6 +11,7 @@ const reviewedWebMCPBindings = Object.freeze({});
 let webMCPBinding;
 let nativePort;
 let nativeConnectionStatus = "idle";
+let nativeConnectionRevision = 0;
 let activeWebMCP;
 
 const nativeConnectionStatuses = new Set([
@@ -24,15 +25,29 @@ const nativeConnectionStatuses = new Set([
 function publishNativeConnectionStatus(value) {
   if (!nativeConnectionStatuses.has(value)) return;
   nativeConnectionStatus = value;
+  nativeConnectionRevision += 1;
   try {
     const sent = chrome.runtime.sendMessage({
       protocol: "ellie.browser-native-status.v1",
       status: value,
+      revision: nativeConnectionRevision,
     });
     sent?.catch(() => {});
   } catch {
     // The popup is usually closed. Connection state remains available in the bind response.
   }
+}
+
+function nativeConnectionSnapshot() {
+  return { status: nativeConnectionStatus, revision: nativeConnectionRevision };
+}
+
+function supportedNativeRequest(request) {
+  return (
+    request?.protocol === nativeProtocol &&
+    typeof request.id === "string" &&
+    ["cancel", "binding.status", "tools.list", "tool.execute"].includes(request.type)
+  );
 }
 
 function nativeHostMissing(message) {
@@ -206,7 +221,7 @@ async function bindWebMCP(tabId) {
     origin,
     expiresAt: binding.expiresAt,
     availability: binding.availability,
-    nativeConnectionStatus,
+    nativeConnection: nativeConnectionSnapshot(),
   };
 }
 
@@ -366,7 +381,7 @@ function connectNativeHost() {
   });
   port.onMessage.addListener((request) => {
     if (nativePort !== port) return;
-    publishNativeConnectionStatus("connected");
+    if (supportedNativeRequest(request)) publishNativeConnectionStatus("connected");
     Promise.resolve()
       .then(() => handleNativeRequest(request))
       .then(

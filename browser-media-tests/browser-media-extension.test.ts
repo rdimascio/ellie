@@ -87,6 +87,10 @@ test("native host status reports a delayed missing-host failure without reconnec
     notifications.map((value: any) => value.status),
     ["waiting", "missing"],
   );
+  assert.deepEqual(
+    notifications.map((value: any) => value.revision),
+    [1, 2],
+  );
   assert.equal(JSON.stringify(notifications).includes("sensitive-detail"), false);
 });
 
@@ -140,11 +144,22 @@ test("native host is connected only after a request and reports a later disconne
   );
   assert.equal(context.__nativeStatusTest.connect(), "waiting");
   assert.equal(context.__nativeStatusTest.status(), "waiting");
-  nativeMessages.emit({ protocol: "invalid", id: "request-1" });
-  assert.equal(context.__nativeStatusTest.status(), "connected");
+  nativeMessages.emit({ protocol: "invalid", id: "request-1", type: "binding.status" });
+  assert.equal(context.__nativeStatusTest.status(), "waiting");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(posted.length, 1);
-  assert.equal(posted[0].status, "unavailable");
+  nativeMessages.emit({
+    protocol: "ellie.browser-webmcp.v1",
+    id: "request-2",
+    type: "binding.status",
+  });
+  assert.equal(context.__nativeStatusTest.status(), "connected");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(posted.length, 2);
+  assert.deepEqual(
+    posted.map((value) => value.status),
+    ["unavailable", "unbound"],
+  );
   disconnect.emit();
   assert.equal(context.__nativeStatusTest.status(), "disconnected");
   assert.equal(connects, 1);
@@ -164,6 +179,7 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
   const elements = new Map<string, any>();
   for (const id of [
     "status",
+    "connection-status",
     "titles",
     "stop",
     "inspect",
@@ -187,12 +203,18 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
       tabs: { query: async () => [{ id: 7 }] },
       runtime: {
         onMessage: runtimeMessages,
-        async sendMessage(value: unknown) {
+        sendMessage(value: unknown) {
           sent.push(value);
-          return {
-            ok: true,
-            value: { availability: "accessibility", nativeConnectionStatus: "waiting" },
-          };
+          return new Promise((resolve) => {
+            context.resolveBind = () =>
+              resolve({
+                ok: true,
+                value: {
+                  availability: "accessibility",
+                  nativeConnection: { status: "waiting", revision: 1 },
+                },
+              });
+          });
         },
       },
     },
@@ -211,29 +233,56 @@ test("popup distinguishes page selection, missing host, and later disconnect wit
     Promise,
   };
   runInNewContext(popup, context);
-  await elements.get("bind-webmcp").onclick();
-  assert.equal(elements.get("status").textContent, "Page selected. Waiting for Mac connection…");
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].command.type, "bindWebMCP");
+  const binding = elements.get("bind-webmcp").onclick();
+  for (let attempt = 0; attempt < 5 && !context.resolveBind; attempt += 1) await Promise.resolve();
+  assert.equal(typeof context.resolveBind, "function");
   runtimeMessages.emit({
     protocol: "ellie.browser-native-status.v1",
     status: "missing",
+    revision: 2,
+  });
+  context.resolveBind();
+  await binding;
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
+  );
+  assert.equal(elements.get("status").textContent, "Done");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].command.type, "bindWebMCP");
+  elements.get("status").textContent = "The result is unknown. Check the Mac before trying again.";
+  runtimeMessages.emit({
+    protocol: "ellie.browser-native-status.v1",
+    status: "missing",
+    revision: 3,
   });
   assert.equal(
-    elements.get("status").textContent,
-    "Page selected. Ellie’s Mac connection is not installed.",
+    elements.get("connection-status").textContent,
+    "Page selected. Ellie’s Mac connection could not be found. Check browser setup.",
   );
   runtimeMessages.emit({
     protocol: "ellie.browser-native-status.v1",
     status: "disconnected",
+    revision: 4,
   });
-  assert.equal(elements.get("status").textContent, "Page selected. The Mac connection was lost.");
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. The Mac connection was lost.",
+  );
+  assert.equal(
+    elements.get("status").textContent,
+    "The result is unknown. Check the Mac before trying again.",
+  );
   runtimeMessages.emit({
     protocol: "ellie.browser-native-status.v1",
     status: "missing",
+    revision: 5,
     error: "sensitive-detail",
   });
-  assert.equal(elements.get("status").textContent, "Page selected. The Mac connection was lost.");
+  assert.equal(
+    elements.get("connection-status").textContent,
+    "Page selected. The Mac connection was lost.",
+  );
   assert.equal(sent.length, 1);
 });
 
@@ -316,7 +365,7 @@ test(
         return globalThis["__ellieTestWebMCP"].bind(tabId);
       }, tab.id);
       assert.equal(bound.availability, "accessibility");
-      assert.equal(bound.nativeConnectionStatus, "waiting");
+      assert.equal(bound.nativeConnection.status, "waiting");
       let nativeStatus = "waiting";
       for (let attempt = 0; attempt < 50 && nativeStatus === "waiting"; attempt += 1) {
         await new Promise((resolve) => setTimeout(resolve, 20));
