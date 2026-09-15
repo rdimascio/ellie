@@ -180,6 +180,72 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
 });
 
+test("read-only accessibility failures stay distinct from dispatched action uncertainty", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-readonly-failure-"));
+  let completed = false;
+  try {
+    const context = {
+      browserProcessPid: process.pid,
+      browserStartSeconds: 1,
+      browserStartMicroseconds: 0,
+      browserCodeHash: "00".repeat(20),
+      connectionId: "connection-1",
+      authenticated: true,
+    };
+    const binding = {
+      availability: "accessibility" as const,
+      documentId: "document-1",
+      url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+      revision: "revision-1",
+    };
+    const cases = [
+      {
+        name: "bind-eof",
+        action: browserWebMCPAction({ tool: "browser.status" }),
+        response: "if (value.type === 'bind') process.exit(0);",
+        expected: "Browser accessibility helper is unavailable.",
+      },
+      {
+        name: "read-malformed",
+        action: browserWebMCPAction({
+          tool: "browser.read",
+          view: "page",
+          revision: "revision-1",
+        }),
+        response:
+          "if (value.type === 'bind') console.log(JSON.stringify({id:value.id,status:'bound',sessionID:'session-1',documentRevision:value.documentRevision})); else console.log(JSON.stringify({id:value.id,status:'garbage'}));",
+        expected: "Browser accessibility read failed.",
+      },
+    ];
+    for (const scenario of cases) {
+      const helper = join(root, `${scenario.name}.mjs`);
+      await writeFile(
+        helper,
+        `#!${process.execPath}\nimport { createInterface } from 'node:readline';\nfor await (const line of createInterface({ input: process.stdin })) { const value = JSON.parse(line); ${scenario.response} }\n`,
+      );
+      await chmod(helper, 0o700);
+      const runtime = new BrowserAccessibilityRuntime(helper, () => context);
+      try {
+        await assert.rejects(
+          runtime.execute(scenario.action, binding, new AbortController().signal),
+          (error: unknown) => {
+            assert.ok(error instanceof Error);
+            assert.equal(error.message, scenario.expected);
+            assert.doesNotMatch(error.message, /outcome is unknown/);
+            return true;
+          },
+        );
+      } finally {
+        await runtime.close();
+      }
+    }
+    completed = true;
+  } finally {
+    if (completed) await rm(root, { recursive: true });
+    else t.diagnostic(`Retained browser AX read-only failure fixture: ${root}`);
+  }
+});
+
 test(
   "large Unicode AX summaries cross the Swift session and Node result contract",
   { skip: process.platform !== "darwin", timeout: 30_000 },
@@ -536,7 +602,11 @@ for await (const line of createInterface({ input: process.stdin })) {
     const response = (await f.controller.call("POST", "/v1/commands", {
       nodeId: "ax-unknown-node",
       action: { tool: "browser.scroll", direction: "down", revision },
-    })) as { browser: { status: string } };
+    })) as { message: string; browser: { status: string } };
+    assert.equal(
+      response.message,
+      "Browser action outcome is unknown. Check the page before retrying.",
+    );
     assert.equal(response.browser.status, "unknown");
     assert.equal((await readFile(performed, "utf8")).trim().split("\n").length, 1);
     const stored = f.jobStore.list("ax-unknown-node", 1)[0]!;
