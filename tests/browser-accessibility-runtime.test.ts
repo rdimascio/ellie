@@ -502,26 +502,68 @@ test(
         true,
       );
       const staleSocket = await lstat(socket);
+      assert.equal(staleSocket.isSocket(), true);
+      assert.equal(staleSocket.mode & 0o777, 0o600);
       const retainedLock = await lstat(lock);
       assert.equal(retainedLock.mode & 0o777, 0o600);
 
       const first = await startBrowserKernelBridge({ home, executable: broker });
-      for (let count = 0; count < 100; count += 1) {
-        const current = await lstat(socket).catch(() => undefined);
-        if (current && current.ino !== staleSocket.ino) break;
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        if (count === 99) assert.fail("stale broker socket was not replaced");
-      }
+      const connectToReplacement = async () => {
+        for (let count = 0; count < 100; count += 1) {
+          const candidate = connect(socket);
+          const connected = await new Promise<boolean>((resolve) => {
+            let settled = false;
+            const cleanup = () => {
+              clearTimeout(timer);
+              candidate.off("connect", onConnect);
+              candidate.off("error", onError);
+            };
+            const finish = (value: boolean) => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              resolve(value);
+            };
+            const onConnect = () => finish(true);
+            const onError = () => finish(false);
+            const timer = setTimeout(() => {
+              candidate.destroy();
+              finish(false);
+            }, 100);
+            candidate.once("connect", onConnect);
+            candidate.once("error", onError);
+          });
+          if (connected) {
+            candidate.on("error", () => {});
+            return candidate;
+          }
+          candidate.destroy();
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        assert.fail("replacement broker socket did not accept a connection");
+      };
+      const hostile = await connectToReplacement();
+      const hostileClosed = hostile.closed
+        ? Promise.resolve(true)
+        : new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => {
+              hostile.destroy();
+              resolve(false);
+            }, 1_000);
+            hostile.once("close", () => {
+              clearTimeout(timer);
+              resolve(true);
+            });
+          });
+      const replacementSocketInfo = await lstat(socket);
+      assert.equal(replacementSocketInfo.isSocket(), true);
+      assert.equal(replacementSocketInfo.mode & 0o777, 0o600);
+      assert.equal(replacementSocketInfo.uid, process.getuid!());
       assert.equal((await lstat(lock)).ino, retainedLock.ino);
-      const hostile = connect(socket);
-      await new Promise<void>((resolve, reject) => {
-        hostile.once("connect", resolve);
-        hostile.once("error", reject);
-      });
       hostile.write(
         browserWebMCPFrame.encode({ type: "native-host.hello", version: 1, parentPid: 1 }),
       );
-      await new Promise((resolve) => hostile.once("close", resolve));
+      assert.equal(await hostileClosed, true, "replacement broker did not reject the hostile peer");
       assert.equal(first.connectionContext(), undefined);
       await first.close();
       await waitForNoSocket();
