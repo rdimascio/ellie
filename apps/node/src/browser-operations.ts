@@ -133,7 +133,6 @@ export class BrowserWebMCPOperations {
     if (availability === "accessibility") {
       this.observed.clear();
       this.currentRevision = undefined;
-      return "unsupported";
     }
     return checked;
   }
