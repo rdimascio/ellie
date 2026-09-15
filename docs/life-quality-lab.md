@@ -4,9 +4,9 @@ The quality lab evaluates whether Ellie remembers, prepares and follows through 
 
 ## Schedule and ownership
 
-The existing Life heartbeat is repurposed as **Ellie quality lab**, every two hours, in the Life task `01a09dea-05e8-7ef1-8040-21a3e6387c5c`. The release task `01a09480-7b02-7d33-8c1e-ec9fc2894c15` retains its thirty-minute schedule and owns shared merges, complete release gates, packaging, installation, signing, Xcode and physical-device reservations. These are two distinct owners; the former overnight feature-building prompt must not be resumed.
+The existing Life heartbeat is repurposed as **Ellie quality lab**, every two hours. The release coordinator retains its thirty-minute schedule and owns shared merges, complete release gates, packaging, installation, signing, Xcode and physical-device reservations. These are two distinct owners; the former overnight feature-building prompt must not be resumed. Task identifiers and local schedule configuration remain in the private coordination ledger.
 
-The lab works in its owned `/Users/ryan/ellie-life-harness` checkout on a `codex/` quality branch. It checks the current branch, uncommitted work, active agents, relevant release handoffs and its private checkpoint before doing anything. It never resets or overwrites unfinished work. Source changes outside this checkout remain with their existing owners.
+The lab works in its own isolated checkout on a `codex/` quality branch. It checks the current branch, uncommitted work, active agents, relevant release handoffs and its private checkpoint before doing anything. It never resets or overwrites unfinished work. Source changes outside this checkout remain with their existing owners.
 
 Check the reviewed upstream revision as well as the local branch so the lab does not keep evaluating an obsolete candidate. Fetching upstream is read-only to the checkout. Advance a clean owned branch safely when possible, or start a fresh `codex/` quality branch from reviewed main after the previous work has been integrated. Preserve unpublished work and coordinate conflicts before changing the candidate.
 
@@ -21,7 +21,7 @@ Reuse Sol engineers for bounded independent evaluation or fixes. Astra reviews t
 5. Reproduce failures before fixing them. Claim the relevant files, make a narrow change, preserve the regression, and obtain independent review. Publish a focused PR when useful; the release coordinator integrates and merges after the appropriate checks.
 6. Update the private coverage ledger and release the in-flight reservation after cleanup. Notify the release coordinator only for a concrete failure, reviewed fix, resource dependency or handoff. Notify the user for a meaningful finding, completion or required action. Keep unchanged wakes quiet.
 
-The private ledger lives outside the repository under `/Users/ryan/.codex/ellie-quality-lab`. It separates execution status from scenario outcomes: a completed evaluation may contain failures. It includes the report hash so changing a report cannot silently reuse its old acceptance. The source revision and scenario digest also prevent old passing results being carried forward to a new candidate.
+The private ledger lives outside the repository in an operator-selected directory. It separates execution status from scenario outcomes: a completed evaluation may contain failures. It includes the report hash so changing a report cannot silently reuse its old acceptance. The source revision and scenario digest also prevent old passing results being carried forward to a new candidate.
 
 ## Evaluation tracks
 
