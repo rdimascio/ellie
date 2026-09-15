@@ -450,7 +450,7 @@ export class BrowserAccessibilityRuntime {
         throw error;
       return browserWebMCPOperationResult({
         ok: false,
-        message: "Browser action was dispatched without independent effect confirmation.",
+        message: "Browser action outcome is unknown. Check the page before retrying.",
         browser: {
           source: "accessibility",
           operation: "command",
