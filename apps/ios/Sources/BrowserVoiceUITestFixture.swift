@@ -5,10 +5,12 @@ import SwiftUI
 
 @MainActor
 struct BrowserVoiceUITestFixtureView: View {
+  @Environment(\.scenePhase) private var scenePhase
   @StateObject private var controls: PhoneControlStore
   @StateObject private var browser: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
+  @State private var backgroundCount = 0
 
   init() {
     let credential = BrowserVoiceUITestFixture.credential
@@ -34,14 +36,21 @@ struct BrowserVoiceUITestFixtureView: View {
         speech: speech)
     }
     .overlay(alignment: .bottomTrailing) {
-      Text("Fixture mutations: \(browserTransport.mutationCount)")
-        .font(.caption2)
-        .padding(4)
-        .accessibilityIdentifier("browser-fixture-mutation-count")
+      VStack(alignment: .trailing, spacing: 2) {
+        Text("Fixture backgrounds: \(backgroundCount)")
+          .accessibilityIdentifier("browser-fixture-background-count")
+        Text("Fixture mutations: \(browserTransport.mutationCount)")
+          .accessibilityIdentifier("browser-fixture-mutation-count")
+      }
+      .font(.caption2)
+      .padding(4)
     }
     .onAppear { controls.refresh() }
     .onChange(of: controls.nodes) { _, nodes in
       if controls.selectedNodeID == nil { controls.selectedNodeID = nodes.first?.id }
+    }
+    .onChange(of: scenePhase) { _, phase in
+      if phase == .background { backgroundCount += 1 }
     }
   }
 }
