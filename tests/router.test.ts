@@ -43,7 +43,10 @@ test("unknown, ambiguous, inherited aliases, and injected commands never become 
 });
 test("personality selection does not affect routing, and aliases are replaceable", () => {
   const prefs = { ...defaults, personality: "custom", apps: { browser: "com.apple.Safari" } };
-  assert.equal(route("open browser", {}, prefs)!.actions[0]!.app, "com.apple.Safari");
+  assert.deepEqual(route("open browser", {}, prefs)!.actions[0], {
+    tool: "app.open",
+    app: "com.apple.Safari",
+  });
   assert.equal(route("open Arc", {}, prefs), undefined);
 });
 test("wire validation rejects unsupported tools, URL schemes, and protocol versions", () => {
