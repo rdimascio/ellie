@@ -2,6 +2,7 @@
   "manifest_version": 3,
   "name": "Ellie Media Companion",
   "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA1W9JviIs4IswrLM7uNZHpn31nIQFrXE8FnoBxOFOHvw+cE2yFdz6NfvY9wJE9HpbRyyWx9BiP0vA87fj4n9O9Z3rzyNdpcWidf34RxTMtHB6vL/WlImDryCZradnW5iRDTKgMdUCEWhQhYoCIhU9BZWz98H1cni7B8R2LbsgehHni1cIu9CGGfxnlukYdc9nl6PR+WQ2avTqtzx3jGGkhvj3e/W2tZq9iavo9z3JWfguzCUPSna/1BoCzV9zTnMlz8as8eSjIHZazHlZ+2VQGr/1URNo6VQ99ij04hHx19NWRHbmblv/AiPXMkLefNm2S7DhwEPjPY4uBAX3hY8qYwIDAQAB",
   "description": "Explicit, local controls for the active Netflix or YouTube tab.",
   "permissions": ["activeTab", "scripting", "nativeMessaging"],
   "background": { "service_worker": "background.js" },

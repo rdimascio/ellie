@@ -5,6 +5,7 @@ import { BROWSER_WEBMCP_LIMITS, browserWebMCPRequest, browserWebMCPResult } from
 import { browserWebMCPFrame, browserWebMCPSocketPath } from "./browser-webmcp-bridge.ts";
 
 export const BROWSER_WEBMCP_NATIVE_HOST = "org.ellie.browser_webmcp";
+export const ELLIE_BROWSER_EXTENSION_ID = "lopakiehdeklmlnnnnacepnbjjoaehee";
 const extensionIdPattern = /^[a-p]{32}$/;
 
 export function browserWebMCPNativeHostManifest(
@@ -26,6 +27,11 @@ export function browserWebMCPNativeHostManifest(
   })}\n`;
 }
 
+/** Manifest bytes for the one reviewed Ellie extension identity. Installation remains explicit. */
+export function ellieBrowserWebMCPNativeHostManifest(executablePath: string): string {
+  return browserWebMCPNativeHostManifest(ELLIE_BROWSER_EXTENSION_ID, executablePath);
+}
+
 export async function runBrowserWebMCPNativeHost(options: {
   home: string;
   input?: NodeJS.ReadableStream;
@@ -39,6 +45,12 @@ export async function runBrowserWebMCPNativeHost(options: {
     socket.once("error", reject);
   });
   await opened;
+  const parentPid = process.ppid;
+  if (!Number.isInteger(parentPid) || parentPid < 1 || parentPid > 0x7fffffff) {
+    socket.destroy();
+    throw new Error("Browser native host parent is unavailable.");
+  }
+  socket.write(browserWebMCPFrame.encode({ type: "native-host.hello", version: 1, parentPid }));
   let stopped = false;
   let removeInputFrames = () => {};
   let removeSocketFrames = () => {};
