@@ -37,6 +37,18 @@ The current Google Calendar and Gmail adapters need a registered Google desktop 
 
 For developer account setup, append `--google-client-id REGISTERED_DESKTOP_CLIENT_ID` to `bun run life:start`. If Google issued a client secret, use `--google-oauth-client /absolute/private/google-desktop-client.json` instead. The loader accepts Google's downloaded `installed` client JSON; the file must be outside the repository, owned by the current user, and mode 0600. Token endpoints remain fixed. Registration and any required provider verification must be completed with Google; the application does not include a shared registered client. Ordinary account owners use the Connect button once the host is configured.
 
+### Installed coordinator account setup
+
+When Life runs inside the installed coordinator, configure that coordinator's private Life host file with the registered Google desktop client and restart through the reviewed rollout procedure. On the coordinator Mac, the local owner can then run:
+
+```sh
+bun run ellie life settings
+```
+
+The command authenticates to the current coordinator over its existing pinned loopback controller connection. The same running Life application lazily opens **Settings → Connected accounts** in the Mac's external system browser; it does not start a second Life process or open another copy of the state. Its launch capability is short-lived and one-use. Normal command output confirms only that settings opened and never prints the local URL, launch token or account credentials.
+
+This command is available only on the coordinator host, only when Google OAuth is configured, and only while that configured Life application is current. Google authorization returns to that application's exact loopback callback. A remote native Life view can inspect existing connection status, but it still cannot start or complete OAuth; connect the account directly on the Mac hosting Ellie.
+
 With suitable connected evidence, Ellie can infer a tentative morning appointment preference, prepare for a confirmed doctor visit, recognize communication cadence and identify recurring settled expenses. Explicit preferences and corrections take precedence. A calendar booking or a message snippet does not prove an unfinished step was completed. Missing history remains missing evidence.
 
 Run the complete connected workflow without real accounts or credentials:
