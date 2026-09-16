@@ -245,7 +245,7 @@ test("bounded runner escalates an owned Node child that ignores TERM to KILL", a
       "-e",
       "process.on('SIGTERM', () => {}); process.stdout.write('READY\\n'); setInterval(() => {}, 1000)",
     ],
-    { timeoutMs: 1_000 },
+    { timeoutMs: 3_000 },
   );
   assert.equal(result.limited, true);
   assert.equal(result.signal, "SIGKILL");
