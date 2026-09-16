@@ -230,12 +230,12 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     let deadline = ContinuousClock.now + transportRequestBudget + recorderObservationAllowance
     while true {
       let phase = store.phase
+      if ContinuousClock.now >= deadline {
+        throw ReviewObservationFailure.timeout(reviewPhaseName(phase))
+      }
       switch phase {
       case .reviewing: return
-      case .uploading:
-        if ContinuousClock.now >= deadline {
-          throw ReviewObservationFailure.timeout(reviewPhaseName(phase))
-        }
+      case .uploading: break
       default:
         throw ReviewObservationFailure.unexpected(reviewPhaseName(phase))
       }
