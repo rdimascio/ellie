@@ -279,7 +279,7 @@ final class NativeSpeechIntegrationTests: XCTestCase {
   @MainActor
   private func isSettledReviewFailure(_ store: SpeechTurnStore) -> Bool {
     guard !store.isBusy else { return false }
-    switch store.phase {
+    return switch store.phase {
     case .idle, .ready, .reviewing, .failed, .revoked, .cleanupRequired: true
     case .checking, .starting, .recording, .uploading, .cancelling: false
     }
