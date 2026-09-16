@@ -1,4 +1,5 @@
 #if DEBUG
+import Darwin
 import Combine
 import Foundation
 import SwiftUI
@@ -95,6 +96,128 @@ struct BrowserTargetUITestFixtureView: View {
     .onChange(of: controls.nodes) { _, nodes in
       if controls.selectedNodeID == nil { controls.selectedNodeID = nodes.first?.id }
     }
+  }
+}
+
+@MainActor
+struct BrowserUnknownRelaunchUITestFixtureView: View {
+  @StateObject private var controls: PhoneControlStore
+  @StateObject private var browser: BrowserPhoneControlStore
+  @StateObject private var browserTransport: BrowserVoiceUITestTransport
+  @State private var markerState = "absent"
+  private let persistence: PrivateBrowserMutationUncertaintyStore
+
+  init(identifier: String) {
+    let credential = BrowserVoiceUITestFixture.credential
+    precondition((try? validateNativeGrants(credential.client.grants)) != nil)
+    let persistence = PrivateBrowserMutationUncertaintyStore(
+      fileURL: BrowserUnknownRelaunchUITestStorage.fileURL(identifier: identifier))
+    let browserTransport = BrowserVoiceUITestTransport()
+    self.persistence = persistence
+    _controls = StateObject(
+      wrappedValue: PhoneControlStore(
+        credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
+    _browser = StateObject(
+      wrappedValue: BrowserPhoneControlStore(
+        credential: credential, transport: browserTransport, uncertainty: persistence))
+    _browserTransport = StateObject(wrappedValue: browserTransport)
+  }
+
+  var body: some View {
+    NavigationStack {
+      PhoneControlView(
+        credential: BrowserVoiceUITestFixture.credential, store: controls, browser: browser)
+    }
+    .overlay(alignment: .bottomTrailing) {
+      VStack(alignment: .trailing, spacing: 2) {
+        Text("Fixture mutations: \(browserTransport.mutationCount)")
+          .accessibilityIdentifier("browser-fixture-mutation-count")
+        Text("Fixture marker: \(markerState)")
+          .accessibilityIdentifier("browser-fixture-persisted-marker")
+      }
+      .font(.caption2)
+      .padding(4)
+    }
+    .onAppear {
+      updateMarkerState()
+      controls.refresh()
+    }
+    .onChange(of: controls.nodes) { _, nodes in
+      if controls.selectedNodeID == nil { controls.selectedNodeID = nodes.first?.id }
+    }
+    .onChange(of: browserTransport.mutationCount) { _, _ in updateMarkerState() }
+    .onChange(of: browser.phase) { _, _ in updateMarkerState() }
+  }
+
+  private func updateMarkerState() {
+    guard let scope = try? browserMutationUncertaintyScope(
+      credential: BrowserVoiceUITestFixture.credential,
+      targetID: BrowserVoiceUITestFixture.nodeAID)
+    else {
+      markerState = "unavailable"
+      return
+    }
+    do {
+      let pending = try persistence.pendingToken(for: scope) != nil
+      let fileExists = FileManager.default.fileExists(atPath: persistence.fileURL.path)
+      markerState = pending && fileExists ? "present" : "absent"
+    } catch {
+      markerState = "unavailable"
+    }
+  }
+}
+
+@MainActor
+struct BrowserUnknownRelaunchUITestCleanupView: View {
+  let identifier: String
+  @State private var status = "pending"
+
+  var body: some View {
+    Text("Fixture cleanup: \(status)")
+      .accessibilityIdentifier("browser-fixture-cleanup")
+      .onAppear {
+        do {
+          try BrowserUnknownRelaunchUITestStorage.remove(identifier: identifier)
+          status = "complete"
+        } catch {
+          status = "failed"
+        }
+      }
+  }
+}
+
+enum BrowserUnknownRelaunchUITestStorage {
+  static func identifier(from arguments: [String], after flag: String) -> String? {
+    guard let index = arguments.firstIndex(of: flag), arguments.indices.contains(index + 1) else {
+      return nil
+    }
+    let value = arguments[index + 1]
+    guard UUID(uuidString: value)?.uuidString.lowercased() == value else { return nil }
+    return value
+  }
+
+  static func fileURL(identifier: String) -> URL {
+    directoryURL(identifier: identifier).appendingPathComponent("markers.json")
+  }
+
+  static func remove(identifier: String) throws {
+    let directory = directoryURL(identifier: identifier)
+    var info = stat()
+    if lstat(directory.path, &info) != 0 {
+      if errno == ENOENT { return }
+      throw CocoaError(.fileReadUnknown)
+    }
+    guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == getuid(),
+      info.st_mode & 0o077 == 0
+    else { throw CocoaError(.fileWriteNoPermission) }
+    try FileManager.default.removeItem(at: directory)
+  }
+
+  private static func directoryURL(identifier: String) -> URL {
+    precondition(UUID(uuidString: identifier)?.uuidString.lowercased() == identifier)
+    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return base.appendingPathComponent("EllieUITests", isDirectory: true)
+      .appendingPathComponent("browser-unknown-\(identifier)", isDirectory: true)
   }
 }
 
