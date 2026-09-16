@@ -102,6 +102,34 @@ test("missing or unfamiliar device fields stay unknown; explicit disabled mode i
   );
 });
 
+test("unrecognized pairing and Developer Mode values remain unknown", () => {
+  const envelope = (device) => ({
+    info: { commandType: "devicectl.list.devices", jsonVersion: 2, outcome: "success" },
+    result: { devices: [device] },
+  });
+  assert.equal(
+    summarizeDevices(
+      envelope({
+        ...successDevice,
+        connectionProperties: {
+          ...successDevice.connectionProperties,
+          pairingState: "future-pairing",
+        },
+      }),
+    ).status,
+    "unknown",
+  );
+  assert.equal(
+    summarizeDevices(
+      envelope({
+        ...successDevice,
+        deviceProperties: { ...successDevice.deviceProperties, developerModeStatus: "future-mode" },
+      }),
+    ).status,
+    "unknown",
+  );
+});
+
 test("command failure and malformed JSON yield unknown without propagating local output", async () => {
   const result = await checkIOS({
     run: async (file, args) =>

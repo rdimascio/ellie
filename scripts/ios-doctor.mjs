@@ -111,11 +111,7 @@ export function summarizeDevices(json) {
   ).length;
 
   const explicitBlocked = phones.some(
-    (device) =>
-      (typeof device.connectionProperties?.pairingState === "string" &&
-        device.connectionProperties.pairingState !== "paired") ||
-      (typeof device.deviceProperties?.developerModeStatus === "string" &&
-        device.deviceProperties.developerModeStatus !== "enabled"),
+    (device) => device.deviceProperties?.developerModeStatus === "disabled",
   );
   return {
     status: phones.some(
