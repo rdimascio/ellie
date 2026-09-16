@@ -1499,6 +1499,120 @@ test("native browser commands require the exact read or control grant and preser
   assert.equal(calls.length, 1);
 });
 
+test("reviewed native speech stays inert until one explicit browser mutation and unknown is not replayed", async (t) => {
+  const browserActions: unknown[] = [];
+  const revision = "7".repeat(64);
+  const f = await fixture(undefined, {
+    nodes: async () => [
+      {
+        ...nativeTarget,
+        capabilities: ["browser.read", "browser.control"],
+      },
+    ],
+    openApp: async () => ({ ok: true, message: "unused" }),
+    execute: async (nodeId, action, options) => {
+      assert.equal(nodeId, nativeTarget.id);
+      assert.ok(options?.signal);
+      browserActions.push(action);
+      return {
+        ok: false,
+        message: "Browser action did not confirm completion.",
+        browser: {
+          source: "webmcp",
+          operation: "command",
+          status: "unknown",
+          revision,
+        },
+      };
+    },
+  });
+  t.after(() => f.close());
+
+  const invitation = await f.nativeAuth.invite({
+    label: "Reviewed command iPhone",
+    grants: [{ target: nativeTarget.id, capabilities: ["browser.control"] }],
+  });
+  const token = "4".repeat(64);
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const paired = await f.request("POST", "/native/v1/pair", {
+    body: { invitation: invitation.code, token },
+    headers: { "x-ellie-version": "1" },
+  });
+  assert.equal(paired.status, 200);
+  const clientId = (paired.body as { client: { id: string } }).client.id;
+
+  assert.equal((await f.request("GET", "/native/v1/speech/availability", { headers })).status, 403);
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/commands", {
+        headers,
+        body: { nodeId: nativeTarget.id, action: { tool: "browser.status" } },
+      })
+    ).status,
+    403,
+  );
+  assert.deepEqual(browserActions, []);
+
+  await f.speech.grant({ clientId, capability: "speech.transcribe" });
+  assert.deepEqual((await f.request("GET", "/native/v1/speech/availability", { headers })).body, {
+    available: true,
+  });
+  const audio = validSpeechWave();
+  const turnId = "77777777-7777-4777-8777-777777777777";
+  const transcript = await f.request("POST", "/native/v1/speech/transcriptions", {
+    rawBody: audio,
+    headers: {
+      ...headers,
+      "content-type": "audio/wav",
+      "content-length": String(audio.length),
+      "x-ellie-turn-id": turnId,
+    },
+  });
+  assert.equal(transcript.status, 200);
+  assert.deepEqual(transcript.body, { turnId, text: "Synthetic transcript" });
+  assert.deepEqual(browserActions, [], "transcription must not dispatch a browser action");
+
+  const reviewedAction = {
+    tool: "browser.scroll" as const,
+    direction: "down" as const,
+    revision,
+  };
+  const mutation = await f.request("POST", "/native/v1/commands", {
+    headers: { ...headers, connection: "close" },
+    body: { nodeId: nativeTarget.id, action: reviewedAction },
+  });
+  assert.equal(mutation.status, 200);
+  assert.equal(mutation.headers.connection, "close");
+  assert.deepEqual(mutation.body, {
+    outcome: "unknown",
+    result: {
+      ok: false,
+      message: "Browser action did not confirm completion.",
+      browser: {
+        source: "webmcp",
+        operation: "command",
+        status: "unknown",
+        revision,
+      },
+    },
+  });
+  assert.deepEqual(browserActions, [reviewedAction]);
+
+  const reconnected = await f.request("GET", "/native/v1/nodes", { headers });
+  assert.equal(reconnected.status, 200);
+  assert.deepEqual(reconnected.body, {
+    nodes: [
+      {
+        id: nativeTarget.id,
+        label: nativeTarget.label,
+        online: true,
+        capabilities: ["browser.control"],
+      },
+    ],
+  });
+  assert.deepEqual(browserActions, [reviewedAction], "reconnect must not replay the mutation");
+});
+
 test("native controls reject browser authority, ungranted targets and noncanonical actions before dispatch", async (t) => {
   let calls = 0;
   const f = await fixture(undefined, {
