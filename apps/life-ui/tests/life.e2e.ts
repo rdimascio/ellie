@@ -1960,7 +1960,7 @@ try {
 
   await openSettings();
   await page.getByRole("button", { name: "Inspect my data" }).click();
-  await page.getByText("Private records").waitFor();
+  await page.getByText("Private records", { exact: true }).waitFor();
   assert.ok(Number(await page.locator(".data-review dd").first().textContent()) > 0);
   const archiveDownload = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download my archive" }).click();
