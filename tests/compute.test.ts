@@ -54,6 +54,19 @@ async function eventually(check: () => Promise<boolean>): Promise<void> {
     await delay(10);
   }
 }
+async function within<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 const registration = () => ({
   capabilities: [],
   computeCapabilities: compute,
@@ -351,10 +364,15 @@ test("busy workers keep publishing load and withdraw unavailable models without 
   const f = await fixture();
   const abort = new AbortController();
   let agent: Promise<void> | undefined;
+  let pending: Promise<unknown> | undefined;
   let available = true;
   let release!: () => void;
+  let started!: () => void;
   const finish = new Promise<void>((resolve) => {
     release = resolve;
+  });
+  const executing = new Promise<void>((resolve) => {
+    started = resolve;
   });
   try {
     const client = await f.pair("heartbeat-worker");
@@ -374,6 +392,7 @@ test("busy workers keep publishing load and withdraw unavailable models without 
           return compute;
         },
         execute: async () => {
+          started();
           await finish;
           return { ok: true, message: "done" };
         },
@@ -381,10 +400,13 @@ test("busy workers keep publishing load and withdraw unavailable models without 
       onStatus: () => ready(),
     });
     await registered;
-    const pending = f.controller.call("POST", "/v1/inference", {
+    pending = f.controller.call("POST", "/v1/inference", {
       model: "test-model",
       prompt: "hello",
     });
+    // Observe rejection immediately, including when an earlier assertion fails.
+    void pending.catch(() => {});
+    await within(executing, 1000, "Worker did not begin the inference job.");
     await eventually(
       async () =>
         ((await f.controller.call("GET", "/v1/nodes")) as NodeInfo[])[0]?.telemetry?.activeJobs ===
@@ -404,8 +426,16 @@ test("busy workers keep publishing load and withdraw unavailable models without 
     );
   } finally {
     release();
+    // Let the held request settle before closing its TLS agent. A failed state
+    // assertion must remain the primary failure, not become ECONNRESET.
+    if (pending)
+      await within(
+        pending.catch(() => {}),
+        3000,
+        "Inference did not settle during cleanup.",
+      ).catch(() => {});
     abort.abort();
-    await f.close();
     await agent;
+    await f.close();
   }
 });
