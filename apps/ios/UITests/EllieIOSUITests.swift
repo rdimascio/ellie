@@ -72,8 +72,15 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
         XCTAssertEqual(relaunchedMutations.label, "Fixture mutations: 0")
-        XCTAssertEqual(relaunchedMarker.label, "Fixture marker: absent")
-        app.buttons["Down"].tap()
+        let markerCleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture marker: absent"),
+            object: relaunchedMarker)
+        XCTAssertEqual(XCTWaiter.wait(for: [markerCleared], timeout: 5), .completed)
+        let down = app.buttons["Down"]
+        let downEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: down)
+        XCTAssertEqual(XCTWaiter.wait(for: [downEnabled], timeout: 5), .completed)
+        down.tap()
         let explicitMutation = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", "Fixture mutations: 1"),
             object: relaunchedMutations)
