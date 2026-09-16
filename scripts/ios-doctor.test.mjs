@@ -3,7 +3,13 @@ import { spawnSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { checkIOS, formatHuman, summarizeDevices, summarizeIdentities } from "./ios-doctor.mjs";
+import {
+  checkIOS,
+  formatHuman,
+  runBounded,
+  summarizeDevices,
+  summarizeIdentities,
+} from "./ios-doctor.mjs";
 
 const successDevice = {
   hardwareProperties: {
@@ -219,4 +225,28 @@ test("uncertain child ownership stops later host commands", async () => {
   });
   assert.equal(calls, 1);
   assert.equal(result.subprocessOwnership, "uncertain");
+});
+
+test("bounded runner counts multibyte output bytes and reaps an owned Node child", async () => {
+  const result = await runBounded(
+    process.execPath,
+    ["-e", "process.stdout.write('é'.repeat(9000)); setInterval(() => {}, 1000)"],
+    { timeoutMs: 3_000 },
+  );
+  assert.equal(result.limited, true);
+  assert.equal(result.stdout, "");
+  assert.equal(result.signal, "SIGTERM");
+});
+
+test("bounded runner escalates an owned Node child that ignores TERM to KILL", async () => {
+  const result = await runBounded(
+    process.execPath,
+    [
+      "-e",
+      "process.on('SIGTERM', () => {}); process.stdout.write('READY\\n'); setInterval(() => {}, 1000)",
+    ],
+    { timeoutMs: 1_000 },
+  );
+  assert.equal(result.limited, true);
+  assert.equal(result.signal, "SIGKILL");
 });

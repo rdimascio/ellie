@@ -53,12 +53,17 @@ export async function runBounded(file, args, { timeoutMs = COMMAND_TIMEOUT } = {
     child.once("exit", () => {
       exited = true;
     });
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       reaped = true;
       clearTimeout(deadline);
       clearTimeout(killTimer);
       clearTimeout(reapTimer);
-      resolve({ code, stdout: overflow || timedOut ? "" : stdout, limited: overflow || timedOut });
+      resolve({
+        code,
+        signal,
+        stdout: overflow || timedOut ? "" : stdout,
+        limited: overflow || timedOut,
+      });
     });
   });
 }
