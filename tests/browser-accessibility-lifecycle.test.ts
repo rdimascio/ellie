@@ -31,6 +31,22 @@ const waitFor = async (check: () => boolean | Promise<boolean>) => {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 };
+async function settledWithin(promise: Promise<unknown>, milliseconds: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 async function fixture(
   mode:
@@ -40,6 +56,7 @@ async function fixture(
     | "semantic-read"
     | "semantic-perform"
     | "ignore"
+    | "gated-ignore"
     | "ignore-perform"
     | "respond",
 ) {
@@ -50,8 +67,8 @@ async function fixture(
     executable,
     `#!${process.execPath}\n` +
       String.raw`const fs=require("node:fs"),path=require("node:path"),root=path.dirname(process.argv[1]),countPath=path.join(root,"count"),mode=fs.readFileSync(path.join(root,"mode"),"utf8");
-const count=Number(fs.existsSync(countPath)?fs.readFileSync(countPath,"utf8"):0)+1;fs.writeFileSync(countPath,String(count));fs.writeFileSync(path.join(root,"pid-"+count),String(process.pid));
-let input="",session,documentRevision;process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{input+=chunk;const newline=input.indexOf("\n");if(newline<0)return;const raw=input.slice(0,newline);input=input.slice(newline+1);const value=JSON.parse(raw);fs.appendFileSync(path.join(root,"requests-"+count),value.id+"\\n");if(count===1&&mode==="malformed-first"){process.stdout.write("{}\n");return;}if(mode==="ignore"||(mode==="ignore-perform"&&value.type==="perform"))return;let reply;if(value.type==="bind"){session="session-"+count;documentRevision=value.documentRevision;reply={id:value.id,status:count===1&&mode==="semantic-bind"?"garbage":"bound",sessionID:session,documentRevision};}else if(value.type==="read")reply={id:value.id,status:count===1&&mode==="semantic-read"?"garbage":"completed",sessionID:session,generation:"generation-"+count,documentRevision,items:[],operation:"read"};else reply={id:value.id,status:"dispatchedUnverified",sessionID:session,documentRevision,operation:count===1&&mode==="semantic-perform"?"search":value.operation};process.stdout.write(JSON.stringify(reply)+"\n",()=>{if(count===1&&mode==="close-after-bind"){fs.closeSync(0);fs.writeFileSync(path.join(root,"stdin-closed"),"yes");}});});
+const count=Number(fs.existsSync(countPath)?fs.readFileSync(countPath,"utf8"):0)+1;fs.writeFileSync(countPath,String(count));if(mode==="gated-ignore"){fs.writeFileSync(path.join(root,"startup-paused"),"yes");while(!fs.existsSync(path.join(root,"continue-startup")))Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,10);}fs.writeFileSync(path.join(root,"pid-"+count),String(process.pid));
+let input="",session,documentRevision;process.stdin.setEncoding("utf8");process.stdin.on("data",chunk=>{input+=chunk;const newline=input.indexOf("\n");if(newline<0)return;const raw=input.slice(0,newline);input=input.slice(newline+1);const value=JSON.parse(raw);fs.appendFileSync(path.join(root,"requests-"+count),value.id+"\\n");if(count===1&&mode==="malformed-first"){process.stdout.write("{}\n");return;}if(mode==="ignore"||mode==="gated-ignore"||(mode==="ignore-perform"&&value.type==="perform"))return;let reply;if(value.type==="bind"){session="session-"+count;documentRevision=value.documentRevision;reply={id:value.id,status:count===1&&mode==="semantic-bind"?"garbage":"bound",sessionID:session,documentRevision};}else if(value.type==="read")reply={id:value.id,status:count===1&&mode==="semantic-read"?"garbage":"completed",sessionID:session,generation:"generation-"+count,documentRevision,items:[],operation:"read"};else reply={id:value.id,status:"dispatchedUnverified",sessionID:session,documentRevision,operation:count===1&&mode==="semantic-perform"?"search":value.operation};process.stdout.write(JSON.stringify(reply)+"\n",()=>{if(count===1&&mode==="close-after-bind"){fs.closeSync(0);fs.writeFileSync(path.join(root,"stdin-closed"),"yes");}});});
 setInterval(()=>{},1000);`,
     { mode: 0o700 },
   );
@@ -259,36 +276,98 @@ test("cancelled dispatched action is unknown and is never replayed after certain
 });
 
 test("cleanup uncertainty retains ownership, blocks replacement, and remains observable", async () => {
-  const item = await fixture("ignore");
-  let complete = false;
+  const item = await fixture("gated-ignore");
   const originalKill = ChildProcess.prototype.kill;
+  const aborter = new AbortController();
+  let runtime: BrowserAccessibilityRuntime | undefined;
+  let pending: Promise<unknown> | undefined;
+  let ownedChild: ChildProcess | undefined;
+  let ownedClose: Promise<void> | undefined;
+  let startupReleased = false;
+  let primaryError: unknown;
+  let cleanupError: Error | undefined;
+  const rememberOwnedChild = (child: ChildProcess) => {
+    if (!ownedChild) {
+      ownedChild = child;
+      ownedClose = new Promise((resolve) => child.once("close", () => resolve()));
+    }
+  };
   try {
-    const runtime = new BrowserAccessibilityRuntime(item.executable, () => context);
-    const aborter = new AbortController();
-    const pending = executeStatus(runtime, aborter.signal);
-    await waitFor(() => item.count().then((value) => value === 1));
-    const pid = Number(await readFile(join(item.root, "pid-1"), "utf8"));
-    ChildProcess.prototype.kill = () => true;
+    runtime = new BrowserAccessibilityRuntime(item.executable, () => context);
+    pending = executeStatus(runtime, aborter.signal);
+    void pending.catch(() => {});
+    await waitFor(
+      async () =>
+        (await item.count()) === 1 &&
+        (await access(join(item.root, "startup-paused")).then(
+          () => true,
+          () => false,
+        )),
+    );
+    // Count is deliberately published first; it is not helper readiness.
+    await assert.rejects(access(join(item.root, "pid-1")), { code: "ENOENT" });
+    await writeFile(join(item.root, "continue-startup"), "go", { mode: 0o600 });
+    startupReleased = true;
+    await waitFor(
+      async () =>
+        await access(join(item.root, "requests-1")).then(
+          () => true,
+          () => false,
+        ),
+    );
+    ChildProcess.prototype.kill = function (signal) {
+      if (this.spawnfile !== item.executable || (ownedChild && this !== ownedChild))
+        return originalKill.call(this, signal);
+      rememberOwnedChild(this);
+      return true;
+    };
     aborter.abort();
     await assert.rejects(pending, /cleanup is uncertain/);
+    assert.ok(ownedChild, "only the task-owned helper kill was intercepted");
     await assert.rejects(executeStatus(runtime), /helper is unavailable|cleanup is uncertain/);
     assert.equal(await item.count(), 1);
     await assert.rejects(runtime.close(), /cleanup is uncertain/);
     await assert.rejects(runtime.close(), /cleanup is uncertain/);
-    ChildProcess.prototype.kill = originalKill;
-    process.kill(pid, "SIGKILL");
-    await waitFor(() => {
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    });
-    complete = true;
+  } catch (error) {
+    primaryError = error;
   } finally {
     ChildProcess.prototype.kill = originalKill;
-    if (complete) await rm(item.root, { recursive: true });
-    else console.error(`Retained accessibility lifecycle fixture: ${item.root}`);
+    let cleanupCertain = true;
+    if (!startupReleased) {
+      try {
+        await writeFile(join(item.root, "continue-startup"), "go", { mode: 0o600 });
+      } catch {
+        cleanupCertain = false;
+      }
+    }
+    aborter.abort();
+    if (ownedChild && ownedClose) {
+      try {
+        if (ownedChild.exitCode === null && ownedChild.signalCode === null)
+          originalKill.call(ownedChild, "SIGKILL");
+        if (!(await settledWithin(ownedClose, 3_000))) cleanupCertain = false;
+      } catch {
+        cleanupCertain = false;
+      }
+    } else if (runtime) {
+      try {
+        await runtime.close();
+      } catch {
+        cleanupCertain = false;
+      }
+    }
+    if (pending && !(await settledWithin(pending, 5_000))) cleanupCertain = false;
+    if (cleanupCertain) {
+      try {
+        await rm(item.root, { recursive: true });
+      } catch {
+        cleanupCertain = false;
+      }
+    }
+    if (!cleanupCertain) console.error(`Retained accessibility lifecycle fixture: ${item.root}`);
+    if (!cleanupCertain)
+      cleanupError = new Error("Task-owned accessibility fixture cleanup is uncertain.");
   }
+  if (primaryError !== undefined) throw primaryError;
+  if (cleanupError) throw cleanupError;
 });
