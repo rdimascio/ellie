@@ -22,6 +22,9 @@ jobs:
       - run: bun run life:test
         env:
           ELLIE_E2E_ARTIFACT_DIR: test-results/life
+      - run: bun run life:test:mobile-orb
+        env:
+          ELLIE_E2E_ARTIFACT_DIR: test-results/life/mobile-orb
       - run: bun run life:test:connections
         env:
           ELLIE_E2E_ARTIFACT_DIR: test-results/life/connections
