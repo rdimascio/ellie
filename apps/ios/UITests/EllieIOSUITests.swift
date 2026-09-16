@@ -16,6 +16,7 @@ final class EllieIOSUITests: XCTestCase {
         }
         app.launch()
 
+        selectFixtureMacA(in: app)
         let browser = app.buttons["Control selected Mac browser"]
         XCTAssertTrue(browser.waitForExistence(timeout: 5))
         let browserEnabled = XCTNSPredicateExpectation(
@@ -47,6 +48,7 @@ final class EllieIOSUITests: XCTestCase {
         app.launchArguments = ["--ellie-ui-browser-unknown-relaunch-fixture", identifier]
         app.launch()
         XCTAssertTrue(app.navigationBars["Mac controls"].waitForExistence(timeout: 5))
+        selectFixtureMacA(in: app)
         let reopened = app.buttons["Control selected Mac browser"]
         XCTAssertTrue(reopened.waitForExistence(timeout: 5))
         let reopenedEnabled = XCTNSPredicateExpectation(
@@ -76,6 +78,15 @@ final class EllieIOSUITests: XCTestCase {
             predicate: NSPredicate(format: "label == %@", "Fixture mutations: 1"),
             object: relaunchedMutations)
         XCTAssertEqual(XCTWaiter.wait(for: [explicitMutation], timeout: 5), .completed)
+    }
+
+    private func selectFixtureMacA(in app: XCUIApplication) {
+        let target = app.descendants(matching: .any)["phone-target-picker"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        let macA = app.buttons["Fixture Mac A"]
+        XCTAssertTrue(macA.waitForExistence(timeout: 5))
+        macA.tap()
     }
 
     func testReviewedBrowserVoiceNavigationAndBackgroundCancellationNeverReplay() {

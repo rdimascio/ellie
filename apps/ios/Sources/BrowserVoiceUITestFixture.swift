@@ -142,9 +142,6 @@ struct BrowserUnknownRelaunchUITestFixtureView: View {
       updateMarkerState()
       controls.refresh()
     }
-    .onChange(of: controls.nodes) { _, nodes in
-      if controls.selectedNodeID == nil { controls.selectedNodeID = nodes.first?.id }
-    }
     .onChange(of: browserTransport.mutationCount) { _, _ in updateMarkerState() }
     .onChange(of: browser.phase) { _, _ in updateMarkerState() }
   }
