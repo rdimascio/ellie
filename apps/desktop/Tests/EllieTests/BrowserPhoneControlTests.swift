@@ -61,7 +61,10 @@ final class BrowserPhoneControlTests: XCTestCase {
   @MainActor
   func testStoreBindsOpaqueSelectionToFreshNodeAndNeverReplaysCancellation() async {
     let transport = BrowserPhoneFakeTransport()
-    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: persistence)
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
@@ -78,6 +81,8 @@ final class BrowserPhoneControlTests: XCTestCase {
     await transport.finishCommand()
     await eventually { if case .unknown = store.phase { true } else { false } }
     XCTAssertNil(store.page)
+    let scope = try? browserMutationUncertaintyScope(credential: credential(), targetID: node.id)
+    XCTAssertNotNil(scope.flatMap { persistence.pendingTokenValue(for: $0) })
     let actionCount = await transport.actions.count
     XCTAssertEqual(actionCount, 3)
   }
@@ -85,7 +90,9 @@ final class BrowserPhoneControlTests: XCTestCase {
   @MainActor
   func testDelayedReadCannotRepublishAfterTargetChange() async {
     let transport = BrowserPhoneFakeTransport(delayRead: true)
-    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
@@ -102,7 +109,9 @@ final class BrowserPhoneControlTests: XCTestCase {
   @MainActor
   func testPostDispatchTransportFailureIsUnknownAndInvalidatesPage() async {
     let transport = BrowserPhoneFakeTransport(commandError: true)
-    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
@@ -118,7 +127,9 @@ final class BrowserPhoneControlTests: XCTestCase {
   @MainActor
   func testReviewedSearchSelectionAndPlaybackRequireExplicitReadsWithoutReplay() async {
     let transport = BrowserPhoneFakeTransport(commandStatus: .completed)
-    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
@@ -172,7 +183,9 @@ final class BrowserPhoneControlTests: XCTestCase {
   @MainActor
   func testEmptyObservedResultListRejectsSelectionWithoutCrashingOrDispatching() async {
     let transport = BrowserPhoneFakeTransport(items: [])
-    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
@@ -188,7 +201,9 @@ final class BrowserPhoneControlTests: XCTestCase {
   @MainActor
   func testAccessibilityPagePreservesSourceAndUnknownCommandInvalidatesIt() async {
     let transport = BrowserPhoneFakeTransport(source: .accessibility, commandStatus: .unknown)
-    let store = BrowserPhoneControlStore(credential: credential(), transport: transport)
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
@@ -202,15 +217,242 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(actionCount, 3)
   }
 
-  private func credential() -> NativeEnrollmentCredential {
+  @MainActor
+  func testUncertaintySurvivesStoreRecreationAndVerifiedReadResolvesOnlyObservedMarker()
+    async throws
+  {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let firstTransport = BrowserPhoneFakeTransport()
+    let first = BrowserPhoneControlStore(
+      credential: credential(), transport: firstTransport, uncertainty: persistence,
+      operationToken: { "00000000-0000-4000-8000-000000000001" })
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    first.clearIfTargetChanged(to: node.id)
+    XCTAssertTrue(first.refresh(on: node))
+    await eventually { first.phase == .ready }
+    XCTAssertTrue(first.perform(.openResult(index: 1), on: node))
+    await eventually { await firstTransport.actions.count == 3 }
+
+    let scope = try browserMutationUncertaintyScope(credential: credential(), targetID: node.id)
+    XCTAssertEqual(
+      persistence.pendingTokenValue(for: scope), "00000000-0000-4000-8000-000000000001")
+
+    let secondTransport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let second = BrowserPhoneControlStore(
+      credential: credential(), transport: secondTransport, uncertainty: persistence)
+    XCTAssertEqual(second.phase, .idle)
+    second.clearIfTargetChanged(to: node.id)
+    guard case .unknown = second.phase else { return XCTFail("Expected restored uncertainty") }
+    XCTAssertNil(second.page)
+    XCTAssertFalse(second.canPerform(.play, on: node))
+    let secondInitialActions = await secondTransport.actions.count
+    XCTAssertEqual(secondInitialActions, 0)
+
+    XCTAssertTrue(second.refresh(on: node))
+    await eventually { second.phase == .ready }
+    XCTAssertNil(persistence.pendingTokenValue(for: scope))
+    let secondReadActions = await secondTransport.actions.count
+    XCTAssertEqual(secondReadActions, 2)
+
+    await firstTransport.finishCommand()
+    await eventually { if case .unknown = first.phase { true } else { false } }
+    XCTAssertNil(persistence.pendingTokenValue(for: scope))
+    let firstActions = await firstTransport.actions.count
+    XCTAssertEqual(firstActions, 3)
+  }
+
+  @MainActor
+  func testUncertaintyIsScopedToEnrollmentAndTargetAndFailedReadRetainsIt() async throws {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let firstCredential = credential()
+    let markedScope = try browserMutationUncertaintyScope(
+      credential: firstCredential, targetID: "mac-a")
+    XCTAssertTrue(
+      try persistence.recordIfClear(
+        token: "00000000-0000-4000-8000-000000000002", for: markedScope))
+
+    let otherTargetTransport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let otherTarget = BrowserPhoneControlStore(
+      credential: firstCredential, transport: otherTargetTransport, uncertainty: persistence)
+    let nodeB = PhoneControlNode(
+      id: "mac-b", label: "Other", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    otherTarget.clearIfTargetChanged(to: nodeB.id)
+    XCTAssertEqual(otherTarget.phase, .idle)
+    XCTAssertTrue(otherTarget.refresh(on: nodeB))
+    await eventually { otherTarget.phase == .ready }
+    XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
+
+    let otherCredential = credential(clientID: "other-phone")
+    let otherEnrollment = BrowserPhoneControlStore(
+      credential: otherCredential,
+      transport: BrowserPhoneFakeTransport(commandStatus: .completed), uncertainty: persistence)
+    otherEnrollment.clearIfTargetChanged(to: "mac-a")
+    XCTAssertEqual(otherEnrollment.phase, .idle)
+    XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
+
+    let otherOrigin = BrowserPhoneControlStore(
+      credential: credential(origin: "https://127.0.0.1:9444"),
+      transport: BrowserPhoneFakeTransport(commandStatus: .completed), uncertainty: persistence)
+    otherOrigin.clearIfTargetChanged(to: "mac-a")
+    XCTAssertEqual(otherOrigin.phase, .idle)
+    XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
+
+    let failingTransport = BrowserPhoneFakeTransport(readError: true)
+    let restored = BrowserPhoneControlStore(
+      credential: firstCredential, transport: failingTransport, uncertainty: persistence)
+    let nodeA = PhoneControlNode(
+      id: "mac-a", label: "Marked", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    restored.clearIfTargetChanged(to: nodeA.id)
+    guard case .unknown = restored.phase else { return XCTFail("Expected target warning") }
+    restored.clearIfTargetChanged(to: nodeA.id)
+    guard case .unknown = restored.phase else { return XCTFail("Warning was reset") }
+    XCTAssertTrue(restored.refresh(on: nodeA))
+    await eventually { if case .failed = restored.phase { true } else { false } }
+    XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
+    XCTAssertNil(restored.page)
+  }
+
+  @MainActor
+  func testPersistenceFailuresBlockDispatchAndUnknownOutcomesRetainMarker() async throws {
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+
+    let unreadable = BrowserPhoneFakeUncertaintyStore()
+    unreadable.failReads = true
+    let blockedTransport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let blocked = BrowserPhoneControlStore(
+      credential: credential(), transport: blockedTransport, uncertainty: unreadable)
+    blocked.clearIfTargetChanged(to: node.id)
+    guard case .failed = blocked.phase else { return XCTFail("Expected storage failure") }
+    let blockedActions = await blockedTransport.actions.count
+    XCTAssertEqual(blockedActions, 0)
+
+    let unwritable = BrowserPhoneFakeUncertaintyStore()
+    let writeTransport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let writeBlocked = BrowserPhoneControlStore(
+      credential: credential(), transport: writeTransport, uncertainty: unwritable)
+    XCTAssertTrue(writeBlocked.refresh(on: node))
+    await eventually { writeBlocked.phase == .ready }
+    unwritable.failRecords = true
+    XCTAssertTrue(writeBlocked.perform(.scroll(.down), on: node))
+    await eventually { if case .failed = writeBlocked.phase { true } else { false } }
+    let writeActions = await writeTransport.actions.count
+    XCTAssertEqual(writeActions, 2)
+
+    for (status, commandError) in [
+      (BrowserPhoneCommandStatus.unknown, false), (.cancelled, false), (.timedOut, false),
+      (.completed, true),
+    ] {
+      let persistence = BrowserPhoneFakeUncertaintyStore()
+      let transport = BrowserPhoneFakeTransport(
+        commandError: commandError, commandStatus: status)
+      let store = BrowserPhoneControlStore(
+        credential: credential(), transport: transport, uncertainty: persistence)
+      XCTAssertTrue(store.refresh(on: node))
+      await eventually { store.phase == .ready }
+      XCTAssertTrue(store.perform(.scroll(.down), on: node))
+      await eventually { if case .unknown = store.phase { true } else { false } }
+      let scope = try browserMutationUncertaintyScope(credential: credential(), targetID: node.id)
+      XCTAssertNotNil(persistence.pendingTokenValue(for: scope))
+      XCTAssertNil(store.page)
+      let actions = await transport.actions.count
+      XCTAssertEqual(actions, 3)
+    }
+
+    let uncleared = BrowserPhoneFakeUncertaintyStore()
+    let definitiveTransport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let definitive = BrowserPhoneControlStore(
+      credential: credential(), transport: definitiveTransport, uncertainty: uncleared)
+    XCTAssertTrue(definitive.refresh(on: node))
+    await eventually { definitive.phase == .ready }
+    uncleared.failClears = true
+    XCTAssertTrue(definitive.perform(.scroll(.down), on: node))
+    await eventually { if case .unknown = definitive.phase { true } else { false } }
+    let definitiveScope = try browserMutationUncertaintyScope(
+      credential: credential(), targetID: node.id)
+    XCTAssertNotNil(uncleared.pendingTokenValue(for: definitiveScope))
+  }
+
+  @MainActor
+  func testLateCompletionCannotClearAReplacementOperationToken() async throws {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let firstTransport = BrowserPhoneFakeTransport()
+    let first = BrowserPhoneControlStore(
+      credential: credential(), transport: firstTransport, uncertainty: persistence,
+      operationToken: { "00000000-0000-4000-8000-000000000003" })
+    XCTAssertTrue(first.refresh(on: node))
+    await eventually { first.phase == .ready }
+    XCTAssertTrue(first.perform(.scroll(.down), on: node))
+    await eventually { await firstTransport.actions.count == 3 }
+
+    let secondTransport = BrowserPhoneFakeTransport()
+    let second = BrowserPhoneControlStore(
+      credential: credential(), transport: secondTransport, uncertainty: persistence,
+      operationToken: { "00000000-0000-4000-8000-000000000004" })
+    second.clearIfTargetChanged(to: node.id)
+    guard case .unknown = second.phase else { return XCTFail("Expected first marker") }
+    XCTAssertTrue(second.refresh(on: node))
+    await eventually { second.phase == .ready }
+    XCTAssertTrue(second.perform(.scroll(.down), on: node))
+    await eventually { await secondTransport.actions.count == 3 }
+    let scope = try browserMutationUncertaintyScope(credential: credential(), targetID: node.id)
+    XCTAssertEqual(
+      persistence.pendingTokenValue(for: scope), "00000000-0000-4000-8000-000000000004")
+
+    await firstTransport.finishCommand()
+    await eventually { if case .unknown = first.phase { true } else { false } }
+    XCTAssertEqual(
+      persistence.pendingTokenValue(for: scope), "00000000-0000-4000-8000-000000000004")
+    await secondTransport.finishCommand()
+    await eventually { if case .outcome = second.phase { true } else { false } }
+    XCTAssertNil(persistence.pendingTokenValue(for: scope))
+  }
+
+  func testPrivateUncertaintyFileIsStrictScopedAndCompareAndClear() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "ellie-browser-uncertainty-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: root, withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("markers.json")
+    let first = PrivateBrowserMutationUncertaintyStore(fileURL: file)
+    let second = PrivateBrowserMutationUncertaintyStore(fileURL: file)
+    let scope = String(repeating: "a", count: 64)
+    let token = "00000000-0000-4000-8000-000000000005"
+    XCTAssertTrue(try first.recordIfClear(token: token, for: scope))
+    XCTAssertEqual(try second.pendingToken(for: scope), token)
+    XCTAssertFalse(
+      try second.clear(
+        token: "00000000-0000-4000-8000-000000000006", for: scope))
+    XCTAssertEqual(try first.pendingToken(for: scope), token)
+    XCTAssertTrue(try second.clear(token: token, for: scope))
+    XCTAssertNil(try first.pendingToken(for: scope))
+
+    try Data(#"{"version":1,"markers":{"bad":"value"}}"#.utf8).write(to: file)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    XCTAssertThrowsError(try first.pendingToken(for: scope))
+  }
+
+  private func credential(
+    clientID: String = "phone", origin: String = "https://127.0.0.1:8444"
+  ) -> NativeEnrollmentCredential {
     let grants = [
       NativeGrant(target: "mac", capabilities: ["browser.read", "browser.control"])
     ]
     return NativeEnrollmentCredential(
-      origin: URL(string: "https://127.0.0.1:8444")!,
+      origin: URL(string: origin)!,
       certificateSha256: String(repeating: "a", count: 64),
       client: NativeClient(
-        id: "phone", role: "native_phone_controller", label: "Phone", grants: grants,
+        id: clientID, role: "native_phone_controller", label: "Phone", grants: grants,
         createdAt: 1, expiresAt: 2), token: String(repeating: "c", count: 64))
   }
 
@@ -227,6 +469,7 @@ final class BrowserPhoneControlTests: XCTestCase {
 private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   var actions: [BrowserPhoneAction] = []
   private let delayRead: Bool
+  private let readError: Bool
   private let commandError: Bool
   private let source: BrowserPhoneSource
   private let commandStatus: BrowserPhoneCommandStatus?
@@ -234,11 +477,12 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private var commandContinuation: CheckedContinuation<Void, Never>?
   private var readContinuation: CheckedContinuation<Void, Never>?
   init(
-    delayRead: Bool = false, commandError: Bool = false,
+    delayRead: Bool = false, readError: Bool = false, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
     items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)]
   ) {
     self.delayRead = delayRead
+    self.readError = readError
     self.commandError = commandError
     self.source = source
     self.commandStatus = commandStatus
@@ -253,17 +497,69 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     case .status, .refresh: return .status(source: source, connected: true, revision: revision)
     case .read:
       if delayRead { await withCheckedContinuation { readContinuation = $0 } }
+      if readError { throw PhoneControlFailure.unavailable }
       return .page(
         BrowserPhonePage(
           nodeID: nodeID, source: source, revision: revision, title: "Page", summary: nil,
           items: items))
     default:
       if commandError { throw PhoneControlFailure.unavailable }
-      if let commandStatus { return .command(source: source, status: commandStatus, revision: revision) }
+      if let commandStatus {
+        return .command(source: source, status: commandStatus, revision: revision)
+      }
       await withCheckedContinuation { commandContinuation = $0 }
       return .command(source: source, status: .completed, revision: revision)
     }
   }
-  func finishCommand() { commandContinuation?.resume(); commandContinuation = nil }
-  func finishRead() { readContinuation?.resume(); readContinuation = nil }
+  func finishCommand() {
+    commandContinuation?.resume()
+    commandContinuation = nil
+  }
+  func finishRead() {
+    readContinuation?.resume()
+    readContinuation = nil
+  }
 }
+
+private final class BrowserPhoneFakeUncertaintyStore: BrowserMutationUncertaintyPersisting,
+  @unchecked Sendable
+{
+  private let lock = NSLock()
+  private var markers: [String: String] = [:]
+  var failReads = false
+  var failRecords = false
+  var failClears = false
+
+  func pendingToken(for scope: String) throws -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    if failReads { throw FixtureUncertaintyError.unavailable }
+    return markers[scope]
+  }
+
+  func recordIfClear(token: String, for scope: String) throws -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if failRecords { throw FixtureUncertaintyError.unavailable }
+    guard markers[scope] == nil else { return false }
+    markers[scope] = token
+    return true
+  }
+
+  func clear(token: String, for scope: String) throws -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    if failClears { throw FixtureUncertaintyError.unavailable }
+    guard markers[scope] == token else { return false }
+    markers.removeValue(forKey: scope)
+    return true
+  }
+
+  func pendingTokenValue(for scope: String) -> String? {
+    lock.lock()
+    defer { lock.unlock() }
+    return markers[scope]
+  }
+}
+
+private enum FixtureUncertaintyError: Error { case unavailable }
