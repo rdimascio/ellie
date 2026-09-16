@@ -1499,7 +1499,7 @@ test("native browser commands require the exact read or control grant and preser
   assert.equal(calls.length, 1);
 });
 
-test("reviewed native speech stays inert until one explicit browser mutation and unknown is not replayed", async (t) => {
+test("native speech stays inert until one explicit synthetic browser mutation and unknown is not replayed", async (t) => {
   const browserActions: unknown[] = [];
   const revision = "7".repeat(64);
   const f = await fixture(undefined, {
