@@ -135,3 +135,115 @@ test("application enforces connector session/origin and resets an unfinished OAu
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("embedded application opens host account settings only with configured Google OAuth", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-owner-settings-"));
+  let captured = "";
+  const configured = await createLifeApplication({
+    stateDir: join(root, "configured"),
+    userId: "fixture",
+    googleOAuth: { clientId: "synthetic-desktop-client" },
+    openOwnerSettingsUrl: async (url) => {
+      captured = url;
+      return true;
+    },
+  });
+  const unconfigured = await createLifeApplication({
+    stateDir: join(root, "unconfigured"),
+    userId: "fixture",
+    openOwnerSettingsUrl: async () => {
+      throw new Error("Unconfigured Life must not invoke the browser opener.");
+    },
+  });
+  try {
+    await configured.prepareEmbedded();
+    await unconfigured.prepareEmbedded();
+    assert.equal(await unconfigured.openOwnerSettings(), "unconfigured");
+    assert.equal(await configured.openOwnerSettings(), "opened");
+    const target = new URL(captured);
+    assert.equal(target.hostname, "127.0.0.1");
+    assert.equal(target.search, "?view=settings&section=connections");
+    assert.match(target.hash, /^#token=[A-Za-z0-9_-]{43}$/);
+  } finally {
+    await Promise.all([configured.close(), unconfigured.close()]);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("application shutdown makes an in-flight owner opener report unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-owner-settings-close-"));
+  let release!: (opened: boolean) => void, signalStarted!: () => void;
+  const openerStarted = new Promise<void>((resolve) => (signalStarted = resolve)),
+    application = await createLifeApplication({
+      stateDir: root,
+      userId: "fixture",
+      googleOAuth: { clientId: "synthetic-desktop-client" },
+      openOwnerSettingsUrl: async () => {
+        signalStarted();
+        return new Promise<boolean>((resolve) => (release = resolve));
+      },
+    });
+  try {
+    await application.prepareEmbedded();
+    const opening = application.openOwnerSettings();
+    await openerStarted;
+    let closingSettled = false;
+    const closing = application.close().then(() => {
+      closingSettled = true;
+    });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    assert.equal(closingSettled, false);
+    release(true);
+    await closing;
+    assert.equal(await opening, "unavailable");
+    assert.equal(await application.openOwnerSettings(), "unavailable");
+  } finally {
+    await application.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("application opener failure revokes a session exchanged before it settles", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-owner-settings-failure-"));
+  let release!: (opened: boolean) => void,
+    openedUrl = "",
+    signalStarted!: () => void;
+  const openerStarted = new Promise<void>((resolve) => (signalStarted = resolve)),
+    application = await createLifeApplication({
+      stateDir: root,
+      userId: "fixture",
+      googleOAuth: { clientId: "synthetic-desktop-client" },
+      openOwnerSettingsUrl: async (url) => {
+        openedUrl = url;
+        signalStarted();
+        return new Promise<boolean>((resolve) => (release = resolve));
+      },
+    });
+  try {
+    await application.prepareEmbedded();
+    const opening = application.openOwnerSettings();
+    await openerStarted;
+    const target = new URL(openedUrl),
+      token = new URLSearchParams(target.hash.slice(1)).get("token")!,
+      response = await fetch(`${target.origin}/api/life/session`, {
+        method: "POST",
+        headers: { origin: target.origin, "content-type": "application/json" },
+        body: JSON.stringify({ token }),
+      }),
+      cookie = response.headers.get("set-cookie")!.split(";", 1)[0]!;
+    assert.equal(response.status, 204);
+    assert.equal(
+      (await fetch(`${target.origin}/api/life/bootstrap`, { headers: { cookie } })).status,
+      200,
+    );
+    release(false);
+    assert.equal(await opening, "unavailable");
+    assert.equal(
+      (await fetch(`${target.origin}/api/life/bootstrap`, { headers: { cookie } })).status,
+      401,
+    );
+  } finally {
+    await application.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

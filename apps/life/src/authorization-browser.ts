@@ -12,6 +12,8 @@ export interface AuthorizationBrowserOptions {
   timeoutMs?: number;
 }
 
+export type OwnerSettingsBrowserOptions = AuthorizationBrowserOptions;
+
 const PARAMETERS = new Set([
   "client_id",
   "redirect_uri",
@@ -72,16 +74,53 @@ function authorizationUrl(value: unknown): string | undefined {
   }
 }
 
-/** Launch Google's native-app consent in the OS browser, never an embedded webview or shell. */
-export async function openAuthorizationUrl(
+function ownerSettingsUrl(value: unknown, expectedOrigin: string): string | undefined {
+  if (typeof value !== "string" || value.length > 16_384 || /\s/.test(value)) return;
+  try {
+    const url = new URL(value),
+      expected = new URL(expectedOrigin),
+      query = url.searchParams;
+    if (
+      value !== url.href ||
+      expected.href !== expectedOrigin + "/" ||
+      expected.protocol !== "http:" ||
+      expected.hostname !== "127.0.0.1" ||
+      !expected.port ||
+      expected.pathname !== "/" ||
+      expected.search ||
+      expected.hash ||
+      url.origin !== expected.origin ||
+      url.protocol !== "http:" ||
+      url.hostname !== "127.0.0.1" ||
+      !url.port ||
+      url.pathname !== "/" ||
+      url.username ||
+      url.password ||
+      url.search !== "?view=settings&section=connections" ||
+      query.size !== 2 ||
+      query.getAll("view").length !== 1 ||
+      query.get("view") !== "settings" ||
+      query.getAll("section").length !== 1 ||
+      query.get("section") !== "connections" ||
+      !/^#token=[A-Za-z0-9_-]{43}$/.test(url.hash)
+    )
+      return;
+    return url.href;
+  } catch {
+    return;
+  }
+}
+
+async function openValidatedUrl(
   value: string,
-  options: AuthorizationBrowserOptions = {},
+  validate: (value: unknown) => string | undefined,
+  options: AuthorizationBrowserOptions,
 ): Promise<boolean> {
-  const url = authorizationUrl(value),
+  const url = validate(value),
     timeoutMs = options.timeoutMs ?? 3_000;
   if (!url || (options.platform ?? process.platform) !== "darwin") return false;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 5_000)
-    throw new TypeError("Authorization browser timeout is invalid.");
+    throw new TypeError("Browser opener timeout is invalid.");
   let child: ChildProcess;
   try {
     child = (options.spawn ?? spawn)("/usr/bin/open", [url], { shell: false, stdio: "ignore" });
@@ -95,21 +134,40 @@ export async function openAuthorizationUrl(
       finished = true;
       clearTimeout(timer);
       child.removeListener("exit", onExit);
-      // Keep the one-use error listener for a late spawn/kill error after timeout.
       resolve(success);
     };
     const onExit = (code: number | null) => finish(code === 0),
       onError = () => finish(false);
     const timer = setTimeout(() => {
-      // The process is only the short-lived OS opener, not the browser it starts.
       try {
         child.kill("SIGTERM");
       } catch {
-        /* Launch failure remains a manual browser fallback. */
+        // Only the short-lived opener child is owned here.
       }
       finish(false);
     }, timeoutMs);
     child.once("exit", onExit);
     child.once("error", onError);
   });
+}
+
+/** Launch Google's native-app consent in the OS browser, never an embedded webview or shell. */
+export async function openAuthorizationUrl(
+  value: string,
+  options: AuthorizationBrowserOptions = {},
+): Promise<boolean> {
+  return openValidatedUrl(value, authorizationUrl, options);
+}
+
+/** Open only a freshly issued Ellie loopback settings page in the OS browser. */
+export async function openOwnerSettingsUrl(
+  value: string,
+  expectedOrigin: string,
+  options: OwnerSettingsBrowserOptions = {},
+): Promise<boolean> {
+  return openValidatedUrl(
+    value,
+    (candidate) => ownerSettingsUrl(candidate, expectedOrigin),
+    options,
+  );
 }

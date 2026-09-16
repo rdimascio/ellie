@@ -6,7 +6,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { LifeEmbeddedContext } from "./server.ts";
 import { LocalModelReadiness, validateLocalModelConfiguration } from "./model-status.ts";
 import { loadGoogleClient } from "./google-client.ts";
-import { openAuthorizationUrl } from "./authorization-browser.ts";
+import { openAuthorizationUrl, openOwnerSettingsUrl } from "./authorization-browser.ts";
 import {
   ConnectorBroker,
   ConnectorStore,
@@ -35,6 +35,7 @@ export interface LifeApplicationOptions {
   /** Trusted server adapters, never browser widget code or user-supplied module paths. */
   connectorPlugins?: Array<{ manifest: ConnectorPluginManifest; adapter: LifeProviderAdapter }>;
   openAuthorizationUrl?: (url: string) => Promise<boolean>;
+  openOwnerSettingsUrl?: (url: string, expectedOrigin: string) => Promise<boolean>;
 }
 
 async function prepareStateDirectory(input: string): Promise<string> {
@@ -264,6 +265,7 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
     });
     let closed = false,
       closeInFlight: Promise<void> | undefined,
+      ownerOpening: Promise<"opened" | "busy" | "unconfigured" | "unavailable"> | undefined,
       pluginsClosed = false,
       storeClosed = false,
       vaultClosed = false,
@@ -283,6 +285,48 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
       handle(request: IncomingMessage, response: ServerResponse, context: LifeEmbeddedContext) {
         return server.handleEmbedded(request, response, context);
       },
+      async openOwnerSettings() {
+        if (closed || closeInFlight) return "unavailable" as const;
+        if (ownerOpening) return "busy" as const;
+        const operation = (async () => {
+          const configured = connectors!
+            .list(trustedActor.userId)
+            .providers.some(
+              (provider) =>
+                (provider.id === "google-calendar" || provider.id === "gmail") &&
+                provider.configured,
+            );
+          if (!configured) return "unconfigured" as const;
+          let launch;
+          try {
+            launch = await server.createOwnerSettingsLaunch();
+          } catch (error) {
+            return error instanceof Error && error.message === "Owner settings are already opening."
+              ? ("busy" as const)
+              : ("unavailable" as const);
+          }
+          let opened = false;
+          try {
+            opened = await (options.openOwnerSettingsUrl ?? openOwnerSettingsUrl)(
+              launch.url,
+              launch.origin,
+            );
+          } catch {
+            opened = false;
+          }
+          if (!opened) {
+            launch.cancel();
+            return "unavailable" as const;
+          }
+          return launch.complete() ? ("opened" as const) : ("unavailable" as const);
+        })();
+        ownerOpening = operation;
+        try {
+          return await operation;
+        } finally {
+          if (ownerOpening === operation) ownerOpening = undefined;
+        }
+      },
       async listen() {
         try {
           const ready = await server.listen();
@@ -299,8 +343,9 @@ export async function createLifeApplication(options: LifeApplicationOptions) {
         if (closeInFlight) return closeInFlight;
         closeInFlight = (async () => {
           readiness.close();
-          await connectors!.close();
           await server.close();
+          await ownerOpening?.catch(() => {});
+          await connectors!.close();
           await taskRuntime.close();
           if (!vaultClosed) {
             vault!.close();

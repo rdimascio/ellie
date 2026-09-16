@@ -40,7 +40,11 @@ async function fixture() {
   };
 }
 
-function managementRequest(method: string, body?: unknown): IncomingMessage {
+function managementRequest(
+  method: string,
+  body?: unknown,
+  remoteAddress = "127.0.0.1",
+): IncomingMessage {
   const value = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
   const request = Readable.from(value ? [value] : []) as IncomingMessage;
   request.method = method;
@@ -52,6 +56,7 @@ function managementRequest(method: string, body?: unknown): IncomingMessage {
     ...(value ? ["Content-Type", "application/json", "Content-Length", String(value.length)] : []),
   ];
   request.headers = {};
+  Object.defineProperty(request, "socket", { value: { remoteAddress } });
   return request;
 }
 
@@ -232,4 +237,53 @@ test("controller management returns the persisted revision and revokes idempoten
   );
   await f.life.close();
   await f.auth.close();
+});
+
+test("local controller opens host settings without native-phone authority or serialized secrets", async () => {
+  let opened = 0;
+  const control = {
+    current: () => ({
+      status: "ready" as const,
+      origin: "https://localhost:8444",
+      auth: undefined as never,
+      hostLife: {
+        async handle() {
+          return true;
+        },
+        async openOwnerSettings() {
+          opened += 1;
+          return "opened" as const;
+        },
+      },
+    }),
+  };
+  assert.deepEqual(
+    await handleLifeManagement(
+      managementRequest("POST", {}),
+      "/v1/life/owner-settings",
+      "controller",
+      control,
+    ),
+    { status: 200, body: { opened: true } },
+  );
+  assert.equal(opened, 1);
+  assert.deepEqual(
+    await handleLifeManagement(
+      managementRequest("POST", {}, "192.0.2.10"),
+      "/v1/life/owner-settings",
+      "controller",
+      control,
+    ),
+    { status: 403, body: { error: "Local owner command required." } },
+  );
+  assert.deepEqual(
+    await handleLifeManagement(
+      managementRequest("POST", { unexpected: true }),
+      "/v1/life/owner-settings",
+      "controller",
+      control,
+    ),
+    { status: 400, body: { error: "Life owner request rejected." } },
+  );
+  assert.equal(opened, 1);
 });
