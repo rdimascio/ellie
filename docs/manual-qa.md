@@ -1,6 +1,6 @@
 # Ellie manual QA
 
-Updated September 15, 2026. This catalogue preserves earlier sessions and defines future build-specific checks. A session is ready only when the coordinator names the exact build, target and prerequisites; do not infer a current handoff from an older preview record.
+Updated September 16, 2026. This catalogue preserves earlier sessions and defines future build-specific checks. A session is ready only when the coordinator names the exact build, target and prerequisites; do not infer a current handoff from an older preview record.
 
 ## What to open
 
@@ -15,6 +15,8 @@ Use a dashboard and records named **Ellie QA** so test data is easy to recognize
 ## Native iPhone browser voice — future build-specific session
 
 These cases are the current product priority, but they are **not ready for owner QA from this document alone**. They require an identified iPhone build installed on a physical phone, completed coordinator enrollment, one explicitly granted Mac, the named browser build and an approved public test page. The coordinator must provide the exact build and target before the session. Simulator transcripts and in-memory transports do not satisfy these cases.
+
+The [September 16 recovery validation](validation/2026-09-16-native-phone-recovery.md) records the passing automated restart and failed-read checks. Physical IP01–IP07 acceptance remains pending for the identified owner build.
 
 | ID                                       | Actions                                                                                                                                                                                      | Pass when                                                                                                                                                                                                                 |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
