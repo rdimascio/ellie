@@ -4,7 +4,11 @@ import { readJson } from "@ellie/transport";
 import type { BrowserControl } from "./browser-management.ts";
 import { nativeLifeGrant, NativeLifeError } from "./native-life.ts";
 
-const paths = new Set(["/v1/life/authorities", "/v1/life/authorities/revoke"]);
+const paths = new Set([
+  "/v1/life/authorities",
+  "/v1/life/authorities/revoke",
+  "/v1/life/owner-settings",
+]);
 const header = (request: IncomingMessage, name: string) =>
   request.rawHeaders.filter(
     (_value, index) => index % 2 === 1 && request.rawHeaders[index - 1]!.toLowerCase() === name,
@@ -41,6 +45,28 @@ export async function handleLifeManagement(
     current = control?.current();
   } catch {
     current = undefined;
+  }
+  if (path === "/v1/life/owner-settings") {
+    if (request.method !== "POST")
+      return { status: 404, body: { error: "Life owner route not found." } };
+    if (!json(request)) return { status: 415, body: { error: "JSON required." } };
+    if (!["127.0.0.1", "::ffff:127.0.0.1"].includes(request.socket.remoteAddress ?? ""))
+      return { status: 403, body: { error: "Local owner command required." } };
+    try {
+      if (Object.keys(record(await readJson(request, 2))).length !== 0)
+        return { status: 400, body: { error: "Life owner request rejected." } };
+    } catch {
+      return { status: 400, body: { error: "Life owner request rejected." } };
+    }
+    if (current?.status !== "ready" || !current.hostLife)
+      return { status: 503, body: { error: "Life owner settings unavailable." } };
+    const result = await current.hostLife.openOwnerSettings().catch(() => "unavailable" as const);
+    if (result === "opened") return { status: 200, body: { opened: true } };
+    if (result === "unconfigured")
+      return { status: 409, body: { error: "Google account setup is not configured." } };
+    if (result === "busy")
+      return { status: 409, body: { error: "Life owner settings are already opening." } };
+    return { status: 503, body: { error: "Life owner settings unavailable." } };
   }
   if (current?.status !== "ready" || !current.nativeAuth || !current.nativeLife)
     return { status: 503, body: { error: "Native Life authority unavailable." } };

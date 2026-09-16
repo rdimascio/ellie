@@ -247,6 +247,12 @@ export interface ListeningLifeServer {
   url: string;
   launchUrl: string;
 }
+export interface OwnerSettingsLaunch {
+  url: string;
+  origin: string;
+  cancel(): void;
+  complete(): boolean;
+}
 /** Supplied only by the authenticated coordinator gateway, never by HTTP payloads. */
 export interface LifeEmbeddedContext {
   actorId: string;
@@ -395,7 +401,20 @@ export class LifeHttpServer {
   private readonly tokenHash: Buffer;
   private tokenUsed = false;
   private readonly tokenCreatedAt: number;
+  // Local UI cookies are host-scoped across loopback ports. The existing Life threat model trusts
+  // same-user local processes; this listener is local-owner authority, not process isolation.
   private readonly sessions = new Map<string, number>();
+  private ownerLaunch?: {
+    hash: Buffer;
+    expiresAt: number;
+    opened: boolean;
+    used: boolean;
+    sessionHash?: string;
+  };
+  private ownerIssuing = false;
+  private listenerStarting?: Promise<ListeningLifeServer>;
+  private lifecycleGeneration = 0;
+  private closed = false;
   private attempts: number[] = [];
   private contextTail: Promise<void> = Promise.resolve();
   private readonly activeRequests = new Set<Promise<void>>();
@@ -622,50 +641,119 @@ export class LifeHttpServer {
     return true;
   }
   async listen(): Promise<ListeningLifeServer> {
+    if (this.closed) throw new Error("Life is closed.");
+    if (!this.embeddedReady) this.prepareMemory();
+    const bound = await this.ensureListener(this.options.port ?? 7440);
+    this.options.preparationMonitor?.start();
+    return bound;
+  }
+  private async ensureListener(port: number): Promise<ListeningLifeServer> {
+    if (this.closed) throw new Error("Life is closed.");
     if (this.bound) return this.bound;
-    const host = this.options.host ?? "127.0.0.1",
-      port = this.options.port ?? 7440;
+    if (this.listenerStarting) return this.listenerStarting;
+    const host = this.options.host ?? "127.0.0.1";
     if (host !== "127.0.0.1" || !Number.isInteger(port) || port < 0 || port > 65535)
       throw new Error("Invalid life listener.");
-    if (!this.embeddedReady) this.prepareMemory();
-    this.accepting = true;
-    this.server = createServer((request, response) => {
-      if (!this.accepting) {
-        this.send(response, 503, { error: "Service is shutting down." });
-        return;
-      }
-      void this.track(request, this.handle(request, response));
-    });
-    // Route readers enforce tighter ordinary deadlines; raw local extraction may use the full minute.
-    this.server.requestTimeout = BINARY_DEADLINE_MS;
-    this.server.headersTimeout = 10_000;
-    this.server.maxConnections = 64;
-    this.server.on("clientError", (_error, socket) => {
-      if (!socket.destroyed) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
-    });
-    await new Promise<void>((ok, fail) => {
-      this.server!.once("error", fail);
-      this.server!.listen(port, host, () => {
-        this.server!.off("error", fail);
-        ok();
-      });
-    });
-    const address = this.server.address();
-    if (!address || typeof address === "string") throw new Error("Life listener did not bind.");
-    const url = `http://${host}:${address.port}`;
-    this.bound = {
-      host,
-      port: address.port,
-      url,
-      launchUrl: `${url}/#token=${encodeURIComponent(this.token)}`,
-    };
-    this.options.preparationMonitor?.start();
-    return this.bound;
+    const generation = this.lifecycleGeneration,
+      starting = (async () => {
+        const candidate = createServer((request, response) => {
+          if (!this.accepting) {
+            this.send(response, 503, { error: "Service is shutting down." });
+            return;
+          }
+          void this.track(request, this.handle(request, response));
+        });
+        candidate.requestTimeout = BINARY_DEADLINE_MS;
+        candidate.headersTimeout = 10_000;
+        candidate.maxConnections = 64;
+        candidate.on("clientError", (_error, socket) => {
+          if (!socket.destroyed)
+            socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+        });
+        try {
+          await new Promise<void>((ok, fail) => {
+            candidate.once("error", fail);
+            candidate.listen(port, host, () => {
+              candidate.off("error", fail);
+              ok();
+            });
+          });
+          const address = candidate.address();
+          if (!address || typeof address === "string")
+            throw new Error("Life listener did not bind.");
+          if (this.closed || this.lifecycleGeneration !== generation)
+            throw new Error("Life listener preparation was cancelled.");
+          const url = `http://${host}:${address.port}`;
+          this.accepting = true;
+          this.server = candidate;
+          this.bound = {
+            host,
+            port: address.port,
+            url,
+            launchUrl: `${url}/#token=${encodeURIComponent(this.token)}`,
+          };
+          return this.bound;
+        } catch (error) {
+          candidate.closeAllConnections();
+          if (candidate.listening)
+            await new Promise<void>((resolve) => candidate.close(() => resolve()));
+          throw error;
+        }
+      })();
+    this.listenerStarting = starting;
+    try {
+      return await starting;
+    } finally {
+      if (this.listenerStarting === starting) this.listenerStarting = undefined;
+    }
+  }
+  async createOwnerSettingsLaunch(): Promise<OwnerSettingsLaunch> {
+    if (this.ownerIssuing) throw new Error("Owner settings are already opening.");
+    this.ownerIssuing = true;
+    try {
+      const now = this.now();
+      if (this.ownerLaunch && this.ownerLaunch.expiresAt > now)
+        throw new Error("Owner settings are already opening.");
+      this.ownerLaunch = undefined;
+      const bound = await this.ensureListener(0),
+        token = randomBytes(32).toString("base64url"),
+        hash = digest(token),
+        launch = {
+          hash,
+          expiresAt: now + 120_000,
+          opened: false,
+          used: false,
+          sessionHash: undefined as string | undefined,
+        };
+      this.ownerLaunch = launch;
+      return {
+        url: `${bound.url}/?view=settings&section=connections#token=${encodeURIComponent(token)}`,
+        origin: bound.url,
+        cancel: () => {
+          if (this.ownerLaunch !== launch) return;
+          if (launch.sessionHash) this.sessions.delete(launch.sessionHash);
+          this.ownerLaunch = undefined;
+        },
+        complete: () => {
+          if (this.ownerLaunch !== launch || this.closed) return false;
+          launch.opened = true;
+          if (launch.used) this.ownerLaunch = undefined;
+          return true;
+        },
+      };
+    } finally {
+      this.ownerIssuing = false;
+    }
   }
   async close(): Promise<void> {
+    this.closed = true;
+    this.lifecycleGeneration += 1;
     this.accepting = false;
     this.embeddedReady = false;
+    this.ownerLaunch = undefined;
+    this.sessions.clear();
     this.options.preparationMonitor?.stop();
+    await this.listenerStarting?.catch(() => {});
     for (const controller of this.extractionControllers) controller.abort();
     for (const controller of this.pluginBuildControllers) controller.abort();
     this.chatProgress.clear();
@@ -1234,21 +1322,30 @@ export class LifeHttpServer {
     if (this.attempts.length >= 20) throw new HttpError(429, "Too many session attempts.");
     this.attempts.push(now);
     const token = jsonObject(await this.body(request)).token;
-    if (
-      typeof token !== "string" ||
-      this.tokenUsed ||
-      now - this.tokenCreatedAt > (this.options.tokenTtlMs ?? 600_000) ||
-      !sameDigest(digest(token), this.tokenHash)
-    )
+    if (typeof token !== "string") throw new HttpError(401, "Invalid or expired launch token.");
+    const candidate = digest(token),
+      owner = this.ownerLaunch,
+      ownerMatch = Boolean(
+        owner && !owner.used && owner.expiresAt >= now && sameDigest(candidate, owner.hash),
+      ),
+      standaloneMatch =
+        !this.tokenUsed &&
+        now - this.tokenCreatedAt <= (this.options.tokenTtlMs ?? 600_000) &&
+        sameDigest(candidate, this.tokenHash);
+    if (!ownerMatch && !standaloneMatch)
       throw new HttpError(401, "Invalid or expired launch token.");
-    this.tokenUsed = true;
+    if (ownerMatch) owner!.used = true;
+    else this.tokenUsed = true;
     const session = randomBytes(32).toString("base64url");
-    this.sessions.set(
-      digest(session).toString("hex"),
-      now + (this.options.sessionTtlMs ?? 43_200_000),
-    );
+    const sessionTtlMs = ownerMatch ? 1_800_000 : (this.options.sessionTtlMs ?? 43_200_000);
+    const sessionHash = digest(session).toString("hex");
+    this.sessions.set(sessionHash, now + sessionTtlMs);
+    if (ownerMatch) {
+      owner!.sessionHash = sessionHash;
+      if (owner!.opened) this.ownerLaunch = undefined;
+    }
     this.send(response, 204, undefined, {
-      "set-cookie": `${SESSION_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor((this.options.sessionTtlMs ?? 43_200_000) / 1000)}`,
+      "set-cookie": `${SESSION_COOKIE}=${session}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${Math.floor(sessionTtlMs / 1000)}`,
     });
   }
   private taskPersonalSummary(expectedGeneration?: number): {

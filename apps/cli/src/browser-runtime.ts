@@ -17,7 +17,7 @@ import type {
 } from "../../server/src/browser-server.ts";
 import type { BrowserRemote } from "../../server/src/browser-remote.ts";
 import { NativeLifeAuthority } from "../../server/src/native-life.ts";
-import type { NativeLifeApplication } from "../../server/src/native-life.ts";
+import type { HostLifeApplication } from "../../server/src/native-life.ts";
 
 export interface ManagedBrowserRemote {
   remote: BrowserRemote;
@@ -35,7 +35,7 @@ export interface BrowserRuntimeOptions {
   loadAssets: () => Promise<BrowserAssets>;
   createRemote?: () => Promise<ManagedBrowserRemote>;
   createServer?: (options: BrowserServerOptions) => BrowserServer;
-  life?: { application: NativeLifeApplication; actorIds: readonly string[] };
+  life?: { application: HostLifeApplication; actorIds: readonly string[] };
 }
 
 export interface BrowserRuntime extends BrowserControl {
@@ -225,7 +225,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         household,
         speech,
         nativeLife,
-        lifeApplication: nativeLife ? options.life?.application : undefined,
+        lifeApplication: options.life?.application,
         assets,
         remote: managedRemote?.remote,
       });
@@ -252,6 +252,7 @@ export function createBrowserRuntime(options: BrowserRuntimeOptions): BrowserRun
         household,
         speech,
         nativeLife,
+        hostLife: options.life?.application,
         certificateSha256,
       };
     } catch {

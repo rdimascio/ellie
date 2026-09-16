@@ -4,6 +4,8 @@ This is the working queue for the household alpha. Each completion advances the 
 
 The product UI is native-first: SwiftUI on macOS and iPhone. Browser code remains a compatibility and protocol reference; new household interface work targets native views. Preserve the browser-v1 dashboard export path.
 
+**Latest Google status — September 15, 2026:** Google Calendar and Gmail read-only providers, local PKCE/loopback OAuth, encrypted host credential storage, refresh, local disconnect and installed-coordinator host initiation are implemented in source. This corrects older queue wording that treated the providers themselves as future work; those historical records remain below. A registered Google desktop client, consent with an actual account, installed-package rollout and build-specific manual QA are still pending. No real Google account or installed-host acceptance is claimed.
+
 ## Current native-phone acceptance checkpoint — September 15, 2026
 
 The current priority is one integrated native iPhone journey: physical microphone recording → editable reviewed command → explicitly authorized Mac → actual public-site search and fresh page read → selection of an observed result → visible play and pause. Transcription never dispatches by itself, speaker recognition grants no authority, and cancellation, backgrounding, navigation or reconnection must not replay an uncertain command.

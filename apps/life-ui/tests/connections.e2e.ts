@@ -196,13 +196,17 @@ try {
   await page.goto(listening.launchUrl);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await page.getByRole("button", { name: "Talk to Ellie", exact: true }).waitFor();
+  await page.goto(`${listening.url}/?section=connections&view=settings`);
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await page.goto(`${listening.url}/?view=settings&section=connections`);
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  assert.equal(await page.locator(".setting-scope select").inputValue(), `user:${actorId}`);
+  await page.getByRole("heading", { name: "Connected accounts", exact: true }).waitFor();
   const openSettings = async () => {
     const mobile = page.getByLabel("Settings", { exact: true });
     if (await mobile.isVisible()) await mobile.click();
     else await page.locator("aside .settings-link").click();
   };
-  await openSettings();
-  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
   await page.getByText("Private fixture calendar").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
   assert.equal(

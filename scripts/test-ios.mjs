@@ -324,41 +324,28 @@ try {
     timeout: 120_000,
     label: "simulator boot readiness",
   });
+  const xcodeTestTargetArguments = [
+    "-project",
+    "apps/ios/EllieIOS.xcodeproj",
+    "-scheme",
+    "EllieIOS",
+    "-destination",
+    `platform=iOS Simulator,id=${simulatorID}`,
+    "-derivedDataPath",
+    derivedData,
+    "CODE_SIGNING_ALLOWED=YES",
+    "ONLY_ACTIVE_ARCH=YES",
+  ];
   enterStage("xcode-build-for-testing");
   xcodeStarted = true;
-  await execute(
-    "xcodebuild",
-    [
-      "-project",
-      "apps/ios/EllieIOS.xcodeproj",
-      "-scheme",
-      "EllieIOS",
-      "-destination",
-      `platform=iOS Simulator,id=${simulatorID}`,
-      "-derivedDataPath",
-      derivedData,
-      "CODE_SIGNING_ALLOWED=YES",
-      "build-for-testing",
-    ],
-    { timeout: 300_000, label: "Xcode build for testing" },
-  );
+  await execute("xcodebuild", [...xcodeTestTargetArguments, "build-for-testing"], {
+    timeout: 300_000,
+    label: "Xcode build for testing",
+  });
   enterStage("xcode-test-without-building");
   await execute(
     "xcodebuild",
-    [
-      "-project",
-      "apps/ios/EllieIOS.xcodeproj",
-      "-scheme",
-      "EllieIOS",
-      "-destination",
-      `platform=iOS Simulator,id=${simulatorID}`,
-      "-derivedDataPath",
-      derivedData,
-      "-resultBundlePath",
-      resultBundle,
-      "CODE_SIGNING_ALLOWED=YES",
-      "test-without-building",
-    ],
+    [...xcodeTestTargetArguments, "-resultBundlePath", resultBundle, "test-without-building"],
     { timeout: 600_000, label: "Xcode test without building" },
   );
   succeeded = true;

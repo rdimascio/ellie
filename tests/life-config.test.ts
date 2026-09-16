@@ -83,6 +83,7 @@ test("private closed Life config validates local model and optional Google clien
 
 test("Life activation gate is unavailable until authority-ready startup activates it", async () => {
   const gate = createLifeActivationGate();
+  assert.equal(await gate.application.openOwnerSettings(), "unavailable");
   let status = 0,
     body = "";
   const response = {
@@ -99,19 +100,29 @@ test("Life activation gate is unavailable until authority-ready startup activate
   assert.equal(status, 503);
   assert.match(body, /starting/);
   let delegated = false;
+  let ownerOpened = false;
   gate.activate({
     async handle() {
       delegated = true;
       return true;
     },
+    async openOwnerSettings() {
+      ownerOpened = true;
+      return "opened";
+    },
   });
   assert.equal(await gate.application.handle({} as never, response as never, {} as never), true);
   assert.equal(delegated, true);
+  assert.equal(await gate.application.openOwnerSettings(), "opened");
+  assert.equal(ownerOpened, true);
   assert.throws(
     () =>
       gate.activate({
         async handle() {
           return true;
+        },
+        async openOwnerSettings() {
+          return "opened";
         },
       }),
     /already active/,

@@ -4,6 +4,7 @@ import type { ChildProcess } from "node:child_process";
 import test from "node:test";
 import {
   openAuthorizationUrl,
+  openOwnerSettingsUrl,
   type AuthorizationBrowserOptions,
 } from "../apps/life/src/authorization-browser.ts";
 
@@ -149,4 +150,43 @@ test("only the exact Google read-only PKCE flow can reach the OS opener", async 
   for (const url of invalid)
     assert.equal(await openAuthorizationUrl(url, { platform: "darwin", spawn: fake.spawn }), false);
   assert.equal(fake.requests.length, 0);
+});
+
+test("only the exact one-use loopback owner-settings URL reaches the OS opener", async () => {
+  const valid = `http://127.0.0.1:49152/?view=settings&section=connections#token=${"a".repeat(43)}`,
+    fake = launcher();
+  assert.equal(
+    await openOwnerSettingsUrl(valid, "http://127.0.0.1:49152", {
+      platform: "darwin",
+      spawn: fake.spawn,
+    }),
+    true,
+  );
+  assert.deepEqual(fake.requests[0], {
+    command: "/usr/bin/open",
+    args: [valid],
+    options: { shell: false, stdio: "ignore" },
+  });
+  for (const invalid of [
+    valid.replace("127.0.0.1", "localhost"),
+    valid.replace("view=settings&section=connections", "section=connections&view=settings"),
+    valid.replace("connections", "other"),
+    valid.replace("#token=", "#other="),
+    `${valid}&extra=true`,
+  ])
+    assert.equal(
+      await openOwnerSettingsUrl(invalid, "http://127.0.0.1:49152", {
+        platform: "darwin",
+        spawn: fake.spawn,
+      }),
+      false,
+    );
+  assert.equal(
+    await openOwnerSettingsUrl(valid, "http://127.0.0.1:49153", {
+      platform: "darwin",
+      spawn: fake.spawn,
+    }),
+    false,
+  );
+  assert.equal(fake.requests.length, 1);
 });

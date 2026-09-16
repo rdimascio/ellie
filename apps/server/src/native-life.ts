@@ -58,6 +58,10 @@ export interface NativeLifeApplication {
     },
   ): Promise<boolean>;
 }
+export type HostLifeOpenResult = "opened" | "busy" | "unconfigured" | "unavailable";
+export interface HostLifeApplication extends NativeLifeApplication {
+  openOwnerSettings(): Promise<HostLifeOpenResult>;
+}
 export class NativeLifeError extends Error {
   readonly kind: "unavailable" | "forbidden" | "invalid" | "busy" | "cancelled";
   constructor(kind: NativeLifeError["kind"]) {

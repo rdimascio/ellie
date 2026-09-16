@@ -187,8 +187,9 @@ const friendly = (value: string, zone?: string) => {
 };
 
 export function App() {
+  const ownerConnections = location.search === "?view=settings&section=connections";
   const [data, setData] = useState<Bootstrap | null>(null),
-    [view, setView] = useState<View>("dashboard"),
+    [view, setView] = useState<View>(ownerConnections ? "settings" : "dashboard"),
     [conversationOpen, setConversationOpen] = useState(
       () => new URLSearchParams(location.search).get("view") === "chat",
     ),
@@ -1027,6 +1028,7 @@ export function App() {
         {view === "settings" && (
           <Settings
             data={data}
+            openConnections={ownerConnections}
             save={async (settingsScope, values) => {
               const generation = scopeGeneration.current;
               setBusy("settings");
@@ -4518,10 +4520,12 @@ function Settings({
   data,
   save,
   busy,
+  openConnections,
 }: {
   data: Bootstrap;
   save: (scope: string, v: Record<string, unknown>) => Promise<void>;
   busy: boolean;
+  openConnections: boolean;
 }) {
   const wrapped = data.settings.values;
   const initial =
@@ -4544,8 +4548,19 @@ function Settings({
     { id: `user:${data.profile.id}`, name: "Personal" },
   ];
   const [settingsScope, setSettingsScope] = useState(
-    settingsScopes.some((item) => item.id === data.scope) ? data.scope : "default",
+    openConnections
+      ? `user:${data.profile.id}`
+      : settingsScopes.some((item) => item.id === data.scope)
+        ? data.scope
+        : "default",
   );
+  useEffect(() => {
+    if (!openConnections) return;
+    const frame = requestAnimationFrame(() =>
+      document.getElementById("connected-accounts")?.scrollIntoView({ block: "start" }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [openConnections]);
   const update = (key: string, value: unknown) =>
     setValues((current) => {
       const next = { ...current, [key]: value };

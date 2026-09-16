@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { identifier, record } from "@ellie/protocol";
 import { loadGoogleClient } from "../../life/src/google-client.ts";
 import { validateLocalModelConfiguration } from "../../life/src/model-status.ts";
-import type { NativeLifeApplication } from "../../server/src/native-life.ts";
+import type { HostLifeApplication } from "../../server/src/native-life.ts";
 
 const MAX = 64 * 1024;
 const CHECKOUT = realpathSync(resolve(fileURLToPath(new URL("../../..", import.meta.url))));
@@ -55,7 +55,7 @@ export interface LifeHostConfig {
 }
 
 export function createLifeActivationGate() {
-  let active: NativeLifeApplication | undefined;
+  let active: HostLifeApplication | undefined;
   return {
     application: {
       async handle(request, response, context) {
@@ -67,8 +67,11 @@ export function createLifeActivationGate() {
         response.end(JSON.stringify({ error: "Ellie Life is starting." }));
         return true;
       },
-    } satisfies NativeLifeApplication,
-    activate(application: NativeLifeApplication) {
+      async openOwnerSettings() {
+        return active ? active.openOwnerSettings() : "unavailable";
+      },
+    } satisfies HostLifeApplication,
+    activate(application: HostLifeApplication) {
       if (active) throw new Error("Ellie Life is already active.");
       active = application;
     },

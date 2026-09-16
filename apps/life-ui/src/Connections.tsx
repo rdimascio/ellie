@@ -113,7 +113,7 @@ export function Connections() {
   };
 
   return (
-    <section className="connections">
+    <section className="connections" id="connected-accounts">
       <header>
         <div>
           <span>Private connections</span>

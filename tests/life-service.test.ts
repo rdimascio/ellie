@@ -312,7 +312,7 @@ async function fixture() {
       });
     },
   };
-  const start = async (
+  const create = (
     token = "a".repeat(43),
     userId = "local",
     overrides: Partial<Parameters<typeof createLifeServer>[0]> = {},
@@ -336,6 +336,14 @@ async function fixture() {
       ...overrides,
     });
     activeServers.add(server);
+    return server;
+  };
+  const start = async (
+    token = "a".repeat(43),
+    userId = "local",
+    overrides: Partial<Parameters<typeof createLifeServer>[0]> = {},
+  ) => {
+    const server = create(token, userId, overrides);
     const listening = await server.listen();
     return { server, ...listening };
   };
@@ -347,6 +355,7 @@ async function fixture() {
     taskRows,
     cancelledTasks,
     harness,
+    create,
     start,
     setNow: (value: number) => {
       now = value;
@@ -430,6 +439,87 @@ test("fragment token exchanges once for a protected strict session", async () =>
     assert.equal(page.status, 200);
     assert.match(page.headers.get("content-security-policy")!, /default-src 'self'/);
     await running.server.close();
+  } finally {
+    await f.close();
+  }
+});
+
+test("embedded Life issues one fresh bounded owner session without reusing its launch token", async () => {
+  const f = await fixture();
+  try {
+    const server = f.create();
+    await server.prepareEmbedded();
+    const firstLaunch = server.createOwnerSettingsLaunch();
+    await assert.rejects(server.createOwnerSettingsLaunch(), /already opening/);
+    const launch = await firstLaunch,
+      target = new URL(launch.url),
+      token = new URLSearchParams(target.hash.slice(1)).get("token")!;
+    assert.equal(target.origin.startsWith("http://127.0.0.1:"), true);
+    assert.equal(target.search, "?view=settings&section=connections");
+    await assert.rejects(server.createOwnerSettingsLaunch(), /already opening/);
+    const response = await fetch(`${target.origin}/api/life/session`, {
+      method: "POST",
+      headers: jsonHeaders(target.origin),
+      body: JSON.stringify({ token }),
+    });
+    assert.equal(response.status, 204);
+    assert.match(response.headers.get("set-cookie")!, /Max-Age=1800/);
+    assert.equal(
+      (
+        await fetch(`${target.origin}/api/life/session`, {
+          method: "POST",
+          headers: jsonHeaders(target.origin),
+          body: JSON.stringify({ token }),
+        })
+      ).status,
+      401,
+    );
+    launch.complete();
+    const next = await server.createOwnerSettingsLaunch();
+    next.cancel();
+  } finally {
+    await f.close();
+  }
+});
+
+test("owner opener failure revokes a session exchanged before the opener settles", async () => {
+  const f = await fixture();
+  try {
+    const server = f.create();
+    await server.prepareEmbedded();
+    const launch = await server.createOwnerSettingsLaunch(),
+      target = new URL(launch.url),
+      token = new URLSearchParams(target.hash.slice(1)).get("token")!,
+      response = await fetch(`${target.origin}/api/life/session`, {
+        method: "POST",
+        headers: jsonHeaders(target.origin),
+        body: JSON.stringify({ token }),
+      }),
+      cookie = response.headers.get("set-cookie")!.split(";", 1)[0]!;
+    assert.equal(response.status, 204);
+    assert.equal(
+      (await fetch(`${target.origin}/api/life/bootstrap`, { headers: { cookie } })).status,
+      200,
+    );
+    launch.cancel();
+    assert.equal(
+      (await fetch(`${target.origin}/api/life/bootstrap`, { headers: { cookie } })).status,
+      401,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("closing embedded Life cancels an in-flight lazy owner listener publication", async () => {
+  const f = await fixture();
+  try {
+    const server = f.create();
+    await server.prepareEmbedded();
+    const opening = server.createOwnerSettingsLaunch();
+    const rejected = assert.rejects(opening, /cancelled|closed/);
+    await server.close();
+    await rejected;
   } finally {
     await f.close();
   }
