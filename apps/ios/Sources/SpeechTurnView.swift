@@ -31,6 +31,22 @@ struct SpeechTurnView: View {
       }
       status
       browserStatus
+      if browserStore.showsSeparatePendingBrowserWarning {
+        Section("Browser result") {
+          Label(
+            BrowserPhoneControlStore.pendingCommandWarningMessage,
+            systemImage: "questionmark.circle")
+            .accessibilityIdentifier("browser-status-pending-warning")
+        }
+      }
+      if browserStore.showsPendingBrowserWarningError,
+        let warningError = browserStore.pendingBrowserWarningError
+      {
+        Section("Browser result") {
+          Label(warningError, systemImage: "exclamationmark.triangle")
+            .accessibilityIdentifier("browser-status-pending-storage-error")
+        }
+      }
       if speech.phase == .reviewing {
         Section("Review transcript") {
           TextEditor(text: $speech.transcript)

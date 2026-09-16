@@ -55,6 +55,22 @@ struct BrowserControlView: View {
         }
       }
       status
+      if browser.showsSeparatePendingBrowserWarning {
+        Section("Browser result") {
+          Label(
+            BrowserPhoneControlStore.pendingCommandWarningMessage,
+            systemImage: "questionmark.circle")
+            .accessibilityIdentifier("browser-status-pending-warning")
+        }
+      }
+      if browser.showsPendingBrowserWarningError,
+        let warningError = browser.pendingBrowserWarningError
+      {
+        Section("Browser result") {
+          Label(warningError, systemImage: "exclamationmark.triangle")
+            .accessibilityIdentifier("browser-status-pending-storage-error")
+        }
+      }
       if browser.isBusy {
         Section { Button("Stop waiting", role: .cancel) { browser.cancel() } }
       }

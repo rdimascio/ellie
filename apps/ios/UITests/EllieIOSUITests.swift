@@ -45,7 +45,10 @@ final class EllieIOSUITests: XCTestCase {
         ], timeout: 5), .completed)
         app.terminate()
 
-        app.launchArguments = ["--ellie-ui-browser-unknown-relaunch-fixture", identifier]
+        app.launchArguments = [
+            "--ellie-ui-browser-unknown-relaunch-fixture", identifier,
+            "--ellie-ui-browser-unknown-fail-read-once",
+        ]
         app.launch()
         XCTAssertTrue(app.navigationBars["Mac controls"].waitForExistence(timeout: 5))
         selectFixtureMacA(in: app)
@@ -69,8 +72,21 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
 
         app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["The coordinator is unavailable."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-pending-warning"]
+            .waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
+        XCTAssertEqual(relaunchedMarker.label, "Fixture marker: present")
+        XCTAssertEqual(relaunchedMutations.label, "Fixture mutations: 0")
+
+        let retryRead = app.buttons["Read current page"]
+        let retryEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: retryRead)
+        XCTAssertEqual(XCTWaiter.wait(for: [retryEnabled], timeout: 5), .completed)
+        app.buttons["Read current page"].tap()
         XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
         XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
+        XCTAssertFalse(app.descendants(matching: .any)["browser-status-pending-warning"].exists)
         XCTAssertEqual(relaunchedMutations.label, "Fixture mutations: 0")
         let markerCleared = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", "Fixture marker: absent"),
