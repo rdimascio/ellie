@@ -1,6 +1,101 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testBrowserMutationUnknownSurvivesProcessRelaunchUntilExplicitRead() {
+        let identifier = UUID().uuidString.lowercased()
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-unknown-relaunch-fixture", identifier]
+        defer {
+            if app.state != .notRunning { app.terminate() }
+            app.launchArguments = ["--ellie-ui-browser-unknown-cleanup", identifier]
+            app.launch()
+            let cleanup = app.staticTexts["browser-fixture-cleanup"]
+            XCTAssertTrue(cleanup.waitForExistence(timeout: 5))
+            XCTAssertEqual(cleanup.label, "Fixture cleanup: complete")
+            app.terminate()
+        }
+        app.launch()
+
+        selectFixtureMacA(in: app)
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+        let read = app.buttons["Read current page"]
+        XCTAssertTrue(read.waitForExistence(timeout: 5))
+        read.tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        let result = app.buttons["browser-result-1"]
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        result.tap()
+
+        let mutations = app.staticTexts["browser-fixture-mutation-count"]
+        let marker = app.staticTexts["browser-fixture-persisted-marker"]
+        XCTAssertTrue(mutations.waitForExistence(timeout: 5))
+        XCTAssertTrue(marker.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [
+            XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label == %@", "Fixture mutations: 1"),
+                object: mutations),
+            XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label == %@", "Fixture marker: present"),
+                object: marker),
+        ], timeout: 5), .completed)
+        app.terminate()
+
+        app.launchArguments = ["--ellie-ui-browser-unknown-relaunch-fixture", identifier]
+        app.launch()
+        XCTAssertTrue(app.navigationBars["Mac controls"].waitForExistence(timeout: 5))
+        selectFixtureMacA(in: app)
+        let reopened = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(reopened.waitForExistence(timeout: 5))
+        let reopenedEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: reopened)
+        XCTAssertEqual(XCTWaiter.wait(for: [reopenedEnabled], timeout: 5), .completed)
+        reopened.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 5))
+        XCTAssertFalse(app.staticTexts["Mac A page"].exists)
+        let relaunchedMutations = app.staticTexts["browser-fixture-mutation-count"]
+        let relaunchedMarker = app.staticTexts["browser-fixture-persisted-marker"]
+        XCTAssertEqual(relaunchedMutations.label, "Fixture mutations: 0")
+        XCTAssertEqual(relaunchedMarker.label, "Fixture marker: present")
+        let noReplay = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", "Fixture mutations: 0"),
+            object: relaunchedMutations)
+        noReplay.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
+        XCTAssertEqual(relaunchedMutations.label, "Fixture mutations: 0")
+        let markerCleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture marker: absent"),
+            object: relaunchedMarker)
+        XCTAssertEqual(XCTWaiter.wait(for: [markerCleared], timeout: 5), .completed)
+        let down = app.buttons["Down"]
+        let downEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: down)
+        XCTAssertEqual(XCTWaiter.wait(for: [downEnabled], timeout: 5), .completed)
+        down.tap()
+        let explicitMutation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture mutations: 1"),
+            object: relaunchedMutations)
+        XCTAssertEqual(XCTWaiter.wait(for: [explicitMutation], timeout: 5), .completed)
+    }
+
+    private func selectFixtureMacA(in app: XCUIApplication) {
+        let target = app.descendants(matching: .any)["phone-target-picker"]
+        XCTAssertTrue(target.waitForExistence(timeout: 5))
+        target.tap()
+        let macA = app.buttons["Fixture Mac A"]
+        XCTAssertTrue(macA.waitForExistence(timeout: 5))
+        macA.tap()
+    }
+
     func testReviewedBrowserVoiceNavigationAndBackgroundCancellationNeverReplay() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-reviewed-browser-fixture"]

@@ -10,6 +10,24 @@ struct EllieIOSApp: App {
                 BrowserVoiceUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-browser-unknown-relaunch-fixture") {
+                if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
+                    from: ProcessInfo.processInfo.arguments,
+                    after: "--ellie-ui-browser-unknown-relaunch-fixture") {
+                    BrowserUnknownRelaunchUITestFixtureView(identifier: identifier)
+                } else {
+                    Text("Invalid UI fixture identifier")
+                }
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-browser-unknown-cleanup") {
+                if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
+                    from: ProcessInfo.processInfo.arguments,
+                    after: "--ellie-ui-browser-unknown-cleanup") {
+                    BrowserUnknownRelaunchUITestCleanupView(identifier: identifier)
+                } else {
+                    Text("Invalid UI fixture identifier")
+                }
             } else {
                 EllieIOSNormalRoot()
             }
