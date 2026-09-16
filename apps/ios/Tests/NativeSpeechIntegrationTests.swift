@@ -20,6 +20,18 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     }
   }
 
+  private enum ReviewObservationFailure: Error {
+    case timeout(String)
+    case unexpected(String)
+
+    var diagnostic: String {
+      switch self {
+      case .timeout(let phase): "expected reviewing; observed \(phase) at the review deadline"
+      case .unexpected(let phase): "expected reviewing; observed \(phase)"
+      }
+    }
+  }
+
   private let originKey = "EllieATSTestOrigin"
   private let pinKey = "EllieATSTestPin"
 
@@ -39,7 +51,13 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     store.record()
     await eventually { store.phase == .recording }
     store.stop()
-    await eventually { store.phase == .reviewing }
+    do {
+      try await waitForReviewedSpeech(store)
+    } catch let failure as ReviewObservationFailure {
+      let cleanup = await settleReviewFailure(store, recorder: recorder)
+      XCTFail("\(failure.diagnostic); \(cleanup)")
+      return
+    }
 
     XCTAssertEqual(store.transcript, "Open Safari")
     XCTAssertEqual(store.reviewedApp, .safari)
@@ -201,6 +219,87 @@ final class NativeSpeechIntegrationTests: XCTestCase {
       (response as? HTTPURLResponse)?.statusCode == 200
       && body == Data(#"{"ok":true}"#.utf8)
     _ = try XCTUnwrap(responseIsExpected ? true : nil, checkpoint.failureMessage)
+  }
+
+  @MainActor
+  private func waitForReviewedSpeech(_ store: SpeechTurnStore) async throws {
+    // The HTTPS request has a 40-second absolute timeout. The additional two seconds cover
+    // recorder actor handoff and disposal around that request, not a longer network deadline.
+    let transportRequestBudget: Duration = .seconds(40)
+    let recorderObservationAllowance: Duration = .seconds(2)
+    let deadline = ContinuousClock.now + transportRequestBudget + recorderObservationAllowance
+    while true {
+      let phase = store.phase
+      if ContinuousClock.now >= deadline {
+        throw ReviewObservationFailure.timeout(reviewPhaseName(phase))
+      }
+      switch phase {
+      case .reviewing: return
+      case .uploading: break
+      default:
+        throw ReviewObservationFailure.unexpected(reviewPhaseName(phase))
+      }
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+  }
+
+  @MainActor
+  private func settleReviewFailure(
+    _ store: SpeechTurnStore, recorder: IntegrationSpeechRecorder
+  ) async -> String {
+    switch store.phase {
+    case .uploading, .checking, .starting, .recording, .cancelling:
+      store.cancelAndDiscard()
+    case .idle, .ready, .reviewing, .failed, .revoked, .cleanupRequired:
+      break
+    }
+    let deadline = ContinuousClock.now + .seconds(5)
+    while ContinuousClock.now < deadline && !isSettledReviewFailure(store) {
+      try? await Task.sleep(for: .milliseconds(20))
+    }
+    let terminal = isSettledReviewFailure(store)
+    let phase = reviewPhaseName(store.phase)
+    let ownedBeforeCleanup = await recorder.hasOwnedArtifact
+    var ownedCleanup = "not needed"
+    if ownedBeforeCleanup && terminal {
+      do {
+        try await recorder.cancel()
+        ownedCleanup = "completed"
+      } catch {
+        ownedCleanup = "failed"
+      }
+    } else if ownedBeforeCleanup {
+      ownedCleanup = "deferred while turn is active"
+    }
+    let ownedAfterCleanup = await recorder.hasOwnedArtifact
+    return "settled=\(terminal), phase=\(phase), artifactBeforeCleanup=\(ownedBeforeCleanup), "
+      + "ownedCleanup=\(ownedCleanup), artifactAfterCleanup=\(ownedAfterCleanup)"
+  }
+
+  @MainActor
+  private func isSettledReviewFailure(_ store: SpeechTurnStore) -> Bool {
+    guard !store.isBusy else { return false }
+    return switch store.phase {
+    case .idle, .ready, .reviewing, .failed, .revoked, .cleanupRequired: true
+    case .checking, .starting, .recording, .uploading, .cancelling: false
+    }
+  }
+
+  @MainActor
+  private func reviewPhaseName(_ phase: SpeechTurnStore.Phase) -> String {
+    switch phase {
+    case .idle: "idle"
+    case .checking: "checking"
+    case .ready: "ready"
+    case .starting: "starting"
+    case .recording: "recording"
+    case .uploading: "uploading"
+    case .cancelling: "cancelling"
+    case .reviewing: "reviewing"
+    case .failed: "failed"
+    case .revoked: "revoked"
+    case .cleanupRequired: "cleanupRequired"
+    }
   }
 
   @MainActor
