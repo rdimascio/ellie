@@ -231,6 +231,26 @@ test("build and UI execution use separate xcodebuild invocations", async () => {
   assert.equal(build.includes("-resultBundlePath"), false);
   assert.equal(testCall.at(-1), "test-without-building");
   assert.equal(testCall.includes("-resultBundlePath"), true);
+  const argumentAfter = (arguments_: string[], option: string) => {
+    const index = arguments_.indexOf(option);
+    assert.notEqual(index, -1, `${option} must be present`);
+    return arguments_[index + 1];
+  };
+  const destination = "platform=iOS Simulator,id=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
+  assert.equal(argumentAfter(build, "-destination"), destination);
+  assert.equal(argumentAfter(testCall, "-destination"), destination);
+  assert.equal(
+    argumentAfter(testCall, "-derivedDataPath"),
+    argumentAfter(build, "-derivedDataPath"),
+  );
+  assert.deepEqual(
+    build.filter((argument) => argument === "ONLY_ACTIVE_ARCH=YES"),
+    ["ONLY_ACTIVE_ARCH=YES"],
+  );
+  assert.deepEqual(
+    testCall.filter((argument) => argument === "ONLY_ACTIVE_ARCH=YES"),
+    ["ONLY_ACTIVE_ARCH=YES"],
+  );
 });
 
 test("a build-for-testing failure never starts UI execution", async () => {
