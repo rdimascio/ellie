@@ -254,10 +254,10 @@ final class NativeSpeechIntegrationTests: XCTestCase {
       break
     }
     let deadline = ContinuousClock.now + .seconds(5)
-    while ContinuousClock.now < deadline && !isSettledReviewFailure(store.phase) {
+    while ContinuousClock.now < deadline && !isSettledReviewFailure(store) {
       try? await Task.sleep(for: .milliseconds(20))
     }
-    let terminal = isSettledReviewFailure(store.phase)
+    let terminal = isSettledReviewFailure(store)
     let phase = reviewPhaseName(store.phase)
     let ownedBeforeCleanup = await recorder.hasOwnedArtifact
     var ownedCleanup = "not needed"
@@ -277,8 +277,9 @@ final class NativeSpeechIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  private func isSettledReviewFailure(_ phase: SpeechTurnStore.Phase) -> Bool {
-    switch phase {
+  private func isSettledReviewFailure(_ store: SpeechTurnStore) -> Bool {
+    guard !store.isBusy else { return false }
+    switch store.phase {
     case .idle, .ready, .reviewing, .failed, .revoked, .cleanupRequired: true
     case .checking, .starting, .recording, .uploading, .cancelling: false
     }
