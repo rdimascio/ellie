@@ -539,6 +539,7 @@ final class BrowserPhoneControlTests: XCTestCase {
       "ellie-browser-uncertainty-parent-\(UUID().uuidString)", isDirectory: true)
     guard mkdir(root.path, 0o750) == 0 else { return XCTFail("Could not create fixture root") }
     defer { try? FileManager.default.removeItem(at: root) }
+    guard chmod(root.path, 0o750) == 0 else { return XCTFail("Could not set owned fixture mode") }
     let file = root.appendingPathComponent("Application Support/Ellie/markers.json")
     let persistence = PrivateBrowserMutationUncertaintyStore(fileURL: file)
     let scope = String(repeating: "b", count: 64)
