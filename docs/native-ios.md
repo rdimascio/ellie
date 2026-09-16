@@ -4,6 +4,8 @@ Ellie's iPhone app is a native SwiftUI target for iOS 17 and later. It shares th
 
 The dashboard list supports create and native navigation. A dashboard supports rename, delete, widget add/reorder/remove, clock settings and note editing through native forms and sheets. State lives in the app's Application Support/Ellie/dashboardsv1.json container. Files import validates the 128 KB bound and complete schema before replacing local state; Files export writes the same browser-v1 schema. The app does not inspect browser storage or coordinator credentials.
 
+For an attended physical-iPhone development setup, run `bun run ios:doctor` on the Mac that will build and connect to the phone (`--json` emits only status codes and counts). It checks the effective full-Xcode selection and iPhoneOS SDK, visible Apple Development identities, and CoreDevice observations of an iPhone, pairing, and Developer Mode. It does not unlock a Keychain, sign, build, install, or change device settings. Exit code 0 means the limited observations were available; 1 means a prerequisite is missing or unknown, and 2 means invalid usage. A favorable `observed` result does **not** verify an app-specific provisioning profile, an unlocked phone, a successful build/install, or working microphone and Local Network permissions. `DEVELOPER_DIR` may select a specific Xcode for this command without changing global `xcode-select`. See Apple’s [physical-device setup](https://developer.apple.com/documentation/xcode/building-and-running-an-app) and [Developer Mode guidance](https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device) for the attended steps.
+
 Build and test with full Xcode:
 
 ```sh
