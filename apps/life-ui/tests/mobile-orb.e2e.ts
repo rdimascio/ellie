@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
-import { chromium, type Page } from "@playwright/test";
+import { chromium, type Browser, type Page } from "@playwright/test";
 
 const dist = resolve("apps/life-ui/dist");
 const types: Record<string, string> = {
@@ -125,50 +125,83 @@ async function overlap(page: Page) {
   });
 }
 
-const browser = await chromium.launch({ headless: true });
-try {
-  const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
-  if (artifactDir) await mkdir(artifactDir, { recursive: true });
-  for (const viewport of [
-    { width: 390, height: 844, name: "mobile" },
-    { width: 1024, height: 900, name: "large" },
-  ]) {
-    const context = await browser.newContext({ viewport, timezoneId: "America/Los_Angeles" });
-    const page = await context.newPage();
-    const errors = await openFixture(page);
-    const measured = await overlap(page);
-    if (artifactDir)
-      await Promise.all([
-        page.screenshot({
-          path: join(artifactDir, `life-orb-${viewport.name}.png`),
-          animations: "disabled",
-        }),
-        writeFile(
-          join(artifactDir, `life-orb-${viewport.name}.json`),
-          `${JSON.stringify(measured, null, 2)}\n`,
-        ),
-      ]);
-    assert.deepEqual(errors, []);
-    assert.equal(
-      measured.width * measured.height,
-      0,
-      `${viewport.name} orb covers the Plans control: ${JSON.stringify(measured)}`,
-    );
-    if (viewport.name === "mobile") {
-      const plan = page.locator(".plan-widget .widget-open");
-      for (
-        let presses = 0;
-        presses < 20 && !(await plan.evaluate((node) => node === document.activeElement));
-        presses++
-      )
-        await page.keyboard.press("Tab");
-      assert.equal(await plan.evaluate((node) => node === document.activeElement), true);
-      await page.keyboard.press("Enter");
-      await page.getByRole("heading", { name: "Plans", exact: true }).waitFor();
+export async function runMobileOrbAcceptance(
+  launchBrowser: () => Promise<Browser> = () => chromium.launch({ headless: true }),
+) {
+  let browser: Browser | undefined;
+  let failed = false,
+    primaryFailure: unknown;
+  const cleanupFailures: unknown[] = [];
+  try {
+    browser = await launchBrowser();
+    const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
+    if (artifactDir) await mkdir(artifactDir, { recursive: true });
+    for (const viewport of [
+      { width: 390, height: 844, name: "mobile" },
+      { width: 1024, height: 900, name: "large" },
+    ]) {
+      const context = await browser.newContext({ viewport, timezoneId: "America/Los_Angeles" });
+      const page = await context.newPage();
+      page.setDefaultTimeout(10_000);
+      page.setDefaultNavigationTimeout(10_000);
+      const errors = await openFixture(page);
+      const measured = await overlap(page);
+      if (artifactDir)
+        await Promise.all([
+          page.screenshot({
+            path: join(artifactDir, `life-orb-${viewport.name}.png`),
+            animations: "disabled",
+          }),
+          writeFile(
+            join(artifactDir, `life-orb-${viewport.name}.json`),
+            `${JSON.stringify(measured, null, 2)}\n`,
+          ),
+        ]);
+      assert.deepEqual(errors, []);
+      assert.equal(
+        measured.width * measured.height,
+        0,
+        `${viewport.name} orb covers the Plans control: ${JSON.stringify(measured)}`,
+      );
+      if (viewport.name === "mobile") {
+        const plan = page.locator(".plan-widget .widget-open");
+        for (
+          let presses = 0;
+          presses < 20 && !(await plan.evaluate((node) => node === document.activeElement));
+          presses++
+        )
+          await page.keyboard.press("Tab");
+        assert.equal(await plan.evaluate((node) => node === document.activeElement), true);
+        await page.keyboard.press("Enter");
+        await page.getByRole("heading", { name: "Plans", exact: true }).waitFor();
+      }
+      await context.close();
     }
-    await context.close();
+  } catch (error) {
+    failed = true;
+    primaryFailure = error;
+  } finally {
+    if (browser)
+      try {
+        await browser.close();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    try {
+      await new Promise<void>((resolveClose, reject) =>
+        server.close((error) => (error ? reject(error) : resolveClose())),
+      );
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
   }
-} finally {
-  await browser.close();
-  await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+  if (failed) {
+    if (cleanupFailures.length)
+      console.error(new AggregateError(cleanupFailures, "Mobile orb fixture cleanup failed."));
+    throw primaryFailure;
+  }
+  if (cleanupFailures.length)
+    throw new AggregateError(cleanupFailures, "Mobile orb fixture cleanup failed.");
 }
+
+if (import.meta.main) await runMobileOrbAcceptance();
