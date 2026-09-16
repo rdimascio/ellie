@@ -4,36 +4,47 @@ import Darwin
 import Foundation
 
 private enum BrowserMutationUncertaintyFailure: Error, Equatable, LocalizedError {
-  case unavailable, unresolved
+  case unavailable, unresolved, postCommitSyncUncertain
   var errorDescription: String? {
     switch self {
     case .unavailable:
       "Browser safety state is unavailable. Browser commands are blocked until it can be read."
-    case .unresolved:
+    case .unresolved, .postCommitSyncUncertain:
       "A previous browser command may have run. Read the page before sending another command."
     }
   }
 }
 
-protocol BrowserMutationUncertaintyPersisting: Sendable {
-  func pendingToken(for scope: String) throws -> String?
-  func recordIfClear(token: String, for scope: String) throws -> Bool
-  func clear(token: String, for scope: String) throws -> Bool
+enum BrowserMutationUncertaintyClearResult: Equatable {
+  case cleared, mismatch, clearedButSyncUncertain
 }
 
-struct PrivateBrowserMutationUncertaintyStore: BrowserMutationUncertaintyPersisting,
-  @unchecked Sendable
-{
+/// Main-actor isolation serializes each in-app load/mutate/save sequence. This store does not
+/// provide cross-process locking and is currently used only by the iPhone app process.
+@MainActor
+protocol BrowserMutationUncertaintyPersisting {
+  func pendingToken(for scope: String) throws -> String?
+  func recordIfClear(token: String, for scope: String) throws -> Bool
+  func clear(token: String, for scope: String) throws -> BrowserMutationUncertaintyClearResult
+}
+
+@MainActor
+struct PrivateBrowserMutationUncertaintyStore: BrowserMutationUncertaintyPersisting {
   static let maximumBytes = 8_192
   static let maximumMarkers = 64
   let fileURL: URL
+  private let synchronizeDirectory: (URL) throws -> Void
 
-  init(fileURL: URL? = nil) {
+  init(
+    fileURL: URL? = nil,
+    synchronizeDirectory: ((URL) throws -> Void)? = nil
+  ) {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     self.fileURL =
       fileURL
       ?? base.appendingPathComponent("Ellie", isDirectory: true)
       .appendingPathComponent("browser-mutation-uncertainty-v1.json")
+    self.synchronizeDirectory = synchronizeDirectory ?? Self.syncDirectory
   }
 
   func pendingToken(for scope: String) throws -> String? {
@@ -46,21 +57,34 @@ struct PrivateBrowserMutationUncertaintyStore: BrowserMutationUncertaintyPersist
       throw BrowserMutationUncertaintyFailure.unavailable
     }
     var markers = try load()
-    guard markers[scope] == nil, markers.count < Self.maximumMarkers else { return false }
+    guard markers[scope] == nil else { return false }
+    guard markers.count < Self.maximumMarkers else {
+      throw BrowserMutationUncertaintyFailure.unavailable
+    }
     markers[scope] = token
-    try save(markers)
+    do {
+      try save(markers)
+    } catch BrowserMutationUncertaintyFailure.postCommitSyncUncertain {
+      throw BrowserMutationUncertaintyFailure.unavailable
+    }
     return true
   }
 
-  func clear(token: String, for scope: String) throws -> Bool {
+  func clear(
+    token: String, for scope: String
+  ) throws -> BrowserMutationUncertaintyClearResult {
     guard Self.validScope(scope), Self.validToken(token) else {
       throw BrowserMutationUncertaintyFailure.unavailable
     }
     var markers = try load()
-    guard markers[scope] == token else { return false }
+    guard markers[scope] == token else { return .mismatch }
     markers.removeValue(forKey: scope)
-    try save(markers)
-    return true
+    do {
+      try save(markers)
+      return .cleared
+    } catch BrowserMutationUncertaintyFailure.postCommitSyncUncertain {
+      return .clearedButSyncUncertain
+    }
   }
 
   private func load() throws -> [String: String] {
@@ -95,7 +119,9 @@ struct PrivateBrowserMutationUncertaintyStore: BrowserMutationUncertaintyPersist
     }
     guard count == data.count,
       let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-      Set(root.keys) == ["version", "markers"], root["version"] as? Int == 1,
+      Set(root.keys) == ["version", "markers"],
+      let version = root["version"] as? NSNumber,
+      CFGetTypeID(version) != CFBooleanGetTypeID(), version == NSNumber(value: 1),
       let markers = root["markers"] as? [String: String], markers.count <= Self.maximumMarkers,
       markers.allSatisfy({ Self.validScope($0.key) && Self.validToken($0.value) })
     else { throw BrowserMutationUncertaintyFailure.unavailable }
@@ -150,40 +176,70 @@ struct PrivateBrowserMutationUncertaintyStore: BrowserMutationUncertaintyPersist
       throw BrowserMutationUncertaintyFailure.unavailable
     }
     succeeded = true
-    try syncDirectory(directory)
+    do {
+      try synchronizeDirectory(directory)
+    } catch {
+      throw BrowserMutationUncertaintyFailure.postCommitSyncUncertain
+    }
   }
 
   private func removeExistingFile(in directory: URL) throws {
     var info = stat()
     if lstat(fileURL.path, &info) != 0 {
       if errno == ENOENT {
-        try syncDirectory(directory)
+        try synchronizeDirectory(directory)
         return
       }
       throw BrowserMutationUncertaintyFailure.unavailable
     }
     try requirePrivateFile(info)
     guard unlink(fileURL.path) == 0 else { throw BrowserMutationUncertaintyFailure.unavailable }
-    try syncDirectory(directory)
+    do {
+      try synchronizeDirectory(directory)
+    } catch {
+      throw BrowserMutationUncertaintyFailure.postCommitSyncUncertain
+    }
   }
 
   private func ensurePrivateDirectory(_ directory: URL) throws {
     var info = stat()
     if lstat(directory.path, &info) != 0 {
       guard errno == ENOENT else { throw BrowserMutationUncertaintyFailure.unavailable }
-      let parent = directory.deletingLastPathComponent()
-      guard mkdir(directory.path, 0o700) == 0 else {
-        throw BrowserMutationUncertaintyFailure.unavailable
-      }
-      do { try syncDirectory(parent) } catch {
-        _ = rmdir(directory.path)
-        throw error
-      }
+      try createMissingPrivateDirectories(endingAt: directory)
       guard lstat(directory.path, &info) == 0 else {
         throw BrowserMutationUncertaintyFailure.unavailable
       }
     }
     try requirePrivateDirectory(info)
+  }
+
+  private func createMissingPrivateDirectories(endingAt directory: URL) throws {
+    var info = stat()
+    if lstat(directory.path, &info) == 0 {
+      guard (info.st_mode & S_IFMT) == S_IFDIR, info.st_uid == getuid() else {
+        throw BrowserMutationUncertaintyFailure.unavailable
+      }
+      return
+    }
+    guard errno == ENOENT else { throw BrowserMutationUncertaintyFailure.unavailable }
+    let parent = directory.deletingLastPathComponent()
+    guard parent.path != directory.path else {
+      throw BrowserMutationUncertaintyFailure.unavailable
+    }
+    try createMissingPrivateDirectories(endingAt: parent)
+    guard mkdir(directory.path, 0o700) == 0 else {
+      throw BrowserMutationUncertaintyFailure.unavailable
+    }
+    do {
+      guard lstat(directory.path, &info) == 0 else {
+        throw BrowserMutationUncertaintyFailure.unavailable
+      }
+      try requirePrivateDirectory(info)
+      try synchronizeDirectory(parent)
+    } catch {
+      _ = rmdir(directory.path)
+      throw error
+    }
   }
 
   private func checkExistingDirectory() throws {
@@ -195,7 +251,7 @@ struct PrivateBrowserMutationUncertaintyStore: BrowserMutationUncertaintyPersist
     try requirePrivateDirectory(info)
   }
 
-  private func syncDirectory(_ directory: URL) throws {
+  private static func syncDirectory(_ directory: URL) throws {
     let descriptor = open(directory.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
     guard descriptor >= 0 else { throw BrowserMutationUncertaintyFailure.unavailable }
     defer { close(descriptor) }
@@ -268,12 +324,12 @@ final class BrowserPhoneControlStore: ObservableObject {
   init(
     credential: NativeEnrollmentCredential,
     transport: BrowserPhoneControlTransporting = BrowserPhoneControlTransport(),
-    uncertainty: BrowserMutationUncertaintyPersisting = PrivateBrowserMutationUncertaintyStore(),
+    uncertainty: BrowserMutationUncertaintyPersisting? = nil,
     operationToken: @escaping @Sendable () -> String = { UUID().uuidString.lowercased() }
   ) {
     self.credential = credential
     self.transport = transport
-    self.uncertainty = uncertainty
+    self.uncertainty = uncertainty ?? PrivateBrowserMutationUncertaintyStore()
     self.operationToken = operationToken
   }
 
@@ -337,8 +393,9 @@ final class BrowserPhoneControlStore: ObservableObject {
       guard case .page(let page) = read, page.nodeID == node.id, page.source == source,
         page.revision == revision
       else { throw PhoneControlFailure.invalidResponse }
+      try Task.checkCancellation()
       if let observedToken {
-        guard try self.uncertainty.clear(token: observedToken, for: scope) else {
+        guard try self.uncertainty.clear(token: observedToken, for: scope) != .mismatch else {
           throw BrowserMutationUncertaintyFailure.unresolved
         }
       } else if try self.uncertainty.pendingToken(for: scope) != nil {
@@ -413,12 +470,12 @@ final class BrowserPhoneControlStore: ObservableObject {
       else { throw PhoneControlFailure.invalidResponse }
       switch status {
       case .completed:
-        guard try self.uncertainty.clear(token: token, for: scope) else {
+        guard try self.uncertainty.clear(token: token, for: scope) != .mismatch else {
           throw BrowserMutationUncertaintyFailure.unresolved
         }
         return (.outcome("\(label) completed."), nil)
       case .failed:
-        guard try self.uncertainty.clear(token: token, for: scope) else {
+        guard try self.uncertainty.clear(token: token, for: scope) != .mismatch else {
           throw BrowserMutationUncertaintyFailure.unresolved
         }
         return (.failed("The browser reported that \(label.lowercased()) failed."), nil)
@@ -481,6 +538,7 @@ final class BrowserPhoneControlStore: ObservableObject {
         dispatched = false
       }
       do {
+        try Task.checkCancellation()
         let result = try await operation()
         if expected == generation, activeTargetID == targetID {
           phase = result.0

@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 
 @testable import Ellie
@@ -104,6 +105,51 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertNil(store.page)
     let actionCount = await transport.actions.count
     XCTAssertEqual(actionCount, 2)
+  }
+
+  @MainActor
+  func testCancelledTargetChangedReadCannotClearObservedUncertainty() async throws {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let credential = credential()
+    let scope = try browserMutationUncertaintyScope(credential: credential, targetID: "mac")
+    let token = "00000000-0000-4000-8000-000000000007"
+    XCTAssertTrue(try persistence.recordIfClear(token: token, for: scope))
+    let transport = BrowserPhoneFakeTransport(delayRead: true)
+    let store = BrowserPhoneControlStore(
+      credential: credential, transport: transport, uncertainty: persistence)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { await transport.actions.count == 2 }
+    store.clearIfTargetChanged(to: "other-mac")
+    await transport.finishRead()
+    await eventually { store.phase == .idle }
+    XCTAssertEqual(persistence.pendingTokenValue(for: scope), token)
+    XCTAssertNil(store.page)
+  }
+
+  @MainActor
+  func testImmediateCancellationBeforeOperationTaskRunsCannotRecordOrDispatch() async throws {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let credential = credential()
+    let transport = BrowserPhoneFakeTransport(commandStatus: .completed)
+    let store = BrowserPhoneControlStore(
+      credential: credential, transport: transport, uncertainty: persistence)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    store.cancel()
+    await eventually { store.phase == .idle }
+    let scope = try browserMutationUncertaintyScope(credential: credential, targetID: node.id)
+    XCTAssertNil(persistence.pendingTokenValue(for: scope))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64))])
   }
 
   @MainActor
@@ -416,6 +462,41 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertNil(persistence.pendingTokenValue(for: scope))
   }
 
+  @MainActor
+  func testTargetChangeDuringMutationRestoresOnlyOriginalTargetWarning() async throws {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let transport = BrowserPhoneFakeTransport()
+    let credential = credential()
+    let store = BrowserPhoneControlStore(
+      credential: credential, transport: transport, uncertainty: persistence)
+    let nodeA = PhoneControlNode(
+      id: "mac-a", label: "First", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    store.clearIfTargetChanged(to: nodeA.id)
+    XCTAssertTrue(store.refresh(on: nodeA))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(.scroll(.down), on: nodeA))
+    await eventually { await transport.actions.count == 3 }
+    let scopeA = try browserMutationUncertaintyScope(
+      credential: credential, targetID: nodeA.id)
+    let tokenA = persistence.pendingTokenValue(for: scopeA)
+    XCTAssertNotNil(tokenA)
+
+    store.clearIfTargetChanged(to: "mac-b")
+    await transport.finishCommand()
+    await eventually { store.phase == .idle }
+    let scopeB = try browserMutationUncertaintyScope(
+      credential: credential, targetID: "mac-b")
+    XCTAssertNil(persistence.pendingTokenValue(for: scopeB))
+    XCTAssertEqual(persistence.pendingTokenValue(for: scopeA), tokenA)
+    store.clearIfTargetChanged(to: nodeA.id)
+    guard case .unknown = store.phase else { return XCTFail("Expected first target warning") }
+    XCTAssertFalse(store.canPerform(.play, on: nodeA))
+    let actions = await transport.actions.count
+    XCTAssertEqual(actions, 3)
+  }
+
+  @MainActor
   func testPrivateUncertaintyFileIsStrictScopedAndCompareAndClear() throws {
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(
       "ellie-browser-uncertainty-\(UUID().uuidString)", isDirectory: true)
@@ -430,16 +511,107 @@ final class BrowserPhoneControlTests: XCTestCase {
     let token = "00000000-0000-4000-8000-000000000005"
     XCTAssertTrue(try first.recordIfClear(token: token, for: scope))
     XCTAssertEqual(try second.pendingToken(for: scope), token)
-    XCTAssertFalse(
+    XCTAssertEqual(
       try second.clear(
-        token: "00000000-0000-4000-8000-000000000006", for: scope))
+        token: "00000000-0000-4000-8000-000000000006", for: scope), .mismatch)
     XCTAssertEqual(try first.pendingToken(for: scope), token)
-    XCTAssertTrue(try second.clear(token: token, for: scope))
+    XCTAssertEqual(try second.clear(token: token, for: scope), .cleared)
     XCTAssertNil(try first.pendingToken(for: scope))
 
     try Data(#"{"version":1,"markers":{"bad":"value"}}"#.utf8).write(to: file)
     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
     XCTAssertThrowsError(try first.pendingToken(for: scope))
+
+    let booleanVersion = #"{"markers":{"\#(scope)":"\#(token)"},"version":true}"#
+    try Data(booleanVersion.utf8).write(to: file)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    XCTAssertThrowsError(try first.pendingToken(for: scope))
+
+    let fractionalVersion = #"{"markers":{"\#(scope)":"\#(token)"},"version":1.5}"#
+    try Data(fractionalVersion.utf8).write(to: file)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    XCTAssertThrowsError(try first.pendingToken(for: scope))
+  }
+
+  @MainActor
+  func testPrivateUncertaintyFileCreatesMissingOwnedAncestorsWithoutChangingExistingMode() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "ellie-browser-uncertainty-parent-\(UUID().uuidString)", isDirectory: true)
+    guard mkdir(root.path, 0o750) == 0 else { return XCTFail("Could not create fixture root") }
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("Application Support/Ellie/markers.json")
+    let persistence = PrivateBrowserMutationUncertaintyStore(fileURL: file)
+    let scope = String(repeating: "b", count: 64)
+    let token = "00000000-0000-4000-8000-000000000008"
+
+    XCTAssertTrue(try persistence.recordIfClear(token: token, for: scope))
+    XCTAssertEqual(try persistence.pendingToken(for: scope), token)
+    var rootInfo = stat()
+    var supportInfo = stat()
+    var ellieInfo = stat()
+    XCTAssertEqual(lstat(root.path, &rootInfo), 0)
+    XCTAssertEqual(
+      lstat(file.deletingLastPathComponent().deletingLastPathComponent().path, &supportInfo), 0)
+    XCTAssertEqual(lstat(file.deletingLastPathComponent().path, &ellieInfo), 0)
+    XCTAssertEqual(rootInfo.st_mode & 0o777, 0o750)
+    XCTAssertEqual(supportInfo.st_mode & 0o777, 0o700)
+    XCTAssertEqual(ellieInfo.st_mode & 0o777, 0o700)
+  }
+
+  @MainActor
+  func testPrivateUncertaintyRecordContainsOnlyClosedScopeAndToken() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "ellie-browser-uncertainty-bytes-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: root, withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("markers.json")
+    let credential = credential(clientID: "private-client", origin: "https://127.0.0.1:9444")
+    let scope = try browserMutationUncertaintyScope(credential: credential, targetID: "private-mac")
+    let token = "00000000-0000-4000-8000-000000000009"
+    let persistence = PrivateBrowserMutationUncertaintyStore(fileURL: file)
+    XCTAssertTrue(try persistence.recordIfClear(token: token, for: scope))
+
+    var info = stat()
+    XCTAssertEqual(lstat(file.path, &info), 0)
+    XCTAssertEqual(info.st_mode & 0o777, 0o600)
+    let data = try Data(contentsOf: file)
+    guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      return XCTFail("Expected closed record")
+    }
+    XCTAssertEqual(Set(value.keys), ["version", "markers"])
+    guard let markers = value["markers"] as? [String: String] else {
+      return XCTFail("Expected marker map")
+    }
+    XCTAssertEqual(markers, [scope: token])
+    let text = String(decoding: data, as: UTF8.self)
+    XCTAssertFalse(text.contains("private-client"))
+    XCTAssertFalse(text.contains("private-mac"))
+    XCTAssertFalse(text.contains("127.0.0.1"))
+    XCTAssertFalse(text.contains("scroll"))
+    XCTAssertFalse(text.contains(credential.token))
+  }
+
+  @MainActor
+  func testPostCommitDirectorySyncFailureReportsResolvedWithoutRetryingClear() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(
+      "ellie-browser-uncertainty-sync-\(UUID().uuidString)", isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: root, withIntermediateDirectories: false,
+      attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("markers.json")
+    let scope = String(repeating: "c", count: 64)
+    let token = "00000000-0000-4000-8000-000000000010"
+    let normal = PrivateBrowserMutationUncertaintyStore(fileURL: file)
+    XCTAssertTrue(try normal.recordIfClear(token: token, for: scope))
+    let syncFailure = PrivateBrowserMutationUncertaintyStore(
+      fileURL: file, synchronizeDirectory: { _ in throw FixtureUncertaintyError.unavailable })
+    XCTAssertEqual(try syncFailure.clear(token: token, for: scope), .clearedButSyncUncertain)
+    XCTAssertNil(try normal.pendingToken(for: scope))
+    XCTAssertThrowsError(try syncFailure.recordIfClear(token: token, for: scope))
+    XCTAssertEqual(try normal.pendingToken(for: scope), token)
   }
 
   private func credential(
@@ -521,43 +693,35 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   }
 }
 
-private final class BrowserPhoneFakeUncertaintyStore: BrowserMutationUncertaintyPersisting,
-  @unchecked Sendable
-{
-  private let lock = NSLock()
+@MainActor
+private final class BrowserPhoneFakeUncertaintyStore: BrowserMutationUncertaintyPersisting {
   private var markers: [String: String] = [:]
   var failReads = false
   var failRecords = false
   var failClears = false
 
   func pendingToken(for scope: String) throws -> String? {
-    lock.lock()
-    defer { lock.unlock() }
     if failReads { throw FixtureUncertaintyError.unavailable }
     return markers[scope]
   }
 
   func recordIfClear(token: String, for scope: String) throws -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
     if failRecords { throw FixtureUncertaintyError.unavailable }
     guard markers[scope] == nil else { return false }
     markers[scope] = token
     return true
   }
 
-  func clear(token: String, for scope: String) throws -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
+  func clear(
+    token: String, for scope: String
+  ) throws -> BrowserMutationUncertaintyClearResult {
     if failClears { throw FixtureUncertaintyError.unavailable }
-    guard markers[scope] == token else { return false }
+    guard markers[scope] == token else { return .mismatch }
     markers.removeValue(forKey: scope)
-    return true
+    return .cleared
   }
 
   func pendingTokenValue(for scope: String) -> String? {
-    lock.lock()
-    defer { lock.unlock() }
     return markers[scope]
   }
 }

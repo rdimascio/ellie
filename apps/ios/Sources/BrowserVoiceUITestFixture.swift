@@ -21,7 +21,8 @@ struct BrowserVoiceUITestFixtureView: View {
         credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
     _browser = StateObject(
       wrappedValue: BrowserPhoneControlStore(
-        credential: credential, transport: browserTransport))
+        credential: credential, transport: browserTransport,
+        uncertainty: BrowserVoiceUITestUncertaintyStore()))
     _speech = StateObject(
       wrappedValue: SpeechTurnStore(
         credential: credential, recorder: BrowserVoiceUITestRecorder(),
@@ -70,7 +71,8 @@ struct BrowserTargetUITestFixtureView: View {
         credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
     _browser = StateObject(
       wrappedValue: BrowserPhoneControlStore(
-        credential: credential, transport: browserTransport))
+        credential: credential, transport: browserTransport,
+        uncertainty: BrowserVoiceUITestUncertaintyStore()))
     _browserTransport = StateObject(wrappedValue: browserTransport)
   }
 
@@ -114,6 +116,29 @@ private enum BrowserVoiceUITestFixture {
       ],
       createdAt: 1, expiresAt: 2),
     token: String(repeating: "c", count: 64))
+}
+
+@MainActor
+private final class BrowserVoiceUITestUncertaintyStore: BrowserMutationUncertaintyPersisting {
+  private var markers: [String: String] = [:]
+
+  func pendingToken(for scope: String) throws -> String? {
+    return markers[scope]
+  }
+
+  func recordIfClear(token: String, for scope: String) throws -> Bool {
+    guard markers[scope] == nil else { return false }
+    markers[scope] = token
+    return true
+  }
+
+  func clear(
+    token: String, for scope: String
+  ) throws -> BrowserMutationUncertaintyClearResult {
+    guard markers[scope] == token else { return .mismatch }
+    markers.removeValue(forKey: scope)
+    return .cleared
+  }
 }
 
 private struct BrowserVoiceUITestPhoneTransport: PhoneControlTransporting {
