@@ -300,6 +300,9 @@ func browserMutationUncertaintyScope(
 
 @MainActor
 final class BrowserPhoneControlStore: ObservableObject {
+  static let pendingCommandWarningMessage =
+    "A previous browser command may have run. Its result is still unverified."
+
   enum Phase: Equatable {
     case idle, checking, reading, sending(String), cancelling
     case ready
@@ -311,6 +314,8 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var page: BrowserPhonePage?
+  @Published private(set) var hasPendingBrowserCommand = false
+  @Published private(set) var pendingBrowserWarningError: String?
   private let credential: NativeEnrollmentCredential
   private let transport: BrowserPhoneControlTransporting
   private let uncertainty: BrowserMutationUncertaintyPersisting
@@ -335,13 +340,29 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   var isBusy: Bool { task != nil }
 
+  var showsSeparatePendingBrowserWarning: Bool {
+    guard hasPendingBrowserCommand else { return false }
+    switch phase {
+    case .unknown, .sending: return false
+    default: break
+    }
+    return true
+  }
+
+  var showsPendingBrowserWarningError: Bool {
+    pendingBrowserWarningError != nil && phase == .cancelling
+  }
+
   func clearIfTargetChanged(to nodeID: String?) {
     guard selectedTargetID != nodeID else { return }
     selectedTargetID = nodeID
     page = nil
-    if task != nil, activeTargetID != nodeID {
-      invalidateActiveOperation()
-    } else if task == nil {
+    hasPendingBrowserCommand = false
+    pendingBrowserWarningError = nil
+    if task != nil {
+      if activeTargetID != nodeID, phase != .cancelling { invalidateActiveOperation() }
+      updatePendingWarning(for: nodeID)
+    } else {
       restoreUncertainty(for: nodeID)
     }
   }
@@ -383,6 +404,8 @@ final class BrowserPhoneControlStore: ObservableObject {
       let scope = try browserMutationUncertaintyScope(
         credential: self.credential, targetID: node.id)
       let observedToken = try self.uncertainty.pendingToken(for: scope)
+      self.hasPendingBrowserCommand = observedToken != nil
+      self.pendingBrowserWarningError = nil
       let status = try await self.transport.execute(
         .refresh, nodeID: node.id, credential: self.credential)
       guard case .status(let source, true, let revision?) = status else {
@@ -399,8 +422,10 @@ final class BrowserPhoneControlStore: ObservableObject {
           throw BrowserMutationUncertaintyFailure.unresolved
         }
       } else if try self.uncertainty.pendingToken(for: scope) != nil {
+        self.hasPendingBrowserCommand = true
         throw BrowserMutationUncertaintyFailure.unresolved
       }
+      self.hasPendingBrowserCommand = false
       return (.ready, page)
     }
     return true
@@ -421,10 +446,13 @@ final class BrowserPhoneControlStore: ObservableObject {
       scope = try browserMutationUncertaintyScope(credential: credential, targetID: node.id)
       if try uncertainty.pendingToken(for: scope) != nil {
         self.page = nil
+        hasPendingBrowserCommand = true
+        pendingBrowserWarningError = nil
         phase = .unknown(
           "A previous browser command may have run. Read the page before sending another command.")
         return false
       }
+      pendingBrowserWarningError = nil
     } catch {
       self.page = nil
       phase = .failed(BrowserMutationUncertaintyFailure.unavailable.localizedDescription)
@@ -461,6 +489,7 @@ final class BrowserPhoneControlStore: ObservableObject {
       guard try self.uncertainty.recordIfClear(token: token, for: scope) else {
         throw BrowserMutationUncertaintyFailure.unresolved
       }
+      self.hasPendingBrowserCommand = true
       self.dispatched = true
       let response = try await self.transport.execute(
         action, nodeID: node.id, credential: self.credential)
@@ -473,11 +502,13 @@ final class BrowserPhoneControlStore: ObservableObject {
         guard try self.uncertainty.clear(token: token, for: scope) != .mismatch else {
           throw BrowserMutationUncertaintyFailure.unresolved
         }
+        self.hasPendingBrowserCommand = false
         return (.outcome("\(label) completed."), nil)
       case .failed:
         guard try self.uncertainty.clear(token: token, for: scope) != .mismatch else {
           throw BrowserMutationUncertaintyFailure.unresolved
         }
+        self.hasPendingBrowserCommand = false
         return (.failed("The browser reported that \(label.lowercased()) failed."), nil)
       case .unknown, .cancelled, .timedOut:
         return (
@@ -503,20 +534,30 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   private func restoreUncertainty(for targetID: String?) {
-    guard let targetID else {
+    updatePendingWarning(for: targetID)
+    if let pendingBrowserWarningError {
+      phase = .failed(pendingBrowserWarningError)
+    } else if hasPendingBrowserCommand {
+      phase = .unknown(
+        "A previous browser command may have run. Read the page before sending another command.")
+    } else {
       phase = .idle
+    }
+  }
+
+  private func updatePendingWarning(for targetID: String?) {
+    guard let targetID else {
+      hasPendingBrowserCommand = false
+      pendingBrowserWarningError = nil
       return
     }
     do {
       let scope = try browserMutationUncertaintyScope(
         credential: credential, targetID: targetID)
-      phase =
-        try uncertainty.pendingToken(for: scope) == nil
-        ? .idle
-        : .unknown(
-          "A previous browser command may have run. Read the page before sending another command.")
+      hasPendingBrowserCommand = try uncertainty.pendingToken(for: scope) != nil
+      pendingBrowserWarningError = nil
     } catch {
-      phase = .failed(BrowserMutationUncertaintyFailure.unavailable.localizedDescription)
+      pendingBrowserWarningError = BrowserMutationUncertaintyFailure.unavailable.localizedDescription
     }
   }
 
@@ -532,7 +573,7 @@ final class BrowserPhoneControlStore: ObservableObject {
       defer {
         task = nil
         activeTargetID = nil
-        if expected != generation, phase == .cancelling {
+        if expected != generation {
           restoreUncertainty(for: selectedTargetID)
         }
         dispatched = false

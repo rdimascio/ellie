@@ -112,7 +112,9 @@ struct BrowserUnknownRelaunchUITestFixtureView: View {
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let persistence = PrivateBrowserMutationUncertaintyStore(
       fileURL: BrowserUnknownRelaunchUITestStorage.fileURL(identifier: identifier))
-    let browserTransport = BrowserVoiceUITestTransport()
+    let browserTransport = BrowserVoiceUITestTransport(
+      failNextRead: ProcessInfo.processInfo.arguments.contains(
+        "--ellie-ui-browser-unknown-fail-read-once"))
     self.persistence = persistence
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
@@ -305,6 +307,11 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
 {
   @Published private(set) var mutationCount = 0
   @Published private(set) var readNodeIDs: [String] = []
+  private var failNextRead: Bool
+
+  init(failNextRead: Bool = false) {
+    self.failNextRead = failNextRead
+  }
 
   func execute(
     _ action: BrowserPhoneAction, nodeID: String, credential: NativeEnrollmentCredential
@@ -315,6 +322,10 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
         source: .webmcp, connected: true, revision: BrowserVoiceUITestFixture.revision)
     case .read:
       readNodeIDs.append(nodeID)
+      if failNextRead {
+        failNextRead = false
+        throw PhoneControlFailure.unavailable
+      }
       let isA = nodeID == BrowserVoiceUITestFixture.nodeAID
       return .page(
         BrowserPhonePage(

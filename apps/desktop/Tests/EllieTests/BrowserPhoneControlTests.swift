@@ -100,6 +100,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     store.refresh(on: node)
     await eventually { await transport.actions.count == 2 }
     store.clearIfTargetChanged(to: "other-mac")
+    XCTAssertFalse(store.hasPendingBrowserCommand)
     await transport.finishRead()
     await eventually { store.phase == .idle }
     XCTAssertNil(store.page)
@@ -124,10 +125,104 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertTrue(store.refresh(on: node))
     await eventually { await transport.actions.count == 2 }
     store.clearIfTargetChanged(to: "other-mac")
+    XCTAssertFalse(store.hasPendingBrowserCommand)
     await transport.finishRead()
     await eventually { store.phase == .idle }
     XCTAssertEqual(persistence.pendingTokenValue(for: scope), token)
     XCTAssertNil(store.page)
+    store.clearIfTargetChanged(to: node.id)
+    XCTAssertTrue(store.hasPendingBrowserCommand)
+    XCTAssertFalse(store.showsSeparatePendingBrowserWarning)
+  }
+
+  @MainActor
+  func testPendingWarningTracksAtoBtoAWhileCancelledReadSettles() async throws {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let credential = credential()
+    let nodeA = PhoneControlNode(
+      id: "mac-a", label: "First", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let scopeA = try browserMutationUncertaintyScope(
+      credential: credential, targetID: nodeA.id)
+    let token = "00000000-0000-4000-8000-000000000012"
+    XCTAssertTrue(try persistence.recordIfClear(token: token, for: scopeA))
+    let transport = BrowserPhoneFakeTransport(delayRead: true)
+    let store = BrowserPhoneControlStore(
+      credential: credential, transport: transport, uncertainty: persistence)
+    store.clearIfTargetChanged(to: nodeA.id)
+    XCTAssertTrue(store.refresh(on: nodeA))
+    await eventually { await transport.actions.count == 2 }
+
+    persistence.failReads = true
+    store.clearIfTargetChanged(to: "mac-b")
+    XCTAssertEqual(store.phase, .cancelling)
+    XCTAssertFalse(store.hasPendingBrowserCommand)
+    XCTAssertTrue(store.showsPendingBrowserWarningError)
+    XCTAssertTrue(store.isBusy)
+    persistence.failReads = false
+    store.clearIfTargetChanged(to: nodeA.id)
+    XCTAssertEqual(store.phase, .cancelling)
+    XCTAssertTrue(store.hasPendingBrowserCommand)
+    XCTAssertFalse(store.showsPendingBrowserWarningError)
+    XCTAssertTrue(store.showsSeparatePendingBrowserWarning)
+    XCTAssertTrue(store.isBusy)
+    XCTAssertFalse(store.canRefresh(on: nodeA))
+    XCTAssertEqual(persistence.pendingTokenValue(for: scopeA), token)
+
+    await transport.finishRead()
+    await eventually { if case .unknown = store.phase { !store.isBusy } else { false } }
+    XCTAssertTrue(store.hasPendingBrowserCommand)
+    XCTAssertFalse(store.showsSeparatePendingBrowserWarning)
+    XCTAssertNil(store.page)
+    XCTAssertEqual(persistence.pendingTokenValue(for: scopeA), token)
+    let actions = await transport.actions
+    XCTAssertEqual(actions.count, 2)
+  }
+
+  @MainActor
+  func testUnreadableMarkerKeepsKnownSameTargetWarningButNeverCarriesItToAnotherTarget()
+    async throws
+  {
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let credential = credential()
+    let nodeA = PhoneControlNode(
+      id: "mac-a", label: "First", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let scopeA = try browserMutationUncertaintyScope(
+      credential: credential, targetID: nodeA.id)
+    XCTAssertTrue(try persistence.recordIfClear(
+      token: "00000000-0000-4000-8000-000000000013", for: scopeA))
+    let transport = BrowserPhoneFakeTransport(delayRead: true)
+    let store = BrowserPhoneControlStore(
+      credential: credential, transport: transport, uncertainty: persistence)
+    store.clearIfTargetChanged(to: nodeA.id)
+    XCTAssertTrue(store.refresh(on: nodeA))
+    await eventually { await transport.actions.count == 2 }
+    XCTAssertTrue(store.hasPendingBrowserCommand)
+    store.cancel()
+    persistence.failReads = true
+    await transport.finishRead()
+    await eventually { !store.isBusy }
+    XCTAssertTrue(store.hasPendingBrowserCommand)
+    XCTAssertNotNil(store.pendingBrowserWarningError)
+    XCTAssertTrue(store.showsSeparatePendingBrowserWarning)
+    guard case .failed = store.phase else { return XCTFail("Expected storage safety diagnostic") }
+
+    store.clearIfTargetChanged(to: "mac-b")
+    XCTAssertFalse(store.hasPendingBrowserCommand)
+    XCTAssertNotNil(store.pendingBrowserWarningError)
+    XCTAssertFalse(store.showsSeparatePendingBrowserWarning)
+    guard case .failed = store.phase else { return XCTFail("Expected B storage diagnostic") }
+
+    let recovered = BrowserPhoneControlStore(
+      credential: credential, transport: BrowserPhoneFakeTransport(), uncertainty: persistence)
+    recovered.clearIfTargetChanged(to: nodeA.id)
+    XCTAssertNotNil(recovered.pendingBrowserWarningError)
+    persistence.failReads = false
+    XCTAssertTrue(recovered.refresh(on: nodeA))
+    await eventually { recovered.phase == .ready }
+    XCTAssertNil(recovered.pendingBrowserWarningError)
+    XCTAssertFalse(recovered.hasPendingBrowserCommand)
   }
 
   @MainActor
@@ -299,6 +394,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertTrue(second.refresh(on: node))
     await eventually { second.phase == .ready }
     XCTAssertNil(persistence.pendingTokenValue(for: scope))
+    XCTAssertFalse(second.hasPendingBrowserCommand)
     let secondReadActions = await secondTransport.actions.count
     XCTAssertEqual(secondReadActions, 2)
 
@@ -327,6 +423,7 @@ final class BrowserPhoneControlTests: XCTestCase {
       capabilities: ["browser.read", "browser.control"])
     otherTarget.clearIfTargetChanged(to: nodeB.id)
     XCTAssertEqual(otherTarget.phase, .idle)
+    XCTAssertFalse(otherTarget.hasPendingBrowserCommand)
     XCTAssertTrue(otherTarget.refresh(on: nodeB))
     await eventually { otherTarget.phase == .ready }
     XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
@@ -346,7 +443,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(otherOrigin.phase, .idle)
     XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
 
-    let failingTransport = BrowserPhoneFakeTransport(readError: true)
+    let failingTransport = BrowserPhoneFakeTransport(readFailure: .unavailable)
     let restored = BrowserPhoneControlStore(
       credential: firstCredential, transport: failingTransport, uncertainty: persistence)
     let nodeA = PhoneControlNode(
@@ -354,12 +451,75 @@ final class BrowserPhoneControlTests: XCTestCase {
       capabilities: ["browser.read", "browser.control"])
     restored.clearIfTargetChanged(to: nodeA.id)
     guard case .unknown = restored.phase else { return XCTFail("Expected target warning") }
+    XCTAssertTrue(restored.hasPendingBrowserCommand)
     restored.clearIfTargetChanged(to: nodeA.id)
     guard case .unknown = restored.phase else { return XCTFail("Warning was reset") }
     XCTAssertTrue(restored.refresh(on: nodeA))
     await eventually { if case .failed = restored.phase { true } else { false } }
     XCTAssertNotNil(persistence.pendingTokenValue(for: markedScope))
     XCTAssertNil(restored.page)
+    XCTAssertTrue(restored.hasPendingBrowserCommand)
+    XCTAssertTrue(restored.showsSeparatePendingBrowserWarning)
+    if case .failed(let message) = restored.phase {
+      XCTAssertFalse(message.isEmpty)
+    } else {
+      XCTFail("Expected read failure diagnostic")
+    }
+    restored.clearIfTargetChanged(to: nodeB.id)
+    XCTAssertFalse(restored.hasPendingBrowserCommand)
+    XCTAssertFalse(restored.showsSeparatePendingBrowserWarning)
+    restored.clearIfTargetChanged(to: nodeA.id)
+    XCTAssertTrue(restored.hasPendingBrowserCommand)
+  }
+
+  @MainActor
+  func testReadCancellationAndRevocationKeepOnlyMatchingTargetWarning() async throws {
+    let credential = credential()
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let scope = try browserMutationUncertaintyScope(credential: credential, targetID: node.id)
+    XCTAssertTrue(try persistence.recordIfClear(
+      token: "00000000-0000-4000-8000-000000000011", for: scope))
+
+    for failure in [PhoneControlFailure.cancelled, .revoked] {
+      let transport = BrowserPhoneFakeTransport(readFailure: failure)
+      let store = BrowserPhoneControlStore(
+        credential: credential, transport: transport, uncertainty: persistence)
+      store.clearIfTargetChanged(to: node.id)
+      XCTAssertTrue(store.hasPendingBrowserCommand)
+      XCTAssertTrue(store.refresh(on: node))
+      await eventually {
+        switch (failure, store.phase) {
+        case (.cancelled, .idle), (.revoked, .revoked): true
+        default: false
+        }
+      }
+      XCTAssertTrue(store.hasPendingBrowserCommand)
+      XCTAssertTrue(store.showsSeparatePendingBrowserWarning)
+      XCTAssertNotNil(persistence.pendingTokenValue(for: scope))
+      XCTAssertNil(store.page)
+      let actions = await transport.actions.count
+      XCTAssertEqual(actions, 2)
+    }
+
+    let otherNode = PhoneControlNode(
+      id: "other-mac", label: "Other", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let noMarkerTransport = BrowserPhoneFakeTransport(readFailure: .unavailable)
+    let noMarker = BrowserPhoneControlStore(
+      credential: credential, transport: noMarkerTransport, uncertainty: persistence)
+    noMarker.clearIfTargetChanged(to: otherNode.id)
+    XCTAssertFalse(noMarker.hasPendingBrowserCommand)
+    XCTAssertTrue(noMarker.refresh(on: otherNode))
+    await eventually { if case .failed = noMarker.phase { true } else { false } }
+    XCTAssertFalse(noMarker.hasPendingBrowserCommand)
+    XCTAssertFalse(noMarker.showsSeparatePendingBrowserWarning)
+    noMarker.clearIfTargetChanged(to: node.id)
+    XCTAssertTrue(noMarker.hasPendingBrowserCommand)
+    noMarker.clearIfTargetChanged(to: otherNode.id)
+    XCTAssertFalse(noMarker.hasPendingBrowserCommand)
   }
 
   @MainActor
@@ -481,6 +641,7 @@ final class BrowserPhoneControlTests: XCTestCase {
       credential: credential, targetID: nodeA.id)
     let tokenA = persistence.pendingTokenValue(for: scopeA)
     XCTAssertNotNil(tokenA)
+    XCTAssertFalse(store.showsSeparatePendingBrowserWarning)
 
     store.clearIfTargetChanged(to: "mac-b")
     await transport.finishCommand()
@@ -642,7 +803,7 @@ final class BrowserPhoneControlTests: XCTestCase {
 private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   var actions: [BrowserPhoneAction] = []
   private let delayRead: Bool
-  private let readError: Bool
+  private let readFailure: PhoneControlFailure?
   private let commandError: Bool
   private let source: BrowserPhoneSource
   private let commandStatus: BrowserPhoneCommandStatus?
@@ -650,12 +811,12 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private var commandContinuation: CheckedContinuation<Void, Never>?
   private var readContinuation: CheckedContinuation<Void, Never>?
   init(
-    delayRead: Bool = false, readError: Bool = false, commandError: Bool = false,
+    delayRead: Bool = false, readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
     items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)]
   ) {
     self.delayRead = delayRead
-    self.readError = readError
+    self.readFailure = readFailure
     self.commandError = commandError
     self.source = source
     self.commandStatus = commandStatus
@@ -670,7 +831,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     case .status, .refresh: return .status(source: source, connected: true, revision: revision)
     case .read:
       if delayRead { await withCheckedContinuation { readContinuation = $0 } }
-      if readError { throw PhoneControlFailure.unavailable }
+      if let readFailure { throw readFailure }
       return .page(
         BrowserPhonePage(
           nodeID: nodeID, source: source, revision: revision, title: "Page", summary: nil,
