@@ -110,6 +110,39 @@
     }
     return selected;
   };
+  const observedRowLabel = (row, index) => {
+    const previous = row.previousElementSibling;
+    const heading =
+      row.getAttribute("aria-label") ||
+      (previous?.matches("h1,h2,h3,[role='heading']") ? previous.textContent : null);
+    const text = heading?.replace(/\s+/g, " ").trim();
+    const prefix = `Row ${index + 1}`;
+    const candidate = text ? `${prefix}: ${text}` : prefix;
+    return !/[\p{C}]/u.test(candidate) && new TextEncoder().encode(candidate).length <= 100
+      ? candidate
+      : prefix;
+  };
+  // The complete visible eligible row set must fit the cap. A partial scan
+  // cannot establish which row a person selected.
+  const observedRows = () => {
+    const anchors = document.querySelectorAll("a[href]");
+    if (anchors.length > 500) return undefined;
+    const rows = new Map();
+    for (const anchor of anchors) {
+      if (!visible(anchor) || !supportedAnchor(anchor) || !titleFor(anchor)) continue;
+      const row = scrollableRowFor(anchor);
+      if (!row || rows.has(row)) continue;
+      rows.set(row, anchor);
+      if (rows.size > 8) return undefined;
+    }
+    return [...rows].map(([row, anchor], index) => ({
+      row,
+      anchor,
+      href: anchor.href,
+      title: titleFor(anchor),
+      label: observedRowLabel(row, index),
+    }));
+  };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
     if (c.type === "inspect" || c.type === "observe" || c.type === "play" || c.type === "pause")
@@ -128,6 +161,13 @@
         exact(c, ["type", "actionId", "snapshotId", "candidateId"]) &&
         uuid(c.snapshotId) &&
         uuid(c.candidateId)
+      );
+    if (c.type === "scrollSelectedRow")
+      return (
+        exact(c, ["type", "actionId", "snapshotId", "rowId", "direction"]) &&
+        uuid(c.snapshotId) &&
+        uuid(c.rowId) &&
+        ["left", "right"].includes(c.direction)
       );
     return (
       c.type === "scrollRow" &&
@@ -292,6 +332,11 @@
           }
         }
         snapshots.clear();
+        const currentRows =
+          netflixOrigins.has(location.origin) && site.page === "browse"
+            ? observedRows()
+            : undefined;
+        const rows = currentRows?.map((entry) => ({ ...entry, id: crypto.randomUUID() })) || [];
         const uniqueRow = site.page === "browse" ? uniqueVisibleRow() : undefined;
         const rowCandidateId = uniqueRow
           ? entries.find((entry) => scrollableRowFor(entry.anchor) === uniqueRow)?.id
@@ -302,6 +347,7 @@
           created: Date.now(),
           entries,
           rowCandidateId,
+          rows,
         });
         const allVideos = [...document.querySelectorAll("video")];
         const videos = allVideos.length <= 16 ? allVideos.filter(visible) : [];
@@ -320,7 +366,11 @@
           playback,
           site:
             netflixOrigins.has(location.origin) && site.page === "browse"
-              ? { ...site, horizontalScrollAvailable: Boolean(rowCandidateId) }
+              ? {
+                  ...site,
+                  horizontalScrollAvailable: Boolean(rowCandidateId),
+                  rows: rows.map(({ id, label }) => ({ id, label })),
+                }
               : site,
           ...(rowCandidateId ? { rowCandidateId } : {}),
         };
@@ -335,6 +385,41 @@
         await wait(80);
         active(command, expectedUrl, deadline);
         if (scrollY === before) throw new Error("scroll_unavailable");
+        return { outcome: "scrolled" };
+      }
+      if (command.type === "scrollSelectedRow") {
+        if (!netflixOrigins.has(location.origin)) throw new Error("row_scroll_unavailable");
+        const snapshot = snapshots.get(command.snapshotId);
+        if (
+          !snapshot ||
+          snapshot.session !== session ||
+          snapshot.url !== location.href ||
+          Date.now() - snapshot.created >= 30_000
+        )
+          throw new Error("stale_snapshot");
+        const chosen = snapshot.rows?.find((entry) => entry.id === command.rowId);
+        const currentRows = observedRows();
+        const current = currentRows?.find((entry) => entry.row === chosen?.row);
+        if (
+          !chosen ||
+          !chosen.anchor.isConnected ||
+          !current ||
+          current.anchor !== chosen.anchor ||
+          current.href !== chosen.href ||
+          current.title !== chosen.title ||
+          current.label !== chosen.label ||
+          currentRows.length !== snapshot.rows.length
+        )
+          throw new Error("row_scroll_unavailable");
+        active(command, expectedUrl, deadline);
+        const before = chosen.row.scrollLeft;
+        chosen.row.scrollBy({
+          left: (command.direction === "left" ? -1 : 1) * chosen.row.clientWidth * 0.8,
+          behavior: "instant",
+        });
+        await wait(80);
+        active(command, expectedUrl, deadline);
+        if (chosen.row.scrollLeft === before) throw new Error("row_scroll_unavailable");
         return { outcome: "scrolled" };
       }
       if (command.type === "scrollRow" || command.type === "open") {

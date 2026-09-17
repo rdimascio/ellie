@@ -314,6 +314,7 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var page: BrowserPhonePage?
+  @Published private(set) var selectedRowID: String?
   @Published private(set) var hasPendingBrowserCommand = false
   @Published private(set) var pendingBrowserWarningError: String?
   private let credential: NativeEnrollmentCredential
@@ -357,6 +358,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     guard selectedTargetID != nodeID else { return }
     selectedTargetID = nodeID
     page = nil
+    selectedRowID = nil
     hasPendingBrowserCommand = false
     pendingBrowserWarningError = nil
     if task != nil {
@@ -380,6 +382,9 @@ final class BrowserPhoneControlStore: ObservableObject {
       return false
     }
     guard Self.observedSiteAllows(intent, on: page) else { return false }
+    if case .scroll(let direction) = intent,
+      (direction == .left || direction == .right), page.site?.provider == .netflix,
+      page.site?.rows?.contains(where: { $0.id == selectedRowID }) != true { return false }
     switch intent {
     case .search(let query):
       return query == query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -393,6 +398,17 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   @discardableResult
+  func selectObservedRow(_ rowID: String, on node: PhoneControlNode?) -> Bool {
+    guard task == nil, let node, node.online,
+      node.capabilities.contains("browser.control"), let page, page.nodeID == node.id,
+      page.site?.provider == .netflix, page.site?.page == .browse,
+      page.site?.rows?.contains(where: { $0.id == rowID }) == true
+    else { return false }
+    selectedRowID = rowID
+    return true
+  }
+
+  @discardableResult
   func refresh(on node: PhoneControlNode?) -> Bool {
     guard task == nil, let node, node.online, node.capabilities.contains("browser.read") else {
       if node != nil { phase = .failed("The selected Mac does not allow browser reading.") }
@@ -400,6 +416,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     }
     if selectedTargetID != node.id { clearIfTargetChanged(to: node.id) }
     page = nil
+    selectedRowID = nil
     phase = .checking
     launch(targetID: node.id, mayDispatch: false) {
       let scope = try browserMutationUncertaintyScope(
@@ -451,6 +468,7 @@ final class BrowserPhoneControlStore: ObservableObject {
       scope = try browserMutationUncertaintyScope(credential: credential, targetID: node.id)
       if try uncertainty.pendingToken(for: scope) != nil {
         self.page = nil
+        self.selectedRowID = nil
         hasPendingBrowserCommand = true
         pendingBrowserWarningError = nil
         phase = .unknown(
@@ -460,12 +478,21 @@ final class BrowserPhoneControlStore: ObservableObject {
       pendingBrowserWarningError = nil
     } catch {
       self.page = nil
+      self.selectedRowID = nil
       phase = .failed(BrowserMutationUncertaintyFailure.unavailable.localizedDescription)
       return false
     }
     let action: BrowserPhoneAction
     switch intent {
-    case .scroll(let direction): action = .scroll(direction, revision: page.revision)
+    case .scroll(let direction):
+      if page.site?.provider == .netflix && (direction == .left || direction == .right) {
+        guard let rowID = selectedRowID,
+          page.site?.rows?.contains(where: { $0.id == rowID }) == true else {
+          phase = .failed("Choose a row from the current Netflix page first.")
+          return false
+        }
+        action = .scrollRow(rowID, direction, revision: page.revision)
+      } else { action = .scroll(direction, revision: page.revision) }
     case .search(let query):
       guard query == query.trimmingCharacters(in: .whitespacesAndNewlines),
         !query.isEmpty, query.utf16.count <= 200, query.utf8.count <= 512,
@@ -492,6 +519,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     // The reviewed handles belong to the pre-command document. Hide them as soon as this
     // mutation is admitted; even a slow or lost response must not expose stale controls.
     self.page = nil
+    self.selectedRowID = nil
     phase = .sending(label)
     launch(targetID: node.id, mayDispatch: true) {
       guard try self.uncertainty.recordIfClear(token: token, for: scope) else {
@@ -532,6 +560,7 @@ final class BrowserPhoneControlStore: ObservableObject {
   func cancel() {
     guard task != nil else { return }
     page = nil
+    selectedRowID = nil
     invalidateActiveOperation()
   }
 
@@ -592,10 +621,12 @@ final class BrowserPhoneControlStore: ObservableObject {
         if expected == generation, activeTargetID == targetID {
           phase = result.0
           page = result.1
+          selectedRowID = nil
         }
       } catch {
         guard expected == generation else { return }
         page = nil
+        selectedRowID = nil
         if mayDispatch && dispatched {
           phase = .unknown("The result is unknown. Read the page before trying again.")
         } else if error as? BrowserMutationUncertaintyFailure == .unresolved {
@@ -627,7 +658,7 @@ final class BrowserPhoneControlStore: ObservableObject {
       case .search: return false
       case .openResult: return site.page == .browse
       case .scroll(let direction) where direction == .left || direction == .right:
-        return site.page == .browse && site.horizontalScrollAvailable == true
+        return site.page == .browse && site.rows?.isEmpty == false
       default: break
       }
     }

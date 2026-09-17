@@ -7,7 +7,7 @@ installation and real-site acceptance remain open. The packaged node uses the au
 Swift broker and [Accessibility runtime](browser-accessibility.md) when an explicitly bound
 page does not offer reviewed WebMCP tools.
 An exact selected Netflix document instead uses a distinct bounded DOM companion adapter;
-it does not claim WebMCP or Accessibility execution. Search and ambiguous horizontal rows
+it does not claim WebMCP or Accessibility execution. Search and stale or over-cap horizontal rows
 remain unavailable, and dispatched outcomes require a separate explicit read.
 
 The browser uses the current `document.modelContext.getTools()` and

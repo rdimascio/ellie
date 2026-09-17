@@ -2,7 +2,15 @@ const productionOrigins = new Set(["https://www.netflix.com", "https://www.youtu
 const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);
 const companionBindingOrigins = new Set(["https://www.netflix.com"]);
 const mutationLedgers = new Map();
-const mutationTypes = new Set(["scrollViewport", "scrollRow", "open", "play", "pause", "seek"]);
+const mutationTypes = new Set([
+  "scrollViewport",
+  "scrollRow",
+  "scrollSelectedRow",
+  "open",
+  "play",
+  "pause",
+  "seek",
+]);
 const actionPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const nativeProtocol = "ellie.browser-webmcp.v1";
 const nativeHost = "org.ellie.browser_webmcp";
@@ -484,7 +492,7 @@ async function executeCompanion(request, controller) {
     typeof request.documentId !== "string" ||
     !request.command ||
     typeof request.command !== "object" ||
-    !["inspect", "scrollViewport", "scrollRow", "open", "play", "pause"].includes(
+    !["inspect", "scrollViewport", "scrollSelectedRow", "open", "play", "pause"].includes(
       request.command.type,
     )
   )

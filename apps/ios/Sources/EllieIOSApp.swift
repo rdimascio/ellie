@@ -15,12 +15,16 @@ struct EllieIOSApp: App {
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(
-                        "--ellie-ui-browser-complete-actions"))
+                        "--ellie-ui-browser-complete-actions"),
+                    netflixRows: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-netflix-voice-rows"))
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-native-scanner-sheet-fixture") {
                 NativeScannerSheetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-netflix-rows-fixture") {
+                BrowserTargetUITestFixtureView(netflixRows: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-read-only-fixture") {
                 BrowserTargetUITestFixtureView(readOnly: true)
