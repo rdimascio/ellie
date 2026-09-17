@@ -825,9 +825,29 @@ async function main() {
   const { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki } =
     await prepareAcceptanceEnvironment(ownedRoot, home, release, composed);
   const bridgeEvents: Array<{ type: string; status: string; value?: unknown }> = [];
+  type OwnedWindowState = {
+    tabMatches: boolean;
+    windowMatches: boolean;
+    urlMatches: boolean;
+    active: boolean;
+    complete: boolean;
+    focused: boolean;
+  };
+  const ownedWindowChecks: Array<{
+    before: OwnedWindowState;
+    after?: OwnedWindowState;
+    focusAttempted: boolean;
+  }> = [];
+  let prepareOwnedWindowForRefresh: (() => Promise<void>) | undefined;
   const operations = new BrowserWebMCPOperations(
     {
       async request(request, signal) {
+        if (composed && request.type === "binding.refresh") {
+          assert.ok(prepareOwnedWindowForRefresh, "The owned browser binding was not captured.");
+          if (signal.aborted) throw new Error("cancelled");
+          await prepareOwnedWindowForRefresh();
+          if (signal.aborted) throw new Error("cancelled");
+        }
         const response = await bridge.request(request, signal);
         bridgeEvents.push({
           type: request.type,
@@ -973,12 +993,13 @@ async function main() {
       url: `chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/popup.html`,
     });
     const bindExpression = composed
-      ? `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});const selected=await chrome.tabs.get(tab.id);const ownerWindow=await chrome.windows.get(selected.windowId);const reply=await chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}});return {reply,precondition:{tabActive:selected.active===true,tabComplete:selected.status==='complete',windowFocused:ownerWindow.focused===true}}})()`
+      ? `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});const selected=await chrome.tabs.get(tab.id);const ownerWindow=await chrome.windows.get(selected.windowId);const reply=await chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}});return {reply,anchor:{tabId:selected.id,windowId:selected.windowId,url:selected.url},precondition:{tabActive:selected.active===true,tabComplete:selected.status==='complete',windowFocused:ownerWindow.focused===true}}})()`
       : `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});return chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}})})()`;
     const bound = await agentJson<{ result: unknown }>(["eval", bindExpression]);
     const composedBinding = composed
       ? (bound.result as {
           reply?: { ok?: unknown; error?: unknown; value?: { availability?: unknown } };
+          anchor?: { tabId?: unknown; windowId?: unknown; url?: unknown };
           precondition?: {
             tabActive?: unknown;
             tabComplete?: unknown;
@@ -1005,6 +1026,45 @@ async function main() {
     await waitUntil(() => bridge.connected(), "The real browser did not open the native host.");
 
     if (composed) {
+      const anchor = composedBinding?.anchor;
+      assert.ok(Number.isInteger(anchor?.tabId) && Number(anchor?.tabId) > 0);
+      assert.ok(Number.isInteger(anchor?.windowId) && Number(anchor?.windowId) > 0);
+      assert.equal(anchor?.url, `${origin}/`);
+      const tabId = Number(anchor.tabId);
+      const windowId = Number(anchor.windowId);
+      const inspectOwnedWindow = async () => {
+        const inspected = await agentJson<{ result: OwnedWindowState }>([
+          "eval",
+          `(async()=>{const tab=await chrome.tabs.get(${tabId});const window=await chrome.windows.get(${windowId});return {tabMatches:tab.id===${tabId},windowMatches:tab.windowId===${windowId}&&window.id===${windowId},urlMatches:tab.url===${JSON.stringify(`${origin}/`)},active:tab.active===true,complete:tab.status==='complete',focused:window.focused===true}})()`,
+        ]);
+        return inspected.result;
+      };
+      const assertOwnedWindow = (state: OwnedWindowState) => {
+        assert.equal(state.tabMatches, true, "The selected browser tab changed.");
+        assert.equal(state.windowMatches, true, "The selected browser window changed.");
+        assert.equal(state.urlMatches, true, "The selected browser URL changed.");
+        assert.equal(state.active, true, "The selected browser tab is no longer active.");
+        assert.equal(state.complete, true, "The selected browser page is not complete.");
+      };
+      prepareOwnedWindowForRefresh = async () => {
+        const before = await inspectOwnedWindow();
+        const check: (typeof ownedWindowChecks)[number] = { before, focusAttempted: false };
+        ownedWindowChecks.push(check);
+        assertOwnedWindow(before);
+        if (!before.focused) {
+          // XCTest foregrounds Simulator. Restore genuine focus to this exact owned browser
+          // window only; the production extension still checks focus before dispatch.
+          check.focusAttempted = true;
+          await agentJson([
+            "eval",
+            `(async()=>{await chrome.windows.update(${windowId},{focused:true});return true})()`,
+          ]);
+        }
+        const after = await inspectOwnedWindow();
+        check.after = after;
+        assertOwnedWindow(after);
+        assert.equal(after.focused, true, "The owned browser window is not focused.");
+      };
       nativeJourney = await startNativeJourney(operations, ownedRoot, true);
       const native = nativeJourney;
       const token = randomBytes(32).toString("hex");
@@ -1080,6 +1140,7 @@ async function main() {
         },
         observedMedia: media,
         bridgeEvents: bridgeEvents.map(({ type, status }) => ({ type, status })),
+        ownedWindowChecks,
         replayAttempted: false,
         accessibilityFallbackAttempted: false,
         commands,
@@ -1406,6 +1467,7 @@ async function main() {
       actionResult,
       rollbackResult,
       bridgeEvents,
+      ownedWindowChecks,
       accessibilityFallbackAttempted: false,
       replayAttempted: false,
       commands,
