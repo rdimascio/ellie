@@ -23,6 +23,41 @@ function mock(responses: Array<{ status?: number; body: unknown }>) {
 
 const signal = () => new AbortController().signal;
 
+test("Google Calendar lists bounded choices and pulls only the selected calendar", async () => {
+  const transport = mock([
+    {
+      body: {
+        items: [
+          { id: "primary@example.test", summary: "Primary", primary: true },
+          { id: "other@example.test", summary: "Other", primary: false },
+        ],
+      },
+    },
+    { body: { id: "primary@example.test", summary: "Primary" } },
+    { body: { items: [], nextSyncToken: "other-cursor" } },
+  ]);
+  const provider = new GoogleCalendarProvider({ fetch: transport.fetch });
+  const calendars = await provider.calendars({ accessToken: "secret" }, signal());
+  assert.deepEqual(
+    calendars.map((item) => item.id),
+    ["primary@example.test", "other@example.test"],
+  );
+  assert.equal(new URL(transport.requests[0]!.url).pathname, "/calendar/v3/users/me/calendarList");
+  const result = await provider.pull({
+    credential: { accessToken: "secret" },
+    resourceId: "other@example.test",
+    window: { from: 1_700_000_000_000, to: 1_800_000_000_000 },
+    limit: 50,
+    signal: signal(),
+  });
+  assert.equal(result.cursor, "other-cursor");
+  assert.equal(
+    new URL(transport.requests[2]!.url).pathname,
+    "/calendar/v3/calendars/other%40example.test/events",
+  );
+  assert.equal(JSON.stringify(calendars).includes("secret"), false);
+});
+
 test("Google Calendar uses fixed incremental request shapes and exposes tombstones", async () => {
   const first = mock([
     { body: { id: "owner@example.test", summary: "Primary" } },

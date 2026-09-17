@@ -57,6 +57,16 @@ function requiredText(value: unknown, max = 2_000): string {
     throw new ProviderError("invalid_response", "The provider returned an invalid response.");
   return result;
 }
+function calendarId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > 1_024 ||
+    [...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
+  )
+    throw new ProviderError("invalid_response", "Calendar identifier is invalid.");
+  return value;
+}
 function instant(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
   const parsed = Date.parse(value);
@@ -252,6 +262,30 @@ export class GoogleCalendarProvider implements LifeProviderAdapter {
   constructor(options: ProviderAdapterOptions = {}) {
     this.client = new Client(options);
   }
+  async calendars(credential: ProviderCredential, signal: AbortSignal) {
+    const calendars: { id: string; label: string; primary: boolean }[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const url = new URL(`${GOOGLE_CALENDAR}/calendar/v3/users/me/calendarList`);
+      url.searchParams.set("maxResults", "100");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const value = await this.client.json(url.href, { headers: auth(credential) }, signal);
+      for (const raw of array(value.items)) {
+        const item = object(raw),
+          id = calendarId(item.id);
+        calendars.push({
+          id,
+          label: text(item.summary, 200) ?? "Calendar",
+          primary: item.primary === true,
+        });
+      }
+      if (calendars.length > 500)
+        throw new ProviderError("limit_exceeded", "Calendar list is too large.");
+      pageToken = text(value.nextPageToken, 4_096);
+      if (!pageToken) return calendars;
+    }
+    throw new ProviderError("limit_exceeded", "Calendar list is partial.");
+  }
   async identity(credential: ProviderCredential, signal: AbortSignal) {
     const value = await this.client.json(
       `${GOOGLE_CALENDAR}/calendar/v3/calendars/primary`,
@@ -265,13 +299,17 @@ export class GoogleCalendarProvider implements LifeProviderAdapter {
   }
   async pull(input: ProviderPullInput): Promise<ProviderPullResult> {
     boundedInput(input);
+    const resourceId = input.resourceId ?? "primary";
+    calendarId(resourceId);
     const identity = await this.identity(input.credential, input.signal),
       saved = continuation(input.continuation, this.id),
       baseCursor = text(saved?.cursor, 4_096) ?? input.cursor,
       pageToken = text(saved?.pageToken, 4_096),
       windowFrom = typeof saved?.windowFrom === "number" ? saved.windowFrom : input.window.from,
       windowTo = typeof saved?.windowTo === "number" ? saved.windowTo : input.window.to,
-      url = new URL(`${GOOGLE_CALENDAR}/calendar/v3/calendars/primary/events`);
+      url = new URL(
+        `${GOOGLE_CALENDAR}/calendar/v3/calendars/${encodeURIComponent(resourceId)}/events`,
+      );
     if (
       (saved?.windowFrom !== undefined && typeof saved.windowFrom !== "number") ||
       (saved?.windowTo !== undefined && typeof saved.windowTo !== "number") ||

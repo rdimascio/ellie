@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { LifeStore } from "../packages/life-core/src/index.ts";
-import { ConnectorBroker, type CredentialVault } from "../packages/life-connectors/src/broker.ts";
+import {
+  ConnectorBroker,
+  type ConnectedOAuth,
+  type CredentialVault,
+} from "../packages/life-connectors/src/broker.ts";
 import { ConnectorStore } from "../packages/life-connectors/src/store.ts";
 import type {
   LifeProviderAdapter,
@@ -153,6 +157,30 @@ test("connector pages advance stable cursors atomically and stay actor-private",
       false,
     );
 
+    assert.throws(() => store.selectCalendar("actor-b", created.id, connected.generation, "other"));
+    const selected = store.selectCalendar("actor-a", created.id, connected.generation, "other");
+    assert.equal(selected.selectedCalendarId, "other");
+    assert.equal(selected.cursor, undefined);
+    assert.equal(selected.lastSyncAt, undefined);
+    assert.deepEqual(store.observations("actor-a", created.id), []);
+    assert.throws(
+      () =>
+        store.ingest(
+          "actor-a",
+          created.id,
+          connected.generation,
+          {
+            accountId: "account-a",
+            items: [event("late-old-calendar")],
+            cursor: "late",
+            complete: true,
+          },
+          15,
+        ),
+      "an old calendar pull cannot repopulate after selection changes",
+    );
+    assert.deepEqual(store.observations("actor-a", created.id), []);
+
     store.revoke("actor-a", created.id);
     assert.equal(store.get("actor-a", created.id)?.state, "revoked");
     assert.equal(
@@ -207,6 +235,93 @@ class CalendarFixture implements LifeProviderAdapter {
     };
   }
 }
+
+test("calendar listing refreshes an expired credential but cannot revive a revoked connection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ellie-calendar-picker-"));
+  const life = new LifeStore(join(directory, "life.sqlite"));
+  const store = new ConnectorStore(join(directory, "connectors.sqlite"));
+  const tasks = new TaskRuntime({
+    directory: join(directory, "tasks"),
+    capabilityResolver: () => ["life.connections.read", "life.connections.write"],
+  });
+  const vault = new MemoryVault();
+  let seenToken = "";
+  let refreshGate: Promise<void> | undefined;
+  let refreshCount = 0;
+  let releaseRefresh: (() => void) | undefined;
+  let refreshStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  const oauth: ConnectedOAuth = {
+    begin() {
+      throw new Error("not used");
+    },
+    async complete() {
+      throw new Error("not used");
+    },
+    async refreshCredential(credential) {
+      refreshCount++;
+      if (refreshCount === 2) refreshStarted?.();
+      await refreshGate;
+      return { ...credential, accessToken: "refreshed-token", expiresAt: Date.now() + 3_600_000 };
+    },
+  };
+  const provider: LifeProviderAdapter = {
+    id: "google-calendar",
+    async identity() {
+      return { accountId: "owner", label: "Fixture calendar" };
+    },
+    async calendars(credential) {
+      seenToken = credential.accessToken;
+      return [{ id: "primary", label: "Primary", primary: true }];
+    },
+    async pull() {
+      throw new Error("not used");
+    },
+  };
+  const broker = new ConnectorBroker({ store, life, vault, providers: [provider], tasks, oauth });
+  try {
+    const connection = await broker.connect(
+      "owner",
+      "google-calendar",
+      {
+        accessToken: "expired-token",
+        clientId: "fixture-client",
+        refreshToken: "fixture-refresh",
+        expiresAt: Date.now() - 1,
+        grantedScopes: ["calendar.readonly"],
+      },
+      "observe",
+    );
+    assert.equal((await broker.calendars("owner", connection.id)).calendars.length, 1);
+    assert.equal(seenToken, "refreshed-token");
+    vault.put(`account-${connection.id}`, {
+      accessToken: "expired-again",
+      clientId: "fixture-client",
+      refreshToken: "fixture-refresh",
+      expiresAt: Date.now() - 1,
+      grantedScopes: ["calendar.readonly"],
+    });
+    refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const late = broker.calendars("owner", connection.id);
+    await started;
+    await broker.revoke("owner", connection.id);
+    releaseRefresh?.();
+    await assert.rejects(late);
+    assert.equal(vault.get(`account-${connection.id}`), undefined);
+    assert.equal(store.get("owner", connection.id)?.state, "revoked");
+  } finally {
+    releaseRefresh?.();
+    await broker.close();
+    await tasks.close();
+    store.close();
+    life.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 async function until(check: () => boolean, tick: () => Promise<void>) {
   for (let attempt = 0; attempt < 200; attempt++) {

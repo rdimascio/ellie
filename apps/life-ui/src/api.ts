@@ -52,6 +52,16 @@ export interface ConnectorConnection {
   lastSyncAt?: number;
   mode: ConnectorMode;
   error?: string;
+  selectedCalendarId?: string;
+}
+export interface ConnectionPreview {
+  state: ConnectorState;
+  lastSyncAt?: number;
+  error?: string;
+  items: (
+    | { kind: "event"; title: string; startAt?: number; startDate?: string }
+    | { kind: "message"; subject: string; from: string; snippet?: string; sentAt: number }
+  )[];
 }
 export interface ConnectorProvider {
   id: ConnectorProviderId;
@@ -149,6 +159,18 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ mode }),
       }),
+    calendars: (id: string) =>
+      request<{
+        selectedCalendarId: string;
+        calendars: { id: string; label: string; primary: boolean }[];
+      }>(`/api/connections/${encodeURIComponent(id)}/calendars`),
+    selectCalendar: (id: string, calendarId: string) =>
+      request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/calendar`, {
+        method: "POST",
+        body: JSON.stringify({ calendarId }),
+      }),
+    preview: (id: string) =>
+      request<ConnectionPreview>(`/api/connections/${encodeURIComponent(id)}/preview`),
   },
   groups: {
     list: () => request<{ groups: Group[] }>("/api/life/groups"),
