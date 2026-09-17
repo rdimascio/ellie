@@ -203,7 +203,7 @@ final class IOSGoogleAgendaStore: ObservableObject {
     }
 
     func bind(_ incoming: NativeEnrollmentCredential?) {
-        let next = incoming.map(Self.scope)
+        let next = incoming.map(Self.scopeForCredential)
         guard next != scope else { return }
         generation += 1
         operation?.cancel(); operation = nil
@@ -285,7 +285,7 @@ final class IOSGoogleAgendaStore: ObservableObject {
         snapshot = nil
         refreshedAt = nil
     }
-    private static func scope(_ credential: NativeEnrollmentCredential) -> String {
+    private static func scopeForCredential(_ credential: NativeEnrollmentCredential) -> String {
         let identity = "\(credential.origin.absoluteString)|\(credential.certificateSha256)|\(credential.client.id)|\(credential.token)"
         return SHA256.hash(data: Data(identity.utf8)).map { String(format: "%02x", $0) }.joined()
     }
