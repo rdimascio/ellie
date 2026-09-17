@@ -68,8 +68,18 @@
     const controls = buttons.filter(
       (button) =>
         visible(button) &&
-        !button.disabled &&
+        !button.matches(":disabled") &&
+        !button.closest("[inert]") &&
+        !button.closest("[aria-disabled='true']") &&
         !button.closest("[role='dialog'],[aria-modal='true']") &&
+        (() => {
+          const rect = button.getBoundingClientRect();
+          const hit = document.elementFromPoint(
+            rect.left + rect.width / 2,
+            rect.top + rect.height / 2,
+          );
+          return Boolean(hit && (hit === button || button.contains(hit)));
+        })() &&
         (button.getAttribute("aria-label") || button.getAttribute("title") || "")
           .trim()
           .toLowerCase() === (state === "paused" ? "play" : "pause"),
