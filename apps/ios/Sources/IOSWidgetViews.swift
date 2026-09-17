@@ -108,7 +108,7 @@ struct IOSWidgetEditor: View {
                             TextField("Place name", text: $placeName)
                                 .accessibilityIdentifier("ios-weather-name")
                             TextField("Latitude", text: $latitude)
-                                .keyboardType(.decimalPad).accessibilityIdentifier("ios-weather-latitude")
+                                .keyboardType(.numbersAndPunctuation).accessibilityIdentifier("ios-weather-latitude")
                             TextField("Longitude", text: $longitude)
                                 .keyboardType(.numbersAndPunctuation).accessibilityIdentifier("ios-weather-longitude")
                             Text("Ellie sends these coordinates to Open-Meteo only when enabled. It never requests this iPhone’s location. Settings apply to every weather widget.")

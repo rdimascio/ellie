@@ -20,12 +20,24 @@ struct HomeAppearanceUITestFixtureView: View {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("ellie-home-appearance-\(UUID().uuidString).json")
         precondition(!FileManager.default.fileExists(atPath: file.path))
+        let arguments = ProcessInfo.processInfo.arguments
+        let weatherFile: URL
+        if let marker = arguments.firstIndex(of: "--ellie-ui-weather-session"),
+           arguments.indices.contains(marker + 1),
+           let identifier = UUID(uuidString: arguments[marker + 1]) {
+            weatherFile = FileManager.default.temporaryDirectory
+                .appendingPathComponent("ellie-home-weather-\(identifier.uuidString).json")
+            if arguments.contains("--ellie-ui-weather-cleanup") {
+                try? FileManager.default.removeItem(at: weatherFile)
+            }
+        } else {
+            weatherFile = file.deletingPathExtension().appendingPathExtension("weather.json")
+        }
         _dashboards = StateObject(wrappedValue: DashboardStore(fileURL: file))
         _chores = StateObject(wrappedValue: ChoresStore(fileURL: file.deletingPathExtension().appendingPathExtension("chores.json")))
         _weather = StateObject(wrappedValue: WeatherStore(
-            fileURL: file.deletingPathExtension().appendingPathExtension("weather.json"),
-            client: OpenMeteoClient(transport: HomeAppearanceWeatherTransport(probe: probe)),
-            now: { Date(timeIntervalSince1970: 1_800_000_000) }))
+            fileURL: weatherFile,
+            client: OpenMeteoClient(transport: HomeAppearanceWeatherTransport(probe: probe))))
         _probe = StateObject(wrappedValue: probe)
         _enrollment = StateObject(wrappedValue: NativeEnrollmentStore(
             vault: HomeAppearanceVault(probe: probe),
@@ -61,6 +73,8 @@ struct HomeAppearanceUITestFixtureView: View {
                     .accessibilityIdentifier("home-fixture-life-opens")
                 Text("Fixture weather requests: \(probe.weatherCalls)")
                     .accessibilityIdentifier("home-fixture-weather-calls")
+                Button("Fail next weather request") { probe.failNextWeather = true }
+                    .accessibilityIdentifier("home-fixture-weather-fail-next")
             }
             .font(.caption)
             .padding(8)
@@ -80,17 +94,31 @@ private final class HomeAppearanceProbe: ObservableObject {
     @Published var transportCalls = 0
     @Published var lifeOpens = 0
     @Published var weatherCalls = 0
+    var failNextWeather = false
     func readVault() { vaultReads += 1 }
     func calledTransport() { transportCalls += 1 }
-    func calledWeather() { weatherCalls += 1 }
+    func calledWeather() -> Bool {
+        weatherCalls += 1
+        let shouldFail = failNextWeather
+        failNextWeather = false
+        return shouldFail
+    }
 }
 
 private actor HomeAppearanceWeatherTransport: WeatherTransport {
     let probe: HomeAppearanceProbe
     init(probe: HomeAppearanceProbe) { self.probe = probe }
     func data(for request: URLRequest, maximumBytes: Int) async throws -> (Data, HTTPURLResponse) {
-        await probe.calledWeather()
-        let json = #"{"current":{"time":1800000000,"temperature_2m":72.4,"apparent_temperature":71.1,"weather_code":2,"is_day":1,"wind_speed_10m":8.7},"current_units":{"temperature_2m":"°F","wind_speed_10m":"mp/h"}}"#
+        let shouldFail = await probe.calledWeather()
+        if shouldFail {
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 503,
+                httpVersion: nil, headerFields: nil)!)
+        }
+        let json = """
+            {"current":{"time":\(Int(Date().timeIntervalSince1970)),"temperature_2m":72.4,
+            "apparent_temperature":71.1,"weather_code":2,"is_day":1,"wind_speed_10m":8.7},
+            "current_units":{"temperature_2m":"°F","wind_speed_10m":"mp/h"}}
+            """
         return (Data(json.utf8), HTTPURLResponse(url: request.url!, statusCode: 200,
             httpVersion: nil, headerFields: nil)!)
     }
