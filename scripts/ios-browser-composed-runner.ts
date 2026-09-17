@@ -234,6 +234,24 @@ export async function runIOSBrowserComposed(input: Input) {
     await run("build", xcodebuild, [...buildArguments, "build-for-testing"], 780_000);
     const app = join(derived, "Build/Products/Debug-iphonesimulator/Ellie.app");
     await realpath(app);
+    const testInfo = join(
+      derived,
+      "Build/Products/Debug-iphonesimulator/EllieIOSUITests-Runner.app/PlugIns/EllieIOSUITests.xctest/Info.plist",
+    );
+    const builtFixtureID = (
+      await run(
+        "test-plist",
+        "/usr/bin/plutil",
+        ["-extract", "EllieComposedBrowserFixtureID", "raw", "-o", "-", testInfo],
+        30_000,
+        true,
+      )
+    ).output.trim();
+    assert.equal(
+      builtFixtureID,
+      identifier,
+      "The built UI test bundle lacks its owned fixture ID.",
+    );
     await run("install", "/usr/bin/xcrun", ["simctl", "install", simulator!, app], 60_000);
     const container = (
       await run(
