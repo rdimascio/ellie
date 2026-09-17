@@ -859,6 +859,42 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(app.buttons["ios-household-chores-save"].isEnabled)
     }
 
+    func testSyntheticHouseholdChoreDeleteCancelThenConfirmSendsOnlyOnce() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-household-chores-fixture"]
+        app.launch()
+        defer { app.terminate() }
+
+        let puts = app.staticTexts["household-chores-fixture-puts"]
+        XCTAssertTrue(puts.waitForExistence(timeout: 5))
+        app.buttons["ios-household-chores-access"].tap()
+        revealHouseholdControl(app.buttons["ios-household-chores-read"], in: app).tap()
+        let chore = app.staticTexts["Household laundry"]
+        XCTAssertTrue(chore.waitForExistence(timeout: 5))
+
+        let delete = app.buttons["Prepare deletion of Household laundry"]
+        revealHouseholdControl(delete, in: app).tap()
+        XCTAssertTrue(app.buttons["Prepare deletion"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(chore.exists)
+        XCTAssertFalse(app.staticTexts["Remove Household laundry · Alex"].exists)
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+
+        revealHouseholdControl(delete, in: app).tap()
+        app.buttons["Prepare deletion"].tap()
+        XCTAssertTrue(app.staticTexts["Remove Household laundry · Alex"].waitForExistence(timeout: 5),
+            "The chosen deletion must be reviewable before a shared write")
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        revealHouseholdControl(app.buttons["ios-household-chores-save"], in: app).tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore PUTs: 1"), object: puts)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 5), .completed)
+        app.buttons["household-chores-fixture-release"].tap()
+        XCTAssertTrue(app.staticTexts["No household chores yet"].waitForExistence(timeout: 5))
+        XCTAssertFalse(chore.exists)
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 1")
+    }
+
     private func revealHouseholdControl(_ control: XCUIElement, in app: XCUIApplication) -> XCUIElement {
         let list = app.collectionViews.firstMatch.exists
             ? app.collectionViews.firstMatch : app.scrollViews.firstMatch

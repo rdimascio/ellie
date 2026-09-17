@@ -61,11 +61,13 @@ struct HouseholdChoresView: View {
               }
               Spacer(minLength: 0)
               Button("Edit") { form = HouseholdChoreForm(chore: chore) }
+                .buttonStyle(.plain)
                 .disabled(!canPrepare)
                 .accessibilityIdentifier("ios-household-chore-edit-\(chore.id)")
               Button(role: .destructive) { deleting = chore } label: {
                 Image(systemName: "trash")
               }
+              .buttonStyle(.plain)
               .disabled(!canPrepare)
               .accessibilityLabel("Prepare deletion of \(chore.title)")
             }
@@ -129,9 +131,11 @@ struct HouseholdChoresView: View {
     }
     .confirmationDialog("Prepare deletion of \(deleting?.title ?? "this chore")?",
       isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } })) {
-      Button("Prepare deletion", role: .destructive) {
-        if let deleting { sync.prepareDelete(id: deleting.id) }
-        deleting = nil
+      if let choreToDelete = deleting {
+        Button("Prepare deletion", role: .destructive) {
+          sync.prepareDelete(id: choreToDelete.id)
+          deleting = nil
+        }
       }
       Button("Cancel", role: .cancel) { deleting = nil }
     } message: { Text("You will review the revised household copy before one save request.") }
