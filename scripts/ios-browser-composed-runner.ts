@@ -70,6 +70,7 @@ export async function runIOSBrowserComposed(input: Input) {
     cleanup = false,
   ): Promise<ChildResult> {
     if (interrupted && !cleanup) throw new Error(`Composed iOS run interrupted before ${label}.`);
+    if (active) throw new ComposedIOSCleanupError(`Unreaped direct child prevents ${label}.`);
     const log = createWriteStream(join(input.reportDirectory, `ios-${label}.log`), {
       flags: "wx",
       mode: 0o600,
@@ -176,7 +177,7 @@ export async function runIOSBrowserComposed(input: Input) {
       runtimes.runtimes.some(
         (runtime) =>
           runtime.identifier === "com.apple.CoreSimulator.SimRuntime.iOS-18-3" &&
-          runtime.version === "18.3" &&
+          runtime.version === "18.3.1" &&
           runtime.isAvailable,
       ),
       "Exact iOS 18.3 Simulator runtime is unavailable.",
@@ -308,16 +309,19 @@ export async function runIOSBrowserComposed(input: Input) {
         false,
         true,
       ).catch(() => {});
-      await run(
-        "delete",
-        "/usr/bin/xcrun",
-        ["simctl", "delete", simulator],
-        30_000,
-        false,
-        true,
-      ).catch(() => {
-        cleanupCertain = false;
-      });
+      if (active) cleanupCertain = false;
+      else
+        await run(
+          "delete",
+          "/usr/bin/xcrun",
+          ["simctl", "delete", simulator],
+          30_000,
+          false,
+          true,
+        ).catch(() => {
+          cleanupCertain = false;
+        });
+      if (active) cleanupCertain = false;
       if (cleanupCertain) {
         try {
           const devices = JSON.parse(

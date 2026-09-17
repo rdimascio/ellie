@@ -879,13 +879,14 @@ async function main() {
         const child = spawn(agentBrowserPath, [...common, ...launchArgs, ...args], {
           cwd: resolve("."),
           env: {
-            ...process.env,
+            HOME: process.env.HOME,
+            CODEX_HOME: process.env.CODEX_HOME,
             ...(composed ? {} : { HOME: home }),
             PATH: `${dirname(process.execPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
             LANG: "C",
             LC_ALL: "C",
             AGENT_BROWSER_MAX_OUTPUT: String(maximumCommandOutput),
-            AGENT_BROWSER_IDLE_TIMEOUT_MS: "180000",
+            AGENT_BROWSER_IDLE_TIMEOUT_MS: composed ? "1800000" : "180000",
             AGENT_BROWSER_SOCKET_DIR: join(ownedRoot, "ab"),
           },
           stdio: ["ignore", "pipe", "pipe"],
