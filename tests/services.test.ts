@@ -23,6 +23,7 @@ test("service Keychain failures are fixed redacted events", async () => {
       ["timeout", "keychain_timeout"],
       ["helper_unavailable", "keychain_helper_unavailable"],
       ["access_unavailable", "keychain_access_unavailable"],
+      ["cleanup_uncertain", "keychain_cleanup_uncertain"],
     ] as const) {
       const error = new KeychainFailure(reason);
       log.write(failureEvent(error));
