@@ -75,6 +75,12 @@ export async function runIOSBrowserComposed(input: Input) {
       flags: "wx",
       mode: 0o600,
     });
+    let logError = false;
+    let stopForLogError: (() => void) | undefined;
+    log.on("error", () => {
+      logError = true;
+      stopForLogError?.();
+    });
     const child = spawn(executable, args, {
       cwd: source,
       env: environment,
@@ -85,38 +91,40 @@ export async function runIOSBrowserComposed(input: Input) {
     let bytes = 0;
     let reason: string | undefined;
     let escalation: ReturnType<typeof setTimeout> | undefined;
+    let eventError: unknown;
     const stop = (why: string) => {
       if (reason) return;
       reason = why;
       try {
         if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ESRCH") reason = "terminate-failed";
       }
       escalation = setTimeout(() => {
         try {
           if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") reason = "reap-failed";
         }
       }, 5_000);
     };
     stopActive = stop;
-    await event({ kind: "child-start", label, timeoutMs, pid: child.pid ?? null });
+    stopForLogError = () => stop("log-error");
+    if (logError) stopForLogError();
     const collect = (chunk: Buffer) => {
       bytes += chunk.length;
       if (bytes > 32 * 1024 * 1024) {
         stop("output-limit");
         return;
       }
-      log.write(chunk);
+      if (!log.destroyed) log.write(chunk);
       if (capture) output += chunk.toString("utf8");
     };
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
     const deadline = setTimeout(() => stop("timeout"), timeoutMs);
     let reapDeadline: ReturnType<typeof setTimeout> | undefined;
-    const result = await new Promise<ChildResult & { reaped: boolean }>((done) => {
+    const completion = new Promise<ChildResult & { reaped: boolean }>((done) => {
       child.once("error", () => {
         reason ??= "spawn";
       });
@@ -126,10 +134,17 @@ export async function runIOSBrowserComposed(input: Input) {
         timeoutMs + 12_000,
       );
     });
+    try {
+      await event({ kind: "child-start", label, timeoutMs, pid: child.pid ?? null });
+    } catch (error) {
+      eventError = error;
+      stop("event-write");
+    }
+    const result = await completion;
     clearTimeout(deadline);
     if (reapDeadline) clearTimeout(reapDeadline);
     if (escalation) clearTimeout(escalation);
-    await new Promise<void>((done) => log.end(done));
+    if (!log.destroyed) await new Promise<void>((done) => log.end(done));
     await event({
       kind: "child-close",
       label,
@@ -160,6 +175,7 @@ export async function runIOSBrowserComposed(input: Input) {
       }
     }
     if (!result.reaped) throw new Error(`${label}: direct-child-cleanup-uncertain`);
+    if (eventError) throw new Error(`${label}: event-write-failed`, { cause: eventError });
     if (reason || result.code !== 0)
       throw new Error(`${label}: ${reason ?? `exit-${result.code}`}`);
     if (interrupted && !cleanup) throw new Error(`${label}: interrupted-${interrupted}`);
