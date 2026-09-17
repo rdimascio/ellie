@@ -35,23 +35,12 @@ class MemoryVault {
 /** Synthetic providers behind the real embedded Life routes; no Google network or OAuth. */
 export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grantedClientIds }) {
   const now = Date.now();
-  await mkdir(join(directory, "tasks"), { mode: 0o700 });
-  const life = new LifeStore(join(directory, "life.sqlite"));
-  const plugins = new PluginStore(join(directory, "plugins.sqlite"));
-  const tasks = new TaskRuntime({
-    directory: join(directory, "tasks"),
-    capabilityResolver: () => [
-      "life.records.read",
-      "life.records.write",
-      "life.connections.read",
-      "life.connections.write",
-    ],
-  });
-  const connectorStore = new ConnectorStore(join(directory, "connectors.sqlite"));
   const vault = new MemoryVault();
   const reads = new Map();
   let heldRead;
   let heldReadStarted = 0;
+  let heldReadCompleted = 0;
+  let heldHandled = 0;
   const event = (sourceKey, title, startAt) => ({
     sourceKey,
     sourceRevision: "fixture-v1",
@@ -136,20 +125,53 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
         heldRead = resolve;
       });
       heldRead = undefined;
+      heldReadCompleted += 1;
       return { status: "plain", text: "Late private fixture body" };
     },
   };
-  const connectors = new ConnectorBroker({
-    store: connectorStore,
-    life,
-    vault,
-    providers: [calendar, gmail],
-    tasks,
-  });
-  const nativeLife = NativeLifeAuthority.memory(nativeAuth, [actorId]);
-  let server;
-  let connectionIds;
+  let life, plugins, tasks, connectorStore, connectors, nativeLife, server, connectionIds;
+  async function closeOwned() {
+    const failures = [];
+    heldRead?.();
+    for (const close of [
+      () => server?.close(),
+      () => nativeLife?.close(),
+      () => connectors?.close(),
+      () => tasks?.close(),
+      () => connectorStore?.close(),
+      () => plugins?.close(),
+      () => life?.close(),
+    ]) {
+      try {
+        await close();
+      } catch {
+        failures.push(1);
+      }
+    }
+    if (failures.length) throw new Error("Synthetic Google fixture cleanup is uncertain.");
+  }
   try {
+    await mkdir(join(directory, "tasks"), { mode: 0o700 });
+    life = new LifeStore(join(directory, "life.sqlite"));
+    plugins = new PluginStore(join(directory, "plugins.sqlite"));
+    tasks = new TaskRuntime({
+      directory: join(directory, "tasks"),
+      capabilityResolver: () => [
+        "life.records.read",
+        "life.records.write",
+        "life.connections.read",
+        "life.connections.write",
+      ],
+    });
+    connectorStore = new ConnectorStore(join(directory, "connectors.sqlite"));
+    connectors = new ConnectorBroker({
+      store: connectorStore,
+      life,
+      vault,
+      providers: [calendar, gmail],
+      tasks,
+    });
+    nativeLife = NativeLifeAuthority.memory(nativeAuth, [actorId]);
     const calendarConnection = await connectors.connect(
       actorId,
       "google-calendar",
@@ -187,40 +209,41 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
     });
     await server.prepareEmbedded();
   } catch (error) {
-    heldRead?.();
-    await server?.close().catch(() => {});
-    await nativeLife.close().catch(() => {});
-    await connectors.close().catch(() => {});
-    await tasks.close().catch(() => {});
-    connectorStore.close();
-    plugins.close();
-    life.close();
+    try {
+      await closeOwned();
+    } catch {
+      const failure = new Error("Synthetic Google fixture setup cleanup is uncertain.");
+      failure.fixtureCleanupUncertain = true;
+      throw failure;
+    }
     throw error;
   }
   return {
     nativeLife,
     lifeApplication: {
-      handle: (request, response, context) => server.handleEmbedded(request, response, context),
+      async handle(request, response, context) {
+        const held = /^\/api\/connections\/[^/]+\/messages\/held_message$/.test(
+          request.url?.split("?", 1)[0] ?? "",
+        );
+        try {
+          return await server.handleEmbedded(request, response, context);
+        } finally {
+          if (held) heldHandled += 1;
+        }
+      },
     },
     connectionIds,
     control: {
       bodyReads: () => Object.fromEntries(reads),
       heldReadStarted: () => heldReadStarted,
+      heldReadCompleted: () => heldReadCompleted,
+      heldHandled: () => heldHandled,
       releaseHeld: () => {
         const release = heldRead;
         heldRead = undefined;
         release?.();
       },
     },
-    async close() {
-      heldRead?.();
-      await server.close();
-      await nativeLife.close();
-      await connectors.close();
-      await tasks.close();
-      connectorStore.close();
-      plugins.close();
-      life.close();
-    },
+    close: closeOwned,
   };
 }

@@ -189,6 +189,21 @@ test(
         truncated_message: 1,
         unavailable_message: 1,
       });
+      const held = call(
+        port,
+        tls.rootCert,
+        `/api/connections/${fixture.connectionIds.gmail}/messages/held_message`,
+        { cookie },
+      );
+      const startedDeadline = Date.now() + 5_000;
+      while (fixture.control.heldReadStarted() < 1 && Date.now() < startedDeadline)
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      assert.equal(fixture.control.heldReadStarted(), 1);
+      assert.equal(fixture.control.heldHandled(), 0);
+      fixture.control.releaseHeld();
+      assert.equal((await held).status, 200);
+      assert.equal(fixture.control.heldReadCompleted(), 1);
+      assert.equal(fixture.control.heldHandled(), 1);
       await fixture.nativeLife.revoke(allowed.id);
       assert.equal((await call(port, tls.rootCert, "/api/connections", { cookie })).status, 401);
     } finally {

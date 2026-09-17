@@ -8,6 +8,8 @@ export interface IOSGoogleLifeFixture {
   control: {
     bodyReads(): Record<string, number>;
     heldReadStarted(): number;
+    heldReadCompleted(): number;
+    heldHandled(): number;
     releaseHeld(): void;
   };
   close(): Promise<void>;

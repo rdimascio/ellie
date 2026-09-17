@@ -64,6 +64,7 @@ const endpointRequests = {
 const endpointResponses = { ...endpointRequests };
 const googleRequests = { session: 0, list: 0, agenda: 0, preview: 0, detail: 0, other: 0 };
 const googleResponses = { ...googleRequests };
+let heldResponsesClosed = 0;
 const googleTokens = {
   allowed: "12".repeat(32),
   denied: "34".repeat(32),
@@ -112,6 +113,10 @@ function recordEndpointRequest(request, response) {
     response.once("finish", () => {
       googleResponses[google] += 1;
     });
+    if (google === "detail" && path?.endsWith("/messages/held_message"))
+      response.once("close", () => {
+        heldResponsesClosed += 1;
+      });
     return;
   }
   const stage = endpointStage(request);
@@ -531,9 +536,10 @@ if (audio[44] >= 3) {
   hosted.server.removeAllListeners("request");
   hosted.server.on("request", (request, response) => {
     recordEndpointRequest(request, response);
-    const googleControl = /^\/__ellie-test\/google\/(held-started\/[123]|release)$/.exec(
-      request.url ?? "",
-    );
+    const googleControl =
+      /^\/__ellie-test\/google\/(held-started\/[123]|settled\/[123]|release)$/.exec(
+        request.url ?? "",
+      );
     if (googleControl) {
       void (async () => {
         const expected = `Bearer ${googleTokens.allowed}`;
@@ -553,9 +559,15 @@ if (audio[44] >= 3) {
         else {
           const target = Number(googleControl[1].at(-1));
           const deadline = Date.now() + 5_000;
-          while (Date.now() < deadline && googleLife.control.heldReadStarted() < target)
+          const ready = () =>
+            googleControl[1].startsWith("held-started/")
+              ? googleLife.control.heldReadStarted() >= target
+              : googleLife.control.heldReadCompleted() >= target &&
+                googleLife.control.heldHandled() >= target &&
+                heldResponsesClosed >= target;
+          while (Date.now() < deadline && !ready())
             await new Promise((resolveWait) => setTimeout(resolveWait, 20));
-          if (googleLife.control.heldReadStarted() < target) {
+          if (!ready()) {
             response.writeHead(503, {
               "content-type": "application/json",
               "cache-control": "no-store",
@@ -798,6 +810,7 @@ if (audio[44] >= 3) {
     "iOS app-hosted pinned HTTPS, native speech, cancellation, rejection, Keychain and built-policy checks passed.",
   );
 } catch (error) {
+  if (error?.fixtureCleanupUncertain) cleanupCertain = false;
   runFailure = error;
   console.error(error instanceof Error ? error.message : "ATS synthetic validation failed.");
 } finally {

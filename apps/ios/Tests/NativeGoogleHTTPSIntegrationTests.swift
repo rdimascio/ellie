@@ -67,7 +67,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  func testLateGmailBodyCannotPublishAfterCancelOrAccountChange() async throws {
+  func testLateGmailBodyCannotPublishAfterCancelCredentialChangeOrRevocation() async throws {
     let allowed = try credential("allowed")
     let denied = try credential("denied")
     let store = IOSGmailInboxStore(client: IOSPinnedGmailClient())
@@ -82,6 +82,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     try await control("held-started/1", credential: allowed)
     store.cancelRead()
     try await control("release", credential: allowed)
+    try await control("settled/1", credential: allowed)
     try await eventually { !store.busy }
     XCTAssertNil(store.detail)
     XCTAssertNil(store.selectedMessageID)
@@ -90,6 +91,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     try await control("held-started/2", credential: allowed)
     store.bind(denied)
     try await control("release", credential: allowed)
+    try await control("settled/2", credential: allowed)
     try await eventually { !store.busy }
     XCTAssertTrue(store.accounts.isEmpty)
     XCTAssertTrue(store.messages.isEmpty)
@@ -107,6 +109,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     try await control("held-started/3", credential: allowed)
     try await NativeEnrollmentTransport(timeout: 6).logout(revocable)
     try await control("release", credential: allowed)
+    try await control("settled/3", credential: allowed)
     try await eventually { !store.busy }
     XCTAssertNil(store.detail)
     XCTAssertNil(store.selectedMessageID)
