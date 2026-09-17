@@ -29,9 +29,16 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [cancelledBody], timeout: 1), .completed,
             "cancelled response must not restore private body")
         message.tap()
-        XCTAssertTrue(app.staticTexts["ios-gmail-body"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["ios-gmail-body"].label, "Transient fixture message body")
+        let body = app.staticTexts["ios-gmail-body"]
+        let form = app.scrollViews.firstMatch
+        XCTAssertTrue(form.waitForExistence(timeout: 5))
+        for _ in 0..<4 where !body.exists { form.swipeUp() }
+        XCTAssertTrue(body.waitForExistence(timeout: 5),
+            "An explicit second read must expose the body in the lazy Gmail Form")
+        XCTAssertEqual(body.label, "Transient fixture message body")
         app.buttons["Hold next body"].tap()
+        for _ in 0..<4 where !message.isHittable { form.swipeDown() }
+        XCTAssertTrue(message.isHittable)
         message.tap()
         let thirdRead = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", "Fixture body reads: 3"), object: reads)
