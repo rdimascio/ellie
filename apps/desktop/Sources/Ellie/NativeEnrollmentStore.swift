@@ -61,6 +61,9 @@ final class NativeEnrollmentStore: ObservableObject {
         "The camera could not scan an enrollment code. Check Camera access and try again.")
     }
   }
+  func scannerDismissed() {
+    if case .scanning = phase { phase = .idle }
+  }
   func confirm() {
     guard task == nil, case .confirming(let payload) = phase else { return }
     do {
