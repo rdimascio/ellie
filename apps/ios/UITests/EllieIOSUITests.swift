@@ -792,6 +792,42 @@ final class EllieIOSUITests: XCTestCase {
             app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
     }
 
+    func testBrowserFormRowButtonsDispatchOnlyTheTappedAction() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-row-actions-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)], timeout: 5),
+            .completed)
+        browser.tap()
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+
+        let up = revealBrowserButton("Up", in: app)
+        let down = revealBrowserButton("Down", in: app, forTap: true)
+        XCTAssertTrue(up.isEnabled, "An enabled adjacent button must not dispatch")
+        XCTAssertTrue(down.isEnabled)
+        down.tap()
+        let actions = app.staticTexts["browser-fixture-action-history"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Actions: scroll.down"),
+            object: actions)], timeout: 5), .completed)
+        XCTAssertEqual(actions.label, "Actions: scroll.down")
+
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        let play = revealBrowserButton("Play", in: app)
+        let pause = revealBrowserButton("Pause", in: app, forTap: true)
+        XCTAssertFalse(play.isEnabled, "The adjacent media action is intentionally disabled")
+        XCTAssertTrue(pause.isEnabled)
+        pause.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Actions: scroll.down,playback.pause"),
+            object: actions)], timeout: 5), .completed)
+        XCTAssertEqual(actions.label, "Actions: scroll.down,playback.pause")
+    }
+
     private func waitForFixtureMutations(_ expected: Int, in app: XCUIApplication) {
         let count = app.staticTexts["browser-fixture-mutation-count"]
         XCTAssertTrue(count.waitForExistence(timeout: 5))

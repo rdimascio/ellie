@@ -32,6 +32,8 @@ struct EllieIOSApp: App {
                 NativeScannerSheetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-row-actions-fixture") {
+                BrowserTargetUITestFixtureView(rowActions: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-read-only-fixture") {
                 BrowserTargetUITestFixtureView(readOnly: true)

@@ -240,8 +240,10 @@ let phase = 'home'; let query = ''; let playback = 'paused'; let mutationCount =
 let scrollInvocations = 0; document.body.dataset.scrollInvocations = '0';
 let scrollAbortObserved = 0; document.body.dataset.scrollAbortObserved = '0';
 let scrollEntries = 0; document.body.dataset.scrollEntries = '0';
+let scrollCallbacks = 0; document.body.dataset.scrollCallbacks = '0';
 document.body.dataset.scrollStage = 'none';
 document.body.dataset.scrollHasSignal = 'false';
+document.body.dataset.scrollDirectionState = 'none';
 const media = () => {
   document.querySelector('#phase').textContent = phase;
   document.querySelector('#query').textContent = query;
@@ -271,10 +273,16 @@ Promise.all([
     inputSchema: ${JSON.stringify(scrollSchema)},
     annotations: ${JSON.stringify(annotations)},
     execute: async ({direction}, context = {}) => {
+      if (${composed}) {
+        scrollCallbacks++; document.body.dataset.scrollCallbacks = String(scrollCallbacks);
+        document.body.dataset.scrollDirectionState =
+          direction === 'down' ? 'down' : direction === 'up' ? 'up' :
+          direction === undefined ? 'missing' : 'other';
+        document.body.dataset.scrollHasSignal = String(context.signal !== undefined);
+      }
       if (${composed} && direction === 'down') {
         scrollEntries++; document.body.dataset.scrollEntries = String(scrollEntries);
         document.body.dataset.scrollStage = 'entered';
-        document.body.dataset.scrollHasSignal = String(context.signal !== undefined);
       }
       context.signal?.throwIfAborted();
       if (${composed} && direction === 'down') {
@@ -903,6 +911,12 @@ async function main() {
           connectedBefore: bridge.connected(),
           contextBefore: before !== undefined,
         };
+        if (composed && request.type === "tool.execute") {
+          const direction = request.args.direction;
+          trace.directionState =
+            direction === "down" ? "down" : direction === "up" ? "up" :
+            direction === undefined ? "missing" : "other";
+        }
         if (composed && bridgeTrace.length < 64) bridgeTrace.push(trace);
         const onAbort = () => {
           trace.signalAbortedAtMonotonicMs = performance.now();
@@ -1186,7 +1200,7 @@ async function main() {
       await agent(["tab", fixtureTab.tabId]);
       const observed = await agentJson<{ result: unknown }>([
         "eval",
-        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal})",
+        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollCallbacks:Number(document.body.dataset.scrollCallbacks),scrollDirectionState:document.body.dataset.scrollDirectionState,scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal})",
       ]);
       const media = record(observed.result);
       assert.equal(media.phase, "watch");
@@ -1569,7 +1583,7 @@ async function main() {
       try {
         const inspection = await agentJson<{ result: unknown }>([
           "eval",
-          `(async()=>{const rows=await chrome.scripting.executeScript({target:{tabId:${ownedFixtureTabId}},world:'MAIN',func:()=>({scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal,mutations:Number(document.body.dataset.mutations),scrollTop:Math.round(document.querySelector('#viewport')?.scrollTop??-1)})});return rows[0]?.result??null})()`,
+          `(async()=>{const rows=await chrome.scripting.executeScript({target:{tabId:${ownedFixtureTabId}},world:'MAIN',func:()=>({scrollCallbacks:Number(document.body.dataset.scrollCallbacks),scrollDirectionState:document.body.dataset.scrollDirectionState,scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal,mutations:Number(document.body.dataset.mutations),scrollTop:Math.round(document.querySelector('#viewport')?.scrollTop??-1)})});return rows[0]?.result??null})()`,
         ]);
         fixtureAtFailure = inspection.result;
       } catch {

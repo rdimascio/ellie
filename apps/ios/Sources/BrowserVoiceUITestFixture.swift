@@ -155,15 +155,21 @@ struct BrowserTargetUITestFixtureView: View {
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
 
   private let credential: NativeEnrollmentCredential
+  private let rowActions: Bool
 
-  init(readOnly: Bool = false, unavailablePlayback: Bool = false) {
+  init(readOnly: Bool = false, unavailablePlayback: Bool = false, rowActions: Bool = false) {
     let credential = readOnly
       ? BrowserVoiceUITestFixture.readOnlyCredential : BrowserVoiceUITestFixture.credential
     self.credential = credential
+    self.rowActions = rowActions
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
+      completeActions: rowActions,
       siteOverride: unavailablePlayback
-        ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil) : nil)
+        ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil)
+        : rowActions
+          ? BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1)
+          : nil)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport(readOnly: readOnly)))
@@ -185,6 +191,10 @@ struct BrowserTargetUITestFixtureView: View {
           .accessibilityIdentifier("browser-fixture-mutation-count")
         Text("Fixture reads: \(browserTransport.readNodeIDs.joined(separator: ","))")
           .accessibilityIdentifier("browser-fixture-read-history")
+        if rowActions {
+          Text("Actions: \(browserTransport.actionHistory.joined(separator: ","))")
+            .accessibilityIdentifier("browser-fixture-action-history")
+        }
       }
       .font(.caption2)
       .padding(4)
@@ -418,6 +428,7 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
 {
   @Published private(set) var mutationCount = 0
   @Published private(set) var readNodeIDs: [String] = []
+  @Published private(set) var actionHistory: [String] = []
   private var failNextRead: Bool
   private let completeActions: Bool
   private let siteOverride: BrowserPhoneSite?
@@ -466,7 +477,13 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
       }
       return .command(
         source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
-    case .scroll, .playback:
+    case .scroll(let direction, _):
+      actionHistory.append("scroll.\(direction.rawValue)")
+      mutationCount += 1
+      return .command(
+        source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+    case .playback(let intent, _):
+      actionHistory.append(intent == .play ? "playback.play" : "playback.pause")
       mutationCount += 1
       return .command(
         source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
