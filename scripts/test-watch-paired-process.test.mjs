@@ -2,12 +2,21 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { performance } from "node:perf_hooks";
-import { createOwnedProcessRunner } from "./watch-paired-owned-process.mjs";
+import { createOwnedProcessRunner, ownedCleanupTargets } from "./watch-paired-owned-process.mjs";
 
 function runner(overrides = {}) {
   return createOwnedProcessRunner({ cwd: process.cwd(), env: process.env,
     deadline: performance.now() + 5_000, termGraceMs: 40, reapGraceMs: 40, ...overrides });
 }
+
+test("phone-only creation still has an owned cleanup target", () => {
+  assert.deepEqual(ownedCleanupTargets(undefined, "11111111-1111-1111-1111-111111111111"),
+    [["phone", "11111111-1111-1111-1111-111111111111"]]);
+  assert.deepEqual(ownedCleanupTargets("22222222-2222-2222-2222-222222222222",
+    "11111111-1111-1111-1111-111111111111"),
+  [["watch", "22222222-2222-2222-2222-222222222222"],
+    ["phone", "11111111-1111-1111-1111-111111111111"]]);
+});
 
 test("missing executable closes its owned child and leaves command lane usable", async () => {
   const commands = runner();

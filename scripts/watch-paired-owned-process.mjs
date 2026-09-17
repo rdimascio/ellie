@@ -2,6 +2,10 @@ import { spawn } from "node:child_process";
 import { closeSync, openSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 
+export function ownedCleanupTargets(watchID, phoneID) {
+  return [["watch", watchID], ["phone", phoneID]].filter(([, id]) => id !== undefined);
+}
+
 // One retained direct child at a time. An unreaped child closes the command lane permanently.
 export function createOwnedProcessRunner({ cwd, env, deadline, output, spawnCommand = spawn,
   clock = () => performance.now(), termGraceMs = 5_000, reapGraceMs = 8_000 }) {

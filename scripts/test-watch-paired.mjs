@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { resolve, dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createOwnedProcessRunner } from "./watch-paired-owned-process.mjs";
+import { createOwnedProcessRunner, ownedCleanupTargets } from "./watch-paired-owned-process.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const project = join(root, "apps/ios/EllieIOS.xcodeproj");
@@ -187,8 +187,8 @@ try {
   receipt.status = "failed";
 } finally {
   let cleanupCertain = !creationUncertain && commands.certain && !commands.active;
-  for (const [kind, id] of [["watch", watchID], ["phone", phoneID]]) {
-    if (!id || !cleanupCertain) break;
+  for (const [kind, id] of ownedCleanupTargets(watchID, phoneID)) {
+    if (!cleanupCertain) break;
     for (const action of ["shutdown", "delete"]) {
       if (!commands.certain || commands.active) { cleanupCertain = false; break; }
       try {
