@@ -57,13 +57,16 @@ jobs:
           ELLIE_IOS_KEEP_RESULT: "1"
         run: bun run ios:test
       - name: Test native iPhone pinned HTTPS and Keychain
+        id: native_ios_ats
         run: bun run test:ios-ats
-      - name: Preserve native iPhone transport failure result
-        if: failure()
+      - name: Preserve native iPhone transport test evidence
+        if: ${{ always() && steps.native_ios_ats.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: native-iphone-transport-test-result
-          path: test-results/native-ios-ats.xcresult
+          path: |
+            test-results/native-ios-ats-summary.json
+            test-results/native-ios-ats.xcresult
           retention-days: 3
       - name: Preserve native iPhone UI result and appearance attachments
         if: ${{ always() && steps.native_ios_ui.outcome != 'skipped' }}
