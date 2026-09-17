@@ -275,7 +275,19 @@ function guardCleanOuterResult(result: ReturnType<typeof spawnSync> | undefined)
     throw new Error("fixture runner termination is uncertain");
 }
 
-async function requireRecordedGroupsAbsent(root: string) {
+async function requireRecordedGroupsAbsent(
+  root: string,
+  {
+    zeroSignal = process.kill,
+    now = () => performance.now(),
+    pause = (milliseconds: number) =>
+      new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)),
+  }: {
+    zeroSignal?: typeof process.kill;
+    now?: () => number;
+    pause?: (milliseconds: number) => Promise<unknown>;
+  } = {},
+) {
   let groups: number[] = [];
   try {
     groups = (await readFile(join(root, "mock-process-groups"), "utf8"))
@@ -287,22 +299,87 @@ async function requireRecordedGroupsAbsent(root: string) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   assert.ok(groups.every((value) => Number.isInteger(value) && value > 1));
-  const deadline = performance.now() + 2_000;
-  while (performance.now() < deadline) {
-    let present = false;
-    for (const group of groups) {
-      try {
-        process.kill(-group, 0);
-        present = true;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-      }
-    }
-    if (!present) return;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  const deadline = now() + 2_000;
+  while (now() < deadline) {
+    if (recordedGroupsAbsent(groups, zeroSignal)) return;
+    await pause(20);
   }
   throw new Error("mock process-group cleanup remains uncertain");
 }
+
+function recordedGroupsAbsent(groups: number[], zeroSignal: typeof process.kill) {
+  for (const group of groups) {
+    try {
+      zeroSignal(-group, 0);
+      return false;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EPERM") return false;
+      if (code !== "ESRCH") throw error;
+    }
+  }
+  return true;
+}
+
+test("an EPERM zero-signal observation never establishes process-group absence", () => {
+  const calls: Array<[number, number | NodeJS.Signals | undefined]> = [];
+  let observation = 0;
+  const zeroSignal: typeof process.kill = (pid, signal) => {
+    calls.push([pid, signal]);
+    const error = new Error("kill EPERM") as NodeJS.ErrnoException;
+    error.code = observation++ === 0 ? "EPERM" : "ESRCH";
+    throw error;
+  };
+  assert.equal(recordedGroupsAbsent([12345], zeroSignal), false);
+  assert.equal(recordedGroupsAbsent([12345], zeroSignal), true);
+  assert.deepEqual(calls, [
+    [-12345, 0],
+    [-12345, 0],
+  ]);
+});
+
+test("persistent EPERM exhausts the existing bound and retains owned evidence", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-ios-group-observation-"));
+  let now = 0;
+  const calls: Array<[number, number | NodeJS.Signals | undefined]> = [];
+  try {
+    await writeFile(join(root, "mock-process-groups"), "12345\n");
+    await writeFile(join(root, "owned-evidence"), "retained\n");
+    await assert.rejects(
+      requireRecordedGroupsAbsent(root, {
+        zeroSignal: (pid, signal) => {
+          calls.push([pid, signal]);
+          const error = new Error("kill EPERM") as NodeJS.ErrnoException;
+          error.code = "EPERM";
+          throw error;
+        },
+        now: () => now,
+        pause: async (milliseconds) => {
+          now += milliseconds;
+        },
+      }),
+      /mock process-group cleanup remains uncertain/,
+    );
+    assert.equal(await readFile(join(root, "owned-evidence"), "utf8"), "retained\n");
+    assert.ok(calls.length > 1);
+    assert.ok(calls.every(([pid, signal]) => pid === -12345 && signal === 0));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unexpected zero-signal errors stop observation", () => {
+  const error = new Error("kill EINVAL") as NodeJS.ErrnoException;
+  error.code = "EINVAL";
+  assert.throws(
+    () =>
+      recordedGroupsAbsent([12345], (_pid, signal) => {
+        assert.equal(signal, 0);
+        throw error;
+      }),
+    (observed) => observed === error,
+  );
+});
 
 test("early process failure preserves a diagnostic without an xcresult", async () => {
   const { diagnostic, result } = await runFixture("nonzero");
