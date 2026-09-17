@@ -56,6 +56,10 @@ struct NativeEnrollmentView: View {
             LifeWebView(credential: LifeWebCredential(enrollment: credential))
               .id(credential.client.id)
           }
+          NavigationLink("Read Gmail") {
+            IOSGmailInboxView(credential: credential)
+              .id(credential.client.id)
+          }
         }
         Section {
           Button("Log out from coordinator", role: .destructive) {
