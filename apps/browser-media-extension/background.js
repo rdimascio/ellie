@@ -2,9 +2,14 @@ const productionOrigins = new Set([
   "https://www.netflix.com",
   "https://www.youtube.com",
   "https://tv.youtube.com",
+  "https://www.disneyplus.com",
 ]);
 const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);
-const companionBindingOrigins = new Set(["https://www.netflix.com", "https://tv.youtube.com"]);
+const companionBindingOrigins = new Set([
+  "https://www.netflix.com",
+  "https://tv.youtube.com",
+  "https://www.disneyplus.com",
+]);
 const mutationLedgers = new Map();
 const mutationTypes = new Set([
   "scrollViewport",
@@ -107,7 +112,9 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
   const controllerFile =
     new URL(before.url).origin === "https://tv.youtube.com"
       ? "youtube-tv-controller.js"
-      : "media-controller.js";
+      : new URL(before.url).origin === "https://www.disneyplus.com"
+        ? "disneyplus-controller.js"
+        : "media-controller.js";
   if (
     expectedBinding &&
     (before.url !== expectedBinding.url ||
