@@ -30,6 +30,7 @@ import { BrowserNodeExecutor } from "../../node/src/browser-executor.ts";
 import { BrowserWebMCPOperations } from "../../node/src/browser-operations.ts";
 import { BrowserAccessibilityRuntime } from "../../node/src/browser-accessibility-runtime.ts";
 import { BrowserOperationSelector } from "../../node/src/browser-operation-selector.ts";
+import { BrowserCompanionOperations } from "../../node/src/browser-companion-operations.ts";
 import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
 import { startBrowserKernelBridge } from "../../node/src/browser-kernel-bridge.ts";
 import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
@@ -722,6 +723,7 @@ async function main(): Promise<void> {
                   refresh ? webmcp.bindingRefresh(signal) : webmcp.bindingStatus(signal),
                 webmcp,
                 browserAccessibility,
+                new BrowserCompanionOperations(browserBridge),
               ),
             )
           : native;

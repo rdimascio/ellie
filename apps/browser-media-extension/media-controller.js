@@ -2,6 +2,7 @@
   if (globalThis.__ellieMediaController) return;
   const allowedOrigins = new Set(["https://www.netflix.com", "https://www.youtube.com"]);
   const youtubeOrigins = new Set(["https://www.youtube.com"]);
+  const netflixOrigins = new Set(["https://www.netflix.com"]);
   const snapshots = new Map();
   const cancelled = new Set();
   const seen = new Set();
@@ -75,7 +76,39 @@
     if (url.origin !== location.origin) return false;
     return youtubeOrigins.has(location.origin)
       ? url.pathname === "/watch" || url.pathname.startsWith("/shorts/")
-      : url.pathname.startsWith("/watch/") || url.pathname.startsWith("/title/");
+      : netflixOrigins.has(location.origin) &&
+          !url.username &&
+          !url.password &&
+          /^\/(?:watch|title)\/[0-9]{1,20}$/.test(url.pathname) &&
+          !url.hash &&
+          url.href.length <= 2048;
+  };
+  const scrollableRowFor = (anchor) => {
+    let row = anchor.parentElement;
+    while (row && row !== document.body) {
+      if (
+        row.scrollWidth > row.clientWidth + 2 &&
+        ["auto", "scroll"].includes(getComputedStyle(row).overflowX)
+      )
+        return row;
+      row = row.parentElement;
+    }
+    return null;
+  };
+  // Scan the current eligible DOM, not the capped title list in a prior read.
+  // More than 500 anchors cannot establish a unique row within this budget.
+  const uniqueVisibleRow = () => {
+    const anchors = document.querySelectorAll("a[href]");
+    if (anchors.length > 500) return undefined;
+    let selected;
+    for (const anchor of anchors) {
+      if (!visible(anchor) || !supportedAnchor(anchor)) continue;
+      const row = scrollableRowFor(anchor);
+      if (!row) continue;
+      if (selected && selected !== row) return undefined;
+      selected = row;
+    }
+    return selected;
   };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
@@ -117,10 +150,22 @@
     return values[0];
   };
   const siteObservation = () => {
-    if (!youtubeOrigins.has(location.origin)) throw new Error("unsupported_page");
+    if (!youtubeOrigins.has(location.origin) && !netflixOrigins.has(location.origin))
+      throw new Error("unsupported_page");
     const url = new URL(location.href);
-    const page =
-      url.pathname === "/"
+    const youtube = youtubeOrigins.has(location.origin);
+    const page = !youtube
+      ? /^\/login(?:\/|$)/.test(url.pathname)
+        ? "login"
+        : url.pathname === "/browse" ||
+            /^\/browse\/genre\/[0-9]{1,20}$/.test(url.pathname) ||
+            url.pathname === "/search" ||
+            /^\/title\/[0-9]{1,20}$/.test(url.pathname)
+          ? "browse"
+          : /^\/watch\/[0-9]{1,20}$/.test(url.pathname)
+            ? "watch"
+            : "unsupported"
+      : url.pathname === "/"
         ? "home"
         : url.pathname === "/results" &&
             url.searchParams.getAll("search_query").length === 1 &&
@@ -133,9 +178,16 @@
             : url.pathname === "/signin"
               ? "login"
               : "unsupported";
-    if (page !== "watch") return { provider: "youtube", page, playback: "unavailable" };
+    const provider = youtube ? "youtube" : "netflix";
+    if (
+      !youtube &&
+      page === "browse" &&
+      document.querySelector("[aria-modal='true'], [role='dialog'], input[type='password']")
+    )
+      return { provider, page: "unsupported", playback: "unavailable" };
+    if (page !== "watch") return { provider, page, playback: "unavailable" };
     const videos = [...document.querySelectorAll("video")];
-    if (videos.length > 16) return { provider: "youtube", page, playback: "ambiguous" };
+    if (videos.length > 16) return { provider, page, playback: "ambiguous" };
     const rendered = videos.filter((video) => {
       const rect = video.getBoundingClientRect();
       if (
@@ -158,18 +210,19 @@
       }
       return true;
     });
-    if (rendered.length > 1) return { provider: "youtube", page, playback: "ambiguous" };
-    if (rendered.length === 0) return { provider: "youtube", page, playback: "unavailable" };
+    if (rendered.length > 1) return { provider, page, playback: "ambiguous" };
+    if (rendered.length === 0) return { provider, page, playback: "unavailable" };
     // A visible video can be an advertisement. Never identify it as the selected title.
-    if (document.querySelector(".html5-video-player.ad-showing, [aria-modal='true']"))
-      return { provider: "youtube", page, playback: "ambiguous" };
+    if (
+      document.querySelector(".html5-video-player.ad-showing, [aria-modal='true'], [role='dialog']")
+    )
+      return { provider, page, playback: "ambiguous" };
     const video = rendered[0];
-    if (video.error || video.readyState < 2)
-      return { provider: "youtube", page, playback: "unavailable" };
+    if (video.error || video.readyState < 2) return { provider, page, playback: "unavailable" };
     const playback = video.paused || video.ended ? "paused" : "playing";
     const time = video.currentTime;
     return {
-      provider: "youtube",
+      provider,
       page,
       playback,
       ...(Number.isFinite(time) && time >= 0 && time <= 86_400
@@ -190,6 +243,18 @@
     if (seen.has(command.actionId)) throw new Error("duplicate_action");
     remember(seen, command.actionId);
     active(command, expectedUrl, deadline);
+    if (netflixOrigins.has(location.origin) && command.type !== "inspect") {
+      const site = siteObservation();
+      if (site.page === "login" || site.page === "unsupported") throw new Error("unsupported_page");
+      if ((command.type === "open" || command.type === "scrollRow") && site.page !== "browse")
+        throw new Error("unsupported_page");
+      if (
+        (command.type === "play" || command.type === "pause") &&
+        (site.page !== "watch" ||
+          site.playback !== (command.type === "play" ? "paused" : "playing"))
+      )
+        throw new Error("playback_unknown");
+    }
     const mutates = command.type !== "inspect" && command.type !== "observe";
     if (mutates && mutation) throw new Error("busy");
     if (mutates) mutation = command.actionId;
@@ -199,6 +264,7 @@
         return siteObservation();
       }
       if (command.type === "inspect") {
+        const site = siteObservation();
         const snapshotId = crypto.randomUUID();
         const entries = [];
         const anchors = document.querySelectorAll("a[href]");
@@ -208,12 +274,35 @@
           index += 1
         ) {
           const anchor = anchors[index];
-          if (!visible(anchor) || !supportedAnchor(anchor)) continue;
+          if (
+            site.page === "login" ||
+            site.page === "unsupported" ||
+            !visible(anchor) ||
+            !supportedAnchor(anchor)
+          )
+            continue;
           const title = titleFor(anchor);
           if (title) entries.push({ id: crypto.randomUUID(), title, anchor, href: anchor.href });
         }
+        if (netflixOrigins.has(location.origin)) {
+          const counts = new Map();
+          for (const entry of entries) counts.set(entry.href, (counts.get(entry.href) || 0) + 1);
+          for (let index = entries.length - 1; index >= 0; index -= 1) {
+            if (counts.get(entries[index].href) !== 1) entries.splice(index, 1);
+          }
+        }
         snapshots.clear();
-        snapshots.set(snapshotId, { session, url: location.href, created: Date.now(), entries });
+        const uniqueRow = site.page === "browse" ? uniqueVisibleRow() : undefined;
+        const rowCandidateId = uniqueRow
+          ? entries.find((entry) => scrollableRowFor(entry.anchor) === uniqueRow)?.id
+          : undefined;
+        snapshots.set(snapshotId, {
+          session,
+          url: location.href,
+          created: Date.now(),
+          entries,
+          rowCandidateId,
+        });
         const allVideos = [...document.querySelectorAll("video")];
         const videos = allVideos.length <= 16 ? allVideos.filter(visible) : [];
         const playback =
@@ -229,6 +318,11 @@
           snapshotId,
           candidates: entries.map(({ id, title }) => ({ id, title })),
           playback,
+          site:
+            netflixOrigins.has(location.origin) && site.page === "browse"
+              ? { ...site, horizontalScrollAvailable: Boolean(rowCandidateId) }
+              : site,
+          ...(rowCandidateId ? { rowCandidateId } : {}),
         };
       }
       if (command.type === "scrollViewport") {
@@ -275,16 +369,12 @@
           }
           throw new Error("navigation_not_observed");
         }
-        let row = entry.anchor.parentElement;
-        while (row && row !== document.body) {
-          if (
-            row.scrollWidth > row.clientWidth + 2 &&
-            ["auto", "scroll"].includes(getComputedStyle(row).overflowX)
-          )
-            break;
-          row = row.parentElement;
+        const row = scrollableRowFor(entry.anchor);
+        if (!row) throw new Error("row_scroll_unavailable");
+        if (netflixOrigins.has(location.origin)) {
+          if (snapshot.rowCandidateId !== entry.id || uniqueVisibleRow() !== row)
+            throw new Error("row_scroll_unavailable");
         }
-        if (!row || row === document.body) throw new Error("row_scroll_unavailable");
         active(command, expectedUrl, deadline);
         const before = row.scrollLeft;
         row.scrollBy({

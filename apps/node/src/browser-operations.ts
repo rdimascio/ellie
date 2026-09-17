@@ -28,7 +28,7 @@ export type BrowserBinding = {
   origin: string;
   url: string;
   expiresAt: number;
-  availability: "webmcp" | "accessibility";
+  availability: "webmcp" | "accessibility" | "companion";
 };
 type Tool = { handle: string; name: string; inputSchema: unknown };
 const exact = (value: unknown, keys: readonly string[]): Record<string, unknown> => {
@@ -112,13 +112,23 @@ export class BrowserWebMCPOperations {
       ...(hasAvailability ? ["availability"] : []),
     ]);
     const availability = hasAvailability ? value.availability : "webmcp";
-    if (availability !== "webmcp" && availability !== "accessibility") throw new Error();
+    if (
+      availability !== "webmcp" &&
+      availability !== "accessibility" &&
+      availability !== "companion"
+    )
+      throw new Error();
     if (typeof value.origin !== "string" || typeof value.url !== "string") throw new Error();
     const origin = new URL(value.origin);
     const url = new URL(value.url);
     if (origin.origin !== value.origin || origin.pathname !== "/" || origin.protocol !== "https:")
       throw new Error();
     if (url.origin !== origin.origin || url.username || url.password) throw new Error();
+    if (
+      (availability === "companion" && origin.origin !== "https://www.netflix.com") ||
+      (availability === "accessibility" && origin.origin !== "https://www.youtube.com")
+    )
+      throw new Error();
     if (!Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= Date.now())
       throw new Error();
     const checked: BrowserBinding = {
@@ -134,7 +144,7 @@ export class BrowserWebMCPOperations {
       this.observed.clear();
       this.currentRevision = nextRevision;
     }
-    if (availability === "accessibility") {
+    if (availability === "accessibility" || availability === "companion") {
       this.observed.clear();
       this.currentRevision = undefined;
     }
@@ -276,7 +286,7 @@ export class BrowserWebMCPOperations {
           typeof binding === "object" && binding.availability === "webmcp"
             ? "Browser tab connected."
             : binding === "unsupported" ||
-                (typeof binding === "object" && binding.availability === "accessibility")
+                (typeof binding === "object" && binding.availability !== "webmcp")
               ? "The connected page does not offer reviewed WebMCP tools."
               : "No reviewed browser tab is connected.",
         browser:

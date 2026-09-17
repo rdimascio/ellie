@@ -622,6 +622,15 @@ final class BrowserPhoneControlStore: ObservableObject {
   {
     guard let site = page.site else { return true }
     guard site.page != .login, site.page != .unsupported else { return false }
+    if site.provider == .netflix {
+      switch intent {
+      case .search: return false
+      case .openResult: return site.page == .browse
+      case .scroll(let direction) where direction == .left || direction == .right:
+        return site.page == .browse && site.horizontalScrollAvailable == true
+      default: break
+      }
+    }
     switch intent {
     case .play: return site.page == .watch && site.playback == .paused
     case .pause: return site.page == .watch && site.playback == .playing

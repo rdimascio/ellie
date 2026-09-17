@@ -6,6 +6,9 @@ this transport through the node executor. The shipping reviewed origin/tool map 
 installation and real-site acceptance remain open. The packaged node uses the authenticated
 Swift broker and [Accessibility runtime](browser-accessibility.md) when an explicitly bound
 page does not offer reviewed WebMCP tools.
+An exact selected Netflix document instead uses a distinct bounded DOM companion adapter;
+it does not claim WebMCP or Accessibility execution. Search and ambiguous horizontal rows
+remain unavailable, and dispatched outcomes require a separate explicit read.
 
 The browser uses the current `document.modelContext.getTools()` and
 `executeTool(RegisteredTool, arguments, { signal })` interface. Only exact reviewed tool

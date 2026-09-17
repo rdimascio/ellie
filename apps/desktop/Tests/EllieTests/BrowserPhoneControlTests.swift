@@ -75,6 +75,65 @@ final class BrowserPhoneControlTests: XCTestCase {
       .command(source: .accessibility, status: .unknown, revision: revision))
   }
 
+  func testNetflixCompanionObservationHasClosedProviderAndRowState() throws {
+    let revision = String(repeating: "c", count: 64)
+    func read(_ site: String) -> Data {
+      Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Netflix page observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    }
+    guard case .page(let page) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"netflix","page":"browse","playback":"unavailable","horizontalScrollAvailable":true}"#),
+      nodeID: "mac")
+    else { return XCTFail("Expected Netflix page") }
+    XCTAssertEqual(page.source, .companion)
+    XCTAssertEqual(page.site?.provider, .netflix)
+    XCTAssertEqual(page.site?.horizontalScrollAvailable, true)
+    let missingSite = Data(
+      #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]}}}}"#.utf8)
+    XCTAssertThrowsError(try decodeBrowserPhoneResponse(missingSite, nodeID: "mac"))
+    for invalid in [
+      #"{"provider":"netflix","page":"home","playback":"unavailable"}"#,
+      #"{"provider":"netflix","page":"login","playback":"playing"}"#,
+      #"{"provider":"youtube","page":"results","playback":"unavailable","horizontalScrollAvailable":true}"#,
+      #"{"provider":"youtube","page":"results","playback":"unavailable"}"#,
+      #"{"provider":"netflix","page":"watch","playback":"paused","horizontalScrollAvailable":true}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","horizontalScrollAvailable":1}"#,
+    ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
+  }
+
+  @MainActor
+  func testNetflixObservedControlsFailClosedBeforeDispatch() async {
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let cases: [(BrowserPhoneSite, BrowserVoiceIntent, Bool)] = [
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, horizontalScrollAvailable: true), .scroll(.right), true),
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, horizontalScrollAvailable: false), .scroll(.right), false),
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .search(query: "title"), false),
+      (BrowserPhoneSite(provider: .netflix, page: .login, playback: .unavailable,
+        currentTimeSeconds: nil), .openResult(index: 1), false),
+      (BrowserPhoneSite(provider: .netflix, page: .watch, playback: .paused,
+        currentTimeSeconds: 1), .play, true),
+    ]
+    for (site, intent, allowed) in cases {
+      let transport = BrowserPhoneFakeTransport(source: .companion, site: site)
+      let store = BrowserPhoneControlStore(
+        credential: credential(), transport: transport,
+        uncertainty: BrowserPhoneFakeUncertaintyStore())
+      XCTAssertTrue(store.refresh(on: node))
+      await eventually { store.phase == .ready }
+      XCTAssertEqual(store.canPerform(intent, on: node), allowed)
+      if !allowed {
+        XCTAssertFalse(store.perform(intent, on: node))
+        let actions = await transport.actions
+        XCTAssertEqual(actions.count, 2)
+      }
+    }
+  }
+
   @MainActor
   func testObservedYouTubeStateBlocksUnavailableControlsBeforeDispatch() async {
     let node = PhoneControlNode(
