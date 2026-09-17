@@ -105,6 +105,68 @@ final class IOSGmailInboxTests: XCTestCase {
             "text": "unsupported HTML"]), expectedID: "message_1"))
     }
 
+    func testProductionBrokerProjectionPreservesUnicodeAndPlainBodyStatuses() throws {
+        // Captured from ConnectorBroker.list/preview/messageDetail with an isolated synthetic
+        // Gmail adapter and observation. No account, credential, or household data is included.
+        let projection = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(#"""
+        {
+          "listing": {
+            "connections": [{
+              "id": "3e72be9d-9c16-477e-a848-52ec69423846", "provider": "gmail",
+              "label": "Family 👩‍👩‍👧‍👦", "state": "connected", "mode": "observe",
+              "lastSyncAt": 1800000000000
+            }],
+            "providers": [{
+              "id": "gmail", "label": "Gmail", "configured": false,
+              "setupMessage": "Register a Google desktop OAuth client in the host configuration to connect."
+            }]
+          },
+          "preview": {
+            "items": [{
+              "kind": "message", "messageId": "message_1", "subject": "Hello 👩‍👩‍👧‍👦",
+              "from": "sender@example.test", "to": ["owner@example.test"],
+              "snippet": "Family 👩‍👩‍👧‍👦", "sentAt": 1800000000000
+            }],
+            "lastSyncAt": 1800000000000, "state": "connected"
+          },
+          "detail": {
+            "messageId": "message_1", "subject": "Hello 👩‍👩‍👧‍👦",
+            "from": "sender@example.test", "to": ["owner@example.test"],
+            "sentAt": 1800000000000, "snippet": "Family 👩‍👩‍👧‍👦",
+            "status": "plain", "text": "Line one\r\nLine two\n"
+          }
+        }
+        """#.utf8)) as? [String: Any])
+        let listing = try XCTUnwrap(projection["listing"] as? [String: Any])
+        let preview = try XCTUnwrap(projection["preview"] as? [String: Any])
+        let detail = try XCTUnwrap(projection["detail"] as? [String: Any])
+        XCTAssertEqual(try IOSGmailWire.accounts(json(listing)).first?.label, "Family 👩‍👩‍👧‍👦")
+        XCTAssertEqual(try IOSGmailWire.preview(json(preview)).first?.subject, "Hello 👩‍👩‍👧‍👦")
+        XCTAssertEqual(try IOSGmailWire.detail(json(detail), expectedID: "message_1").text,
+            "Line one\r\nLine two\n")
+
+        var controlled = detail
+        controlled["subject"] = "Hello\u{0085}👩‍👩‍👧‍👦\u{202E}"
+        XCTAssertEqual(try IOSGmailWire.detail(json(controlled), expectedID: "message_1")
+            .message.subject, "Hello 👩‍👩‍👧‍👦 ")
+        var truncated = detail
+        truncated["status"] = "truncated"
+        truncated["text"] = String(repeating: "x", count: 32 * 1_024)
+        truncated["additionalPartsOmitted"] = true
+        let bounded = try IOSGmailWire.detail(json(truncated), expectedID: "message_1")
+        XCTAssertEqual(bounded.status, "truncated")
+        XCTAssertEqual(bounded.text?.utf8.count, 32 * 1_024)
+        XCTAssertTrue(bounded.additionalPartsOmitted)
+        var unavailable = detail
+        unavailable["status"] = "unavailable"
+        unavailable.removeValue(forKey: "text")
+        let noBody = try IOSGmailWire.detail(json(unavailable), expectedID: "message_1")
+        XCTAssertNil(noBody.text)
+        XCTAssertEqual(noBody.status, "unavailable")
+        unavailable["messageId"] = "../message_1"
+        XCTAssertThrowsError(try IOSGmailWire.detail(json(unavailable), expectedID: "../message_1"))
+    }
+
     @MainActor
     func testExplicitReadsCancelLateResultAndClearOnRevocationOrBackground() async {
         let client = GmailFixtureClient()

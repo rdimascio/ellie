@@ -39,10 +39,14 @@ enum IOSGmailWire {
     }
     private static func text(_ value: Any?, maximum: Int, allowEmpty: Bool = false) throws -> String {
         guard let value = value as? String, (allowEmpty || !value.isEmpty),
-              value.utf8.count <= maximum * 4, value.utf16.count <= maximum,
-              value.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+              value.utf8.count <= maximum * 4, value.utf16.count <= maximum
         else { throw IOSGmailFailure.invalidResponse }
-        return value
+        // Provider metadata is display text. Keep script and emoji joiners, but do not render
+        // terminal, bidi, or other non-printing controls from an external mailbox.
+        return value.unicodeScalars.map { scalar in
+            CharacterSet.controlCharacters.contains(scalar) &&
+                scalar.value != 0x200C && scalar.value != 0x200D ? " " : String(scalar)
+        }.joined()
     }
     private static func identifier(_ value: Any?, maximum: Int) throws -> String {
         let id = try text(value, maximum: maximum)
@@ -328,7 +332,7 @@ struct IOSGmailInboxView: View {
                     Text(notice).accessibilityIdentifier("ios-gmail-notice")
                 }
             } footer: {
-                Text("Requires an explicit Ellie Life account grant. This reads existing imports on your Mac; Gmail sync and account setup stay there.")
+                Text("Requires an explicit Ellie Life account grant. Account and message previews come from imports on your Mac. Selecting a message makes one fresh read-only Gmail body request; sync and account setup stay on your Mac.")
             }
             if !store.accounts.isEmpty {
                 Section("Gmail account") {
