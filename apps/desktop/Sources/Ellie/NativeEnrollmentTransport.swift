@@ -107,6 +107,51 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
     else { throw NativeEnrollmentFailure.invalidResponse }
     return (data, http)
   }
+
+  /// Only the two read-only Life account paths used by the native calendar widget.
+  /// The memory-only Life session is never put in a shared cookie jar or a URL.
+  func lifeCalendarGET(path: String, credential: LifeWebCredential, sessionToken: String)
+    async throws -> (Data, HTTPURLResponse)
+  {
+    guard let components = URLComponents(string: path),
+      components.scheme == nil, components.host == nil,
+      components.fragment == nil,
+      (path == "/api/connections" ||
+        (components.path.range(of: "^/api/connections/[A-Za-z0-9_-]{1,128}/agenda$", options: .regularExpression) != nil &&
+          components.queryItems?.count == 1 &&
+          components.queryItems?.first?.name == "timeZone" &&
+          components.queryItems?.first?.value?.range(of: "^[A-Za-z0-9_+./-]{1,80}$", options: .regularExpression) != nil)),
+      sessionToken.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+      credential.origin.scheme == "https",
+      let host = nativeTLSHost(credential.origin.host),
+      let url = URL(string: path, relativeTo: credential.origin)?.absoluteURL,
+      url.scheme == "https", url.host == credential.origin.host,
+      url.port == credential.origin.port, url.user == nil, url.password == nil,
+      url.fragment == nil
+    else { throw NativeEnrollmentFailure.invalidCode }
+    var request = URLRequest(
+      url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
+    request.httpMethod = "GET"
+    request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
+    request.setValue("__Host-ellie_life=\(sessionToken)", forHTTPHeaderField: "Cookie")
+    let delegate = PinnedSessionDelegate(
+      host: host, pin: credential.certificateSha256, maximumBytes: 48_000,
+      timeout: timeout, verificationDate: now())
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.httpCookieStorage = nil
+    configuration.urlCredentialStorage = nil
+    configuration.urlCache = nil
+    configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+    configuration.tlsMinimumSupportedProtocolVersion = .TLSv12
+    configuration.timeoutIntervalForRequest = timeout
+    configuration.timeoutIntervalForResource = timeout
+    let connection = URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
+    defer { connection.finishTasksAndInvalidate() }
+    let (data, response) = try await delegate.perform(request, in: connection)
+    guard let http = response as? HTTPURLResponse, http.url == url,
+      http.mimeType == "application/json" else { throw NativeEnrollmentFailure.invalidResponse }
+    return (data, http)
+  }
 }
 
 enum NativeTransportFailureCategory: String, Sendable {

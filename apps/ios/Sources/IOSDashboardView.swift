@@ -7,6 +7,7 @@ struct IOSDashboardList: View {
     @ObservedObject var enrollment: NativeEnrollmentStore
     @StateObject private var choresStore: ChoresStore
     @StateObject private var weatherStore: WeatherStore
+    @StateObject private var agendaStore: IOSGoogleAgendaStore
     #if DEBUG
     var uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)? = nil
     #endif
@@ -17,16 +18,18 @@ struct IOSDashboardList: View {
         self.enrollment = enrollment
         _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
         _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
+        _agendaStore = StateObject(wrappedValue: IOSGoogleAgendaStore())
     }
 
     #if DEBUG
     init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil,
-         weatherStore: WeatherStore? = nil,
+         weatherStore: WeatherStore? = nil, agendaStore: IOSGoogleAgendaStore? = nil,
          uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)?) {
         self.store = store
         self.enrollment = enrollment
         _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
         _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
+        _agendaStore = StateObject(wrappedValue: agendaStore ?? IOSGoogleAgendaStore())
         self.uiTestLifeDestination = uiTestLifeDestination
     }
     #endif
@@ -63,7 +66,8 @@ struct IOSDashboardList: View {
                             ForEach(store.state.dashboards) { dashboard in
                                 NavigationLink {
                                     IOSDashboardDetail(store: store, choresStore: choresStore,
-                                        weatherStore: weatherStore, dashboardID: dashboard.id)
+                                        weatherStore: weatherStore, agendaStore: agendaStore,
+                                        enrollment: enrollment, dashboardID: dashboard.id)
                                 } label: {
                                     HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 16) {
                                         if !dynamicTypeSize.isAccessibilitySize {
@@ -181,6 +185,13 @@ struct IOSDashboardList: View {
         } message: {
             Text("Importing replaces every dashboard and note saved on this iPhone.")
         }
+        .onAppear { agendaStore.bind(activeCredential) }
+        .onChange(of: enrollment.phase) { _, _ in agendaStore.bind(activeCredential) }
+    }
+
+    private var activeCredential: NativeEnrollmentCredential? {
+        if case .enrolled(let credential) = enrollment.phase { return credential }
+        return nil
     }
 
     private var coordinatorTitle: String {
@@ -274,6 +285,8 @@ private struct IOSDashboardDetail: View {
     @ObservedObject var store: DashboardStore
     @ObservedObject var choresStore: ChoresStore
     @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: IOSGoogleAgendaStore
+    @ObservedObject var enrollment: NativeEnrollmentStore
     let dashboardID: String
     @State private var editing = false
     @State private var adding = false
@@ -289,7 +302,8 @@ private struct IOSDashboardDetail: View {
             LazyVStack(spacing: 16) {
                 if let dashboard {
                     ForEach(dashboard.widgets) { widget in
-                        IOSWidgetCard(widget: widget, choresStore: choresStore, weatherStore: weatherStore, editing: editing,
+                        IOSWidgetCard(widget: widget, choresStore: choresStore, weatherStore: weatherStore,
+                            agendaStore: agendaStore, enrollment: enrollment, editing: editing,
                             edit: { editedWidget = widget },
                             earlier: { select(); store.moveWidget(id: widget.id, offset: -1) },
                             later: { select(); store.moveWidget(id: widget.id, offset: 1) },

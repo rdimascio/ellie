@@ -9,6 +9,7 @@ extension WidgetKind {
 
 struct IOSWidgetCard: View {
     let widget: DashboardWidget; @ObservedObject var choresStore: ChoresStore; @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: IOSGoogleAgendaStore; @ObservedObject var enrollment: NativeEnrollmentStore
     let editing: Bool; let edit: () -> Void; let earlier: () -> Void; let later: () -> Void; let remove: () -> Void; let isFirst: Bool; let isLast: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -27,6 +28,8 @@ struct IOSWidgetCard: View {
                 IOSChoresWidget(store: choresStore)
             } else if widget.type == .weather {
                 IOSWeatherWidget(store: weatherStore, configure: edit)
+            } else if widget.type == .calendar {
+                IOSGoogleAgendaWidget(store: agendaStore, enrollment: enrollment)
             } else { ContentUnavailableView("Not connected", systemImage: widget.type.iosSymbol, description: Text("This widget is ready for a future provider connection.")) }
             if editing {
                 HStack {

@@ -45,6 +45,28 @@ type StoredCredential = ProviderCredential & {
   grantedScopes?: string[];
 };
 const DAY = 86_400_000;
+const AGENDA_HORIZON = 30 * DAY;
+const AGENDA_LIMIT = 20;
+const civilDay = (value: string): number | undefined => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const instant = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value
+    ? instant
+    : undefined;
+};
+/** Preserve complete Unicode scalars when bounding a host-owned display field by UTF-16 units. */
+const boundedCalendarText = (value: string, maximum: number): string => {
+  let result = "",
+    units = 0;
+  for (const scalar of value) {
+    const point = scalar.codePointAt(0)!;
+    if (point >= 0xd800 && point <= 0xdfff) continue;
+    if (units + scalar.length > maximum) break;
+    result += scalar;
+    units += scalar.length;
+  }
+  return result;
+};
 const LABELS: Record<ProviderId, string> = {
   "google-calendar": "Google Calendar",
   gmail: "Gmail",
@@ -452,6 +474,113 @@ export class ConnectorBroker {
       )
       .filter((item) => item !== null);
     return { items, lastSyncAt: c.lastSyncAt, error: c.error, state: c.state };
+  }
+  /** A bounded projection of already imported events from this actor's selected calendar. */
+  agenda(actorId: string, id: string, displayTimeZone: string) {
+    const connection = this.current(actorId, id);
+    if (connection.provider !== "google-calendar" || connection.state === "revoked")
+      throw new Error("Calendar connection is unavailable.");
+    const now = this.now();
+    const horizonEnd = now + AGENDA_HORIZON;
+    if (!/^[A-Za-z0-9_+./-]{1,80}$/.test(displayTimeZone))
+      throw new Error("Calendar display time zone is invalid.");
+    let formatter: Intl.DateTimeFormat;
+    try {
+      formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: displayTimeZone,
+        calendar: "gregory",
+        numberingSystem: "latn",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+    } catch {
+      throw new Error("Calendar display time zone is invalid.");
+    }
+    const civilDate = (instant: number) => {
+      const parts = Object.fromEntries(
+        formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+      );
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    const firstDay = civilDate(now);
+    const lastDay = civilDate(horizonEnd);
+    const complete = connection.lastSyncAt !== undefined && !connection.continuation;
+    type AgendaEvent = {
+      title: string;
+      status: "confirmed" | "tentative" | "cancelled";
+      startAt?: number;
+      endAt?: number;
+      startDate?: string;
+      endDate?: string;
+      timeZone?: string;
+      sortAt: number;
+      tie: string;
+    };
+    const events = complete
+      ? this.store
+          .observations(actorId, id)
+          .flatMap((item): AgendaEvent[] => {
+            if (item.kind !== "event" || item.deleted || item.data.status === "cancelled")
+              return [];
+            const { startAt, endAt, startDate, endDate, timeZone, status } = item.data;
+            const title = boundedCalendarText(item.title, 160);
+            if (!title) return [];
+            if (
+              Number.isFinite(startAt) &&
+              Number.isFinite(endAt) &&
+              startAt! < endAt! &&
+              endAt! > now &&
+              startAt! < horizonEnd
+            )
+              return [
+                {
+                  title,
+                  startAt: startAt!,
+                  endAt: endAt!,
+                  ...(timeZone ? { timeZone: boundedCalendarText(timeZone, 80) } : {}),
+                  status,
+                  sortAt: startAt!,
+                  tie: item.sourceKey,
+                },
+              ];
+            const day = startDate ? civilDay(startDate) : undefined;
+            if (
+              day !== undefined &&
+              endDate &&
+              civilDay(endDate) !== undefined &&
+              startDate! < endDate &&
+              endDate > firstDay &&
+              startDate! <= lastDay
+            )
+              return [
+                {
+                  title,
+                  startDate,
+                  endDate,
+                  status,
+                  sortAt: day,
+                  tie: item.sourceKey,
+                },
+              ];
+            return [];
+          })
+          .sort((a, b) => a.sortAt - b.sortAt || a.tie.localeCompare(b.tie))
+          .slice(0, AGENDA_LIMIT)
+          .map(({ sortAt: _sortAt, tie: _tie, ...event }) => event)
+      : [];
+    return {
+      connectionId: connection.id,
+      label: boundedCalendarText(connection.label, 80),
+      state: connection.state,
+      selectedCalendarId: boundedCalendarText(connection.selectedCalendarId ?? "primary", 1_024),
+      displayTimeZone,
+      ...(connection.lastSyncAt !== undefined ? { lastSyncAt: connection.lastSyncAt } : {}),
+      complete,
+      horizonStart: now,
+      horizonEnd,
+      events,
+    };
   }
   async setMode(actorId: string, id: string, mode: ConnectionMode): Promise<void> {
     if (!["observe", "prepare"].includes(mode)) throw new TypeError("Connection mode is invalid.");

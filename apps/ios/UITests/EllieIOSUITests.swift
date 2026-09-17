@@ -1,6 +1,46 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testCalendarRequiresExplicitReadAndKeepsFailedReadVisiblyCached() throws {
+        let app = XCUIApplication()
+        let session = UUID().uuidString
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-calendar-session", session]
+        defer {
+            app.terminate()
+            app.launchArguments.append("--ellie-ui-calendar-cleanup")
+            app.launch()
+            app.terminate()
+        }
+        app.launch()
+        let calls = app.staticTexts["home-fixture-agenda-calls"]
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 0")
+        app.buttons["home-fixture-load-pairing"].tap()
+        openDashboard(named: "Home", in: app)
+        let refresh = revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app)
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 0",
+            "Opening the native calendar widget must not read an account")
+        refresh.tap()
+        XCTAssertTrue(app.buttons["ios-agenda-account"].waitForExistence(timeout: 5))
+        revealWeatherControl(app.buttons["ios-agenda-account"], in: app).tap()
+        app.buttons["Fixture Google account"].tap()
+        revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app).tap()
+        XCTAssertTrue(app.staticTexts["Fixture calendar event"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 3")
+        app.buttons["home-fixture-agenda-fail-next"].tap()
+        revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app).tap()
+        XCTAssertTrue(app.staticTexts["ios-agenda-message"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ios-agenda-message"].label.contains("Offline"))
+        XCTAssertTrue(app.staticTexts["Fixture calendar event"].exists,
+            "A failed read retains the same-session snapshot with a cached label")
+        app.terminate()
+        app.launch()
+        app.buttons["home-fixture-load-pairing"].tap()
+        openDashboard(named: "Home", in: app)
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 0")
+        XCTAssertFalse(app.staticTexts["Fixture calendar event"].exists,
+            "A relaunch must not redisplay old private event data before explicit Refresh")
+    }
+
     func testWeatherRequiresOptInUsesChosenPlaceAndCanBeDisabled() throws {
         let app = XCUIApplication()
         let weatherSession = UUID().uuidString
