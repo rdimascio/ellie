@@ -28,6 +28,7 @@ export const SERVICE_EVENTS = [
   "keychain_timeout",
   "keychain_helper_unavailable",
   "keychain_access_unavailable",
+  "keychain_cleanup_uncertain",
 ] as const;
 export type ServiceEvent = (typeof SERVICE_EVENTS)[number];
 export interface LogEntry {
@@ -104,6 +105,8 @@ export function failureEvent(error: unknown): ServiceEvent {
         return "keychain_helper_unavailable";
       case "access_unavailable":
         return "keychain_access_unavailable";
+      case "cleanup_uncertain":
+        return "keychain_cleanup_uncertain";
     }
   }
   switch ((error as NodeJS.ErrnoException | undefined)?.code) {

@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import {
   browserConfig,
   ensureState,
@@ -83,6 +86,131 @@ test(
     }
   },
 );
+test(
+  "Keychain caps helper output by bytes and settles only after the owned child closes",
+  { skip: process.platform !== "darwin" },
+  async () => {
+    let closed = false;
+    class SyntheticKeychain extends Keychain {
+      protected override spawnHelper(): ChildProcessWithoutNullStreams {
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            'process.stdout.write("é".repeat(40000)); setTimeout(() => process.exit(0), 5000)',
+          ],
+          { stdio: ["pipe", "pipe", "pipe"] },
+        );
+        child.once("close", () => (closed = true));
+        return child;
+      }
+    }
+    await assert.rejects(new SyntheticKeychain().get("synthetic.account"), (error: unknown) => {
+      assert.equal(closed, true);
+      return error instanceof KeychainFailure && error.reason === "access_unavailable";
+    });
+  },
+);
+test(
+  "Keychain timeout terminates and reaps the owned helper before a fixed failure",
+  { skip: process.platform !== "darwin" },
+  async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let child: ChildProcessWithoutNullStreams | undefined;
+    let closed = false;
+    let ready!: () => void;
+    const started = new Promise<void>((resolve) => (ready = resolve));
+    let late!: () => void;
+    const lateOutput = new Promise<void>((resolve) => (late = resolve));
+    let observed = "";
+    class SyntheticKeychain extends Keychain {
+      protected override spawnHelper(): ChildProcessWithoutNullStreams {
+        child = spawn(
+          process.execPath,
+          [
+            "-e",
+            'process.on("SIGTERM", () => process.stdout.write(JSON.stringify({value:"late-value"}))); process.stdout.write("ready"); setTimeout(() => process.exit(0), 5000)',
+          ],
+          { stdio: ["pipe", "pipe", "pipe"] },
+        );
+        child.stdout.once("data", ready);
+        child.stdout.on("data", (data: Buffer) => {
+          observed = (observed + data.toString("utf8")).slice(-64);
+          if (observed.includes("late-value")) late();
+        });
+        child.once("close", () => (closed = true));
+        return child;
+      }
+    }
+    try {
+      let settled = false;
+      const operation = new SyntheticKeychain().get("synthetic.account");
+      operation.finally(() => (settled = true)).catch(() => {});
+      await Promise.race([
+        started,
+        once(child!, "close", { signal: AbortSignal.timeout(6_000) }).then(() => {
+          throw new Error("Synthetic helper closed before readiness.");
+        }),
+      ]);
+      t.mock.timers.tick(60_000);
+      await Promise.race([
+        lateOutput,
+        once(child!, "close", { signal: AbortSignal.timeout(3_000) }).then(() => {
+          throw new Error("Synthetic helper closed before late output.");
+        }),
+      ]);
+      assert.equal(settled, false);
+      assert.equal(closed, false);
+      t.mock.timers.tick(250);
+      await assert.rejects(operation, (error: unknown) => {
+        assert.equal(closed, true);
+        assert.equal(child?.signalCode, "SIGKILL");
+        return error instanceof KeychainFailure && error.reason === "timeout";
+      });
+    } finally {
+      t.mock.timers.reset();
+      if (child && !closed) {
+        child.kill("SIGKILL");
+        await once(child, "close", { signal: AbortSignal.timeout(3_000) });
+      }
+    }
+  },
+);
+test("Keychain reports cleanup uncertainty if a synthetic child never confirms close", async (t) => {
+  if (process.platform !== "darwin") return;
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const signals: string[] = [];
+  const child = Object.assign(new EventEmitter(), {
+    stdin: Object.assign(new EventEmitter(), { end() {}, destroy() {} }),
+    stdout: new EventEmitter(),
+    stderr: { resume() {} },
+    exitCode: null,
+    signalCode: null,
+    pid: 7_777,
+    kill(signal: string) {
+      signals.push(signal);
+      return true;
+    },
+  }) as unknown as ChildProcessWithoutNullStreams;
+  class NeverClosingKeychain extends Keychain {
+    protected override spawnHelper(): ChildProcessWithoutNullStreams {
+      return child;
+    }
+  }
+  try {
+    const operation = new NeverClosingKeychain().get("synthetic.account");
+    t.mock.timers.tick(60_000);
+    t.mock.timers.tick(3_000);
+    await assert.rejects(
+      operation,
+      (error: unknown) => error instanceof KeychainFailure && error.reason === "cleanup_uncertain",
+    );
+    assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
+    child.emit("close", 0, null);
+  } finally {
+    t.mock.timers.reset();
+  }
+});
 test("packaged helper resolution is explicit, absolute, and preserves the developer fallback", () => {
   assert.equal(nativeHelperPath({}, "/synthetic/.ellie"), "/synthetic/.ellie/bin/ellie-macos");
   assert.equal(
