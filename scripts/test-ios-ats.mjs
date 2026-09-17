@@ -21,6 +21,7 @@ import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
 import { createIOSGoogleLifeFixture } from "./ios-google-life-fixture.mjs";
 import { fixtureNodeLauncher } from "./ios-fixture-node-launcher.mjs";
+import { verifiedATSResult } from "./ios-ats-result-summary.mjs";
 import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
 import { SpeechStartDiagnostics } from "./speech-start-diagnostics.mjs";
 
@@ -31,6 +32,7 @@ const environment = {
 };
 const owned = mkdtempSync(join(tmpdir(), "ellie-ios-ats-"));
 const resultBundle = resolve(root, "test-results/native-ios-ats.xcresult");
+const resultSummary = resolve(root, "test-results/native-ios-ats-summary.json");
 const unreapedChildren = new Set();
 let simulatorID,
   server,
@@ -296,6 +298,12 @@ try {
   try {
     lstatSync(resultBundle);
     throw new Error("A previous ATS result is retained; move or remove it before another run.");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  try {
+    lstatSync(resultSummary);
+    throw new Error("A previous ATS summary is retained; move or remove it before another run.");
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -747,6 +755,66 @@ if (audio[44] >= 3) {
       "test",
     ],
     { timeout: 600_000 },
+  );
+  enterDiagnosticStage("xcresult-summary");
+  const atsResult = verifiedATSResult(
+    JSON.parse(
+      await execute(
+        "xcrun",
+        [
+          "xcresulttool",
+          "get",
+          "test-results",
+          "summary",
+          "--path",
+          resultBundle,
+          "--format",
+          "json",
+        ],
+        { capture: true, timeout: 30_000 },
+      ),
+    ),
+    JSON.parse(
+      await execute(
+        "xcrun",
+        [
+          "xcresulttool",
+          "get",
+          "test-results",
+          "tests",
+          "--path",
+          resultBundle,
+          "--format",
+          "json",
+        ],
+        { capture: true, timeout: 30_000 },
+      ),
+    ),
+  );
+  writeFileSync(
+    resultSummary,
+    `${JSON.stringify(
+      {
+        ...atsResult,
+        toolchain: { xcode: platform.xcode, sdk: platform.sdk, runtime: platform.runtime },
+        sourceSha256: {
+          runner: createHash("sha256")
+            .update(readFileSync(fileURLToPath(import.meta.url)))
+            .digest("hex"),
+          googleTests: createHash("sha256")
+            .update(
+              readFileSync(resolve(root, "apps/ios/Tests/NativeGoogleHTTPSIntegrationTests.swift")),
+            )
+            .digest("hex"),
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    { flag: "wx", mode: 0o600 },
+  );
+  console.log(
+    `ATS xcresult: ${atsResult.counts.passed}/${atsResult.counts.total} passed, ${atsResult.counts.failed} failed, ${atsResult.counts.skipped} skipped; Google HTTPS ${atsResult.googleCases.length}/${atsResult.googleCases.length} passed.`,
   );
   if (remoteNodeReads !== 2 || remoteAppOpens !== 1) {
     throw new Error("The production native routes did not perform the expected finite operations.");
