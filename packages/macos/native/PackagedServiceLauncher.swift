@@ -4,7 +4,7 @@ import Darwin
 import Foundation
 
 private let launcherMaximumManifestBytes = 4 * 1024 * 1024
-private let launcherMaximumPayloadFiles = 2_048
+private let launcherMaximumPayloadFiles = 3_072
 private let launcherMaximumPayloadBytes = 512 * 1024 * 1024
 private let launcherMaximumPayloadEntries = 4_096
 private let launcherMaximumPayloadDepth = 16

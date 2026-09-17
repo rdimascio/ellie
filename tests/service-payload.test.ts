@@ -16,7 +16,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createReleaseArchive,
   extractVerifiedNode,
+  MAXIMUM_PAYLOAD_FILES,
   nativeArchitecture,
   prepareDependencies,
   stageApplication,
@@ -24,6 +26,8 @@ import {
   verifyManifest,
   verifyStagedLifeRuntime,
 } from "../scripts/build-service-payload.mjs";
+// @ts-expect-error The archive preflight remains directly executable JavaScript.
+import { zipEntries } from "../scripts/test-packaged-runtime.mjs";
 
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
@@ -67,6 +71,34 @@ async function temporary(t: test.TestContext, prefix: string): Promise<string> {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test(
+  "release ZIP omits AppleDouble metadata while preserving manifested file modes",
+  {
+    skip: process.platform !== "darwin",
+  },
+  async (t) => {
+    const directory = await temporary(t, "ellie-payload-zip-");
+    const release = join(directory, "EllieServices-test");
+    await mkdir(release);
+    const executable = join(release, "helper");
+    await writeFile(executable, "fixture\n", { mode: 0o755 });
+    execFileSync("/usr/bin/xattr", ["-w", "com.ellie.test.fixture", "metadata", executable]);
+    const archive = join(directory, "release.zip");
+
+    createReleaseArchive(release, archive);
+
+    const entries = zipEntries(await readFile(archive), "EllieServices-test") as Array<{
+      name: string;
+      mode: number;
+    }>;
+    assert.deepEqual(
+      entries.map((entry) => entry.name),
+      ["EllieServices-test/", "EllieServices-test/helper"],
+    );
+    assert.equal(entries[1]!.mode & 0o777, 0o755);
+  },
+);
 
 test("extracts only a checksum-verified target Node runtime and its license", async (t) => {
   const directory = await temporary(t, "ellie-node-archive-");
@@ -542,6 +574,49 @@ test("manifest verification rejects any payload mutation", async (t) => {
   await writeFile(runtime, "fixture", { mode: 0o755 });
   await chmod(runtime, 0o4755);
   await assert.rejects(verifyManifest(release), /unsafe mode/);
+});
+
+test("builder admits the finite native file limit and rejects files, entries, and depth beyond it", async (t) => {
+  const directory = await temporary(t, "ellie-payload-inventory-limits-");
+  const release = join(directory, "release");
+  const payload = join(release, "payload");
+  await mkdir(payload, { recursive: true, mode: 0o755 });
+  const bytes = Buffer.from("x");
+  const files = [];
+  for (let index = 0; index < MAXIMUM_PAYLOAD_FILES; index++) {
+    const name = `f${String(index).padStart(4, "0")}`;
+    await writeFile(join(payload, name), bytes, { mode: 0o644 });
+    files.push({ path: name, mode: 0o644, size: 1, sha256: digest(bytes) });
+  }
+  await writeFile(join(release, "SOURCE.txt"), sourceRecord());
+  await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest(files))}\n`);
+  const acceptedFiles = (await verifyManifest(release)).files;
+  assert.ok(Array.isArray(acceptedFiles));
+  assert.equal(acceptedFiles.length, 3_072);
+
+  const extra = join(payload, "f3072");
+  await writeFile(extra, bytes, { mode: 0o644 });
+  await assert.rejects(verifyManifest(release), /file or byte limit/);
+  await writeFile(
+    join(release, "manifest.json"),
+    `${JSON.stringify(manifest([...files, { path: "f3072", mode: 0o644, size: 1, sha256: digest(bytes) }]))}\n`,
+  );
+  await assert.rejects(verifyManifest(release), /unsupported shape/);
+  await rm(extra);
+  await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest(files))}\n`);
+
+  for (let index = 0; index < 1_025; index++)
+    await mkdir(join(payload, `d${String(index).padStart(4, "0")}`));
+  await assert.rejects(verifyManifest(release), /entry or depth limit/);
+  for (let index = 0; index < 1_025; index++)
+    await rm(join(payload, `d${String(index).padStart(4, "0")}`), { recursive: true });
+
+  let nested = payload;
+  for (let index = 0; index < 17; index++) {
+    nested = join(nested, `n${index}`);
+    await mkdir(nested);
+  }
+  await assert.rejects(verifyManifest(release), /entry or depth limit/);
 });
 
 test("manifest verification rejects linked release roots and mismatched source metadata", async (t) => {
