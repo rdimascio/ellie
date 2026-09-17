@@ -7,6 +7,7 @@ import SwiftUI
 struct HomeAppearanceUITestFixtureView: View {
     let accessibilityLayout: Bool
     let narrowLayout: Bool
+    let weatherFixtureEnabled: Bool
     @StateObject private var dashboards: DashboardStore
     @StateObject private var chores: ChoresStore
     @StateObject private var weather: WeatherStore
@@ -25,12 +26,14 @@ struct HomeAppearanceUITestFixtureView: View {
         if let marker = arguments.firstIndex(of: "--ellie-ui-weather-session"),
            arguments.indices.contains(marker + 1),
            let identifier = UUID(uuidString: arguments[marker + 1]) {
+            weatherFixtureEnabled = true
             weatherFile = FileManager.default.temporaryDirectory
                 .appendingPathComponent("ellie-home-weather-\(identifier.uuidString).json")
             if arguments.contains("--ellie-ui-weather-cleanup") {
                 try? FileManager.default.removeItem(at: weatherFile)
             }
         } else {
+            weatherFixtureEnabled = false
             weatherFile = file.deletingPathExtension().appendingPathExtension("weather.json")
         }
         _dashboards = StateObject(wrappedValue: DashboardStore(fileURL: file))
@@ -71,10 +74,12 @@ struct HomeAppearanceUITestFixtureView: View {
                     .accessibilityIdentifier("home-fixture-transport-calls")
                 Text("Fixture Life opens: \(probe.lifeOpens)")
                     .accessibilityIdentifier("home-fixture-life-opens")
-                Text("Fixture weather requests: \(probe.weatherCalls)")
-                    .accessibilityIdentifier("home-fixture-weather-calls")
-                Button("Fail next weather request") { probe.failNextWeather = true }
-                    .accessibilityIdentifier("home-fixture-weather-fail-next")
+                if weatherFixtureEnabled {
+                    Text("Fixture weather requests: \(probe.weatherCalls)")
+                        .accessibilityIdentifier("home-fixture-weather-calls")
+                    Button("Fail next weather request") { probe.failNextWeather = true }
+                        .accessibilityIdentifier("home-fixture-weather-fail-next")
+                }
             }
             .font(.caption)
             .padding(8)
