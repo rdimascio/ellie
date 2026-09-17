@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type ConnectorConnection, type ConnectorMode, type ConnectorProvider } from "./api";
+import {
+  api,
+  type ConnectionPreview,
+  type ConnectorConnection,
+  type ConnectorMode,
+  type ConnectorProvider,
+} from "./api";
 
 export function Connections() {
   const [connections, setConnections] = useState<ConnectorConnection[]>([]);
@@ -12,6 +18,30 @@ export function Connections() {
   const [copyStatus, setCopyStatus] = useState("");
   const listRequest = useRef(0);
   const actionInFlight = useRef(false);
+  const detailRequest = useRef(0);
+  const [detailId, setDetailId] = useState("");
+  const [preview, setPreview] = useState<ConnectionPreview | null>(null);
+  const [calendarOptions, setCalendarOptions] = useState<
+    { id: string; label: string; primary: boolean }[]
+  >([]);
+  const [calendarChoice, setCalendarChoice] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const detailSync = connections.find((item) => item.id === detailId)?.lastSyncAt;
+  useEffect(() => {
+    if (!detailId) return;
+    const current = connections.find((item) => item.id === detailId);
+    if (!current || current.state === "revoked") {
+      detailRequest.current++;
+      setDetailId("");
+      setPreview(null);
+      setCalendarOptions([]);
+      setCalendarChoice("");
+      setDetailError("");
+    }
+  }, [connections, detailId]);
+  useEffect(() => {
+    if (detailId && detailSync && !actionInFlight.current) void openDetails(detailId);
+  }, [detailId, detailSync]);
   const [pending, setPending] = useState<{
     provider: ConnectorProvider["id"];
     connectionId: string;
@@ -83,12 +113,25 @@ export function Connections() {
     setBusy(key);
     setError("");
     setNotice("");
+    if (detailId) {
+      detailRequest.current++;
+      setPreview(null);
+    }
     try {
       await operation();
       await load();
+      if (detailId && !key.startsWith("revoke:") && !key.startsWith("cancel:"))
+        await openDetails(detailId);
+      else if (key.startsWith("revoke:") || key.startsWith("cancel:")) {
+        setDetailId("");
+        setCalendarOptions([]);
+        setPreview(null);
+        setCalendarChoice("");
+      }
     } catch (caught) {
       try {
         await load();
+        if (detailId) await openDetails(detailId);
       } catch {
         /* Preserve the action failure. */
       }
@@ -98,6 +141,32 @@ export function Connections() {
     } finally {
       actionInFlight.current = false;
       setBusy("");
+    }
+  };
+  const openDetails = async (id: string) => {
+    const request = ++detailRequest.current;
+    setDetailId(id);
+    setPreview(null);
+    setCalendarOptions([]);
+    setCalendarChoice("");
+    setDetailError("");
+    try {
+      const connection = connections.find((item) => item.id === id);
+      const [nextPreview, calendars] = await Promise.all([
+        api.connections.preview(id),
+        connection?.provider === "google-calendar" && connection.state === "connected"
+          ? api.connections.calendars(id)
+          : Promise.resolve(null),
+      ]);
+      if (request !== detailRequest.current) return;
+      setPreview(nextPreview);
+      setCalendarOptions(calendars?.calendars ?? []);
+      setCalendarChoice(calendars?.selectedCalendarId ?? "");
+    } catch (caught) {
+      if (request === detailRequest.current)
+        setDetailError(
+          caught instanceof Error ? caught.message : "Imported activity is unavailable.",
+        );
     }
   };
   const connect = async (provider: ConnectorProvider) => {
@@ -250,6 +319,21 @@ export function Connections() {
                 </select>
               </label>
               <div className="connection-actions">
+                {connection.state !== "revoked" && (
+                  <button
+                    type="button"
+                    disabled={busy !== ""}
+                    onClick={() =>
+                      detailId === connection.id
+                        ? (detailRequest.current++, setDetailId(""), setPreview(null))
+                        : void openDetails(connection.id)
+                    }
+                  >
+                    {detailId === connection.id
+                      ? "Hide imported activity"
+                      : "View imported activity"}
+                  </button>
+                )}
                 <button
                   disabled={busy !== "" || connection.state === "revoked"}
                   onClick={() =>
@@ -270,6 +354,65 @@ export function Connections() {
                   Disconnect
                 </button>
               </div>
+              {detailId === connection.id && (
+                <div className="connection-status">
+                  {connection.provider === "google-calendar" && calendarOptions.length > 0 && (
+                    <label>
+                      Calendar to read
+                      <select
+                        value={calendarChoice}
+                        disabled={busy !== ""}
+                        onChange={(event) =>
+                          void run(`calendar:${connection.id}`, () =>
+                            api.connections.selectCalendar(connection.id, event.target.value),
+                          )
+                        }
+                      >
+                        {calendarChoice &&
+                          !calendarOptions.some((item) => item.id === calendarChoice) && (
+                            <option value={calendarChoice}>
+                              Previously selected calendar (unavailable)
+                            </option>
+                          )}
+                        {calendarOptions.map((calendar) => (
+                          <option key={calendar.id} value={calendar.id}>
+                            {calendar.label}
+                            {calendar.primary ? " (primary)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {detailError && <p role="alert">{detailError}</p>}
+                  {preview && (
+                    <>
+                      <p>
+                        {preview.lastSyncAt
+                          ? `Last imported ${new Date(preview.lastSyncAt).toLocaleString()}`
+                          : "No completed import yet."}
+                        {preview.error ? ` · Import needs attention: ${preview.error}` : ""}
+                      </p>
+                      {preview.items.length === 0 ? (
+                        <p>No imported activity to preview.</p>
+                      ) : (
+                        <ul>
+                          {preview.items.map((item, index) => (
+                            <li key={index}>
+                              {item.kind === "event"
+                                ? `${item.title}${item.startAt ? ` · ${new Date(item.startAt).toLocaleString()}` : item.startDate ? ` · ${item.startDate}` : ""}`
+                                : `${item.subject} · ${item.from}${item.snippet ? ` · ${item.snippet}` : ""}`}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <small>
+                        Private read-only preview. Gmail shows headers and a bounded snippet, not
+                        message bodies.
+                      </small>
+                    </>
+                  )}
+                </div>
+              )}
             </article>
           ))}
         </div>

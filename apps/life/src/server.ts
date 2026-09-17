@@ -1118,6 +1118,23 @@ export class LifeHttpServer {
         );
         return;
       }
+      const connectionRead = /^\/api\/connections\/([^/]+)\/(calendars|preview)$/.exec(path);
+      if (connectionRead && request.method === "GET") {
+        const connectors = this.options.connectors;
+        if (!connectors) throw new HttpError(503, "Connected accounts are unavailable.");
+        const id = identifier(decodeURIComponent(connectionRead[1]!));
+        const connection = connectors.store.get(this.actor.userId, id);
+        if (!connection || connection.state === "revoked")
+          throw new HttpError(404, "Connection is unavailable.");
+        this.send(
+          response,
+          200,
+          connectionRead[2] === "calendars"
+            ? await connectors.calendars(this.actor.userId, id)
+            : connectors.preview(this.actor.userId, id),
+        );
+        return;
+      }
       if (path.startsWith("/api/connections/") && request.method === "POST") {
         const connectors = this.options.connectors;
         if (!connectors) throw new HttpError(503, "Connected accounts are unavailable.");
@@ -1148,6 +1165,19 @@ export class LifeHttpServer {
             ? await this.options.openAuthorizationUrl(started.authorizationUrl).catch(() => false)
             : false;
           this.send(response, 200, { ...started, openedExternally });
+          return;
+        }
+        const calendarSelection = /^\/api\/connections\/([^/]+)\/calendar$/.exec(path);
+        if (calendarSelection) {
+          const id = identifier(decodeURIComponent(calendarSelection[1]!));
+          const connection = connectors.store.get(this.actor.userId, id);
+          if (!connection || connection.state === "revoked")
+            throw new HttpError(404, "Connection is unavailable.");
+          if (typeof body.calendarId !== "string" || body.calendarId.length > 1_024)
+            throw new HttpError(400, "Calendar selection is invalid.");
+          await connectors.selectCalendar(this.actor.userId, id, body.calendarId);
+          this.options.harness.invalidateActorContext?.(this.actor);
+          this.send(response, 200, { ok: true });
           return;
         }
         const match = /^\/api\/connections\/([^/]+)\/(refresh|revoke|mode)$/.exec(path);
