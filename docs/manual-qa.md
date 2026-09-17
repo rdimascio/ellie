@@ -14,6 +14,8 @@ Use a dashboard and records named **Ellie QA** so test data is easy to recognize
 
 ## Native iPhone browser voice — future build-specific session
 
+The [current service recovery record](validation/2026-09-17-service-credential-recovery.md) explains the execution Mac's credential gate and the expired temporary phone listener. Wait for the coordinator's recovered, identified candidate before IP01–IP07; a previously paired phone alone does not establish that its endpoint or execution Mac is available.
+
 These cases are the current product priority, but they are **not ready for owner QA from this document alone**. They require an identified iPhone build installed on a physical phone, completed coordinator enrollment, one explicitly granted Mac, the named browser build and an approved public test page. The coordinator must provide the exact build and target before the session. Simulator transcripts and in-memory transports do not satisfy these cases.
 
 The [September 16 recovery validation](validation/2026-09-16-native-phone-recovery.md) records the passing automated restart and failed-read checks. Physical IP01–IP07 acceptance remains pending for the identified owner build.
