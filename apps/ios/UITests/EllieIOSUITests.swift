@@ -796,6 +796,7 @@ final class EllieIOSUITests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-browser-row-actions-fixture"]
         app.launch()
+        defer { app.terminate() }
         let browser = app.buttons["Control selected Mac browser"]
         XCTAssertTrue(browser.waitForExistence(timeout: 5))
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
@@ -815,6 +816,8 @@ final class EllieIOSUITests: XCTestCase {
             predicate: NSPredicate(format: "label == %@", "Actions: scroll.down"),
             object: actions)], timeout: 5), .completed)
         XCTAssertEqual(actions.label, "Actions: scroll.down")
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 1")
 
         revealBrowserButton("Read current page", in: app, forTap: true).tap()
         let play = revealBrowserButton("Play", in: app)
@@ -826,6 +829,8 @@ final class EllieIOSUITests: XCTestCase {
             predicate: NSPredicate(format: "label == %@", "Actions: scroll.down,playback.pause"),
             object: actions)], timeout: 5), .completed)
         XCTAssertEqual(actions.label, "Actions: scroll.down,playback.pause")
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 2")
     }
 
     private func waitForFixtureMutations(_ expected: Int, in app: XCUIApplication) {
