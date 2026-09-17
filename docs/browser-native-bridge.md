@@ -47,8 +47,6 @@ exists. A stale revision reaches no mutation tool; the native transport conserva
 an unknown outcome after dispatch begins. One play tool changes the visible fixture but withholds
 completion proof, so a fresh read is required before a separate pause command. The runner checks
 exactly four media mutations, no replay job and an unavailable status after bridge disconnect.
-A discarded candidate is deliberately not posted; this checks the network boundary, not the
-native review UI.
 The runner records the exact source, release, extension fixture changes, browser executable,
 registry, snapshots and screenshots. It requires a measured scroll offset and visible text change,
 then reverses that one action only after both the WebMCP result and page effect are known. An

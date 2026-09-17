@@ -44,6 +44,24 @@ import {
 import { startBrowserWebMCPBridge } from "../apps/node/src/browser-webmcp-bridge.ts";
 
 const runnerPath = fileURLToPath(import.meta.url);
+export class NativeJourneySetupCleanupError extends Error {
+  override name = "NativeJourneySetupCleanupError";
+}
+
+/** Preserve both the setup failure and uncertain ownership when setup cleanup fails. */
+export async function settleFailedNativeJourneySetup(
+  error: unknown,
+  close: () => Promise<void>,
+): Promise<never> {
+  try {
+    await close();
+  } catch {
+    throw new NativeJourneySetupCleanupError("Owned native journey setup cleanup is uncertain.", {
+      cause: error,
+    });
+  }
+  throw error;
+}
 const sourceExtension = resolve("apps/browser-media-extension");
 const agentBrowserPath = resolve("node_modules/.bin/agent-browser");
 const hostname = "ellie-browser-acceptance.local";
@@ -585,8 +603,7 @@ async function startNativeJourney(operations: BrowserWebMCPOperations, ownedRoot
     };
     return { close, coordinator, events, pair, request, target };
   } catch (error) {
-    await close().catch(() => {});
-    throw error;
+    return settleFailedNativeJourneySetup(error, close);
   }
 }
 
@@ -943,18 +960,6 @@ async function main() {
     );
     assert.equal(nativeRead.status, "completed");
     assert.match(String(record(nativeRead.view).summary), /^home:/);
-    const beforeDiscardJobs = native.coordinator.jobStore.list(native.target, 100).length;
-    const discarded = {
-      tool: "browser.search",
-      query: "discarded synthetic query",
-      revision: nativeRevision,
-    };
-    assert.equal(discarded.query, "discarded synthetic query");
-    assert.equal(
-      native.coordinator.jobStore.list(native.target, 100).length,
-      beforeDiscardJobs,
-      "an unsubmitted reviewed candidate cannot create a coordinator job",
-    );
     const beforeStaleEvents = bridgeEvents.length;
     const stale = await command(
       { tool: "browser.search", query: "owned synthetic video", revision: "a".repeat(64) },
@@ -1066,7 +1071,6 @@ async function main() {
     nativeEvidence = {
       path: "pinned native HTTPS → scoped grant → coordinator job → owned node → production WebMCP selector → loaded extension",
       deniedControlStatus: 403,
-      discardedCandidateDispatched: false,
       staleRevisionOutcome: "unknown transport result; no companion mutation dispatched",
       search: "completed",
       select: "completed",
@@ -1137,6 +1141,8 @@ async function main() {
     };
   } catch (error) {
     failure = error;
+    if (error instanceof NativeJourneySetupCleanupError)
+      cleanupError = "Owned native journey setup cleanup is uncertain.";
     report = {
       version: 1,
       status: "fail",
@@ -1181,4 +1187,4 @@ async function main() {
   console.log(JSON.stringify({ status: "pass", reportDirectory }));
 }
 
-await main();
+if (process.argv[1] && resolve(process.argv[1]) === runnerPath) await main();
