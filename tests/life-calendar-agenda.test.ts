@@ -103,6 +103,14 @@ test("actor-scoped upcoming agenda reads only completed selected-calendar import
           },
           {
             kind: "event",
+            sourceKey: "unicode-boundary",
+            sourceRevision: "1",
+            observedAt: now,
+            title: `${"A".repeat(159)}🗓️`,
+            data: { status: "confirmed", startAt: now + 4_000_000, endAt: now + 5_000_000 },
+          },
+          {
+            kind: "event",
             sourceKey: "past",
             sourceRevision: "1",
             observedAt: now,
@@ -164,16 +172,20 @@ test("actor-scoped upcoming agenda reads only completed selected-calendar import
     assert.equal(agenda.lastSyncAt, now);
     assert.deepEqual(
       agenda.events.filter((item) => item.startAt !== undefined).map((item) => item.title),
-      ["日程 🗓️ Soon", "Later"],
+      ["日程 🗓️ Soon", "A".repeat(159), "Later"],
     );
     assert.deepEqual(
       agenda.events.filter((item) => item.startAt !== undefined).map((item) => item.status),
-      ["tentative", "confirmed"],
+      ["tentative", "confirmed", "confirmed"],
     );
     assert.ok(
       agenda.events.some((item) => item.title === "All day" && item.startDate === allDayStart),
     );
     assert.ok(!agenda.events.some((item) => item.title === "Invalid date"));
+    assert.ok(
+      !JSON.stringify(agenda).includes("\\ud83d"),
+      "a title truncated at the UTF-16 boundary must never expose a lone surrogate",
+    );
     assert.ok(
       !agenda.events.some((item) => item.title.startsWith("Ended")),
       "events whose exclusive all-day end is today cannot consume the result cap",

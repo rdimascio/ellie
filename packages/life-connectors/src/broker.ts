@@ -54,6 +54,19 @@ const civilDay = (value: string): number | undefined => {
     ? instant
     : undefined;
 };
+/** Preserve complete Unicode scalars when bounding a host-owned display field by UTF-16 units. */
+const boundedCalendarText = (value: string, maximum: number): string => {
+  let result = "",
+    units = 0;
+  for (const scalar of value) {
+    const point = scalar.codePointAt(0)!;
+    if (point >= 0xd800 && point <= 0xdfff) continue;
+    if (units + scalar.length > maximum) break;
+    result += scalar;
+    units += scalar.length;
+  }
+  return result;
+};
 const LABELS: Record<ProviderId, string> = {
   "google-calendar": "Google Calendar",
   gmail: "Gmail",
@@ -511,7 +524,7 @@ export class ConnectorBroker {
             if (item.kind !== "event" || item.deleted || item.data.status === "cancelled")
               return [];
             const { startAt, endAt, startDate, endDate, timeZone, status } = item.data;
-            const title = item.title.slice(0, 160);
+            const title = boundedCalendarText(item.title, 160);
             if (!title) return [];
             if (
               Number.isFinite(startAt) &&
@@ -525,7 +538,7 @@ export class ConnectorBroker {
                   title,
                   startAt: startAt!,
                   endAt: endAt!,
-                  ...(timeZone ? { timeZone: timeZone.slice(0, 80) } : {}),
+                  ...(timeZone ? { timeZone: boundedCalendarText(timeZone, 80) } : {}),
                   status,
                   sortAt: startAt!,
                   tie: item.sourceKey,
@@ -558,9 +571,9 @@ export class ConnectorBroker {
       : [];
     return {
       connectionId: connection.id,
-      label: connection.label.slice(0, 80),
+      label: boundedCalendarText(connection.label, 80),
       state: connection.state,
-      selectedCalendarId: (connection.selectedCalendarId ?? "primary").slice(0, 1_024),
+      selectedCalendarId: boundedCalendarText(connection.selectedCalendarId ?? "primary", 1_024),
       displayTimeZone,
       ...(connection.lastSyncAt !== undefined ? { lastSyncAt: connection.lastSyncAt } : {}),
       complete,
