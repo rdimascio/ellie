@@ -7,12 +7,13 @@ import {
   type ConnectorProvider,
 } from "./api";
 
-export function Connections() {
+export function Connections({ standalone = false }: { standalone?: boolean }) {
   const [connections, setConnections] = useState<ConnectorConnection[]>([]);
   const [providers, setProviders] = useState<ConnectorProvider[]>([]);
   const [connectMode, setConnectMode] = useState<ConnectorMode>("prepare");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
@@ -57,6 +58,7 @@ export function Connections() {
     setConnections(value.connections);
     setProviders(value.providers);
     setLoadError("");
+    setLoading(false);
     return true;
   };
   useEffect(() => {
@@ -89,11 +91,13 @@ export function Connections() {
         setConnections(value.connections);
         setProviders(value.providers);
         setLoadError("");
+        setLoading(false);
       } catch (caught) {
         if (current && request === listRequest.current)
           setLoadError(
             caught instanceof Error ? caught.message : "Connected accounts are unavailable.",
           );
+        if (current && request === listRequest.current) setLoading(false);
       } finally {
         loading = false;
       }
@@ -219,13 +223,29 @@ export function Connections() {
   };
 
   return (
-    <section className="connections" id="connected-accounts">
-      <header>
-        <div>
-          <span>Private connections</span>
-          <h2>Connected accounts</h2>
+    <section
+      className={`connections ${standalone ? "connections-page" : ""}`}
+      id="connected-accounts"
+    >
+      {standalone ? (
+        <div className="integration-intro">
+          <span className="integration-intro-symbol">
+            <IntegrationMark provider="all" />
+          </span>
+          <h2>
+            A little more connected.
+            <br />A lot more useful.
+          </h2>
+          <p>Give Ellie the context to help with your day.</p>
         </div>
-      </header>
+      ) : (
+        <header>
+          <div>
+            <span>Private connections</span>
+            <h2>Connected accounts</h2>
+          </div>
+        </header>
+      )}
       <p>
         Connect once and Ellie can keep read-only context current automatically. Ellie never sends
         messages, moves money, or changes a connected account.
@@ -293,15 +313,18 @@ export function Connections() {
         <div className="connection-list">
           {connections.map((connection) => (
             <article key={connection.id}>
-              <div>
-                <strong>{connection.label}</strong>
-                <small>
-                  {providerLabel(providers, connection.provider)} · {stateLabel(connection.state)}
-                  {connection.lastSyncAt
-                    ? ` · Updated ${new Date(connection.lastSyncAt).toLocaleString()}`
-                    : ""}
-                </small>
-                {connection.error && <span role="alert">{connection.error}</span>}
+              <div className="connection-identity">
+                <IntegrationMark provider={connection.provider} />
+                <div>
+                  <strong>{connection.label}</strong>
+                  <small>
+                    {providerLabel(providers, connection.provider)} · {stateLabel(connection.state)}
+                    {connection.lastSyncAt
+                      ? ` · Updated ${new Date(connection.lastSyncAt).toLocaleString()}`
+                      : ""}
+                  </small>
+                  {connection.error && <span role="alert">{connection.error}</span>}
+                </div>
               </div>
               <label>
                 Mode
@@ -428,13 +451,23 @@ export function Connections() {
           )
           .map((provider) => (
             <article key={provider.id}>
-              <div>
-                <strong>{provider.label}</strong>
-                <small>
-                  {provider.configured
-                    ? "Ready for a private read-only connection"
-                    : (provider.setupMessage ?? "Setup is required on this Ellie host.")}
-                </small>
+              <div className="connection-identity">
+                <IntegrationMark provider={provider.id} />
+                <div>
+                  <strong>{provider.id === "plaid" ? "Plaid" : provider.label}</strong>
+                  <span className="provider-description">
+                    {provider.id === "gmail"
+                      ? "Email & useful context"
+                      : provider.id === "google-calendar"
+                        ? "Events & your everyday"
+                        : "Financial accounts & transactions"}
+                  </span>
+                  <small>
+                    {provider.configured
+                      ? "Ready for a private read-only connection"
+                      : (provider.setupMessage ?? "Setup is required on this Ellie host.")}
+                  </small>
+                </div>
               </div>
               <button
                 disabled={!provider.configured || busy !== "" || pending !== null}
@@ -456,7 +489,12 @@ export function Connections() {
             </article>
           ))}
       </div>
-      {providers.length === 0 && !error && (
+      {loading && (
+        <p className="connection-empty" role="status">
+          Loading integrations…
+        </p>
+      )}
+      {providers.length === 0 && !error && !loadError && !loading && (
         <p className="connection-empty">No providers are configured.</p>
       )}
       {error && (
@@ -485,4 +523,44 @@ function stateLabel(state: ConnectorConnection["state"]) {
     error: "Needs attention",
     revoked: "Disconnected",
   }[state];
+}
+
+function IntegrationMark({ provider }: { provider: string }) {
+  return (
+    <span className={`integration-mark mark-${provider}`} aria-hidden="true">
+      <svg
+        width="26"
+        height="26"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {provider === "gmail" ? (
+          <>
+            <path d="M3 18V6l9 7 9-7v12" />
+            <path d="m3 6 9 7 9-7" />
+          </>
+        ) : provider === "google-calendar" ? (
+          <>
+            <rect x="4" y="5" width="16" height="16" rx="3" />
+            <path d="M8 3v4m8-4v4M4 11h16m-11 5h6" />
+          </>
+        ) : provider === "plaid" ? (
+          <>
+            <path d="m12 2 10 10-10 10L2 12Z" />
+            <path d="m7 7 10 10M7 17 17 7M7 2l15 15M2 7l15 15" />
+          </>
+        ) : (
+          <>
+            <rect x="3" y="3" width="7" height="7" rx="2" />
+            <rect x="14" y="14" width="7" height="7" rx="2" />
+            <path d="M14 6h2a2 2 0 0 1 2 2v2M10 18H8a2 2 0 0 1-2-2v-2" />
+          </>
+        )}
+      </svg>
+    </span>
+  );
 }

@@ -348,9 +348,21 @@ try {
   };
   const openTool = async (name: "Today" | "Memory" | "Apps" | "Activity") => {
     await closeChat();
-    const more = page.locator("aside details.rail-more");
-    if ((await more.getAttribute("open")) === null) await more.locator("summary").click();
-    await more.getByRole("button", { name, exact: true }).click();
+    if (name === "Memory" || name === "Apps") {
+      await openSettings();
+      const library = page.locator(".library-settings");
+      if ((await library.getAttribute("open")) === null) await library.locator("summary").click();
+      await library
+        .getByRole("button", {
+          name: name === "Memory" ? "Manage saved memory" : "Open custom tools",
+          exact: true,
+        })
+        .click();
+    } else {
+      const more = page.locator("aside details.rail-more");
+      if ((await more.getAttribute("open")) === null) await more.locator("summary").click();
+      await more.getByRole("button", { name, exact: true }).click();
+    }
     if (name === "Memory") await page.getByRole("button", { name: "all", exact: true }).click();
   };
   const artifactDir = process.env.ELLIE_E2E_ARTIFACT_DIR;
@@ -405,7 +417,11 @@ try {
     });
   const orb = page.getByRole("button", { name: "Talk to Ellie", exact: true });
   const orbBounds = await orb.boundingBox();
-  assert.ok(orbBounds && Math.abs(orbBounds.x + orbBounds.width / 2 - 720) < 2);
+  const dashboardBounds = await page.locator(".life-dashboard").boundingBox();
+  assert.ok(
+    orbBounds && dashboardBounds && orbBounds.x >= dashboardBounds.x + dashboardBounds.width,
+    "desktop assistant control has its own space beside the dashboard",
+  );
   const desktopStatusBounds = await orb.locator(".orb-status").boundingBox();
   assert.ok(
     desktopStatusBounds &&

@@ -210,7 +210,10 @@ try {
     path: join(artifactDir, "native-life-desktop.png"),
     fullPage: false,
   });
-  await macPage.getByRole("button", { name: /Add or make an app/ }).click();
+  await macPage.locator("aside .settings-link").click();
+  const library = macPage.locator(".library-settings");
+  await library.locator("summary").click();
+  await library.getByRole("button", { name: "Open custom tools", exact: true }).click();
   await macPage
     .getByPlaceholder(/family board/)
     .fill("Build an arcade game with a persistent high score");
