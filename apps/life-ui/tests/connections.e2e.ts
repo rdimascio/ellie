@@ -251,8 +251,8 @@ try {
   await page.getByRole("heading", { name: "Connected accounts", exact: true }).waitFor();
   const openSettings = async () => {
     const mobile = page.getByLabel("Settings", { exact: true });
-    if (await mobile.isVisible()) await mobile.click();
-    else await page.locator("aside .settings-link").click();
+    await expect(mobile).toBeVisible();
+    await mobile.click();
   };
   const holdNextConnectionsList = async () => {
     let capture!: () => void;
