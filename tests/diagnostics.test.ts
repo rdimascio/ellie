@@ -211,6 +211,7 @@ async function fixture(role: "coordinator" | "node") {
       state: "running",
       pid: 123,
     }),
+    serviceCredentialState: async () => "none",
     client: () => ({
       call: async () =>
         role === "node"
@@ -252,6 +253,58 @@ test("role diagnostics cover private state, Keychain, certificate, helper, GUI, 
       ),
     );
   }
+});
+
+test("attention diagnostic refuses a second Keychain query", async () => {
+  const f = await fixture("node");
+  let credentialReads = 0;
+  const report = await doctorService("node", {
+    ...f.deps,
+    serviceCredentialState: async () => "needs_attention",
+    keychainGet: async () => {
+      credentialReads += 1;
+      throw new Error("synthetic private account");
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.equal(report.lines.length, 1);
+  assert.match(report.lines[0]!, /needs credential attention/);
+  assert.doesNotMatch(report.lines[0]!, /synthetic private account/);
+});
+
+test("an unfinished startup diagnostic also refuses a second Keychain query", async () => {
+  const f = await fixture("coordinator");
+  let credentialReads = 0;
+  const report = await doctorService("coordinator", {
+    ...f.deps,
+    serviceCredentialState: async () => "starting",
+    keychainGet: async () => {
+      credentialReads += 1;
+      throw new Error("synthetic private account");
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.match(report.lines[0]!, /not reported startup readiness/);
+});
+
+test("unreadable attention records fail closed before Keychain", async () => {
+  const f = await fixture("node");
+  let credentialReads = 0;
+  const report = await doctorService("node", {
+    ...f.deps,
+    serviceCredentialState: async () => {
+      throw new Error("synthetic private path");
+    },
+    keychainGet: async () => {
+      credentialReads += 1;
+      return "synthetic secret";
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.doesNotMatch(report.lines.join("\n"), /synthetic private path|synthetic secret/);
 });
 
 test("diagnostic failures and optional inference warnings stay redacted", async () => {
