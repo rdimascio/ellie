@@ -23,19 +23,24 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [oneRead], timeout: 5), .completed)
         app.buttons["ios-gmail-cancel"].tap()
         app.buttons["Release held body"].tap()
+        let form = app.scrollViews.firstMatch
+        XCTAssertTrue(form.waitForExistence(timeout: 5))
+        let bodies = app.descendants(matching: .any).matching(identifier: "ios-gmail-body")
+        for _ in 0..<4 { form.swipeUp() }
         let cancelledBody = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "exists == true"), object: app.staticTexts["ios-gmail-body"])
+            predicate: NSPredicate(format: "exists == true"), object: bodies.firstMatch)
         cancelledBody.isInverted = true
         XCTAssertEqual(XCTWaiter.wait(for: [cancelledBody], timeout: 1), .completed,
             "cancelled response must not restore private body")
+        XCTAssertEqual(bodies.count, 0)
+        for _ in 0..<4 where !message.isHittable { form.swipeDown() }
+        XCTAssertTrue(message.isHittable)
         message.tap()
-        let body = app.staticTexts["ios-gmail-body"]
-        let form = app.scrollViews.firstMatch
-        XCTAssertTrue(form.waitForExistence(timeout: 5))
-        for _ in 0..<4 where !body.exists { form.swipeUp() }
-        XCTAssertTrue(body.waitForExistence(timeout: 5),
+        for _ in 0..<4 where bodies.count == 0 { form.swipeUp() }
+        XCTAssertTrue(bodies.firstMatch.waitForExistence(timeout: 5),
             "An explicit second read must expose the body in the lazy Gmail Form")
-        XCTAssertEqual(body.label, "Transient fixture message body")
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual(bodies.firstMatch.label, "Transient fixture message body")
         app.buttons["Hold next body"].tap()
         for _ in 0..<4 where !message.isHittable { form.swipeDown() }
         XCTAssertTrue(message.isHittable)
@@ -44,10 +49,12 @@ final class EllieIOSUITests: XCTestCase {
             predicate: NSPredicate(format: "label == %@", "Fixture body reads: 3"), object: reads)
         XCTAssertEqual(XCTWaiter.wait(for: [thirdRead], timeout: 5), .completed)
         app.buttons["Revoke fixture"].tap()
+        for _ in 0..<4 { form.swipeDown() }
         let notice = app.staticTexts["ios-gmail-notice"]
         XCTAssertTrue(notice.waitForExistence(timeout: 5))
         XCTAssertTrue(notice.label.contains("access was removed"))
-        XCTAssertFalse(app.staticTexts["ios-gmail-body"].exists)
+        for _ in 0..<4 { form.swipeUp() }
+        XCTAssertFalse(bodies.firstMatch.exists)
         XCTAssertFalse(message.exists)
     }
 
