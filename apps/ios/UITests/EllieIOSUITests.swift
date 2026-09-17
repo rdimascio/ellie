@@ -711,6 +711,102 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
     }
 
+    func testLocalChoresAddCancelEditCompleteRelaunchAndDelete() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let dashboardName = "Chores \(UUID().uuidString.prefix(8))"
+        let secondDashboard = "Shared chores \(UUID().uuidString.prefix(8))"
+        let task = "Bins \(UUID().uuidString.prefix(8))"
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(dashboardName, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Chores"].tap()
+        XCTAssertTrue(app.staticTexts["Saved on this iPhone only · Not synced"].waitForExistence(timeout: 5))
+        app.buttons["ios-manage-chores"].tap()
+        app.buttons["ios-chore-add"].tap()
+        try typeTextReliably(task + " ", into: app.textFields["ios-chore-title"], in: app)
+        try typeTextReliably("Sam", into: app.textFields["ios-chore-assignee"], in: app)
+        app.buttons["ios-chore-save"].tap()
+
+        let edit = app.buttons["Edit \(task)"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5))
+        let id = edit.identifier.replacingOccurrences(of: "ios-chore-edit-", with: "")
+        XCTAssertFalse(id.isEmpty)
+        edit.tap()
+        try typeTextReliably(" Jr", into: app.textFields["ios-chore-assignee"], in: app, startingWith: "Sam")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.buttons["Edit \(task)"].waitForExistence(timeout: 5), "Cancelling must keep the saved task")
+        XCTAssertTrue((app.buttons["Edit \(task)"].value as? String)?.hasPrefix("Sam · Due ") == true,
+            "Cancelling must not change the saved assignee or due day")
+        app.buttons["Done"].tap()
+        returnToDashboardList(from: dashboardName, in: app)
+
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(secondDashboard, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: secondDashboard, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Chores"].tap()
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertTrue(app.buttons["Edit \(task)"].waitForExistence(timeout: 5),
+            "A second dashboard must show the same local chore")
+        app.buttons["Edit \(task)"].tap()
+        try typeTextReliably(" Jr", into: app.textFields["ios-chore-assignee"], in: app, startingWith: "Sam")
+        app.buttons["ios-chore-save"].tap()
+        XCTAssertTrue((app.buttons["Edit \(task)"].value as? String)?.hasPrefix("Sam Jr · Due ") == true)
+        let toggle = app.buttons["ios-chore-toggle-\(id)"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
+        let delete = app.buttons["ios-chore-delete-\(id)"]
+        XCTAssertGreaterThanOrEqual(delete.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(delete.frame.height, 44)
+        toggle.tap()
+        XCTAssertEqual(toggle.label, "Undo completion of \(task)")
+        XCTAssertTrue(app.otherElements["ios-chores-week-chart"].exists)
+        app.buttons["Done"].tap()
+        returnToDashboardList(from: secondDashboard, in: app)
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertTrue((app.buttons["Edit \(task)"].value as? String)?.hasPrefix("Sam Jr · Due ") == true,
+            "Changes from the second dashboard must be visible in the first without relaunch")
+        app.buttons["Done"].tap()
+
+        app.terminate()
+        app.launch()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertTrue(app.buttons["Edit \(task)"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["ios-chore-toggle-\(id)"].label, "Undo completion of \(task)")
+        app.buttons["ios-chore-delete-\(id)"].tap()
+        app.buttons["Delete chore"].tap()
+        let removed = app.buttons["Edit \(task)"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: removed)], timeout: 5), .completed,
+            "Confirming deletion must remove the chore")
+        app.buttons["Done"].tap()
+        app.terminate()
+        app.launch()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertFalse(app.buttons["Edit \(task)"].exists,
+            "A deleted chore must stay absent after relaunch")
+        app.buttons["Done"].tap()
+        returnToDashboardList(from: dashboardName, in: app)
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["dashboard-options"].tap()
+        app.buttons["Delete Dashboard"].tap()
+        app.buttons["Delete dashboard"].tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
+        openDashboard(named: secondDashboard, in: app)
+        app.buttons["dashboard-options"].tap()
+        app.buttons["Delete Dashboard"].tap()
+        app.buttons["Delete dashboard"].tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
+    }
+
     private func openDashboard(named name: String, identifiedBy identifier: String? = nil, in app: XCUIApplication) {
         let link = identifier.map { app.buttons[$0] }
             ?? app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch

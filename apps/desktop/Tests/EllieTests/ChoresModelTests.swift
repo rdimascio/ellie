@@ -66,6 +66,37 @@ final class ChoresModelTests: XCTestCase {
     }
 
     @MainActor
+    func testEditPreservesCompletionAndWeekChartAfterRelaunch() async throws {
+        let location = temporaryLocation()
+        let store = ChoresStore(fileURL: location, defaultTimeZone: TimeZone(identifier: "UTC")!)
+        let originalDay = try ChoreDay("2026-09-13")
+        let completionDay = try ChoreDay("2026-09-14")
+        store.add(title: "Bins", member: "Sam", dueDay: originalDay)
+        let id = try XCTUnwrap(store.state.chores.first?.id)
+        store.setCompleted(id: id, completed: true,
+            now: try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-09-14T01:00:00Z")))
+        let beforeInvalidEdit = try Data(contentsOf: location)
+        store.update(id: id, title: " ", member: "Alex", dueDay: completionDay)
+        XCTAssertNotNil(store.error)
+        XCTAssertEqual(try Data(contentsOf: location), beforeInvalidEdit)
+
+        store.update(id: id, title: "Recycling", member: "Alex", body: "Blue bin", dueDay: completionDay)
+        XCTAssertNil(store.error)
+        let reloaded = ChoresStore(fileURL: location)
+        let edited = try XCTUnwrap(reloaded.state.chores.first)
+        XCTAssertEqual(edited.id, id)
+        XCTAssertEqual(edited.title, "Recycling")
+        XCTAssertEqual(edited.member, "Alex")
+        XCTAssertEqual(edited.body, "Blue bin")
+        XCTAssertEqual(edited.dueDay, completionDay)
+        XCTAssertEqual(edited.completedDay, completionDay)
+        XCTAssertEqual(reloaded.completionsByDay(forWeekContaining: completionDay)
+            .first(where: { $0.day == completionDay })?.count, 1)
+        reloaded.setCompleted(id: id, completed: false)
+        XCTAssertNil(ChoresStore(fileURL: location).state.chores.first?.completedDay)
+    }
+
+    @MainActor
     func testCorruptFileIsPreservedAndBlocksWrites() async throws {
         let location = temporaryLocation()
         try FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -74,6 +105,7 @@ final class ChoresModelTests: XCTestCase {
         let store = ChoresStore(fileURL: location)
         XCTAssertNotNil(store.error)
         store.add(title: "Must not save", member: "Nobody", dueDay: try ChoreDay("2026-09-13"))
+        store.update(id: UUID().uuidString, title: "Must not edit", member: "Nobody", dueDay: try ChoreDay("2026-09-13"))
         XCTAssertEqual(try Data(contentsOf: location), corrupt)
         XCTAssertTrue(store.state.chores.isEmpty)
     }

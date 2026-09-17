@@ -8,6 +8,7 @@ struct HomeAppearanceUITestFixtureView: View {
     let accessibilityLayout: Bool
     let narrowLayout: Bool
     @StateObject private var dashboards: DashboardStore
+    @StateObject private var chores: ChoresStore
     @StateObject private var enrollment: NativeEnrollmentStore
     @StateObject private var probe: HomeAppearanceProbe
 
@@ -19,6 +20,7 @@ struct HomeAppearanceUITestFixtureView: View {
             .appendingPathComponent("ellie-home-appearance-\(UUID().uuidString).json")
         precondition(!FileManager.default.fileExists(atPath: file.path))
         _dashboards = StateObject(wrappedValue: DashboardStore(fileURL: file))
+        _chores = StateObject(wrappedValue: ChoresStore(fileURL: file.deletingPathExtension().appendingPathExtension("chores.json")))
         _probe = StateObject(wrappedValue: probe)
         _enrollment = StateObject(wrappedValue: NativeEnrollmentStore(
             vault: HomeAppearanceVault(probe: probe),
@@ -28,7 +30,7 @@ struct HomeAppearanceUITestFixtureView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            IOSDashboardList(store: dashboards, enrollment: enrollment, uiTestLifeDestination: { credential in
+            IOSDashboardList(store: dashboards, enrollment: enrollment, choresStore: chores, uiTestLifeDestination: { credential in
                 AnyView(Text("Synthetic Life destination: \(credential.client.id)")
                     .accessibilityIdentifier("home-fixture-life-destination")
                     .navigationTitle("Fixture Life")
