@@ -801,6 +801,78 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
     }
 
+    func testSyntheticHouseholdChoreReviewCancelAndUnknownNeverReplay() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-household-chores-fixture"]
+        app.launch()
+        defer { app.terminate() }
+
+        let puts = app.staticTexts["household-chores-fixture-puts"]
+        let reads = app.staticTexts["household-chores-fixture-reads"]
+        XCTAssertTrue(puts.waitForExistence(timeout: 5))
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 0")
+        app.buttons["ios-household-chores-access"].tap()
+        let read = app.buttons["ios-household-chores-read"]
+        XCTAssertTrue(read.waitForExistence(timeout: 5))
+        revealHouseholdControl(read, in: app).tap()
+        XCTAssertTrue(app.staticTexts["Household laundry"].waitForExistence(timeout: 5))
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 1")
+
+        let edit = app.buttons["ios-household-chore-edit-11111111-1111-4111-8111-111111111111"]
+        revealHouseholdControl(edit, in: app).tap()
+        try typeTextReliably("Take blue basket", into: app.descendants(matching: .any)["ios-household-chore-details"], in: app)
+        app.buttons["ios-household-chore-prepare"].tap()
+        XCTAssertTrue(app.staticTexts["Changed household chore"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Take blue basket"].exists,
+            "The review must show the edited details before any PUT")
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        revealHouseholdControl(app.buttons["Cancel Prepared Change"], in: app).tap()
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        XCTAssertFalse(app.staticTexts["Changed household chore"].exists)
+
+        revealHouseholdControl(edit, in: app).tap()
+        try typeTextReliably("Take blue basket", into: app.descendants(matching: .any)["ios-household-chore-details"], in: app)
+        app.buttons["ios-household-chore-prepare"].tap()
+        XCTAssertTrue(app.staticTexts["Take blue basket"].waitForExistence(timeout: 5))
+        revealHouseholdControl(app.buttons["ios-household-chores-save"], in: app).tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore PUTs: 1"), object: puts)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 5), .completed)
+        revealHouseholdControl(app.buttons["ios-household-chores-cancel"], in: app).tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "save outcome is unknown")).firstMatch.waitForExistence(timeout: 5))
+        app.buttons["household-chores-fixture-release"].tap()
+        let revision = app.staticTexts["household-chores-fixture-revision"]
+        let committed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore revision: 8"), object: revision)
+        XCTAssertEqual(XCTWaiter.wait(for: [committed], timeout: 5), .completed)
+        revealHouseholdControl(app.buttons["ios-household-chores-check-result"], in: app).tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "currently matches the prepared copy")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 2")
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 1",
+            "Cancellation and recovery must not send the prepared change again")
+        XCTAssertFalse(app.buttons["ios-household-chores-save"].isEnabled)
+    }
+
+    private func revealHouseholdControl(_ control: XCUIElement, in app: XCUIApplication) -> XCUIElement {
+        let list = app.collectionViews.firstMatch.exists
+            ? app.collectionViews.firstMatch : app.scrollViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        for _ in 0..<6 {
+            if control.exists && control.isHittable { return control }
+            list.swipeUp()
+        }
+        for _ in 0..<6 {
+            if control.exists && control.isHittable { return control }
+            list.swipeDown()
+        }
+        XCTAssertTrue(control.exists && control.isHittable,
+            "Expected the synthetic household chore control to be reachable")
+        return control
+    }
+
     func testLocalChoresAddCancelEditCompleteRelaunchAndDelete() throws {
         let app = XCUIApplication()
         app.launch()

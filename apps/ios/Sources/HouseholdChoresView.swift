@@ -62,6 +62,7 @@ struct HouseholdChoresView: View {
               Spacer(minLength: 0)
               Button("Edit") { form = HouseholdChoreForm(chore: chore) }
                 .disabled(!canPrepare)
+                .accessibilityIdentifier("ios-household-chore-edit-\(chore.id)")
               Button(role: .destructive) { deleting = chore } label: {
                 Image(systemName: "trash")
               }
@@ -259,8 +260,11 @@ private struct HouseholdChoreEditor: View {
     NavigationStack {
       Form {
         TextField("Task", text: $title)
+          .accessibilityIdentifier("ios-household-chore-title")
         TextField("Assigned to", text: $member)
+          .accessibilityIdentifier("ios-household-chore-member")
         TextField("Details (optional)", text: $details, axis: .vertical).lineLimit(2...4)
+          .accessibilityIdentifier("ios-household-chore-details")
         DatePicker("Due day", selection: $dueDate, displayedComponents: .date)
           .environment(\.timeZone, timeZone)
         Text("The change is prepared privately first. Saving it is a separate, single request.")
@@ -285,6 +289,7 @@ private struct HouseholdChoreEditor: View {
             if sync.phase == .prepared { dismiss() }
           }
           .disabled(!valid)
+          .accessibilityIdentifier("ios-household-chore-prepare")
         }
       }
     }

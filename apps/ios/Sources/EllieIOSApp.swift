@@ -16,6 +16,8 @@ struct EllieIOSApp: App {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(
                         "--ellie-ui-browser-complete-actions"))
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-household-chores-fixture") {
+                HouseholdChoresUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-native-scanner-sheet-fixture") {
                 NativeScannerSheetUITestFixtureView()
