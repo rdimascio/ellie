@@ -126,7 +126,7 @@
 		D0000000000000000000000A = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (B0000000000000000000002B, B0000000000000000000002C, B0000000000000000000002D, B0000000000000000000002E); runOnlyForDeploymentPostprocessing = 0; };
 		D0000000000000000000000B = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		D0000000000000000000000C = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
-		D0000000000000000000000D = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = ""; dstSubfolderSpec = 13; files = (B0000000000000000000002F); name = "Embed Watch Content"; runOnlyForDeploymentPostprocessing = 0; };
+		D0000000000000000000000D = {isa = PBXCopyFilesBuildPhase; buildActionMask = 2147483647; dstPath = "$(CONTENTS_FOLDER_PATH)/Watch"; dstSubfolderSpec = 16; files = (B0000000000000000000002F); name = "Embed Watch Content"; runOnlyForDeploymentPostprocessing = 0; };
 
 		E00000000000000000000001 = {isa = PBXContainerItemProxy; containerPortal = F00000000000000000000001; proxyType = 1; remoteGlobalIDString = E00000000000000000000003; remoteInfo = EllieIOS; };
 		E00000000000000000000002 = {isa = PBXTargetDependency; target = E00000000000000000000003; targetProxy = E00000000000000000000001; };
