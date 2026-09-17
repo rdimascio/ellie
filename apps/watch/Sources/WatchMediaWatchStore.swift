@@ -13,17 +13,31 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   private var pendingOperation: WatchMediaOperation?
   private var timeout: Task<Void, Never>?
   private var activated = false
+  private var foreground = false
 
   var canPlay: Bool { !waiting && reachable && observation?.playback == "paused" }
   var canPause: Bool { !waiting && reachable && observation?.playback == "playing" }
 
   func activate() {
-    guard WCSession.isSupported(), !activated else { return }
-    activated = true
+    foreground = true
+    guard WCSession.isSupported() else { return }
     let session = WCSession.default
-    session.delegate = self
-    session.activate()
+    if !activated {
+      activated = true
+      session.delegate = self
+      session.activate()
+    }
     updateReachability(session)
+  }
+
+  func suspend() {
+    foreground = false
+    reachable = false
+    if let pendingOperation { finishUncertain(pendingOperation) }
+    else {
+      observation = nil
+      status = "Read the current page after returning to Ellie."
+    }
   }
 
   func read() { send(.read) }
@@ -70,6 +84,10 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
 
   private func receive(_ value: [String: Any], request: WatchMediaRequest) {
     guard pendingID == request.id else { return }
+    guard foreground, WatchMediaWire.now() < request.expiresAt else {
+      finishUncertain(request.operation)
+      return
+    }
     timeout?.cancel()
     timeout = nil
     pendingID = nil
@@ -113,7 +131,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   }
 
   private func updateReachability(_ session: WCSession) {
-    reachable = session.activationState == .activated && session.isReachable
+    reachable = foreground && session.activationState == .activated && session.isReachable
     if !reachable {
       let operation = pendingOperation
       observation = nil
