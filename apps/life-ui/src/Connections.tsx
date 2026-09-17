@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type ConnectorConnection, type ConnectorMode, type ConnectorProvider } from "./api";
 
 export function Connections() {
@@ -10,6 +10,8 @@ export function Connections() {
   const [loadError, setLoadError] = useState("");
   const [notice, setNotice] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const listRequest = useRef(0);
+  const actionInFlight = useRef(false);
   const [pending, setPending] = useState<{
     provider: ConnectorProvider["id"];
     connectionId: string;
@@ -19,10 +21,13 @@ export function Connections() {
   } | null>(null);
 
   const load = async () => {
+    const request = ++listRequest.current;
     const value = await api.connections.list();
+    if (request !== listRequest.current) return false;
     setConnections(value.connections);
     setProviders(value.providers);
     setLoadError("");
+    return true;
   };
   useEffect(() => {
     if (!pending) return;
@@ -45,16 +50,17 @@ export function Connections() {
     let current = true;
     let loading = false;
     const refresh = async () => {
-      if (loading || document.visibilityState !== "visible") return;
+      if (loading || actionInFlight.current || document.visibilityState !== "visible") return;
       loading = true;
+      const request = ++listRequest.current;
       try {
         const value = await api.connections.list();
-        if (!current) return;
+        if (!current || request !== listRequest.current) return;
         setConnections(value.connections);
         setProviders(value.providers);
         setLoadError("");
       } catch (caught) {
-        if (current)
+        if (current && request === listRequest.current)
           setLoadError(
             caught instanceof Error ? caught.message : "Connected accounts are unavailable.",
           );
@@ -66,11 +72,14 @@ export function Connections() {
     const timer = window.setInterval(() => void refresh(), 5_000);
     return () => {
       current = false;
+      listRequest.current++;
       window.clearInterval(timer);
     };
   }, []);
 
   const run = async (key: string, operation: () => Promise<unknown>) => {
+    actionInFlight.current = true;
+    listRequest.current++;
     setBusy(key);
     setError("");
     setNotice("");
@@ -87,10 +96,13 @@ export function Connections() {
         caught instanceof Error ? caught.message : "The connected account could not be updated.",
       );
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   };
   const connect = async (provider: ConnectorProvider) => {
+    actionInFlight.current = true;
+    listRequest.current++;
     setBusy(`connect:${provider.id}`);
     setError("");
     setNotice("");
@@ -120,10 +132,10 @@ export function Connections() {
         seen: false,
       });
       try {
-        await load();
-        setPending((current) =>
-          current?.connectionId === value.connectionId ? { ...current, seen: true } : current,
-        );
+        if (await load())
+          setPending((current) =>
+            current?.connectionId === value.connectionId ? { ...current, seen: true } : current,
+          );
       } catch {
         setError("Connection started, but its current status could not be loaded.");
       }
@@ -132,6 +144,7 @@ export function Connections() {
         caught instanceof Error ? caught.message : "The account connection could not start.",
       );
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   };

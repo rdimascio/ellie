@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import {
   ConnectorBroker,
   type ConnectedOAuth,
@@ -213,6 +213,43 @@ try {
     if (await mobile.isVisible()) await mobile.click();
     else await page.locator("aside .settings-link").click();
   };
+  const holdNextConnectionsList = async () => {
+    let capture!: () => void;
+    let release!: () => void;
+    let delivered!: () => void;
+    const captured = new Promise<void>((resolve) => (capture = resolve));
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const finished = new Promise<void>((resolve) => (delivered = resolve));
+    let held = false;
+    const routePattern = "**/api/connections";
+    const handler = async (route: import("@playwright/test").Route) => {
+      if (held || route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      held = true;
+      const stale = await route.fetch();
+      capture();
+      await gate;
+      await route.fulfill({ response: stale });
+      delivered();
+    };
+    await page.route(routePattern, handler);
+    await Promise.race([
+      captured,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for the owned status poll.")), 7_000),
+      ),
+    ]);
+    return async () => {
+      release();
+      await finished;
+      await page.unroute(routePattern, handler);
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+    };
+  };
   await page.getByText("Private fixture calendar").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
   assert.equal(
@@ -263,6 +300,8 @@ try {
       .locator(".provider-list article")
       .filter({ hasText: "Gmail" })
       .getByRole("button", { name: "Connect" });
+  await expect(gmailConnect()).toBeEnabled();
+  const deliverPreStartList = await holdNextConnectionsList();
   await gmailConnect().click();
   await page
     .getByRole("status")
@@ -270,6 +309,12 @@ try {
     .waitFor();
   assert.equal(page.url(), ellieUrl, "host-opened OAuth keeps the Ellie WebView in place");
   assert.equal(await gmailConnect().count(), 0, "pending setup cannot create a duplicate");
+  await deliverPreStartList();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "a delayed pre-start list must not clear the current setup",
+  );
   const cancelRoute = "**/api/connections/*/revoke";
   await page.route(cancelRoute, (route) =>
     route.fulfill({
@@ -286,11 +331,16 @@ try {
     "failed cancellation must retain the pending setup and its recovery control",
   );
   await page.unroute(cancelRoute);
+  await expect(page.getByRole("button", { name: "Stop setup" })).toBeEnabled();
+  const deliverPreStopList = await holdNextConnectionsList();
   await page.getByRole("button", { name: "Stop setup" }).click();
   await page
     .getByRole("status")
     .getByText("Google connection setup did not finish. You can start again.")
     .waitFor();
+  await deliverPreStopList();
+  assert.equal(await page.getByRole("button", { name: "Stop setup" }).count(), 0);
+  await page.getByText(/Gmail · Disconnected/).waitFor();
   const stoppedCallback = await fetch(
     `${listening.url}/api/connections/callback?state=${encodeURIComponent(latestOAuthState)}&code=late-synthetic-code`,
     { redirect: "manual" },

@@ -751,6 +751,7 @@ export class ConnectorBroker {
   }
   async close(): Promise<void> {
     this.closed = true;
+    this.pendingOAuthState.clear();
     for (const active of this.active.values()) active.controller.abort();
     await this.research.close();
     await Promise.allSettled([...this.active.values()].map((a) => a.promise));
