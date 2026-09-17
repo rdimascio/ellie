@@ -43,7 +43,7 @@ const uuid = (value: unknown): value is string =>
   typeof value === "string" &&
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
 
-/** The reviewed DOM companion is limited to the exact selected Netflix document. */
+/** The DOM companion is limited to the exact selected, reviewed provider document. */
 export class BrowserCompanionOperations {
   private observed?: Observation;
   private readonly bridge: Bridge;
@@ -85,7 +85,8 @@ export class BrowserCompanionOperations {
   ): Promise<BrowserWebMCPOperationResult> {
     if (
       binding.availability !== "companion" ||
-      binding.origin !== "https://www.netflix.com" ||
+      (binding.origin !== "https://www.netflix.com" &&
+        binding.origin !== "https://tv.youtube.com") ||
       new URL(binding.url).origin !== binding.origin ||
       binding.expiresAt <= Date.now()
     )
@@ -159,7 +160,7 @@ export class BrowserCompanionOperations {
         throw new Error("Browser companion row is invalid.");
       const checked = browserWebMCPOperationResult({
         ok: true,
-        message: "Netflix page observed.",
+        message: "Selected browser page observed.",
         browser: {
           source: "companion",
           operation: "read",
@@ -168,7 +169,11 @@ export class BrowserCompanionOperations {
           view: { items: [...items].map(([id, label]) => ({ id, label })), site: value.site },
         },
       });
-      if (checked.browser.operation !== "read" || checked.browser.view.site?.provider !== "netflix")
+      if (
+        checked.browser.operation !== "read" ||
+        checked.browser.view.site?.provider !==
+          (binding.origin === "https://www.netflix.com" ? "netflix" : "youtube_tv")
+      )
         throw new Error("Browser companion observation is invalid.");
       this.observed = {
         bindingId: binding.bindingId,
@@ -187,9 +192,25 @@ export class BrowserCompanionOperations {
       return checked;
     }
     const observed = this.observed;
-    if (!observed) throw new Error("Read the Netflix page before an action.");
+    if (!observed)
+      throw new Error(
+        binding.origin === "https://www.netflix.com"
+          ? "Read the Netflix page before an action."
+          : "Read the YouTube TV page before an action.",
+      );
     if (observed.site.page === "login" || observed.site.page === "unsupported")
-      throw new Error("Netflix page needs attention before an action.");
+      throw new Error("Selected browser page needs attention before an action.");
+    const youtubeTV = binding.origin === "https://tv.youtube.com";
+    if (
+      youtubeTV &&
+      (action.tool === "browser.search" ||
+        action.tool === "browser.select" ||
+        action.tool === "browser.scrollRow" ||
+        (action.tool === "browser.scroll" &&
+          action.direction !== "up" &&
+          action.direction !== "down"))
+    )
+      throw new Error("YouTube TV selection, search, and row controls are not observed.");
     let command: BrowserCompanionCommand;
     if (action.tool === "browser.search") {
       if (
@@ -215,9 +236,17 @@ export class BrowserCompanionOperations {
         direction: action.direction,
       };
     } else if (action.tool === "browser.scroll") {
-      if (action.direction === "up" || action.direction === "down")
+      if (
+        (action.direction === "up" || action.direction === "down") &&
+        (!youtubeTV || observed.site.page === "browse")
+      )
         command = { type: "scrollViewport", actionId: randomUUID(), direction: action.direction };
-      else throw new Error("Choose an observed Netflix row before horizontal browsing.");
+      else
+        throw new Error(
+          youtubeTV
+            ? "YouTube TV browsing is unavailable."
+            : "Choose an observed Netflix row before horizontal browsing.",
+        );
     } else if (action.tool === "browser.select") {
       if (
         (observed.site.page !== "browse" && observed.site.page !== "results") ||
@@ -255,8 +284,8 @@ export class BrowserCompanionOperations {
       ok: false,
       message:
         status === "unknown"
-          ? "Netflix action outcome is unknown; read the page again."
-          : "Netflix action was stopped before dispatch; read the page again.",
+          ? "Browser action outcome is unknown; read the page again."
+          : "Browser action was stopped before dispatch; read the page again.",
       browser: { source: "companion", operation: "command", status, revision },
     });
   }

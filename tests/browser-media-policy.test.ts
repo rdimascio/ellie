@@ -7,10 +7,15 @@ test("shipping media extension has narrow permissions and production origins", a
   const manifest = JSON.parse(await readFile(new URL("manifest.json", root), "utf8"));
   assert.deepEqual(manifest.permissions, ["activeTab", "scripting", "nativeMessaging"]);
   assert.equal(manifest.host_permissions, undefined);
-  for (const file of ["background.js", "media-controller.js"]) {
+  for (const file of ["background.js", "media-controller.js", "youtube-tv-controller.js"]) {
     const source = await readFile(new URL(file, root), "utf8");
-    assert.match(source, /https:\/\/www\.netflix\.com/);
-    assert.match(source, /https:\/\/www\.youtube\.com/);
-    assert.doesNotMatch(source, /localhost|127\.0\.0\.1|youtube\.tv|disneyplus/);
+    assert.doesNotMatch(source, /localhost|127\.0\.0\.1|disneyplus/);
+    if (file === "media-controller.js") {
+      assert.match(source, /https:\/\/www\.netflix\.com/);
+      assert.match(source, /https:\/\/www\.youtube\.com/);
+      assert.doesNotMatch(source, /tv\.youtube\.com/);
+    } else {
+      assert.match(source, /https:\/\/tv\.youtube\.com/);
+    }
   }
 });
