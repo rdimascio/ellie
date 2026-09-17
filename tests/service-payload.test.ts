@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  cp,
   link,
   mkdir,
   mkdtemp,
@@ -30,6 +31,7 @@ import {
 import { zipEntries } from "../scripts/test-packaged-runtime.mjs";
 
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+const companionSource = new URL("../apps/browser-media-extension/", import.meta.url).pathname;
 
 function manifest(files: object[]) {
   return {
@@ -168,6 +170,7 @@ test("materializes the finite production workspace closure and complete license 
   await writeFile(join(source, "LICENSE"), "Ellie fixture license\n");
   await writeFile(join(source, "package.json"), '{"name":"fixture"}\n');
   await writeFile(join(source, "bun.lock"), "fixture-lock\n");
+  await cp(companionSource, join(source, "apps/browser-media-extension"), { recursive: true });
   for (const name of ["cli", "node", "server"]) {
     await packageFile(join(source, "apps", name), {
       name: `@ellie/${name}`,
@@ -314,6 +317,7 @@ test("supplies only the pinned provider-utils upstream license when its npm pack
   await writeFile(join(source, "apps/life-ui/dist/index.html"), "fixture\n");
   await writeFile(join(source, "LICENSE"), "Ellie fixture license\n");
   await writeFile(join(source, "package.json"), '{"name":"fixture"}\n');
+  await cp(companionSource, join(source, "apps/browser-media-extension"), { recursive: true });
   await writeFile(lock, lockText(integrity));
   await writeFile(packageJson, JSON.stringify(packageValue));
   await writeFile(join(packageDirectory, "index.js"), "export {};\n");

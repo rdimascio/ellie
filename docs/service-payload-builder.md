@@ -29,6 +29,14 @@ manifested runtime identity. This keeps macOS AppleDouble metadata from inflatin
 entry count beyond the bounded offline runtime check; the builder still verifies extracted app
 signatures and the complete manifest after the ZIP round trip.
 
+The payload includes the complete unpacked browser companion at
+`payload/lib/ellie/apps/browser-media-extension`. Its manifest entrypoints and transitive literal
+relative JavaScript references are checked before copy and in the copied payload; release
+verification repeats the closure check when the directory is present. This avoids provider-module
+lists in the builder while rejecting a missing controller. An older release without that directory
+remains valid for rollback, but does not provide a packaged companion. Loading the extension in a
+browser is a separate attended step using the same exact release as its native messaging host.
+
 The development payload has a finite inventory budget shared by the builder, native inspector,
 and bundled launchers: at most 3,072 files and 4,096 total file/directory entries, depth 16,
 128 MiB per file, 512 MiB of files in total, and a 4 MiB manifest. The builder rejects an

@@ -1,6 +1,6 @@
 # Browser media companion development slice
 
-This is an unpacked development extension for exercising page controls inside a selected browser tab. It is not installed by an Ellie service and is not yet connected to the native Mac, iPhone or Apple Watch interfaces. The product remote remains SwiftUI.
+This is an unpacked development extension for exercising page controls inside a selected browser tab. It is not installed automatically by an Ellie service. The product remote remains SwiftUI.
 
 The source is `apps/browser-media-extension`. Its production manifest requests `activeTab`, `scripting`, and local `nativeMessaging`. Its code permits the exact HTTPS origins `www.netflix.com`, `www.youtube.com`, and `tv.youtube.com`; there are no persistent all-site permissions, website-to-native HTTP server, browser-cookie reads or household credentials.
 
@@ -21,6 +21,8 @@ WebMCP discovery is read-only and bounded. It checks the current `document.model
 ## Development use
 
 Use a separate browser profile for development. In a Chromium browser that supports unpacked Manifest V3 extensions, open the Extensions page, enable developer mode in that profile and load `apps/browser-media-extension`. Open a permitted service and invoke **Ellie Media Companion** on the intended tab. The extension's local user gesture supplies temporary `activeTab` access; receiving a phone command cannot create this browser grant.
+
+For a packaged development release, load the immutable extension directory at `RELEASE/payload/lib/ellie/apps/browser-media-extension`, where `RELEASE` is the exact selected release directory. Install the native messaging host from that same captured release using the [supported host command](browser-native-host-management.md); do not mix a checkout extension or another release's host with it. The builder validates the manifest entrypoints and every literal relative JavaScript dependency, copies the complete extension tree, then validates the copied closure. The native installer verifies the complete per-file manifest when staging the release. This supplies a version-matched directory for an attended browser installation; it does not install an extension, grant `activeTab`, notarize it or establish real-site acceptance.
 
 Use **Inspect titles** after navigation or when a title list changes. Select only an inspected title, and check the page when an action cannot be verified. The popup is a temporary developer control surface; it is not a substitute for the future native remote. Arc extension and native-messaging compatibility require separate validation.
 
