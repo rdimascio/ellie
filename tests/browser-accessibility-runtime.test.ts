@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -99,6 +99,84 @@ async function compileSwift(
     `${label} Swift compilation failed:\n${Buffer.concat(output).toString("utf8")}`,
   );
 }
+
+async function waitForPublishedBrokerSocket(
+  socket: string,
+  lock: string,
+  { child, bridge }: { child?: ChildProcess; bridge?: BrowserKernelBridge } = {},
+) {
+  const deadline = performance.now() + 5_000;
+  let publication = "socket=missing lock=missing record=missing";
+  while (true) {
+    const [current, currentLock, record] = await Promise.all([
+      lstat(socket).catch(() => undefined),
+      lstat(lock).catch(() => undefined),
+      readFile(lock, "utf8").catch(() => undefined),
+    ]);
+    const socketState = !current
+      ? "missing"
+      : !current.isSocket()
+        ? "wrong-type"
+        : (current.mode & 0o777) !== 0o600 || current.uid !== process.getuid!()
+          ? "unsafe"
+          : "valid";
+    const lockState = !currentLock
+      ? "missing"
+      : !currentLock.isFile()
+        ? "wrong-type"
+        : (currentLock.mode & 0o777) !== 0o600 || currentLock.uid !== process.getuid!()
+          ? "unsafe"
+          : "valid";
+    const recordState =
+      record === undefined
+        ? "missing"
+        : current && record === `v1 ${current.dev} ${current.ino}\n`
+          ? "match"
+          : "mismatch";
+    publication = `socket=${socketState} lock=${lockState} record=${recordState}`;
+    if (child && (child.exitCode !== null || child.signalCode !== null))
+      assert.fail(
+        `broker exited before publication (${publication}; child=${child.signalCode ?? child.exitCode})`,
+      );
+    if (performance.now() >= deadline) {
+      const bridgeState = bridge ? (bridge.connected() ? "connected" : "disconnected") : "n/a";
+      assert.fail(
+        `broker publication deadline exceeded (${publication}; bridge=${bridgeState}; child=${child ? "active" : "unobserved"})`,
+      );
+    }
+    if (socketState === "valid" && lockState === "valid" && recordState === "match")
+      return current!;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("broker publication waits for a delayed exact socket and ownership record", async () => {
+  const root = await mkdtemp("/tmp/e-bk-publication-");
+  const socket = join(root, "broker.sock");
+  const lock = join(root, "broker.lock");
+  const server = createServer();
+  try {
+    const publish = (async () => {
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socket, () => {
+          server.off("error", reject);
+          resolve();
+        });
+      });
+      await chmod(socket, 0o600);
+      const current = await lstat(socket);
+      await writeFile(lock, `v1 ${current.dev} ${current.ino}\n`, { mode: 0o600 });
+    })();
+    const current = await waitForPublishedBrokerSocket(socket, lock);
+    await publish;
+    assert.equal(current.isSocket(), true);
+  } finally {
+    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true });
+  }
+});
 
 test("persistent accessibility helper binds, reads and reports mutations as unverified", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-runtime-"));
@@ -940,21 +1018,6 @@ test(
         "Library/Application Support/Ellie/BrowserBridge/browser-webmcp-v1.sock",
       );
       const lock = join(home, "Library/Application Support/Ellie/BrowserBridge/broker.lock");
-      const waitForPublishedSocket = async () => {
-        for (let count = 0; count < 100; count += 1) {
-          const current = await lstat(socket).catch(() => undefined);
-          if (
-            current?.isSocket() &&
-            (current.mode & 0o777) === 0o600 &&
-            current.uid === process.getuid!() &&
-            (await readFile(lock, "utf8").catch(() => undefined)) ===
-              `v1 ${current.dev} ${current.ino}\n`
-          )
-            return current;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
-        assert.fail("broker socket and ownership record were not published together");
-      };
       const waitForNoSocket = async () => {
         for (let count = 0; count < 100; count += 1) {
           if (
@@ -976,7 +1039,7 @@ test(
         }),
       );
       const crashedExit = new Promise((resolve) => crashed.once("close", resolve));
-      const publishedSocket = await waitForPublishedSocket();
+      const publishedSocket = await waitForPublishedBrokerSocket(socket, lock, { child: crashed });
       assert.equal(crashed.kill("SIGKILL"), true);
       assert.equal(await crashedExit, null);
       assert.equal(
@@ -1073,7 +1136,7 @@ test(
       const production = trackBridge(
         await startBrowserKernelBridge({ home, executable: productionBroker }),
       );
-      await waitForPublishedSocket();
+      await waitForPublishedBrokerSocket(socket, lock, { bridge: production });
       const untrustedExactPeer = trackChild(
         spawn(peer, [], { env: { HOME: home }, stdio: "ignore" }),
       );
@@ -1086,7 +1149,7 @@ test(
       await waitForNoSocket();
 
       const bridge = trackBridge(await startBrowserKernelBridge({ home, executable: broker }));
-      await waitForPublishedSocket();
+      await waitForPublishedBrokerSocket(socket, lock, { bridge });
       const child = trackChild(
         spawn(peer, ["--disconnect"], { env: { HOME: home }, stdio: "ignore" }),
       );
