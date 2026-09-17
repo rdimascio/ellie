@@ -204,6 +204,13 @@ test(
       assert.equal((await held).status, 200);
       assert.equal(fixture.control.heldReadCompleted(), 1);
       assert.equal(fixture.control.heldHandled(), 1);
+      fixture.control.failNextServerCloseForTest();
+      await assert.rejects(fixture.close(), /cleanup is uncertain/);
+      assert.equal(
+        (await call(port, tls.rootCert, "/api/connections", { cookie })).status,
+        200,
+        "failed HTTPS close must retain dependent stores and authority",
+      );
       await fixture.nativeLife.revoke(allowed.id);
       assert.equal((await call(port, tls.rootCert, "/api/connections", { cookie })).status, 401);
     } finally {

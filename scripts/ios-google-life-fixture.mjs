@@ -130,11 +130,17 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
     },
   };
   let life, plugins, tasks, connectorStore, connectors, nativeLife, server, connectionIds;
+  let failServerCloseOnce = false;
   async function closeOwned() {
-    const failures = [];
     heldRead?.();
     for (const close of [
-      () => server?.close(),
+      () => {
+        if (failServerCloseOnce) {
+          failServerCloseOnce = false;
+          throw new Error("Synthetic server close failure.");
+        }
+        return server?.close();
+      },
       () => nativeLife?.close(),
       () => connectors?.close(),
       () => tasks?.close(),
@@ -145,10 +151,11 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
       try {
         await close();
       } catch {
-        failures.push(1);
+        const failure = new Error("Synthetic Google fixture cleanup is uncertain.");
+        failure.fixtureCleanupUncertain = true;
+        throw failure;
       }
     }
-    if (failures.length) throw new Error("Synthetic Google fixture cleanup is uncertain.");
   }
   try {
     await mkdir(join(directory, "tasks"), { mode: 0o700 });
@@ -242,6 +249,9 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
         const release = heldRead;
         heldRead = undefined;
         release?.();
+      },
+      failNextServerCloseForTest: () => {
+        failServerCloseOnce = true;
       },
     },
     close: closeOwned,

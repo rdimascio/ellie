@@ -70,7 +70,8 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
   func testLateGmailBodyCannotPublishAfterCancelCredentialChangeOrRevocation() async throws {
     let allowed = try credential("allowed")
     let denied = try credential("denied")
-    let store = IOSGmailInboxStore(client: IOSPinnedGmailClient())
+    let client = RecordingPinnedGmailClient()
+    let store = IOSGmailInboxStore(client: client)
     store.bind(allowed)
     store.refresh()
     try await eventually { !store.busy && store.accounts.count == 1 }
@@ -83,7 +84,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     store.cancelRead()
     try await control("release", credential: allowed)
     try await control("settled/1", credential: allowed)
-    try await eventually { !store.busy }
+    try await noLatePublication(store, client: client, completed: 1)
     XCTAssertNil(store.detail)
     XCTAssertNil(store.selectedMessageID)
 
@@ -92,7 +93,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     store.bind(denied)
     try await control("release", credential: allowed)
     try await control("settled/2", credential: allowed)
-    try await eventually { !store.busy }
+    try await noLatePublication(store, client: client, completed: 2)
     XCTAssertTrue(store.accounts.isEmpty)
     XCTAssertTrue(store.messages.isEmpty)
     XCTAssertNil(store.detail)
@@ -110,10 +111,30 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     try await NativeEnrollmentTransport(timeout: 6).logout(revocable)
     try await control("release", credential: allowed)
     try await control("settled/3", credential: allowed)
-    try await eventually { !store.busy }
+    try await noLatePublication(store, client: client, completed: 3)
     XCTAssertNil(store.detail)
     XCTAssertNil(store.selectedMessageID)
     XCTAssertTrue(store.messages.isEmpty)
+  }
+
+  @MainActor
+  private func noLatePublication(_ store: IOSGmailInboxStore,
+    client: RecordingPinnedGmailClient, completed: Int) async throws {
+    let deadline = ContinuousClock.now + .seconds(6)
+    while ContinuousClock.now < deadline {
+      if await client.completedDetails() >= completed { break }
+      try await Task.sleep(for: .milliseconds(20))
+    }
+    let observed = await client.completedDetails()
+    XCTAssertEqual(observed, completed,
+      "Pinned Gmail detail call did not settle after server response")
+    // Store invalidation clears busy immediately. Observe after the real pinned
+    // client's completion, giving its MainActor continuation a bounded turn.
+    let observationEnd = ContinuousClock.now + .milliseconds(250)
+    while ContinuousClock.now < observationEnd {
+      XCTAssertNil(store.detail, "A cancelled private body was published late")
+      try await Task.sleep(for: .milliseconds(20))
+    }
   }
 
   @MainActor
@@ -144,6 +165,31 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
     XCTAssertEqual(body, Data(#"{"ok":true}"#.utf8))
   }
+}
+
+private actor RecordingPinnedGmailClient: IOSGmailClient {
+  private let pinned = IOSPinnedGmailClient()
+  private var completed = 0
+
+  func accounts(_ credential: NativeEnrollmentCredential) async throws -> [IOSGmailAccount] {
+    try await pinned.accounts(credential)
+  }
+  func preview(_ credential: NativeEnrollmentCredential,
+    accountID: String) async throws -> [IOSGmailMessage] {
+    try await pinned.preview(credential, accountID: accountID)
+  }
+  func detail(_ credential: NativeEnrollmentCredential, accountID: String,
+    messageID: String) async throws -> IOSGmailDetail {
+    do {
+      let result = try await pinned.detail(credential, accountID: accountID, messageID: messageID)
+      completed += 1
+      return result
+    } catch {
+      completed += 1
+      throw error
+    }
+  }
+  func completedDetails() -> Int { completed }
 }
 
 private final class GoogleFixturePinnedDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {

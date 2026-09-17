@@ -11,6 +11,7 @@ export interface IOSGoogleLifeFixture {
     heldReadCompleted(): number;
     heldHandled(): number;
     releaseHeld(): void;
+    failNextServerCloseForTest(): void;
   };
   close(): Promise<void>;
 }
