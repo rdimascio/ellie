@@ -16,6 +16,7 @@ The repository currently provides a developer milestone, not a household product
 
 - A TypeScript coordinator and outbound-polling node communicate over authenticated, certificate-pinned HTTPS on a trusted local network.
 - The deterministic router can open allowed macOS apps and HTTPS sites and can place or tile windows through an isolated Swift Accessibility helper.
+- Optional decision routing interprets unmatched coordinator desktop commands as at most one existing operation, initially in shadow mode. Provider setup and bounded execution are explicit; this path is not yet wired into Ellie Life conversation or the native clients. See [setup and evaluation](decision-routing.md).
 - Pairing, per-node credentials, revocation, capability checks, local allowlists, bounded messages, and ephemeral command context are implemented.
 - Optional, explicitly configured Macs can advertise installed local models and resource telemetry. The coordinator schedules a non-streaming inference probe on one eligible independent worker. Separate Macs run concurrently but do not pool memory.
 - Portable certificate generation and basic independent-worker admission, reservation, and scheduling are implemented with regression coverage.

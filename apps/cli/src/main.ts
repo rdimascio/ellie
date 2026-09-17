@@ -72,6 +72,7 @@ import {
   configureServiceLife,
   selectedServiceLifeConfig,
 } from "./service-life-config.ts";
+import { createDecisionRouting, decisionKeyAccount, routingCommand } from "./decision-routing.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
@@ -440,6 +441,14 @@ async function main(): Promise<void> {
     });
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
+      let decisionRouting;
+      try {
+        decisionRouting = await createDecisionRouting(config.decisionRouting, secrets);
+      } catch {
+        console.error(
+          "Optional decision routing could not be initialized. Deterministic commands remain available.",
+        );
+      }
       const created = createEllieServer({
         key: await secrets.get("server.key"),
         cert,
@@ -447,6 +456,7 @@ async function main(): Promise<void> {
         preferences: config.preferences,
         jobStore,
         browser,
+        decisionRouting,
       });
       app = created;
       await new Promise<void>((resolve, reject) => {
@@ -517,6 +527,32 @@ async function main(): Promise<void> {
     const status = browser.current().status;
     if (status === "ready") serviceLog?.write("browser_ready");
     else if (status === "unavailable") serviceLog?.write("browser_unavailable");
+    return;
+  }
+  if (args[0] === "routing") {
+    const raw = record(await privateConfig("server.json"));
+    const config = serverConfig(raw);
+    const command = routingCommand(args.slice(1), config.decisionRouting);
+    if (command.kind === "status") {
+      console.log(JSON.stringify(config.decisionRouting ?? { mode: "off" }, null, 2));
+      console.log("This is the saved configuration; restart the coordinator after changes.");
+      return;
+    }
+    if (command.needsKey) {
+      console.log(
+        "Cloud routing will send unmatched commands, allowed app/site candidates, and the previous successful app context to TypeSafe. Setup starts in shadow mode.",
+      );
+      const key = await ask("TypeSafe API key (hidden): ", true);
+      if (!key || key.length > 4096 || /\s/.test(key))
+        throw new Error("Enter a valid TypeSafe API key.");
+      await secrets.set(decisionKeyAccount, key);
+    }
+    if (command.config) raw.decisionRouting = command.config;
+    else delete raw.decisionRouting;
+    await save("server.json", raw);
+    console.log(
+      `Decision routing saved (${command.config?.mode ?? "off"}). Restart the coordinator to apply it.`,
+    );
     return;
   }
   if (args[0] === "server" && args[1] === "pair") {
@@ -749,7 +785,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  server init [--lan]   Generate private config and Keychain identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  server init [--lan]   Generate private config and Keychain identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up Jev in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
   console.log(
     "  transcribe --audio WAV --model PATH --executable PATH\n" +

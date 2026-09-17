@@ -15,6 +15,8 @@ Open the one-use local link printed by the launcher. Try “Remember that I pref
 
 The original desktop command path uses text commands → deterministic routing → authenticated HTTPS → native macOS app and window control. These desktop commands and the supported Life commands need **no model download, cloud account, API key, or paid service**. Broader Life conversation and generated custom apps use the optional local model described above. The existing coordinator also has an independent inference-worker probe for installed models; see [worker setup](docs/inference-workers.md).
 
+An [optional decision-routing experiment](docs/decision-routing.md) can propose a single allowed desktop action for commands the deterministic grammar does not recognize. It starts in shadow mode, with explicit local or hosted provider setup; this coordinator command path is separate from Ellie Life conversation and the native clients.
+
 ## Try the first milestone
 
 You need macOS, Node.js 24, Bun 1.4.2, Xcode Command Line Tools (`xcode-select --install`), and `openssl` on each Mac (the macOS-provided LibreSSL is supported). Node remains the production runtime and test runner; Bun installs the workspace and runs its scripts. The execution Mac needs a logged-in graphical session. Install Arc for the default browser commands. Bun installs the local runtime dependencies with the workspace.

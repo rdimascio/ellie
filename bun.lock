@@ -22,6 +22,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/config": "*",
+        "@ellie/decisions": "*",
         "@ellie/life": "*",
         "@ellie/macos": "*",
         "@ellie/protocol": "*",
@@ -84,6 +85,7 @@
       "dependencies": {
         "@ellie/compute": "*",
         "@ellie/config": "*",
+        "@ellie/decisions": "*",
         "@ellie/permissions": "*",
         "@ellie/protocol": "*",
         "@ellie/router": "*",
@@ -107,6 +109,10 @@
       "dependencies": {
         "@ellie/protocol": "*",
       },
+    },
+    "packages/decisions": {
+      "name": "@ellie/decisions",
+      "version": "0.1.0",
     },
     "packages/improvement-queue": {
       "name": "@ellie/improvement-queue",
@@ -237,6 +243,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/config": "*",
+        "@ellie/decisions": "*",
         "@ellie/protocol": "*",
       },
     },
@@ -273,6 +280,8 @@
     "@ellie/compute": ["@ellie/compute@workspace:packages/compute"],
 
     "@ellie/config": ["@ellie/config@workspace:packages/config"],
+
+    "@ellie/decisions": ["@ellie/decisions@workspace:packages/decisions"],
 
     "@ellie/improvement-queue": ["@ellie/improvement-queue@workspace:packages/improvement-queue"],
 

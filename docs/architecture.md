@@ -4,6 +4,8 @@
 
 A text client submits a command to `ellie-server`. The pure router produces a typed plan, or returns an unsupported-command response. The server checks the target node's advertised capabilities and its own app/site allowlist. A waiting HTTPS long poll delivers the job immediately to `ellie-node`, which independently validates the wire message and checks its local allowlist. The Swift helper then executes a fixed native operation using structured JSON over stdin. No command text is interpolated into a shell, script, or AppleScript.
 
+An explicitly configured [decision provider](decision-routing.md) can interpret unmatched desktop requests. It starts in shadow mode, which returns a proposed action without dispatch; a separate execution setting enables single-action plans through the same validation, permission checks, job lifecycle, and native executor. The optional provider is independent of the pure router and never runs for a recognized deterministic command. A node is reserved while inference is pending; cancellation, reconnect, revocation, and shutdown invalidate the proposal.
+
 The node's outbound connection avoids opening an execution port on each Mac. Transport is behind a small client boundary; an authenticated private-network address can replace a LAN address later without changing tools. Tailscale is a possible deployment option, not a dependency or an implemented onboarding integration.
 
 Each node has an opaque generated identity, transient pronoun context, one in-flight job, and separate execution/compute capability advertisements. Long polling has no periodic dispatch delay when idle. Unrelated nodes can execute concurrently. The server commits new pronoun context only after reported success. Capabilities are refreshed when a node reconnects; restart the node after granting Accessibility.
@@ -44,7 +46,7 @@ App launching and URL opening require only normal macOS app access. Window place
 
 A physical Mac can host an execution role, an inference-worker role, or both under its paired node identity. `executionCapabilities` describes permitted desktop tools; the legacy `capabilities` field is preserved for older clients. `computeCapabilities` independently describes the inference backend, independent-worker mode, and locally enabled installed models. Enabling compute grants no window or application permissions. Set `executionEnabled: false` for a compute-only Mac.
 
-The coordinator remains the owner of routing, conversational context, permissions, and placement. Desktop commands retain their explicit target node. A model output is returned as text; it does not become an executable action. `say` keeps the deterministic route; the separate controller-only `infer` command exercises the new local compute path. There is no automatic model fallback for unsupported desktop commands.
+The coordinator remains the owner of routing, conversational context, permissions, and placement. Desktop commands retain their explicit target node. The controller-only `infer` probe returns model text and never interprets it as an action. `say` uses the deterministic route first, with optional bounded decision routing only when explicitly configured. The decision adapter calls its own coordinator-local runner or explicitly enabled hosted API; it does not use the independent worker scheduler.
 
 ### Implemented independent-worker path
 
