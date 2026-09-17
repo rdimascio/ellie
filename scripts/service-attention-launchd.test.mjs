@@ -46,8 +46,9 @@ async function fakeFixture(phase) {
   return { root, record };
 }
 
-function fakeLaunchd(root, record) {
+function fakeLaunchd(root, record, { lingerPrints = 0 } = {}) {
   let loaded = false;
+  let linger = 0;
   let bootstrapCount = 0;
   const calls = [];
   const command = `${record.release}/payload/lib/ellie/apps/cli/src/main.ts service run coordinator`;
@@ -57,12 +58,17 @@ function fakeLaunchd(root, record) {
       calls.push(args);
       if (args[0] === "print") {
         assert.equal(args[1], `gui/${process.getuid()}/${record.label}`);
+        if (linger > 0) {
+          linger--;
+          return { code: 0, stdout: "\tpid = 12345\n" };
+        }
         return loaded ? { code: 0, stdout: "\tpid = 12345\n" } : { code: 113, stdout: "" };
       }
       if (args[0] === "bootout") {
         assert.equal(args[1], `gui/${process.getuid()}/${record.label}`);
         assert.equal(loaded, true);
         loaded = false;
+        linger = lingerPrints;
         return { code: 0, stdout: "" };
       }
       assert.equal(args[0], "bootstrap");
@@ -88,13 +94,14 @@ function fakeLaunchd(root, record) {
     verifyNoListener: async () => {},
     verifyTlsListener: async () => {},
     throttleWait: async (duration) => assert.equal(duration, 31_000),
+    pollWait: async () => {},
   };
 }
 
 test("fake launchd requires a single rejecting start, stable attention, then explicit recovery", async () => {
   const { root, record } = await fakeFixture("prepared");
   try {
-    const io = fakeLaunchd(root, record);
+    const io = fakeLaunchd(root, record, { lingerPrints: 2 });
     await kc01(root, io);
     const attention = JSON.parse(await readFile(join(root, "fixture.json"), "utf8"));
     assert.equal(attention.phase, "attention");
@@ -114,6 +121,7 @@ test("fake launchd requires a single rejecting start, stable attention, then exp
     assert.equal(recovered.phase, "recovered");
     assert.deepEqual(io.calls.filter(([command]) => command === "bootout").length, 1);
     assert.deepEqual(io.calls.filter(([command]) => command === "bootstrap").length, 2);
+    assert.ok(io.calls.filter(([command]) => command === "print").length >= 2);
     assert.equal(await readFile(join(root, "attempts"), "utf8"), "server.key\nserver.key\n");
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -192,6 +200,39 @@ test("cleanup waits for the exact owned service process after the label disappea
     });
     assert.equal(JSON.parse(await readFile(join(root, "fixture.json"), "utf8")).phase, "stopped");
     assert.equal(calls.filter(([commandName]) => commandName === "bootout").length, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("failed post-bootout process observation retains uncertain cleanup", async () => {
+  const { root, record } = await fakeFixture("recovered");
+  try {
+    const command = `${record.release}/payload/lib/ellie/apps/cli/src/main.ts service run coordinator`;
+    let loaded = true;
+    let bootouts = 0;
+    await assert.rejects(
+      cleanup(root, {
+        fixture: async () => record,
+        launchctl: async ([action]) => {
+          if (action === "bootout") {
+            bootouts++;
+            loaded = false;
+            return { code: 0, stdout: "" };
+          }
+          return loaded ? { code: 0, stdout: "\tpid = 12345\n" } : { code: 113, stdout: "" };
+        },
+        observeProcess: async () =>
+          loaded
+            ? { code: 0, stdout: `Thu Sep 17 12:00:00 2026 /qa/node ${command}\n` }
+            : { code: 2, stdout: "" },
+        verifyNoListener: async () => {},
+      }),
+      /process state is unavailable/,
+    );
+    assert.equal(bootouts, 1);
+    assert.equal(JSON.parse(await readFile(join(root, "fixture.json"), "utf8")).phase, "uncertain");
+    assert.equal(await readFile(join(root, "mode"), "utf8"), "reject\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

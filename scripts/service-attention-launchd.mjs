@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { constants } from "node:fs";
 import {
   createHash,
   createPrivateKey,
@@ -447,6 +448,69 @@ async function waitGone(identity, entrypoint, io = {}) {
   throw new Error("Owned service process exit was not observed; retaining fixture state.");
 }
 
+async function audit(root, phase, action, outcome) {
+  const line = JSON.stringify({ time: new Date().toISOString(), phase, action, outcome }) + "\n";
+  const handle = await open(
+    join(root, "phase-diagnostics.jsonl"),
+    constants.O_CREAT | constants.O_APPEND | constants.O_WRONLY | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    const info = await handle.stat();
+    if (
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      info.uid !== process.getuid() ||
+      (info.mode & 0o077) !== 0 ||
+      info.size + Buffer.byteLength(line) > 64 * 1024
+    )
+      throw new Error("Private fixture diagnostics cannot be recorded safely.");
+    await handle.writeFile(line);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function auditedIO(root, phase, io) {
+  const observed = async (action, operation) => {
+    await audit(root, phase, action, "before");
+    try {
+      const value = await operation();
+      await audit(
+        root,
+        phase,
+        action,
+        typeof value?.code === "number" ? `exit_${value.code}` : "passed",
+      );
+      return value;
+    } catch (error) {
+      await audit(root, phase, action, "failed");
+      throw error;
+    }
+  };
+  return {
+    ...io,
+    launchctl: (args) => observed(`launchctl_${args[0]}`, () => io.launchctl(args)),
+    observeProcess: (pid) =>
+      observed("ps_exact_pid", () =>
+        (
+          io.observeProcess ??
+          ((value) =>
+            runBounded(
+              "/bin/ps",
+              ["-ww", "-p", String(value), "-o", "lstart=", "-o", "command="],
+              5_000,
+            ))
+        )(pid),
+      ),
+    verifyNoListener: (port) =>
+      observed("loopback_absent", () => (io.verifyNoListener ?? verifyNoListener)(port)),
+    verifyTlsListener: (port, cert) =>
+      observed("loopback_tls", () => (io.verifyTlsListener ?? verifyTlsListener)(port, cert)),
+  };
+}
+
 async function recordedIdentity(root, name = "attention", caseName = "KC01") {
   const evidence = JSON.parse(await readFile(join(root, `${name}.json`), "utf8"));
   const identity = evidence.identity;
@@ -477,6 +541,20 @@ async function absent(label, io) {
   const result = await printJob(label, io);
   if (result.code !== 113)
     throw new Error("Fixture label is already loaded or cannot be inspected.");
+}
+
+async function waitLabelGone(label, previousPid, io) {
+  const deadline = Date.now() + 5_000;
+  do {
+    const result = await printJob(label, io);
+    if (result.code === 113) return;
+    if (result.code !== 0) throw new Error("Fixture label unload state is unavailable.");
+    const observed = [...result.stdout.matchAll(/^\s*pid = ([1-9][0-9]*)\s*$/gm)];
+    if (observed.length > 1 || (observed.length === 1 && Number(observed[0][1]) !== previousPid))
+      throw new Error("Fixture label changed process while unloading.");
+    await (io.pollWait ?? sleep)(50);
+  } while (Date.now() < deadline);
+  throw new Error("Fixture label did not unload within the bounded wait.");
 }
 
 async function events(root) {
@@ -550,8 +628,25 @@ async function update(root, record, phase, evidence) {
   await writeFile(path, JSON.stringify(evidence, null, 2) + "\n", { flag: "wx", mode: 0o600 });
 }
 
+async function durableEvidence(root, name, value) {
+  const handle = await open(join(root, name), "wx", 0o600);
+  try {
+    await handle.writeFile(JSON.stringify(value, null, 2) + "\n");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  const directory = await open(root, "r");
+  try {
+    await directory.sync();
+  } finally {
+    await directory.close();
+  }
+}
+
 export async function kc01(root, io = { launchctl }) {
   const record = await (io.fixture ?? fixture)(root);
+  io = auditedIO(root, "KC01", io);
   if (record.phase !== "prepared" || (await readFile(join(root, "mode"), "utf8")) !== "reject\n")
     throw new Error("KC01 requires an unused rejecting fixture.");
   await absent(record.label, io);
@@ -603,6 +698,7 @@ export async function kc01(root, io = { launchctl }) {
 
 export async function kc02(root, io = { launchctl }) {
   const record = await (io.fixture ?? fixture)(root);
+  io = auditedIO(root, "KC02", io);
   if (record.phase !== "attention") throw new Error("KC02 requires KC01 attention evidence.");
   const pid = await loadedPid(record.label, io);
   if (!pid) throw new Error("Fixture service is not running.");
@@ -662,6 +758,7 @@ export async function kc02(root, io = { launchctl }) {
 
 export async function kc03(root, io = { launchctl }) {
   const record = await (io.fixture ?? fixture)(root);
+  io = auditedIO(root, "KC03", io);
   if (record.phase !== "diagnosed") throw new Error("KC03 requires KC02 diagnosis evidence.");
   const identity = await recordedIdentity(root);
   const entrypoint = join(
@@ -680,11 +777,12 @@ export async function kc03(root, io = { launchctl }) {
     JSON.stringify(await processIdentity(currentPid, entrypoint, io)) !== JSON.stringify(identity)
   )
     throw new Error("KC03 service identity changed; no lifecycle command was sent.");
+  await durableEvidence(root, "kc03-handoff.json", { case: "KC03", label: record.label, identity });
   try {
     const bootout = await io.launchctl(["bootout", `gui/${process.getuid()}/${record.label}`]);
     if (bootout.code !== 0)
       throw new Error("Exact fixture label could not be stopped; state retained.");
-    await absent(record.label, io);
+    await waitLabelGone(record.label, identity.pid, io);
     await waitGone(identity, entrypoint, io);
     await (io.verifyNoListener ?? verifyNoListener)(record.port);
     await writeFile(join(root, "mode"), "success\n", { mode: 0o600 });
@@ -723,6 +821,7 @@ export async function kc03(root, io = { launchctl }) {
 
 export async function cleanup(root, io = { launchctl }) {
   const record = await (io.fixture ?? fixture)(root);
+  io = auditedIO(root, "cleanup", io);
   const current = await printJob(record.label, io);
   const entrypoint = join(
     record.release,
@@ -744,15 +843,26 @@ export async function cleanup(root, io = { launchctl }) {
           : undefined;
   if (record.phase === "uncertain" && current.code === 113)
     throw new Error("Uncertain fixture ownership requires manual process reconciliation.");
-  if (current.code === 0) {
-    const stopped = await io.launchctl(["bootout", `gui/${process.getuid()}/${record.label}`]);
-    if (stopped.code !== 0) throw new Error("Fixture bootout is uncertain; artifacts retained.");
-  } else if (current.code !== 113)
-    throw new Error("Fixture label status is uncertain; artifacts retained.");
-  await absent(record.label, io);
-  if (identity) await waitGone(identity, entrypoint, io);
-  await (io.verifyNoListener ?? verifyNoListener)(record.port);
-  await writeRecord(root, { ...record, phase: "stopped" });
+  try {
+    if (current.code === 0) {
+      await durableEvidence(root, "cleanup-handoff.json", {
+        case: "cleanup",
+        label: record.label,
+        identity,
+      });
+      const stopped = await io.launchctl(["bootout", `gui/${process.getuid()}/${record.label}`]);
+      if (stopped.code !== 0) throw new Error("Fixture bootout is uncertain; artifacts retained.");
+    } else if (current.code !== 113)
+      throw new Error("Fixture label status is uncertain; artifacts retained.");
+    if (current.code === 0) await waitLabelGone(record.label, identity.pid, io);
+    else await absent(record.label, io);
+    if (identity) await waitGone(identity, entrypoint, io);
+    await (io.verifyNoListener ?? verifyNoListener)(record.port);
+    await writeRecord(root, { ...record, phase: "stopped" });
+  } catch (error) {
+    await writeRecord(root, { ...record, phase: "uncertain" });
+    throw error;
+  }
   // Artifacts, including synthetic key and fixed event evidence, remain private for review.
 }
 
