@@ -149,7 +149,7 @@ struct BrowserControlView: View {
       case .home, .results: return "Observed Netflix page is unsupported"
       }
     }
-    switch site.page {
+    return switch site.page {
     case .home: "Observed YouTube home page"
     case .results: "Observed YouTube results page"
     case .browse: "Observed YouTube page is unsupported"
