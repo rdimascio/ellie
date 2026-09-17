@@ -439,7 +439,6 @@ struct IOSQuietSessionsHome: View {
         }
         .onChange(of: credential) { _, updated in store.bind(updated); store.refreshRecent() }
         .onChange(of: scenePhase) { _, phase in if phase != .active { store.background() } }
-        .accessibilityIdentifier("quiet-home")
     }
 }
 
