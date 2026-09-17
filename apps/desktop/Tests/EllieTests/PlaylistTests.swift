@@ -67,6 +67,16 @@ final class PlaylistTests: XCTestCase {
         XCTAssertEqual(PlaylistPlayerState.playerError(nil), .unavailable)
     }
 
+    func testSharedPlayerDocumentAcceptsOnlyValidatedPlaylistIDs() throws {
+        let html = try XCTUnwrap(PlaylistNavigationPolicy.playerHTML(playlistID: syntheticID))
+        XCTAssertTrue(html.contains("list:'\(syntheticID)'"))
+        XCTAssertTrue(html.contains("https://www.youtube-nocookie.com"))
+        XCTAssertTrue(html.contains("autoplay:1"))
+        XCTAssertNil(PlaylistNavigationPolicy.playerHTML(playlistID: "bad');alert(1)//"))
+        XCTAssertEqual(YouTubePlaylist.publicURL(for: syntheticID)?.absoluteString,
+            "https://www.youtube.com/playlist?list=\(syntheticID)")
+    }
+
     @MainActor
     func testProductionContentRuleGrammarCompilesWithoutLoadingProviderContent() async throws {
         let store = try XCTUnwrap(WKContentRuleListStore.default())

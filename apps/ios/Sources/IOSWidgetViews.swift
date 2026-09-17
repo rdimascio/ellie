@@ -20,6 +20,8 @@ struct IOSWidgetCard: View {
                         .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
                         .multilineTextAlignment(.leading)
                 }.buttonStyle(.plain).accessibilityIdentifier("note-\(widget.id)")
+            } else if widget.type == .playlist {
+                IOSPlaylistWidget(widget: widget, configure: edit)
             } else { ContentUnavailableView("Not connected", systemImage: widget.type.iosSymbol, description: Text("This widget is ready for a future provider connection.")) }
             if editing {
                 HStack {
@@ -65,10 +67,10 @@ struct IOSWidgetGallery: View {
 struct IOSWidgetEditor: View {
     @Environment(\.dismiss) private var dismiss
     let widget: DashboardWidget; let save: (String, WidgetSize, [String: String]) -> Void
-    @State private var title: String; @State private var size: WidgetSize; @State private var note: String; @State private var zone: String
+    @State private var title: String; @State private var size: WidgetSize; @State private var note: String; @State private var zone: String; @State private var playlist: String
     init(widget: DashboardWidget, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
         self.widget = widget; self.save = save
-        _title = State(initialValue: widget.title); _size = State(initialValue: widget.size); _note = State(initialValue: widget.config["text"] ?? ""); _zone = State(initialValue: widget.config["timeZone"] ?? "")
+        _title = State(initialValue: widget.title); _size = State(initialValue: widget.size); _note = State(initialValue: widget.config["text"] ?? ""); _zone = State(initialValue: widget.config["timeZone"] ?? ""); _playlist = State(initialValue: widget.config["youtubePlaylistID"] ?? "")
     }
     var body: some View {
         NavigationStack {
@@ -77,12 +79,21 @@ struct IOSWidgetEditor: View {
                 Picker("Size", selection: $size) { Text("Small").tag(WidgetSize.small); Text("Wide").tag(WidgetSize.wide) }.pickerStyle(.segmented)
                 if widget.type == .note { Section("Note") { TextEditor(text: $note).frame(minHeight: 180); Text("\(note.count) of 2,000 characters").font(.caption).foregroundStyle(.secondary) } }
                 if widget.type == .clock { Section("Time zone") { TextField("Europe/London", text: $zone).textInputAutocapitalization(.never).autocorrectionDisabled(); Text("Leave blank for this iPhone’s time zone.") } }
+                if widget.type == .playlist {
+                    Section("YouTube playlist") {
+                        TextField("Playlist URL or ID", text: $playlist)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityIdentifier("playlist-input")
+                        Text("Use a public playlist URL or ID. Ellie stores only its playlist ID; playback starts when you open the player.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
             }
             .ellieScreen()
             .navigationTitle("Edit \(widget.type.iosName)").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { guard let config = try? DashboardModel.configAfterEditing(widget, note: note, timeZone: zone) else { return }; save(title, size, config) }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.utf16.count > 80 || note.utf16.count > 2_000 || (widget.type == .clock && !zone.isEmpty && TimeZone(identifier: zone) == nil)) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") { guard let config = try? DashboardModel.configAfterEditing(widget, note: note, timeZone: zone, playlist: widget.type == .playlist ? playlist : nil) else { return }; save(title, size, config) }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.utf16.count > 80 || note.utf16.count > 2_000 || (widget.type == .clock && !zone.isEmpty && TimeZone(identifier: zone) == nil) || (widget.type == .playlist && !playlist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && YouTubePlaylist.parse(playlist) == nil)) }
             }
         }
     }
