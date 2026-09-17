@@ -127,10 +127,13 @@ export const api = {
         "/api/connections",
       ),
     start: (provider: ConnectorProviderId, mode: ConnectorMode) =>
-      request<{ authorizationUrl: string; openedExternally?: boolean }>("/api/connections/start", {
-        method: "POST",
-        body: JSON.stringify({ provider, mode }),
-      }),
+      request<{ authorizationUrl: string; connectionId: string; openedExternally?: boolean }>(
+        "/api/connections/start",
+        {
+          method: "POST",
+          body: JSON.stringify({ provider, mode }),
+        },
+      ),
     refresh: (id: string) =>
       request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/refresh`, {
         method: "POST",
