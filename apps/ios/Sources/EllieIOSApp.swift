@@ -16,6 +16,15 @@ struct EllieIOSApp: App {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(
                         "--ellie-ui-browser-complete-actions"))
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-composed-fixture") {
+                if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
+                    from: ProcessInfo.processInfo.arguments,
+                    after: "--ellie-ui-browser-composed-fixture"),
+                   let fixture = BrowserComposedUITestFixture.load(identifier: identifier) {
+                    BrowserComposedUITestFixtureView(fixture: fixture, identifier: identifier)
+                } else {
+                    Text("Invalid composed browser fixture")
+                }
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-household-chores-fixture") {
                 HouseholdChoresUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(

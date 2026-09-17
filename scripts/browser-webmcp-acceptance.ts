@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createHash, randomUUID, X509Certificate } from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  randomBytes,
+  randomUUID,
+  X509Certificate,
+} from "node:crypto";
 import { createServer } from "node:https";
 import { request as httpsRequest } from "node:https";
 import { createServer as createNetServer, type AddressInfo } from "node:net";
@@ -17,7 +23,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { generateBrowserTlsIdentity } from "../apps/cli/src/certificate.ts";
 import { defaults } from "@ellie/config";
 import { record } from "@ellie/protocol";
@@ -42,6 +48,7 @@ import {
   browserWebMCPHostInstallationPlan,
 } from "../apps/node/src/browser-native-host.ts";
 import { startBrowserWebMCPBridge } from "../apps/node/src/browser-webmcp-bridge.ts";
+import { ComposedIOSCleanupError, runIOSBrowserComposed } from "./ios-browser-composed-runner.ts";
 
 const runnerPath = fileURLToPath(import.meta.url);
 export class NativeJourneySetupCleanupError extends Error {
@@ -212,7 +219,7 @@ async function prepareExtension(root: string, origin: string) {
   };
 }
 
-function fixtureHtml(): string {
+function fixtureHtml(composed = false): string {
   return `<!doctype html>
 <meta charset="utf-8">
 <title>Ellie owned WebMCP acceptance</title>
@@ -230,6 +237,7 @@ const result = document.querySelector('#result');
 const update = () => { result.textContent = 'Scroll offset: ' + Math.round(viewport.scrollTop); };
 viewport.addEventListener('scroll', update);
 let phase = 'home'; let query = ''; let playback = 'paused'; let mutationCount = 0;
+let scrollInvocations = 0; document.body.dataset.scrollInvocations = '0';
 const media = () => {
   document.querySelector('#phase').textContent = phase;
   document.querySelector('#query').textContent = query;
@@ -260,12 +268,18 @@ Promise.all([
     annotations: ${JSON.stringify(annotations)},
     execute: async ({direction}, context = {}) => {
       context.signal?.throwIfAborted();
+      if (${composed} && direction === 'down') {
+        scrollInvocations++; document.body.dataset.scrollInvocations = String(scrollInvocations);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        context.signal?.throwIfAborted();
+      }
       const before = viewport.scrollTop;
       viewport.scrollTop = before + (direction === 'down' ? 120 : -120);
       context.signal?.throwIfAborted();
       const after = viewport.scrollTop;
       if (direction === 'down' ? after <= before : after >= before) throw new Error('scroll_not_observed');
       update();
+      if (${composed}) { mutationCount++; media(); }
       return ${JSON.stringify(completedValue)};
     }
   }),
@@ -317,7 +331,7 @@ Promise.all([
 </script>`;
 }
 
-async function prepareRegistry(home: string, origin: string) {
+async function prepareRegistry(home: string, origin: string, composed = false) {
   const state = join(home, ".ellie");
   await mkdir(state, { recursive: true, mode: 0o700 });
   await chmod(state, 0o700);
@@ -345,6 +359,17 @@ async function prepareRegistry(home: string, origin: string) {
         toolName: "ellie_acceptance_read",
         inputSchemaSha256: sha256(canonical(readSchema)),
       },
+      ...(composed
+        ? [
+            {
+              id: "summary",
+              origin,
+              operation: "read" as const,
+              toolName: "ellie_acceptance_read",
+              inputSchemaSha256: sha256(canonical(readSchema)),
+            },
+          ]
+        : []),
       {
         id: "scroll",
         origin,
@@ -390,22 +415,30 @@ async function prepareRegistry(home: string, origin: string) {
   return { path, sha256: sha256(bytes), registry: loadReviewedBrowserRegistry(path) };
 }
 
-async function prepareNativeHost(home: string, profile: string, release: string) {
+async function prepareNativeHost(
+  home: string,
+  profile: string,
+  release: string,
+  composedBootstrap?: string,
+) {
   const plan = browserWebMCPHostInstallationPlan(release);
+  const manifest = composedBootstrap
+    ? `${JSON.stringify({ ...JSON.parse(plan.manifest), path: composedBootstrap })}\n`
+    : plan.manifest;
   const directories = [join(profile, "NativeMessagingHosts")];
   const paths: string[] = [];
   for (const directory of directories) {
     await mkdir(directory, { recursive: true, mode: 0o700 });
     await chmod(directory, 0o700);
     const path = join(directory, plan.manifestName);
-    await writeFile(path, plan.manifest, { mode: 0o600 });
+    await writeFile(path, manifest, { mode: 0o600 });
     await chmod(path, 0o600);
     paths.push(path);
   }
   return {
-    executablePath: plan.executablePath,
-    executableSha256: sha256(await readFile(plan.executablePath)),
-    manifestSha256: sha256(plan.manifest),
+    executablePath: composedBootstrap ?? plan.executablePath,
+    executableSha256: sha256(await readFile(composedBootstrap ?? plan.executablePath)),
+    manifestSha256: sha256(manifest),
     manifestPaths: paths.map((path) =>
       path.startsWith(profile)
         ? `$PROFILE${path.slice(profile.length)}`
@@ -470,7 +503,68 @@ async function within<T>(work: Promise<T>, milliseconds: number, message: string
   }
 }
 
-async function startNativeJourney(operations: BrowserWebMCPOperations, ownedRoot: string) {
+async function generateComposedLoopbackIdentity(ownedRoot: string) {
+  const config = join(ownedRoot, "ios-loopback-openssl.cnf");
+  const key = join(ownedRoot, "ios-loopback-key.pem");
+  const cert = join(ownedRoot, "ios-loopback-cert.pem");
+  await writeFile(
+    config,
+    "[req]\ndistinguished_name=dn\nx509_extensions=server\nprompt=no\n[dn]\nCN=127.0.0.1\n[server]\nsubjectAltName=IP:127.0.0.1\nbasicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\n",
+    { mode: 0o600 },
+  );
+  await new Promise<void>((resolveDone, reject) => {
+    const child = spawn(
+      "/usr/bin/openssl",
+      [
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-sha256",
+        "-nodes",
+        "-keyout",
+        key,
+        "-out",
+        cert,
+        "-days",
+        "2",
+        "-config",
+        config,
+      ],
+      { stdio: "ignore" },
+    );
+    let timedOut = false;
+    let escalation: ReturnType<typeof setTimeout> | undefined;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+      escalation = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }, 1_000);
+    }, 30_000);
+    child.once("error", reject);
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (escalation) clearTimeout(escalation);
+      if (code === 0 && !timedOut) resolveDone();
+      else reject(new Error("Owned loopback certificate generation failed."));
+    });
+  });
+  const [leafKey, leafCert] = await Promise.all([readFile(key, "utf8"), readFile(cert, "utf8")]);
+  const parsed = new X509Certificate(leafCert);
+  assert.equal(parsed.checkIP("127.0.0.1"), "127.0.0.1");
+  assert.equal(parsed.ca, false);
+  assert.ok(parsed.checkPrivateKey(createPrivateKey(leafKey)));
+  assert.ok(parsed.validFromDate.getTime() <= Date.now());
+  assert.ok(parsed.validToDate.getTime() > Date.now());
+  return { leafKey, leafCert, pin: sha256(parsed.raw) };
+}
+
+async function startNativeJourney(
+  operations: BrowserWebMCPOperations,
+  ownedRoot: string,
+  composed = false,
+) {
   const target = "owned-browser-node";
   const coordinator = await coordinatorFixture(5_000);
   const nodeAbort = new AbortController();
@@ -524,15 +618,19 @@ async function startNativeJourney(operations: BrowserWebMCPOperations, ownedRoot
       onEvent: (event) => events.push(event),
     });
     await within(ready, 5_000, "Owned browser node did not register.");
-    const identity = await generateBrowserTlsIdentity("ellie-native-acceptance.local", {
-      tempDir: ownedRoot,
-    });
+    const identity = composed
+      ? await generateComposedLoopbackIdentity(ownedRoot)
+      : await generateBrowserTlsIdentity("ellie-native-acceptance.local", {
+          tempDir: ownedRoot,
+        });
     const port = await availablePort();
+    const nativeHost = composed ? "127.0.0.1" : "ellie-native-acceptance.local";
+    const nativeOrigin = `https://${nativeHost}:${port}`;
     const auth = new NativeAuth(NativeAuth.empty(), async () => {});
     listener = createBrowserServer({
       key: identity.leafKey,
       cert: identity.leafCert,
-      origin: `https://ellie-native-acceptance.local:${port}`,
+      origin: nativeOrigin,
       auth: new BrowserAuth(BrowserAuth.empty(), async () => {}),
       nativeAuth: auth,
       remote: createBrowserRemote(coordinator.controller, [
@@ -550,14 +648,14 @@ async function startNativeJourney(operations: BrowserWebMCPOperations, ownedRoot
           {
             host: "127.0.0.1",
             port,
-            servername: "ellie-native-acceptance.local",
+            servername: composed ? undefined : nativeHost,
             path,
             method: "POST",
-            ca: identity.rootCert,
+            ca: "rootCert" in identity ? identity.rootCert : identity.leafCert,
             rejectUnauthorized: true,
             timeout: 5_000,
             headers: {
-              host: `ellie-native-acceptance.local:${port}`,
+              host: `${nativeHost}:${port}`,
               "x-ellie-version": "1",
               "content-type": "application/json",
               "content-length": Buffer.byteLength(payload),
@@ -596,18 +694,40 @@ async function startNativeJourney(operations: BrowserWebMCPOperations, ownedRoot
         label: "Owned synthetic phone",
         grants: [{ target, capabilities }],
       });
-      assert.equal(
-        (await request("/native/v1/pair", { invitation: invitation.code, token })).status,
-        200,
-      );
+      const reply = await request("/native/v1/pair", { invitation: invitation.code, token });
+      assert.equal(reply.status, 200);
+      return record(reply.body).client;
     };
-    return { close, coordinator, events, pair, request, target };
+    return {
+      close,
+      coordinator,
+      events,
+      pair,
+      request,
+      target,
+      ...(composed
+        ? {
+            credential: {
+              origin: nativeOrigin,
+              certificateSha256:
+                "pin" in identity
+                  ? identity.pin
+                  : sha256(new X509Certificate(identity.leafCert).raw),
+            },
+          }
+        : {}),
+    };
   } catch (error) {
     return settleFailedNativeJourneySetup(error, close);
   }
 }
 
-async function prepareAcceptanceEnvironment(ownedRoot: string, home: string, release: string) {
+async function prepareAcceptanceEnvironment(
+  ownedRoot: string,
+  home: string,
+  release: string,
+  composed = false,
+) {
   let server: ReturnType<typeof createServer> | undefined;
   let bridge: Awaited<ReturnType<typeof startBrowserWebMCPBridge>> | undefined;
   try {
@@ -621,7 +741,7 @@ async function prepareAcceptanceEnvironment(ownedRoot: string, home: string, rel
           "content-security-policy":
             "default-src 'self' 'unsafe-inline'; connect-src 'none'; img-src 'none'; media-src 'none'; frame-src 'none'",
         });
-        response.end(fixtureHtml());
+        response.end(fixtureHtml(composed));
       },
     );
     await new Promise<void>((resolveListen, reject) => {
@@ -637,9 +757,20 @@ async function prepareAcceptanceEnvironment(ownedRoot: string, home: string, rel
       )
       .digest("base64");
     const extension = await prepareExtension(ownedRoot, origin);
-    const registry = await prepareRegistry(home, origin);
+    const registry = await prepareRegistry(home, origin, composed);
     const profile = join(ownedRoot, "browser-profile");
-    const nativeHost = await prepareNativeHost(home, profile, release);
+    let composedBootstrap: string | undefined;
+    if (composed) {
+      composedBootstrap = join(ownedRoot, "native-host-bootstrap.mjs");
+      const moduleURL = pathToFileURL(resolve("apps/node/src/browser-native-host.ts")).href;
+      await writeFile(
+        composedBootstrap,
+        `#!${process.execPath}\nimport { runBrowserWebMCPNativeHost } from ${JSON.stringify(moduleURL)};\nawait runBrowserWebMCPNativeHost({ home: ${JSON.stringify(home)} }).catch(() => { process.exitCode = 1; });\n`,
+        { mode: 0o500 },
+      );
+      await chmod(composedBootstrap, 0o500);
+    }
+    const nativeHost = await prepareNativeHost(home, profile, release, composedBootstrap);
     bridge = await startBrowserWebMCPBridge({ home });
     const configPath = join(ownedRoot, "agent-browser-config.json");
     await writeFile(configPath, "{}\n", { mode: 0o600 });
@@ -653,6 +784,10 @@ async function prepareAcceptanceEnvironment(ownedRoot: string, home: string, rel
 }
 
 async function main() {
+  const composedSetting = process.env.ELLIE_BROWSER_ACCEPTANCE_IOS_COMPOSED;
+  if (composedSetting !== undefined && composedSetting !== "1")
+    throw new Error("Invalid composed iOS acceptance setting.");
+  const composed = composedSetting === "1";
   const sourceStatus = await gitValue(["status", "--short"]);
   if (sourceStatus && process.env.ELLIE_BROWSER_ACCEPTANCE_ALLOW_DIRTY !== "1")
     throw new Error(
@@ -688,7 +823,7 @@ async function main() {
     mode: 0o700,
   });
   const { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki } =
-    await prepareAcceptanceEnvironment(ownedRoot, home, release);
+    await prepareAcceptanceEnvironment(ownedRoot, home, release, composed);
   const bridgeEvents: Array<{ type: string; status: string; value?: unknown }> = [];
   const operations = new BrowserWebMCPOperations(
     {
@@ -744,7 +879,7 @@ async function main() {
         const child = spawn(agentBrowserPath, [...common, ...launchArgs, ...args], {
           cwd: resolve("."),
           env: {
-            HOME: home,
+            ...(composed ? {} : { HOME: home }),
             PATH: `${dirname(process.execPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
             LANG: "C",
             LC_ALL: "C",
@@ -844,305 +979,394 @@ async function main() {
     assert.equal(bindingReply.value?.availability, "webmcp");
     await waitUntil(() => bridge.connected(), "The real browser did not open the native host.");
 
-    const signal = new AbortController().signal;
-    const status = await operations.execute({ tool: "browser.status" }, signal);
-    statusResult = status;
-    assert.equal(status.ok, true);
-    assert.equal(status.browser.source, "webmcp");
-    assert.equal(status.browser.operation, "status");
-    assert.equal(status.browser.status, "connected");
-    assert.ok(status.browser.operation === "status" && status.browser.revision);
-    const revision = status.browser.revision;
-    const read = await operations.execute(
-      { tool: "browser.read", view: "viewport", revision },
-      signal,
-    );
-    readResult = read;
-    assert.equal(read.ok, true);
-    assert.equal(read.browser.source, "webmcp");
-    assert.equal(read.browser.operation, "read");
-    assert.equal(read.browser.view.items[0]?.state, "0");
-
-    actionDispatched = true;
-    const action = await operations.execute(
-      { tool: "browser.scroll", direction: "down", revision },
-      signal,
-    );
-    actionResult = action;
-    actionConfirmed =
-      action.ok === true &&
-      action.browser.source === "webmcp" &&
-      action.browser.operation === "command" &&
-      action.browser.status === "completed";
-    if (!actionConfirmed)
-      throw new Error(
-        "The browser action outcome was not confirmed; no replay or cleanup dispatch was attempted.",
+    if (composed) {
+      nativeJourney = await startNativeJourney(operations, ownedRoot, true);
+      const native = nativeJourney;
+      const token = randomBytes(32).toString("hex");
+      const client = await native.pair(token, ["browser.read", "browser.control"]);
+      const info = native.credential;
+      assert.ok(info);
+      const beforeJobs = native.coordinator.jobStore.list(native.target, 100).length;
+      const ios = await runIOSBrowserComposed({
+        ownedRoot,
+        reportDirectory,
+        credential: { ...info, client, token },
+        target: native.target,
+      });
+      const tabs = await agentJson<{
+        tabs: Array<{ tabId: string; url: string; active: boolean }>;
+      }>(["tab", "list"]);
+      const fixtureTab = tabs.tabs.find((tab) => tab.url === `${origin}/`);
+      assert.ok(fixtureTab);
+      await agent(["tab", fixtureTab.tabId]);
+      const observed = await agentJson<{ result: unknown }>([
+        "eval",
+        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollInvocations:Number(document.body.dataset.scrollInvocations)})",
+      ]);
+      const media = record(observed.result);
+      assert.equal(media.phase, "watch");
+      assert.equal(media.query, "owned synthetic video");
+      assert.equal(media.selection, "Owned synthetic video");
+      assert.equal(media.playback, "playing");
+      assert.equal(media.scrollInvocations, 1, "The delayed command must reach the page once.");
+      assert.ok(media.mutations === 3 || media.mutations === 4);
+      const jobs = native.coordinator.jobStore.list(native.target, 100).slice(beforeJobs);
+      assert.equal(
+        jobs.length,
+        14,
+        "Only five explicit reads and four user actions may submit jobs.",
       );
-
-    const tabs = await agentJson<{
-      tabs: Array<{ tabId: string; url: string; active: boolean }>;
-    }>(["tab", "list"]);
-    const fixtureTab = tabs.tabs.find((tab) => tab.url === `${origin}/`);
-    assert.ok(fixtureTab);
-    await agent(["tab", fixtureTab.tabId]);
-    const visible = await agentJson<{ result: unknown }>([
-      "eval",
-      "({offset:Math.round(document.querySelector('#viewport').scrollTop),text:document.querySelector('#result').textContent})",
-    ]);
-    const visibleResult = visible.result as { offset?: unknown; text?: unknown };
-    assert.equal(typeof visibleResult.offset, "number");
-    assert.ok(Number(visibleResult.offset) > 0);
-    assert.equal(visibleResult.text, `Scroll offset: ${visibleResult.offset}`);
-    visibleEffectConfirmed = true;
-    await writeFile(artifact("after.snapshot.txt"), `${await agent(["snapshot", "-c"])}\n`, {
-      mode: 0o600,
-    });
-    await agent(["screenshot", artifact("after.png")]);
-    await chmod(artifact("after.png"), 0o600);
-
-    rollbackDispatched = true;
-    const rollback = await operations.execute(
-      { tool: "browser.scroll", direction: "up", revision },
-      signal,
-    );
-    rollbackResult = rollback;
-    rollbackConfirmed =
-      rollback.ok === true &&
-      rollback.browser.source === "webmcp" &&
-      rollback.browser.operation === "command" &&
-      rollback.browser.status === "completed";
-    if (!rollbackConfirmed)
-      throw new Error("The confirmed action's rollback outcome is unknown; it was not replayed.");
-    const rolledBack = await agentJson<{ result: unknown }>([
-      "eval",
-      "({offset:Math.round(document.querySelector('#viewport').scrollTop),text:document.querySelector('#result').textContent})",
-    ]);
-    assert.deepEqual(rolledBack.result, { offset: 0, text: "Scroll offset: 0" });
-
-    nativeJourney = await startNativeJourney(operations, ownedRoot);
-    const native = nativeJourney;
-    const browserResult = (reply: { status: number; body: unknown }) => {
-      assert.equal(reply.status, 200);
-      return record(record(record(reply.body).result).browser);
-    };
-    const command = (action: Record<string, unknown>, token: string) =>
-      native.request("/native/v1/commands", { nodeId: native.target, action }, token);
-    const readOnlyToken = "1".repeat(64);
-    const controlToken = "2".repeat(64);
-    await native.pair(readOnlyToken, ["browser.read"]);
-    const firstStatus = browserResult(await command({ tool: "browser.status" }, readOnlyToken));
-    assert.equal(firstStatus.status, "connected");
-    assert.equal(typeof firstStatus.revision, "string");
-    const beforeDeniedJobs = native.coordinator.jobStore.list(native.target, 100).length;
-    assert.equal(
-      (
-        await command(
-          {
-            tool: "browser.search",
-            query: "owned synthetic video",
-            revision: firstStatus.revision,
-          },
-          readOnlyToken,
-        )
-      ).status,
-      403,
-    );
-    assert.equal(native.coordinator.jobStore.list(native.target, 100).length, beforeDeniedJobs);
-    await native.pair(controlToken, ["browser.read", "browser.control"]);
-    const nativeStatus = browserResult(await command({ tool: "browser.status" }, controlToken));
-    assert.equal(nativeStatus.status, "connected");
-    const nativeRevision = String(nativeStatus.revision);
-    const nativeRead = browserResult(
-      await command(
-        { tool: "browser.read", view: "catalog", revision: nativeRevision },
-        controlToken,
-      ),
-    );
-    assert.equal(nativeRead.status, "completed");
-    assert.match(String(record(nativeRead.view).summary), /^home:/);
-    const beforeStaleEvents = bridgeEvents.length;
-    const stale = await command(
-      { tool: "browser.search", query: "owned synthetic video", revision: "a".repeat(64) },
-      controlToken,
-    );
-    assert.equal(
-      stale.status,
-      502,
-      "native transport conservatively reports post-dispatch uncertainty",
-    );
-    assert.equal(record(stale.body).outcome, "unknown");
-    assert.deepEqual(
-      bridgeEvents.slice(beforeStaleEvents).map((event) => event.type),
-      ["binding.status", "binding.status"],
-      "a stale revision cannot reach the companion mutation tool",
-    );
-    assert.equal(
-      browserResult(
-        await command(
-          { tool: "browser.search", query: "owned synthetic video", revision: nativeRevision },
-          controlToken,
-        ),
-      ).status,
-      "completed",
-    );
-    const results = browserResult(
-      await command(
-        { tool: "browser.read", view: "catalog", revision: nativeRevision },
-        controlToken,
-      ),
-    );
-    assert.match(String(record(results.view).summary), /^results: owned synthetic video:/);
-    const resultItems = record(results.view).items;
-    assert.ok(Array.isArray(resultItems));
-    const selected = resultItems.find((item) => record(item).id === "owned-video-1");
-    assert.ok(selected);
-    assert.equal(
-      browserResult(
-        await command(
-          { tool: "browser.select", itemId: record(selected).id, revision: nativeRevision },
-          controlToken,
-        ),
-      ).status,
-      "completed",
-    );
-    const watch = browserResult(
-      await command(
-        { tool: "browser.read", view: "player", revision: nativeRevision },
-        controlToken,
-      ),
-    );
-    assert.match(String(record(watch.view).summary), /^watch: owned synthetic video: paused$/);
-    const play = await command(
-      { tool: "browser.playback", action: "play", revision: nativeRevision },
-      controlToken,
-    );
-    assert.equal(play.status, 200);
-    assert.equal(record(play.body).outcome, "unknown");
-    assert.equal(record(record(record(play.body).result).browser).status, "unknown");
-    const afterUnknownJobs = native.coordinator.jobStore.list(native.target, 100).length;
-    const playing = browserResult(
-      await command(
-        { tool: "browser.read", view: "player", revision: nativeRevision },
-        controlToken,
-      ),
-    );
-    assert.match(String(record(playing.view).summary), /^watch: owned synthetic video: playing$/);
-    assert.equal(
-      native.coordinator.jobStore.list(native.target, 100).length,
-      afterUnknownJobs + 1,
-      "fresh read does not replay the unknown play mutation",
-    );
-    assert.equal(
-      browserResult(
-        await command(
-          { tool: "browser.playback", action: "pause", revision: nativeRevision },
-          controlToken,
-        ),
-      ).status,
-      "completed",
-    );
-    const finalRead = browserResult(
-      await command(
-        { tool: "browser.read", view: "player", revision: nativeRevision },
-        controlToken,
-      ),
-    );
-    assert.match(String(record(finalRead.view).summary), /^watch: owned synthetic video: paused$/);
-    const visibleMedia = await agentJson<{ result: unknown }>([
-      "eval",
-      "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations)})",
-    ]);
-    assert.deepEqual(visibleMedia.result, {
-      phase: "watch",
-      query: "owned synthetic video",
-      selection: "Owned synthetic video",
-      playback: "paused",
-      mutations: 4,
-    });
-    await bridge.close();
-    const disconnected = await command({ tool: "browser.status" }, controlToken);
-    assert.equal(disconnected.status, 200);
-    assert.equal(record(disconnected.body).outcome, "failed");
-    assert.equal(
-      native.coordinator.jobStore.list(native.target, 100).length,
-      afterUnknownJobs + 4,
-      "disconnect does not create any replay job",
-    );
-    nativeEvidence = {
-      path: "pinned native HTTPS → scoped grant → coordinator job → owned node → production WebMCP selector → loaded extension",
-      deniedControlStatus: 403,
-      staleRevisionOutcome: "unknown transport result; no companion mutation dispatched",
-      search: "completed",
-      select: "completed",
-      play: "unknown",
-      pause: "completed",
-      freshReadAfterUnknown: "playing",
-      visibleMedia: visibleMedia.result,
-      disconnectedStatus: "failed",
-      jobs: native.coordinator.jobStore
-        .list(native.target, 100)
-        .map((job) => ({ state: job.state })),
-      nodeEvents: native.events,
-    };
-
-    report = {
-      version: 1,
-      status: "pass",
-      startedFromCleanSource: sourceStatus.length === 0,
-      source: {
-        commit: await gitValue(["rev-parse", "HEAD"]),
-        tree: await gitValue(["rev-parse", "HEAD^{tree}"]),
-        runnerSha256: sha256(await readFile(runnerPath)),
-        controllerSha256: sha256(await readFile(join(sourceExtension, "webmcp-controller.js"))),
-      },
-      browser: {
-        executable: browserExecutable,
-        executableSha256: sha256(await readFile(browserExecutable)),
-        userAgent: browserUserAgent,
-        driver: `agent-browser ${JSON.parse(await readFile("node_modules/agent-browser/package.json", "utf8")).version}`,
-        profile: "owned temporary profile",
-        webmcpApi: "native Document.prototype.modelContext with registerTool/getTools/executeTool",
-        webmcpDialect:
-          "reviewed Chrome 152 dialect: serialized schemas, JSON-string arguments and results",
-        certificateTrust: "one owned leaf SPKI launch exception; no user trust-store change",
-      },
-      extension: {
-        id: ELLIE_BROWSER_EXTENSION_ID,
-        source: "production extension copy",
-        productionManifestSha256: extension.productionManifestSha256,
-        productionFiles: extension.productionFiles,
-        fixtureFiles: extension.files,
-        fixtureDifferences: extension.fixtureDifferences,
-      },
-      nativeHost: {
-        name: BROWSER_WEBMCP_NATIVE_HOST,
-        release,
-        ...nativeHost,
-      },
-      runtime: {
-        bridge: "reviewed Node Unix bridge seam",
-        authenticatedBrowserAncestry: false,
-        registrySha256: registry.sha256,
-        events: bridgeEvents,
-      },
-      journey: {
-        origin,
-        status: status.browser,
-        read: read.browser,
-        action: { operation: "scroll", direction: "down", confirmed: actionConfirmed },
-        visibleEffectConfirmed,
-        rollback: { operation: "scroll", direction: "up", confirmed: rollbackConfirmed },
-        accessibilityFallbackAttempted: false,
+      assert.equal(
+        bridgeEvents.filter((event) => event.type === "tool.execute").length,
+        9,
+        "Five observed reads and four mutations may reach WebMCP exactly once each.",
+      );
+      report = {
+        version: 1,
+        status: "pass",
+        mode: "synthetic-ios-composed",
+        startedFromCleanSource: sourceStatus.length === 0,
+        source: {
+          commit: await gitValue(["rev-parse", "HEAD"]),
+          tree: await gitValue(["rev-parse", "HEAD^{tree}"]),
+          runnerSha256: sha256(await readFile(runnerPath)),
+        },
+        browser: {
+          executableSha256: sha256(await readFile(browserExecutable)),
+          userAgent: browserUserAgent,
+          profile: "owned temporary profile",
+        },
+        nativeHost: {
+          ...nativeHost,
+          scope:
+            "production native-host function via owned explicit-home bootstrap; shipped launcher separately covered",
+        },
+        ios: {
+          simulator: ios.simulator,
+          fixtureID: ios.fixtureID,
+          resultBundle: "private composed-ios.xcresult",
+          cleanupCertain: ios.cleanupCertain,
+          transcript: "synthetic, injected without microphone or model",
+        },
+        nativeJourney: {
+          path: "iOS UI → pinned loopback HTTPS → NativeAuth scoped grant → coordinator → node → loaded WebMCP",
+          jobs: jobs.map((job) => ({ state: job.state })),
+          nodeEvents: native.events,
+        },
+        observedMedia: media,
+        bridgeEvents: bridgeEvents.map(({ type, status }) => ({ type, status })),
         replayAttempted: false,
-      },
-      nativeJourney: nativeEvidence,
-      commands,
-      artifacts: ["before.snapshot.txt", "before.png", "after.snapshot.txt", "after.png"],
-    };
+        accessibilityFallbackAttempted: false,
+        commands,
+        artifacts: ["before.snapshot.txt", "before.png", "composed-ios.xcresult"],
+      };
+    } else {
+      const signal = new AbortController().signal;
+      const status = await operations.execute({ tool: "browser.status" }, signal);
+      statusResult = status;
+      assert.equal(status.ok, true);
+      assert.equal(status.browser.source, "webmcp");
+      assert.equal(status.browser.operation, "status");
+      assert.equal(status.browser.status, "connected");
+      assert.ok(status.browser.operation === "status" && status.browser.revision);
+      const revision = status.browser.revision;
+      const read = await operations.execute(
+        { tool: "browser.read", view: "viewport", revision },
+        signal,
+      );
+      readResult = read;
+      assert.equal(read.ok, true);
+      assert.equal(read.browser.source, "webmcp");
+      assert.equal(read.browser.operation, "read");
+      assert.equal(read.browser.view.items[0]?.state, "0");
+
+      actionDispatched = true;
+      const action = await operations.execute(
+        { tool: "browser.scroll", direction: "down", revision },
+        signal,
+      );
+      actionResult = action;
+      actionConfirmed =
+        action.ok === true &&
+        action.browser.source === "webmcp" &&
+        action.browser.operation === "command" &&
+        action.browser.status === "completed";
+      if (!actionConfirmed)
+        throw new Error(
+          "The browser action outcome was not confirmed; no replay or cleanup dispatch was attempted.",
+        );
+
+      const tabs = await agentJson<{
+        tabs: Array<{ tabId: string; url: string; active: boolean }>;
+      }>(["tab", "list"]);
+      const fixtureTab = tabs.tabs.find((tab) => tab.url === `${origin}/`);
+      assert.ok(fixtureTab);
+      await agent(["tab", fixtureTab.tabId]);
+      const visible = await agentJson<{ result: unknown }>([
+        "eval",
+        "({offset:Math.round(document.querySelector('#viewport').scrollTop),text:document.querySelector('#result').textContent})",
+      ]);
+      const visibleResult = visible.result as { offset?: unknown; text?: unknown };
+      assert.equal(typeof visibleResult.offset, "number");
+      assert.ok(Number(visibleResult.offset) > 0);
+      assert.equal(visibleResult.text, `Scroll offset: ${visibleResult.offset}`);
+      visibleEffectConfirmed = true;
+      await writeFile(artifact("after.snapshot.txt"), `${await agent(["snapshot", "-c"])}\n`, {
+        mode: 0o600,
+      });
+      await agent(["screenshot", artifact("after.png")]);
+      await chmod(artifact("after.png"), 0o600);
+
+      rollbackDispatched = true;
+      const rollback = await operations.execute(
+        { tool: "browser.scroll", direction: "up", revision },
+        signal,
+      );
+      rollbackResult = rollback;
+      rollbackConfirmed =
+        rollback.ok === true &&
+        rollback.browser.source === "webmcp" &&
+        rollback.browser.operation === "command" &&
+        rollback.browser.status === "completed";
+      if (!rollbackConfirmed)
+        throw new Error("The confirmed action's rollback outcome is unknown; it was not replayed.");
+      const rolledBack = await agentJson<{ result: unknown }>([
+        "eval",
+        "({offset:Math.round(document.querySelector('#viewport').scrollTop),text:document.querySelector('#result').textContent})",
+      ]);
+      assert.deepEqual(rolledBack.result, { offset: 0, text: "Scroll offset: 0" });
+
+      nativeJourney = await startNativeJourney(operations, ownedRoot);
+      const native = nativeJourney;
+      const browserResult = (reply: { status: number; body: unknown }) => {
+        assert.equal(reply.status, 200);
+        return record(record(record(reply.body).result).browser);
+      };
+      const command = (action: Record<string, unknown>, token: string) =>
+        native.request("/native/v1/commands", { nodeId: native.target, action }, token);
+      const readOnlyToken = "1".repeat(64);
+      const controlToken = "2".repeat(64);
+      await native.pair(readOnlyToken, ["browser.read"]);
+      const firstStatus = browserResult(await command({ tool: "browser.status" }, readOnlyToken));
+      assert.equal(firstStatus.status, "connected");
+      assert.equal(typeof firstStatus.revision, "string");
+      const beforeDeniedJobs = native.coordinator.jobStore.list(native.target, 100).length;
+      assert.equal(
+        (
+          await command(
+            {
+              tool: "browser.search",
+              query: "owned synthetic video",
+              revision: firstStatus.revision,
+            },
+            readOnlyToken,
+          )
+        ).status,
+        403,
+      );
+      assert.equal(native.coordinator.jobStore.list(native.target, 100).length, beforeDeniedJobs);
+      await native.pair(controlToken, ["browser.read", "browser.control"]);
+      const nativeStatus = browserResult(await command({ tool: "browser.status" }, controlToken));
+      assert.equal(nativeStatus.status, "connected");
+      const nativeRevision = String(nativeStatus.revision);
+      const nativeRead = browserResult(
+        await command(
+          { tool: "browser.read", view: "catalog", revision: nativeRevision },
+          controlToken,
+        ),
+      );
+      assert.equal(nativeRead.status, "completed");
+      assert.match(String(record(nativeRead.view).summary), /^home:/);
+      const beforeStaleEvents = bridgeEvents.length;
+      const stale = await command(
+        { tool: "browser.search", query: "owned synthetic video", revision: "a".repeat(64) },
+        controlToken,
+      );
+      assert.equal(
+        stale.status,
+        502,
+        "native transport conservatively reports post-dispatch uncertainty",
+      );
+      assert.equal(record(stale.body).outcome, "unknown");
+      assert.deepEqual(
+        bridgeEvents.slice(beforeStaleEvents).map((event) => event.type),
+        ["binding.status", "binding.status"],
+        "a stale revision cannot reach the companion mutation tool",
+      );
+      assert.equal(
+        browserResult(
+          await command(
+            { tool: "browser.search", query: "owned synthetic video", revision: nativeRevision },
+            controlToken,
+          ),
+        ).status,
+        "completed",
+      );
+      const results = browserResult(
+        await command(
+          { tool: "browser.read", view: "catalog", revision: nativeRevision },
+          controlToken,
+        ),
+      );
+      assert.match(String(record(results.view).summary), /^results: owned synthetic video:/);
+      const resultItems = record(results.view).items;
+      assert.ok(Array.isArray(resultItems));
+      const selected = resultItems.find((item) => record(item).id === "owned-video-1");
+      assert.ok(selected);
+      assert.equal(
+        browserResult(
+          await command(
+            { tool: "browser.select", itemId: record(selected).id, revision: nativeRevision },
+            controlToken,
+          ),
+        ).status,
+        "completed",
+      );
+      const watch = browserResult(
+        await command(
+          { tool: "browser.read", view: "player", revision: nativeRevision },
+          controlToken,
+        ),
+      );
+      assert.match(String(record(watch.view).summary), /^watch: owned synthetic video: paused$/);
+      const play = await command(
+        { tool: "browser.playback", action: "play", revision: nativeRevision },
+        controlToken,
+      );
+      assert.equal(play.status, 200);
+      assert.equal(record(play.body).outcome, "unknown");
+      assert.equal(record(record(record(play.body).result).browser).status, "unknown");
+      const afterUnknownJobs = native.coordinator.jobStore.list(native.target, 100).length;
+      const playing = browserResult(
+        await command(
+          { tool: "browser.read", view: "player", revision: nativeRevision },
+          controlToken,
+        ),
+      );
+      assert.match(String(record(playing.view).summary), /^watch: owned synthetic video: playing$/);
+      assert.equal(
+        native.coordinator.jobStore.list(native.target, 100).length,
+        afterUnknownJobs + 1,
+        "fresh read does not replay the unknown play mutation",
+      );
+      assert.equal(
+        browserResult(
+          await command(
+            { tool: "browser.playback", action: "pause", revision: nativeRevision },
+            controlToken,
+          ),
+        ).status,
+        "completed",
+      );
+      const finalRead = browserResult(
+        await command(
+          { tool: "browser.read", view: "player", revision: nativeRevision },
+          controlToken,
+        ),
+      );
+      assert.match(
+        String(record(finalRead.view).summary),
+        /^watch: owned synthetic video: paused$/,
+      );
+      const visibleMedia = await agentJson<{ result: unknown }>([
+        "eval",
+        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations)})",
+      ]);
+      assert.deepEqual(visibleMedia.result, {
+        phase: "watch",
+        query: "owned synthetic video",
+        selection: "Owned synthetic video",
+        playback: "paused",
+        mutations: 4,
+      });
+      await bridge.close();
+      const disconnected = await command({ tool: "browser.status" }, controlToken);
+      assert.equal(disconnected.status, 200);
+      assert.equal(record(disconnected.body).outcome, "failed");
+      assert.equal(
+        native.coordinator.jobStore.list(native.target, 100).length,
+        afterUnknownJobs + 4,
+        "disconnect does not create any replay job",
+      );
+      nativeEvidence = {
+        path: "pinned native HTTPS → scoped grant → coordinator job → owned node → production WebMCP selector → loaded extension",
+        deniedControlStatus: 403,
+        staleRevisionOutcome: "unknown transport result; no companion mutation dispatched",
+        search: "completed",
+        select: "completed",
+        play: "unknown",
+        pause: "completed",
+        freshReadAfterUnknown: "playing",
+        visibleMedia: visibleMedia.result,
+        disconnectedStatus: "failed",
+        jobs: native.coordinator.jobStore
+          .list(native.target, 100)
+          .map((job) => ({ state: job.state })),
+        nodeEvents: native.events,
+      };
+
+      report = {
+        version: 1,
+        status: "pass",
+        startedFromCleanSource: sourceStatus.length === 0,
+        source: {
+          commit: await gitValue(["rev-parse", "HEAD"]),
+          tree: await gitValue(["rev-parse", "HEAD^{tree}"]),
+          runnerSha256: sha256(await readFile(runnerPath)),
+          controllerSha256: sha256(await readFile(join(sourceExtension, "webmcp-controller.js"))),
+        },
+        browser: {
+          executable: browserExecutable,
+          executableSha256: sha256(await readFile(browserExecutable)),
+          userAgent: browserUserAgent,
+          driver: `agent-browser ${JSON.parse(await readFile("node_modules/agent-browser/package.json", "utf8")).version}`,
+          profile: "owned temporary profile",
+          webmcpApi:
+            "native Document.prototype.modelContext with registerTool/getTools/executeTool",
+          webmcpDialect:
+            "reviewed Chrome 152 dialect: serialized schemas, JSON-string arguments and results",
+          certificateTrust: "one owned leaf SPKI launch exception; no user trust-store change",
+        },
+        extension: {
+          id: ELLIE_BROWSER_EXTENSION_ID,
+          source: "production extension copy",
+          productionManifestSha256: extension.productionManifestSha256,
+          productionFiles: extension.productionFiles,
+          fixtureFiles: extension.files,
+          fixtureDifferences: extension.fixtureDifferences,
+        },
+        nativeHost: {
+          name: BROWSER_WEBMCP_NATIVE_HOST,
+          release,
+          ...nativeHost,
+        },
+        runtime: {
+          bridge: "reviewed Node Unix bridge seam",
+          authenticatedBrowserAncestry: false,
+          registrySha256: registry.sha256,
+          events: bridgeEvents,
+        },
+        journey: {
+          origin,
+          status: status.browser,
+          read: read.browser,
+          action: { operation: "scroll", direction: "down", confirmed: actionConfirmed },
+          visibleEffectConfirmed,
+          rollback: { operation: "scroll", direction: "up", confirmed: rollbackConfirmed },
+          accessibilityFallbackAttempted: false,
+          replayAttempted: false,
+        },
+        nativeJourney: nativeEvidence,
+        commands,
+        artifacts: ["before.snapshot.txt", "before.png", "after.snapshot.txt", "after.png"],
+      };
+    }
   } catch (error) {
     failure = error;
     if (error instanceof NativeJourneySetupCleanupError)
       cleanupError = "Owned native journey setup cleanup is uncertain.";
+    if (error instanceof ComposedIOSCleanupError)
+      cleanupError = "Owned iOS Simulator cleanup is uncertain.";
     report = {
       version: 1,
       status: "fail",

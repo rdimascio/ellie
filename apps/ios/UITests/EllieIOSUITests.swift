@@ -663,6 +663,88 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(count.label, "Fixture mutations: 4")
     }
 
+    func testComposedSyntheticVoiceUsesPinnedBrowserAndNeverReplaysCancelledScroll() throws {
+        guard let identifier = Bundle(for: type(of: self))
+            .object(forInfoDictionaryKey: "EllieComposedBrowserFixtureID") as? String,
+            UUID(uuidString: identifier)?.uuidString.lowercased() == identifier
+        else { throw XCTSkip("Requires the owned composed browser fixture ID") }
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-composed-fixture", identifier]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.staticTexts["browser-composed-synthetic-label"].waitForExistence(timeout: 5),
+            "The owned credential file must survive the test launch before any request")
+
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 10))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for owned synthetic video")
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled, "A reviewed voice intent needs a separately observed page")
+        app.buttons["speech-browser-read"].tap()
+        let runEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: run)
+        XCTAssertEqual(XCTWaiter.wait(for: [runEnabled], timeout: 15), .completed)
+        run.tap()
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 15))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: updatedRead)], timeout: 15),
+            .completed)
+        updatedRead.tap()
+        let continueButton = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 15))
+        continueButton.tap()
+
+        let result = revealBrowserButton("browser-result-2", in: app, forTap: true)
+        XCTAssertTrue(result.waitForExistence(timeout: 15))
+        XCTAssertTrue(result.label.contains("Owned synthetic video"))
+        result.tap()
+        let freshRead = revealBrowserButton("Read current page", in: app, forTap: true)
+        XCTAssertTrue(freshRead.waitForExistence(timeout: 15))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: freshRead)], timeout: 15),
+            .completed)
+        freshRead.tap()
+        let play = revealBrowserButton("Play", in: app, forTap: true)
+        XCTAssertTrue(play.waitForExistence(timeout: 15))
+        XCTAssertTrue(play.isEnabled)
+        play.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 15), "A lost completion proof must stay unknown")
+        let afterPlayRead = revealBrowserButton("Read current page", in: app, forTap: true)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: afterPlayRead)], timeout: 15),
+            .completed)
+        afterPlayRead.tap()
+        let summary = app.staticTexts.containing(NSPredicate(
+            format: "label CONTAINS %@", "watch: owned synthetic video: playing")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 15))
+
+        let down = revealBrowserButton("Down", in: app, forTap: true)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: down)], timeout: 15),
+            .completed)
+        down.tap()
+        let cancel = app.buttons["Stop waiting"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        cancel.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 15))
+        let afterCancelRead = revealBrowserButton("Read current page", in: app, forTap: true)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: afterCancelRead)], timeout: 15),
+            .completed)
+        afterCancelRead.tap()
+        XCTAssertTrue(summary.waitForExistence(timeout: 15))
+    }
+
     func testReadOnlyBrowserPageDoesNotOfferEnabledMutationControls() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-browser-read-only-fixture"]
