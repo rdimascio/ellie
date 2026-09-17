@@ -39,7 +39,11 @@ export interface ConnectedOAuth {
     signal?: AbortSignal,
   ): Promise<GoogleOAuthCredential>;
 }
-type StoredCredential = ProviderCredential & { refreshToken?: string; expiresAt?: number; grantedScopes?: string[] };
+type StoredCredential = ProviderCredential & {
+  refreshToken?: string;
+  expiresAt?: number;
+  grantedScopes?: string[];
+};
 const DAY = 86_400_000;
 const LABELS: Record<ProviderId, string> = {
   "google-calendar": "Google Calendar",
