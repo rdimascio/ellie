@@ -178,6 +178,7 @@ struct OpenMeteoClient: Sendable {
 final class WeatherStore: ObservableObject {
     @Published private(set) var state: WeatherState
     @Published private(set) var isRefreshing = false
+    @Published private(set) var fetchedInCurrentSession = false
     @Published private(set) var message: String?
 
     let fileURL: URL
@@ -221,6 +222,7 @@ final class WeatherStore: ObservableObject {
             let candidate = WeatherState(enabled: true, place: place, snapshot: state.place == place ? state.snapshot : nil)
             try persist(candidate)
             state = candidate
+            fetchedInCurrentSession = false
             message = nil
             refresh(force: true)
             return true
@@ -235,6 +237,7 @@ final class WeatherStore: ObservableObject {
         refreshID = nil
         isRefreshing = false
         state = WeatherState()
+        fetchedInCurrentSession = false
         guard !recoveryRequired else {
             message = "Weather is off, but the unreadable settings file was preserved and may still contain the previous place."
             return false
@@ -259,6 +262,7 @@ final class WeatherStore: ObservableObject {
                 do { try self.persist(candidate) }
                 catch { throw WeatherError.cacheWrite }
                 self.state = candidate
+                self.fetchedInCurrentSession = true
             } catch is CancellationError { }
             catch {
                 guard let self, self.refreshID == id else { return }
