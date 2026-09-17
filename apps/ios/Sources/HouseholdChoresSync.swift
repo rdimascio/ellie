@@ -398,6 +398,7 @@ final class HouseholdChoresSyncStore: ObservableObject {
     else if phase == .loading { phase = draft == nil ? .idle : .unknown }
     return cancelled
   }
+  @discardableResult func cancelCurrentRequest() -> Task<Void, Never>? { enterBackground() }
   func leaveView() { enterBackground() }
 
   private func launch<Value>(

@@ -189,13 +189,34 @@ final class HouseholdChoresSyncTests: XCTestCase {
     store.savePrepared()
     let started = await gate.waitUntilStarted()
     XCTAssertTrue(started)
-    let cancelled = store.enterBackground()
+    let cancelled = store.cancelCurrentRequest()
     XCTAssertEqual(store.phase, .unknown)
     await gate.release()
     await cancelled?.value
     XCTAssertEqual(store.phase, .unknown)
     XCTAssertNotNil(persistence.saved)
     XCTAssertEqual(transport.calls.filter { $0 == "save" }.count, 1)
+  }
+
+  func testExplicitCancelReadIgnoresLateDocument() async {
+    let transport = ChoresFixtureTransport()
+    let gate = ChoresSaveGate()
+    transport.grants = [choreGrant(.read)]
+    transport.readGate = gate
+    transport.document = HouseholdChoresDocument(revision: 4, value: choreState())
+    let store = HouseholdChoresSyncStore(
+      credential: choreCredential(), transport: transport, persistence: ChoresFixturePersistence())
+    store.checkAccess()
+    await settle(store)
+    store.readServerCopy()
+    let started = await gate.waitUntilStarted()
+    XCTAssertTrue(started)
+    let cancelled = store.cancelCurrentRequest()
+    await gate.release()
+    await cancelled?.value
+    XCTAssertNil(store.remote)
+    XCTAssertEqual(store.phase, .idle)
+    XCTAssertEqual(transport.calls, ["authority", "read"])
   }
 
   func testPendingFileRoundTripAndSymlinkPreservation() throws {
@@ -254,6 +275,31 @@ final class HouseholdChoresSyncTests: XCTestCase {
     XCTAssertEqual(actions, 0)
   }
 
+  func testTransportRejectsMismatchedETagAndMalformedConflict() throws {
+    let transport = HouseholdChoresTransport()
+    let value = try JSONSerialization.jsonObject(with: ChoresModel.encode(choreState()))
+    let body = try JSONSerialization.data(withJSONObject: [
+      "profile": "shared", "kind": "chores", "revision": 3, "value": value,
+    ])
+    let url = URL(string: "https://ellie.local:8444/native/v1/household/shared/chores")!
+    let valid = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200,
+      httpVersion: nil, headerFields: ["ETag": "\"ellie-revision-3\""]))
+    XCTAssertEqual(try transport.decodeDocument(body, response: valid).revision, 3)
+    let stale = try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 200,
+      httpVersion: nil, headerFields: ["ETag": "\"ellie-revision-2\""]))
+    XCTAssertThrowsError(try transport.decodeDocument(body, response: stale))
+
+    let conflict = try JSONSerialization.data(withJSONObject: [
+      "profile": "shared", "kind": "chores", "revision": 4,
+    ])
+    XCTAssertEqual(try transport.decodeConflict(conflict, baseRevision: 3), 4)
+    XCTAssertThrowsError(try transport.decodeConflict(conflict, baseRevision: 4))
+    let wrongKind = try JSONSerialization.data(withJSONObject: [
+      "profile": "shared", "kind": "dashboards", "revision": 4,
+    ])
+    XCTAssertThrowsError(try transport.decodeConflict(wrongKind, baseRevision: 3))
+  }
+
   private func settle(_ store: HouseholdChoresSyncStore) async {
     for _ in 0..<100 where store.isBusy { await Task.yield() }
     await Task.yield()
@@ -285,6 +331,7 @@ private final class ChoresFixtureTransport: HouseholdChoresTransporting, @unchec
   var readFailure: ChoresSyncFailure?
   var authorityFailure: ChoresSyncFailure?
   var saveGate: ChoresSaveGate?
+  var readGate: ChoresSaveGate?
   var saved: PendingChoresDraft?
   func authority(_ credential: NativeEnrollmentCredential) async throws -> [HouseholdDashboardGrant] {
     calls.append("authority")
@@ -293,6 +340,7 @@ private final class ChoresFixtureTransport: HouseholdChoresTransporting, @unchec
   }
   func read(_ credential: NativeEnrollmentCredential) async throws -> HouseholdChoresDocument {
     calls.append("read")
+    if let readGate { await readGate.waitForRelease() }
     if let readFailure { throw readFailure }
     return document
   }

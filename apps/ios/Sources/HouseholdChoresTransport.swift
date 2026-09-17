@@ -53,12 +53,7 @@ final class HouseholdChoresTransport: HouseholdChoresTransporting, @unchecked Se
     if response.statusCode == 401 { try requireError(data); throw ChoresSyncFailure.revoked }
     if response.statusCode == 403 { try requireError(data); throw ChoresSyncFailure.forbidden }
     if response.statusCode == 412 {
-      guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-        Set(root.keys) == ["profile", "kind", "revision"],
-        root["profile"] as? String == "shared", root["kind"] as? String == "chores",
-        let revision = safeRevision(root["revision"]), revision > checked.baseRevision
-      else { throw ChoresSyncFailure.unknownOutcome }
-      return .conflict(revision)
+      return .conflict(try decodeConflict(data, baseRevision: checked.baseRevision))
     }
     guard response.statusCode == 200 else { throw ChoresSyncFailure.unknownOutcome }
     do {
@@ -87,7 +82,7 @@ final class HouseholdChoresTransport: HouseholdChoresTransporting, @unchecked Se
     } catch { throw ChoresSyncFailure.unavailable }
   }
 
-  private func decodeDocument(_ data: Data, response: HTTPURLResponse) throws
+  func decodeDocument(_ data: Data, response: HTTPURLResponse) throws
     -> HouseholdChoresDocument {
     guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
       Set(root.keys) == ["profile", "kind", "revision", "value"],
@@ -100,6 +95,15 @@ final class HouseholdChoresTransport: HouseholdChoresTransporting, @unchecked Se
       let encoded = try JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])
       return HouseholdChoresDocument(revision: revision, value: try ChoresModel.decode(encoded))
     } catch { throw ChoresSyncFailure.invalidResponse }
+  }
+
+  func decodeConflict(_ data: Data, baseRevision: Int64) throws -> Int64 {
+    guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      Set(root.keys) == ["profile", "kind", "revision"],
+      root["profile"] as? String == "shared", root["kind"] as? String == "chores",
+      let revision = safeRevision(root["revision"]), revision > baseRevision
+    else { throw ChoresSyncFailure.unknownOutcome }
+    return revision
   }
 
   private func requireError(_ data: Data) throws {

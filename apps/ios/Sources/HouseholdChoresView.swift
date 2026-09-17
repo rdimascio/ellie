@@ -84,8 +84,24 @@ struct HouseholdChoresView: View {
           Text("Review the full household copy before saving. This replaces revision \(draft.baseRevision) only if it is still current.")
             .font(.footnote).foregroundStyle(.secondary)
           ForEach(draft.value.chores.sorted(by: choreOrder)) { chore in
-            Text("\(chore.title) · \(chore.member) · \(chore.dueDay.value)\(chore.completedDay == nil ? "" : " · Done")")
-              .font(.caption)
+            VStack(alignment: .leading, spacing: 2) {
+              if let change = changeLabel(chore) {
+                Text(change).font(.caption.weight(.semibold)).foregroundStyle(Color.accentColor)
+              }
+              Text("\(chore.title) · \(chore.member) · Due \(chore.dueDay.value)")
+              if !chore.body.isEmpty { Text(chore.body).font(.caption) }
+              if let completed = chore.completedDay {
+                Text("Completed \(completed.value)").font(.caption)
+              }
+            }
+          }
+          ForEach(removedChores) { chore in
+            Text("Remove \(chore.title) · \(chore.member)")
+              .font(.caption.weight(.semibold)).foregroundStyle(.red)
+          }
+          if sync.remote == nil {
+            Text("The previous server copy is unavailable here. Check Result to compare; no change will be resent.")
+              .font(.footnote).foregroundStyle(.secondary)
           }
           Button("Save Prepared Change Once") { sync.savePrepared() }
             .disabled(!sync.canSave)
@@ -132,8 +148,20 @@ struct HouseholdChoresView: View {
 
   @ViewBuilder private var status: some View {
     switch sync.phase {
-    case .loading: Section { ProgressView("Reading…") }
-    case .saving: Section { ProgressView("Saving once…") }
+    case .loading:
+      Section {
+        ProgressView("Reading…")
+        Button("Cancel Read") { sync.cancelCurrentRequest() }
+          .accessibilityIdentifier("ios-household-chores-cancel")
+      }
+    case .saving:
+      Section {
+        ProgressView("Saving once…")
+        Button("Cancel Save", role: .destructive) { sync.cancelCurrentRequest() }
+          .accessibilityIdentifier("ios-household-chores-cancel")
+        Text("Cancellation can leave the result unknown. Ellie will not resend the change.")
+          .font(.footnote).foregroundStyle(.secondary)
+      }
     case .conflict(let revision):
       Section {
         Label("The household copy is now at revision \(revision). Your prepared change is unchanged.",
@@ -169,6 +197,19 @@ struct HouseholdChoresView: View {
   private func choreOrder(_ lhs: Chore, _ rhs: Chore) -> Bool {
     if lhs.dueDay != rhs.dueDay { return lhs.dueDay < rhs.dueDay }
     return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+  }
+
+  private func changeLabel(_ chore: Chore) -> String? {
+    guard let old = sync.remote?.value.chores.first(where: { $0.id == chore.id }) else {
+      return sync.remote == nil ? nil : "New household chore"
+    }
+    return old == chore ? nil : "Changed household chore"
+  }
+
+  private var removedChores: [Chore] {
+    guard let remote = sync.remote, let draft = sync.draft else { return [] }
+    let proposedIDs = Set(draft.value.chores.map(\.id))
+    return remote.value.chores.filter { !proposedIDs.contains($0.id) }.sorted(by: choreOrder)
   }
 }
 
