@@ -30,6 +30,7 @@ struct IOSChoresWidget: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .frame(minHeight: 44)
                     .accessibilityLabel(chore.completedDay == nil ? "Complete \(chore.title)" : "Undo completion of \(chore.title)")
                     .accessibilityIdentifier("ios-chore-widget-toggle-\(chore.id)")
                 }
@@ -79,6 +80,8 @@ struct IOSChoresSheet: View {
                             Button { store.setCompleted(id: chore.id, completed: chore.completedDay == nil) } label: {
                                 Image(systemName: chore.completedDay == nil ? "circle" : "checkmark.circle.fill")
                                     .font(.title3)
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel(chore.completedDay == nil ? "Complete \(chore.title)" : "Undo completion of \(chore.title)")
@@ -101,6 +104,8 @@ struct IOSChoresSheet: View {
                             .accessibilityIdentifier("ios-chore-edit-\(chore.id)")
                             Button(role: .destructive) { deleting = chore } label: {
                                 Image(systemName: "trash")
+                                    .frame(width: 44, height: 44)
+                                    .contentShape(Rectangle())
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Delete \(chore.title)")
@@ -151,6 +156,15 @@ private struct IOSChoresWeekChart: View {
                     BarMark(x: .value("Day", value.day.value), y: .value("Completed", value.count))
                         .foregroundStyle(value.day == today ? Color.accentColor : Color.secondary.opacity(0.5))
                 }
+                .chartXAxis {
+                    AxisMarks(values: values.map(\.day.value)) { mark in
+                        AxisGridLine()
+                        AxisTick()
+                        if let raw = mark.as(String.self), let day = try? ChoreDay(raw) {
+                            AxisValueLabel(weekday(day))
+                        }
+                    }
+                }
                 .frame(height: 130)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Completed this week: " + values.map { "\($0.day.value), \($0.count)" }.joined(separator: "; "))
@@ -159,6 +173,16 @@ private struct IOSChoresWeekChart: View {
             }
             .accessibilityIdentifier("ios-chores-week-chart")
         }
+    }
+
+    private func weekday(_ day: ChoreDay) -> String {
+        let zone = TimeZone(secondsFromGMT: 0)!
+        let formatter = DateFormatter()
+        formatter.locale = .current
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = zone
+        formatter.setLocalizedDateFormatFromTemplate("EEEEE")
+        return formatter.string(from: day.date(in: zone))
     }
 }
 
@@ -207,10 +231,13 @@ private struct IOSChoreEditor: View {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         let day = ChoreDay.from(dueDate, timeZone: store.timeZone)
+                        let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let cleanMember = member.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let cleanDetails = details.trimmingCharacters(in: .whitespacesAndNewlines)
                         if let chore {
-                            store.update(id: chore.id, title: title, member: member, body: details, dueDay: day)
+                            store.update(id: chore.id, title: cleanTitle, member: cleanMember, body: cleanDetails, dueDay: day)
                         } else {
-                            store.add(title: title, member: member, body: details, dueDay: day)
+                            store.add(title: cleanTitle, member: cleanMember, body: cleanDetails, dueDay: day)
                         }
                         if store.error == nil { dismiss() }
                     }
@@ -225,10 +252,9 @@ private struct IOSChoreEditor: View {
         let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanMember = member.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanDetails = details.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title == cleanTitle && member == cleanMember && details == cleanDetails
-            && !title.isEmpty && !member.isEmpty
-            && title.utf16.count <= ChoresModel.maximumTitleLength
-            && member.utf16.count <= ChoresModel.maximumMemberLength
-            && details.utf16.count <= ChoresModel.maximumBodyLength
+        return !cleanTitle.isEmpty && !cleanMember.isEmpty
+            && cleanTitle.utf16.count <= ChoresModel.maximumTitleLength
+            && cleanMember.utf16.count <= ChoresModel.maximumMemberLength
+            && cleanDetails.utf16.count <= ChoresModel.maximumBodyLength
     }
 }
