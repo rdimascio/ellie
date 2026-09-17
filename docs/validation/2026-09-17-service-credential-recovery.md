@@ -28,6 +28,8 @@ An isolated loopback test used the exact staged package's coordinator, client, n
 
 This is packaged software evidence with a synthetic bridge. The earlier real browser-status timeout remains an unknown durable job and was not replayed. No new physical browser-status request or website action was performed during this update.
 
+The separate `2a1b695` integration test extends the native HTTPS authorization path through the production remote, coordinator, node, operation selector and TypeScript Accessibility runtime. A synthetic helper provides page observations and unverified dispatch replies. One explicit search follows an initial read; a separately supplied results binding and read precede selection; another fresh watch-page read precedes play and pause. Read-only grants deny control before creating a job. Exact helper requests and twelve durable jobs confirm four unknown mutation outcomes with no observed retry, adapter switch or node reconnection. The focused test and static checks passed. The fixture does not access macOS Accessibility or prove public-site effects, microphone input or physical phone acceptance.
+
 ## Next acceptance boundary
 
 The coordinator must first resolve the execution Mac's credential access with the owner, then provide the exact package, preserved-identity checks, managed start procedure and rollback steps. Do not replace credentials or re-enroll a paired client to mask a startup failure. A timed-out helper request is not evidence that an item is missing.
