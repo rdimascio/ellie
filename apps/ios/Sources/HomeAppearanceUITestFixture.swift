@@ -27,16 +27,17 @@ struct HomeAppearanceUITestFixtureView: View {
     }
 
     var body: some View {
-        IOSDashboardList(store: dashboards, enrollment: enrollment, uiTestLifeDestination: { credential in
-            AnyView(Text("Synthetic Life destination: \(credential.client.id)")
-                .accessibilityIdentifier("home-fixture-life-destination")
-                .navigationTitle("Fixture Life")
-                .onAppear { probe.lifeOpens += 1 })
-        })
-        .dynamicTypeSize(accessibilityLayout ? .accessibility5 : .large)
-        .frame(width: narrowLayout || accessibilityLayout ? 320 : nil)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .safeAreaInset(edge: .bottom) {
+        VStack(spacing: 0) {
+            IOSDashboardList(store: dashboards, enrollment: enrollment, uiTestLifeDestination: { credential in
+                AnyView(Text("Synthetic Life destination: \(credential.client.id)")
+                    .accessibilityIdentifier("home-fixture-life-destination")
+                    .navigationTitle("Fixture Life")
+                    .onAppear { probe.lifeOpens += 1 })
+            })
+            .dynamicTypeSize(accessibilityLayout ? .accessibility5 : .large)
+            .frame(width: narrowLayout || accessibilityLayout ? 320 : nil)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .clipped()
             VStack(spacing: 4) {
                 HStack {
                     Button("Load fixture pairing") { enrollment.startScanning() }
@@ -53,8 +54,13 @@ struct HomeAppearanceUITestFixtureView: View {
             }
             .font(.caption)
             .padding(8)
-            .background(Color(uiColor: .systemBackground))
+            .frame(maxWidth: .infinity)
+            .background(ElliePalette.background)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("home-fixture-controls")
         }
+        .tint(ElliePalette.accent)
+        .preferredColorScheme(.dark)
     }
 }
 

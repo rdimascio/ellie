@@ -22,31 +22,46 @@ struct IOSDashboardList: View {
             GeometryReader { geometry in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
-                        homeInvitation(compact: geometry.size.width < 390 || dynamicTypeSize.isAccessibilitySize)
+                        if dynamicTypeSize.isAccessibilitySize {
+                            if case .enrolled(let credential) = enrollment.phase {
+                                lifeEntry(for: credential)
+                            }
+                        } else {
+                            homeInvitation(compact: geometry.size.width < 390)
+                        }
                         HStack {
                             Text("Your dashboards").font(.headline)
-                            Spacer()
-                            Image(systemName: "square.grid.2x2").foregroundStyle(ElliePalette.muted)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !dynamicTypeSize.isAccessibilitySize {
+                                Spacer()
+                                Image(systemName: "square.grid.2x2").foregroundStyle(ElliePalette.muted)
+                            }
                         }
                         VStack(spacing: 12) {
                             ForEach(store.state.dashboards) { dashboard in
                                 NavigationLink {
                                     IOSDashboardDetail(store: store, dashboardID: dashboard.id)
                                 } label: {
-                                    HStack(spacing: 16) {
-                                        Image(systemName: dashboard.id == store.state.dashboards.first?.id ? "house" : "rectangle.3.group")
-                                            .font(.title3)
-                                            .foregroundStyle(ElliePalette.accent)
-                                            .frame(width: 44, height: 44)
-                                            .background(ElliePalette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                                    HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 16) {
+                                        if !dynamicTypeSize.isAccessibilitySize {
+                                            Image(systemName: dashboard.id == store.state.dashboards.first?.id ? "house" : "rectangle.3.group")
+                                                .font(.title3)
+                                                .foregroundStyle(ElliePalette.accent)
+                                                .frame(width: 44, height: 44)
+                                                .background(ElliePalette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                                        }
                                         VStack(alignment: .leading, spacing: 5) {
                                             Text(dashboard.name).font(.headline).foregroundStyle(ElliePalette.foreground)
                                                 .fixedSize(horizontal: false, vertical: true)
                                             Text("\(dashboard.widgets.count) widgets")
                                                 .font(.caption).foregroundStyle(ElliePalette.muted)
+                                                .fixedSize(horizontal: false, vertical: true)
                                         }
-                                        Spacer(minLength: 8)
-                                        Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        if !dynamicTypeSize.isAccessibilitySize {
+                                            Spacer(minLength: 8)
+                                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                        }
                                     }
                                     .ellieCard()
                                 }
@@ -58,16 +73,22 @@ struct IOSDashboardList: View {
                         NavigationLink {
                             NativeEnrollmentView(store: enrollment, dashboards: store)
                         } label: {
-                            HStack(spacing: 14) {
-                                Image(systemName: "link").foregroundStyle(ElliePalette.accent)
+                            HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 14) {
+                                if !dynamicTypeSize.isAccessibilitySize {
+                                    Image(systemName: "link").foregroundStyle(ElliePalette.accent)
+                                }
                                 VStack(alignment: .leading, spacing: 5) {
                                     Text(coordinatorTitle).font(.subheadline.weight(.semibold)).foregroundStyle(ElliePalette.foreground)
                                         .fixedSize(horizontal: false, vertical: true)
                                     Text("Your devices, working together")
                                         .font(.caption).foregroundStyle(ElliePalette.muted)
+                                        .fixedSize(horizontal: false, vertical: true)
                                 }
-                                Spacer(minLength: 8)
-                                Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                if !dynamicTypeSize.isAccessibilitySize {
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                }
                             }
                             .ellieCard()
                         }
@@ -156,18 +177,7 @@ struct IOSDashboardList: View {
                 }
             }
             if case .enrolled(let credential) = enrollment.phase {
-                NavigationLink {
-                    lifeDestination(for: credential)
-                } label: {
-                    Label("Open Ellie Life", systemImage: "sparkle")
-                        .font(.subheadline.weight(.semibold))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                        .padding(.vertical, 12).padding(.horizontal, 16)
-                        .foregroundStyle(ElliePalette.background)
-                        .background(ElliePalette.accent, in: RoundedRectangle(cornerRadius: 13))
-                }
-                .accessibilityIdentifier("open-ellie-life")
+                lifeEntry(for: credential)
             } else {
                 Text("Connect your coordinator to bring Ellie with you.")
                     .font(.caption).foregroundStyle(ElliePalette.accent)
@@ -177,6 +187,27 @@ struct IOSDashboardList: View {
         .padding(20)
         .background(LinearGradient(colors: [ElliePalette.surface, Color(red: 0.12, green: 0.14, blue: 0.26)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 28))
         .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(ElliePalette.violet.opacity(0.3), lineWidth: 1))
+    }
+
+    private func lifeEntry(for credential: NativeEnrollmentCredential) -> some View {
+        NavigationLink {
+            lifeDestination(for: credential)
+        } label: {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    Text("Open Ellie Life")
+                } else {
+                    Label("Open Ellie Life", systemImage: "sparkle")
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.vertical, 12).padding(.horizontal, 16)
+            .foregroundStyle(ElliePalette.background)
+            .background(ElliePalette.accent, in: RoundedRectangle(cornerRadius: 13))
+        }
+        .accessibilityIdentifier("open-ellie-life")
     }
 
     private var invitationCopy: some View {

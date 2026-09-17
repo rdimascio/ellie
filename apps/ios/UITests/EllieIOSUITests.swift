@@ -23,7 +23,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(reads.label, "Fixture vault reads: 1")
         XCTAssertEqual(opens.label, "Fixture Life opens: 0")
         XCTAssertFalse(app.staticTexts["home-fixture-life-destination"].exists)
-        revealHomeControl(life, in: app)
+        fullyExposeHomeControl(life, in: app)
         keepHomeScreenshot(app, name: "native-home-normal-life-entry")
         life.tap()
         let destination = app.staticTexts["home-fixture-life-destination"]
@@ -54,22 +54,35 @@ final class EllieIOSUITests: XCTestCase {
             XCTAssertTrue(scroll.waitForExistence(timeout: 5))
             XCTAssertEqual(scroll.frame.width, 320, accuracy: 1)
             let title = app.staticTexts["home-invitation-title"]
-            XCTAssertTrue(title.waitForExistence(timeout: 5))
-            XCTAssertTrue(title.label.contains("A little more"))
-            XCTAssertTrue(title.label.contains("headspace."))
             if accessibility {
-                XCTAssertGreaterThan(title.frame.height, 100, "Accessibility text must scale instead of shrinking")
+                XCTAssertFalse(title.exists, "Promotional copy must not push accessibility navigation below the fold")
+                XCTAssertTrue(homeViewport(in: app).contains(app.buttons["dashboard-home"].frame),
+                    "The first dashboard must be fully visible without scrolling at accessibility size 5")
+            } else {
+                XCTAssertTrue(title.waitForExistence(timeout: 5))
+                XCTAssertTrue(title.label.contains("A little more"))
+                XCTAssertTrue(title.label.contains("headspace."))
+                XCTAssertGreaterThanOrEqual(title.frame.minX, scroll.frame.minX)
+                XCTAssertLessThanOrEqual(title.frame.maxX, scroll.frame.maxX)
             }
-            XCTAssertGreaterThanOrEqual(title.frame.minX, scroll.frame.minX)
-            XCTAssertLessThanOrEqual(title.frame.maxX, scroll.frame.maxX)
-            keepHomeScreenshot(app, name: "native-home-320-\(appearance)-invitation")
+            keepHomeScreenshot(app, name: "native-home-320-\(appearance)-\(accessibility ? "overview" : "invitation")")
 
             for identifier in ["dashboard-home", "coordinator-enrollment"] {
                 let control = app.buttons[identifier]
-                revealHomeControl(control, in: app)
+                fullyExposeHomeControl(control, in: app)
                 XCTAssertGreaterThanOrEqual(control.frame.height, 44)
                 XCTAssertGreaterThanOrEqual(control.frame.minX, scroll.frame.minX)
                 XCTAssertLessThanOrEqual(control.frame.maxX, scroll.frame.maxX)
+                if identifier == "dashboard-home" {
+                    XCTAssertEqual(control.label, "Home")
+                    if accessibility {
+                        XCTAssertLessThan(control.frame.height, scroll.frame.width * 0.75,
+                            "A short Home label and widget count must not form the tall, character-wrapped card seen in the failed capture")
+                    }
+                    keepHomeScreenshot(app, name: "native-home-320-\(appearance)-dashboard")
+                } else {
+                    XCTAssertEqual(control.label, "Pair this iPhone")
+                }
             }
             keepHomeScreenshot(app, name: "native-home-320-\(appearance)-navigation")
             app.buttons["coordinator-enrollment"].tap()
@@ -77,6 +90,17 @@ final class EllieIOSUITests: XCTestCase {
             XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
             XCTAssertEqual(app.staticTexts["home-fixture-vault-reads"].label, "Fixture vault reads: 0")
             XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+            if accessibility {
+                returnToDashboardList(from: "Coordinator", in: app)
+                app.buttons["home-fixture-load-pairing"].tap()
+                let life = app.buttons["open-ellie-life"]
+                XCTAssertTrue(life.waitForExistence(timeout: 5))
+                fullyExposeHomeControl(life, in: app)
+                XCTAssertEqual(life.label, "Open Ellie Life")
+                XCTAssertEqual(app.staticTexts["home-fixture-life-opens"].label, "Fixture Life opens: 0")
+                XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+                keepHomeScreenshot(app, name: "native-home-320-accessibility5-life-entry")
+            }
             app.terminate()
         }
     }
@@ -90,6 +114,40 @@ final class EllieIOSUITests: XCTestCase {
         attachment.name = name
         attachment.lifetime = .keepAlways
         add(attachment)
+    }
+
+    private func homeViewport(in app: XCUIApplication) -> CGRect {
+        let scroll = app.scrollViews["dashboard-list"].frame
+        let footer = app.descendants(matching: .any)["home-fixture-controls"]
+        XCTAssertTrue(footer.exists)
+        let top = max(scroll.minY, app.navigationBars["Ellie"].frame.maxY)
+        let bottom = min(scroll.maxY, footer.frame.minY)
+        XCTAssertGreaterThan(bottom, top)
+        return CGRect(x: scroll.minX, y: top, width: scroll.width, height: max(0, bottom - top))
+            .insetBy(dx: 1, dy: 4)
+    }
+
+    private func fullyExposeHomeControl(_ control: XCUIElement, in app: XCUIApplication) {
+        let scroll = app.scrollViews["dashboard-list"]
+        XCTAssertTrue(control.waitForExistence(timeout: 5))
+        for _ in 0..<12 {
+            let viewport = homeViewport(in: app)
+            let frame = control.frame
+            if viewport.contains(frame) && control.isHittable { break }
+            guard frame.height <= viewport.height else { break }
+            let upward = frame.maxY > viewport.maxY
+            let distance = min(max(upward ? frame.maxY - viewport.maxY : viewport.minY - frame.minY, 20),
+                viewport.height * 0.5)
+            let startY = upward ? viewport.maxY - 20 : viewport.minY + 20
+            let endY = startY + (upward ? -distance : distance)
+            let origin = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            let start = origin.withOffset(CGVector(dx: viewport.midX - scroll.frame.minX, dy: startY - scroll.frame.minY))
+            let end = origin.withOffset(CGVector(dx: viewport.midX - scroll.frame.minX, dy: endY - scroll.frame.minY))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(control.isHittable)
+        XCTAssertTrue(homeViewport(in: app).contains(control.frame),
+            "The complete target card must be below the navigation bar and above the fixture controls before capture")
     }
 
     func testScannerSheetDismissalKeepsDecodedReviewUntilExplicitCancel() {
