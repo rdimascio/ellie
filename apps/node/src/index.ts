@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { job, record, inferenceJob, result } from "@ellie/protocol";
+import { job, record, inferenceJob, result, string, OPERATION_REGISTRY } from "@ellie/protocol";
 import type { Result, ComputeCapabilities, Telemetry } from "@ellie/protocol";
 import type { Preferences } from "@ellie/config";
 import type { Executor } from "@ellie/macos";
@@ -18,6 +18,15 @@ export function reconnectDelay(
   const maximum = options.maxMs ?? 10_000;
   const exponential = Math.min(maximum, base * 2 ** Math.max(0, Math.min(attempt, 16)));
   return Math.min(maximum, Math.max(base, Math.round(exponential * (0.75 + random() * 0.5))));
+}
+
+function desktopFailureMessage(error: unknown): string {
+  if (!(error instanceof Error)) return "Native action failed.";
+  try {
+    return string(error.message, OPERATION_REGISTRY.limits.maxResultMessageLength);
+  } catch {
+    return "Native action failed.";
+  }
 }
 
 export async function runNode(options: {
@@ -178,9 +187,7 @@ export async function runNode(options: {
             message:
               "kind" in task
                 ? "Inference failed or was cancelled. Check the local runner and worker status."
-                : error instanceof Error
-                  ? error.message
-                  : "Native action failed.",
+                : desktopFailureMessage(error),
           };
         } finally {
           activeJobs = 0;

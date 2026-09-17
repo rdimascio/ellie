@@ -7,11 +7,13 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { defaults } from "@ellie/config";
-import { nativeCommand, record, type Action } from "@ellie/protocol";
+import { browserWebMCPResultFor, nativeCommand, record, type Action } from "@ellie/protocol";
 import { createBrowserRemote } from "../apps/server/src/browser-remote.ts";
 import { runNode } from "../apps/node/src/index.ts";
 import { BrowserNodeExecutor } from "../apps/node/src/browser-executor.ts";
-import type { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
+import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
+import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
+import type { BrowserAccessibilityRuntime } from "../apps/node/src/browser-accessibility-runtime.ts";
 import { fixture } from "./helpers.ts";
 import { browserWebMCPHostWrapper } from "../scripts/browser-webmcp-host-wrapper.ts";
 import { packagedBrowserHelpers } from "../apps/cli/src/browser-runtime-paths.ts";
@@ -107,6 +109,182 @@ test("composed node advertises browser grants only with an initialized browser e
   await executor.execute({ tool: "browser.status" });
   assert.deepEqual(desktopCalls, [{ tool: "app.open", app: "Arc" }]);
   assert.deepEqual(browserCalls, [{ tool: "browser.status" }]);
+});
+
+test("disconnected browser jobs finish through coordinator without reconnect or replay", async () => {
+  const f = await fixture(3_000);
+  const abort = new AbortController();
+  let agent: Promise<void> | undefined;
+  let bridgeRequests = 0;
+  let accessibilityCalls = 0;
+  const events: string[] = [];
+  try {
+    const node = await f.pair("disconnected-browser-node");
+    const webmcp = new BrowserWebMCPOperations(
+      {
+        request: async (request) => {
+          bridgeRequests++;
+          return browserWebMCPResultFor(request.id, "unavailable");
+        },
+      },
+      { version: 1, bindings: [] },
+    );
+    const selector = new BrowserOperationSelector(
+      (signal, refresh) => (refresh ? webmcp.bindingRefresh(signal) : webmcp.bindingStatus(signal)),
+      webmcp,
+      {
+        execute: async () => {
+          accessibilityCalls++;
+          throw new Error("Accessibility must not run without a binding.");
+        },
+      } as unknown as BrowserAccessibilityRuntime,
+    );
+    let ready!: () => void;
+    const registered = new Promise<void>((resolve) => (ready = resolve));
+    agent = runNode({
+      client: node,
+      preferences: defaults,
+      signal: abort.signal,
+      executor: new BrowserNodeExecutor(
+        {
+          capabilities: async () => ["app.open"],
+          execute: async () => {
+            throw new Error("Desktop helper must not run for browser.status.");
+          },
+        },
+        selector,
+      ),
+      onStatus: ready,
+      onEvent: (event) => events.push(event),
+    });
+    await registered;
+    for (const [index, action] of [
+      { tool: "browser.status" },
+      { tool: "browser.refresh" },
+      { tool: "browser.read", view: "summary", revision },
+    ].entries()) {
+      const response = record(
+        await f.controller.call(
+          "POST",
+          "/v1/commands",
+          { nodeId: "disconnected-browser-node", action },
+          { timeoutMs: 2_500 },
+        ),
+      );
+      assert.equal(response.ok, false);
+      if (index < 2)
+        assert.deepEqual(response.browser, {
+          source: "webmcp",
+          operation: "status",
+          status: "unavailable",
+        });
+      else {
+        assert.equal(response.message, "Browser connection is unavailable.");
+        assert.equal(Object.hasOwn(response, "browser"), false);
+      }
+      assert.equal(bridgeRequests, index + 1);
+      const stored = f.jobStore.list("disconnected-browser-node", 1)[0]!;
+      assert.equal(stored.state, "failed");
+    }
+    assert.equal(accessibilityCalls, 0);
+    assert.deepEqual(events, ["connected"]);
+  } finally {
+    abort.abort();
+    await f.close();
+    await agent;
+  }
+});
+
+test("pre-dispatch refresh failure is unavailable; cancellation and read never enter an adapter", async () => {
+  let bindingCalls = 0;
+  let adapterCalls = 0;
+  const selector = new BrowserOperationSelector(
+    async () => {
+      bindingCalls++;
+      throw new Error();
+    },
+    {
+      execute: async () => {
+        adapterCalls++;
+        throw new Error("WebMCP adapter must not run.");
+      },
+    },
+    {
+      execute: async () => {
+        adapterCalls++;
+        throw new Error("Accessibility adapter must not run.");
+      },
+    } as unknown as BrowserAccessibilityRuntime,
+  );
+  const refreshed = record(
+    await selector.execute({ tool: "browser.refresh" }, AbortSignal.timeout(1_000)),
+  );
+  assert.deepEqual(refreshed.browser, {
+    source: "webmcp",
+    operation: "status",
+    status: "unavailable",
+  });
+  const cancelled = AbortSignal.abort();
+  await assert.rejects(selector.execute({ tool: "browser.status" }, cancelled), /cancelled/);
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.read", view: "summary", revision },
+      AbortSignal.timeout(1_000),
+    ),
+    /connection is unavailable/,
+  );
+  assert.equal(bindingCalls, 2);
+  assert.equal(adapterCalls, 0);
+});
+
+test("invalid desktop error messages produce one bounded terminal result without reconnect", async () => {
+  const f = await fixture(3_000);
+  const abort = new AbortController();
+  let agent: Promise<void> | undefined;
+  let executions = 0;
+  const events: string[] = [];
+  try {
+    const node = await f.pair("invalid-browser-error-node");
+    let ready!: () => void;
+    const registered = new Promise<void>((resolve) => (ready = resolve));
+    agent = runNode({
+      client: node,
+      preferences: defaults,
+      signal: abort.signal,
+      executor: {
+        capabilities: async () => ["browser.read"],
+        execute: async () => {
+          executions++;
+          throw new Error(executions === 1 ? "" : "x".repeat(4_001));
+        },
+      },
+      onStatus: ready,
+      onEvent: (event) => events.push(event),
+    });
+    await registered;
+    for (let index = 1; index <= 2; index++) {
+      const response = record(
+        await f.controller.call(
+          "POST",
+          "/v1/commands",
+          { nodeId: "invalid-browser-error-node", action: { tool: "browser.status" } },
+          { timeoutMs: 2_500 },
+        ),
+      );
+      assert.equal(response.ok, false);
+      assert.equal(response.message, "Native action failed.");
+      assert.equal(executions, index);
+    }
+    assert.deepEqual(events, ["connected"]);
+    assert.equal(f.jobStore.list("invalid-browser-error-node", 2).length, 2);
+    assert.ok(
+      f.jobStore.list("invalid-browser-error-node", 2).every((row) => row.state === "failed"),
+    );
+  } finally {
+    abort.abort();
+    await f.close();
+    await agent;
+  }
 });
 
 test("native browser command grammar is canonical and never accepts page authority", () => {
