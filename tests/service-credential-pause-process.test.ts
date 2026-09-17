@@ -4,13 +4,15 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { defaults } from "@ellie/config";
 import { Auth } from "../apps/server/src/auth.ts";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 
 const node = process.execPath;
-const main = new URL("../apps/cli/src/main.ts", import.meta.url).pathname;
+const main = fileURLToPath(new URL("../apps/cli/src/main.ts", import.meta.url));
+const checkout = fileURLToPath(new URL("..", import.meta.url));
 type Role = "node" | "coordinator";
 type Owned = {
   child: ChildProcessWithoutNullStreams;
@@ -34,7 +36,7 @@ async function within<T>(work: Promise<T>, milliseconds: number, message: string
 
 function launch(home: string, helper: string, attempts: string, args: string[]): Owned {
   const child = spawn(node, [main, ...args], {
-    cwd: new URL("..", import.meta.url).pathname,
+    cwd: checkout,
     env: {
       HOME: home,
       PATH: "/usr/bin:/bin",
@@ -51,7 +53,8 @@ function launch(home: string, helper: string, attempts: string, args: string[]):
   for (const stream of [child.stdout, child.stderr])
     stream.on("data", (value: Buffer) => {
       outputBytes += value.length;
-      if (outputBytes > 16_384) child.kill("SIGTERM");
+      if (outputBytes > 16_384 && child.exitCode === null && child.signalCode === null)
+        child.kill("SIGTERM");
     });
   const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
     (resolve, reject) => {
