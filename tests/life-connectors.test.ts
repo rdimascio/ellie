@@ -378,6 +378,8 @@ test("broker sync publishes private preparation once and preserves user correcti
       () => provider.pulls > pullsBeforeEdit + 1,
       async () => {},
     );
+    await assert.rejects(broker.revoke("another-actor", connection.id));
+    assert.equal(store.get(actor.userId, connection.id)?.state, "connected");
     const revoking = broker.revoke(actor.userId, connection.id);
     releaseGate();
     await revoking;

@@ -7,27 +7,40 @@ export function Connections() {
   const [connectMode, setConnectMode] = useState<ConnectorMode>("prepare");
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [notice, setNotice] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
   const [pending, setPending] = useState<{
     provider: ConnectorProvider["id"];
+    connectionId: string;
     authorizationUrl?: string;
     openedExternally: boolean;
+    seen: boolean;
   } | null>(null);
 
   const load = async () => {
     const value = await api.connections.list();
     setConnections(value.connections);
     setProviders(value.providers);
-    setPending((current) =>
-      current &&
-      value.connections.some(
-        (connection) =>
-          connection.provider === current.provider && connection.state === "connected",
-      )
-        ? null
-        : current,
-    );
+    setLoadError("");
   };
+  useEffect(() => {
+    if (!pending) return;
+    const connection = connections.find(
+      (item) => item.id === pending.connectionId && item.provider === pending.provider,
+    );
+    if (connection?.state === "connecting") {
+      if (!pending.seen) setPending({ ...pending, seen: true });
+      return;
+    }
+    if (!connection && !pending.seen) return;
+    setPending(null);
+    setCopyStatus("");
+    if (connection?.state === "connected") setNotice("Google connection is ready.");
+    else if (connection?.state === "paused" || connection?.state === "error")
+      setNotice("Google sign-in finished, but the connection needs attention.");
+    else setNotice("Google connection setup did not finish. You can start again.");
+  }, [connections, pending]);
   useEffect(() => {
     let current = true;
     let loading = false;
@@ -39,19 +52,10 @@ export function Connections() {
         if (!current) return;
         setConnections(value.connections);
         setProviders(value.providers);
-        setPending((pendingConnection) =>
-          pendingConnection &&
-          value.connections.some(
-            (connection) =>
-              connection.provider === pendingConnection.provider &&
-              connection.state === "connected",
-          )
-            ? null
-            : pendingConnection,
-        );
+        setLoadError("");
       } catch (caught) {
         if (current)
-          setError(
+          setLoadError(
             caught instanceof Error ? caught.message : "Connected accounts are unavailable.",
           );
       } finally {
@@ -69,10 +73,16 @@ export function Connections() {
   const run = async (key: string, operation: () => Promise<unknown>) => {
     setBusy(key);
     setError("");
+    setNotice("");
     try {
       await operation();
       await load();
     } catch (caught) {
+      try {
+        await load();
+      } catch {
+        /* Preserve the action failure. */
+      }
       setError(
         caught instanceof Error ? caught.message : "The connected account could not be updated.",
       );
@@ -83,10 +93,15 @@ export function Connections() {
   const connect = async (provider: ConnectorProvider) => {
     setBusy(`connect:${provider.id}`);
     setError("");
+    setNotice("");
     setCopyStatus("");
     try {
       const value = await api.connections.start(provider.id, connectMode),
         target = new URL(value.authorizationUrl, location.origin);
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.connectionId)
+      )
+        throw new Error("The connection response was invalid.");
       const local = target.origin === location.origin,
         google =
           target.protocol === "https:" &&
@@ -99,15 +114,24 @@ export function Connections() {
       if (!local && !google) throw new Error("The connection URL was not trusted.");
       setPending({
         provider: provider.id,
+        connectionId: value.connectionId,
         ...(value.openedExternally ? {} : { authorizationUrl: target.href }),
         openedExternally: value.openedExternally === true,
+        seen: false,
       });
-      setBusy("");
-      await load();
+      try {
+        await load();
+        setPending((current) =>
+          current?.connectionId === value.connectionId ? { ...current, seen: true } : current,
+        );
+      } catch {
+        setError("Connection started, but its current status could not be loaded.");
+      }
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : "The account connection could not start.",
       );
+    } finally {
       setBusy("");
     }
   };
@@ -165,7 +189,23 @@ export function Connections() {
             </div>
           )}
           {copyStatus && <small>{copyStatus}</small>}
+          <button
+            type="button"
+            disabled={busy !== ""}
+            onClick={() =>
+              void run(`cancel:${pending.connectionId}`, () =>
+                api.connections.revoke(pending.connectionId),
+              )
+            }
+          >
+            {busy === `cancel:${pending.connectionId}` ? "Stopping…" : "Stop setup"}
+          </button>
         </div>
+      )}
+      {notice && (
+        <p className="connection-status" role="status">
+          {notice}
+        </p>
       )}
       {connections.length > 0 && (
         <div className="connection-list">
@@ -241,8 +281,14 @@ export function Connections() {
                 </small>
               </div>
               <button
-                disabled={!provider.configured || busy !== ""}
-                title={!provider.configured ? provider.setupMessage : undefined}
+                disabled={!provider.configured || busy !== "" || pending !== null}
+                title={
+                  !provider.configured
+                    ? provider.setupMessage
+                    : pending
+                      ? "Finish or stop the current connection first."
+                      : undefined
+                }
                 onClick={() => void connect(provider)}
               >
                 {busy === `connect:${provider.id}`
@@ -260,6 +306,11 @@ export function Connections() {
       {error && (
         <p className="settings-error" role="alert">
           {error}
+        </p>
+      )}
+      {loadError && (
+        <p className="settings-error" role="alert">
+          {loadError}
         </p>
       )}
     </section>
