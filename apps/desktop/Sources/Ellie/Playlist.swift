@@ -57,7 +57,9 @@ private struct PlaylistPlayerSheet: View {
             }.padding(16)
             Divider()
             ZStack {
-                PlaylistWebView(playlistID: playlistID, model: model)
+                if model.state.message == nil {
+                    PlaylistWebView(playlistID: playlistID, model: model)
+                }
                 if model.state == .loading { ProgressView("Connecting to YouTube…").padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
                 if let message = model.state.message {
                     ContentUnavailableView("Playback unavailable", systemImage: "exclamationmark.triangle", description: Text(message))
@@ -73,7 +75,9 @@ private struct PlaylistWebView: NSViewRepresentable {
     let playlistID: String
     @ObservedObject var model: PlaylistPlayerModel
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model, policy: PlaylistNavigationPolicy(bundleIdentifier: Bundle.main.bundleIdentifier))
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -114,11 +118,11 @@ private struct PlaylistWebView: NSViewRepresentable {
                 guard let list, coordinator.isActive else { coordinator.failSetup(); return }
                 view.configuration.userContentController.add(list)
                 coordinator.startTimeout()
-                guard let html = PlaylistNavigationPolicy.playerHTML(playlistID: playlistID) else {
+                guard let policy = coordinator.policy, let html = policy.playerHTML(playlistID: playlistID) else {
                     coordinator.failSetup()
                     return
                 }
-                view.loadHTMLString(html, baseURL: PlaylistNavigationPolicy.documentOrigin)
+                view.loadHTMLString(html, baseURL: policy.documentURL)
             }
         }
     }
@@ -126,9 +130,13 @@ private struct PlaylistWebView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         private let model: PlaylistPlayerModel
+        let policy: PlaylistNavigationPolicy?
         private var timeoutTask: Task<Void, Never>?
         private(set) var isActive = true
-        init(model: PlaylistPlayerModel) { self.model = model }
+        init(model: PlaylistPlayerModel, policy: PlaylistNavigationPolicy?) {
+            self.model = model
+            self.policy = policy
+        }
 
         func startTimeout() {
             timeoutTask?.cancel()
@@ -144,7 +152,7 @@ private struct PlaylistWebView: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             let origin = message.frameInfo.securityOrigin
             guard isActive, message.name == "elliePlayer", message.frameInfo.isMainFrame,
-                  origin.protocol == "https", origin.host == "ellie.local",
+                  let policy, origin.protocol == "https", origin.host.lowercased() == policy.origin.host,
                   let body = message.body as? [String: Any], body.count <= 2,
                   let type = body["type"] as? String, type.utf8.count <= 16 else { return }
             if type == "ready" { timeoutTask?.cancel(); model.state = .ready }
@@ -161,14 +169,14 @@ private struct PlaylistWebView: NSViewRepresentable {
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.shouldPerformDownload { decisionHandler(.cancel); return }
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            let allowed = PlaylistNavigationPolicy.allows(url, mainFrame: navigationAction.targetFrame?.isMainFrame == true)
+            let allowed = policy?.allows(url, mainFrame: navigationAction.targetFrame?.isMainFrame == true) == true
             decisionHandler(allowed ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
             guard let url = navigationResponse.response.url,
-                  PlaylistNavigationPolicy.allows(url, mainFrame: navigationResponse.isForMainFrame),
+                  policy?.allows(url, mainFrame: navigationResponse.isForMainFrame) == true,
                   navigationResponse.canShowMIMEType else { decisionHandler(.cancel); return }
             decisionHandler(.allow)
         }
