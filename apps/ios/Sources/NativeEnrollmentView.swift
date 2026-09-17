@@ -4,6 +4,9 @@ import SwiftUI
 struct NativeEnrollmentView: View {
   @ObservedObject var store: NativeEnrollmentStore
   @ObservedObject var dashboards: DashboardStore
+  #if DEBUG
+  var uiTestScannerCode: String? = nil
+  #endif
   @Environment(\.scenePhase) private var scenePhase
   @State private var syncCleanupError = false
 
@@ -116,11 +119,16 @@ struct NativeEnrollmentView: View {
         set: { if !$0 { store.scannerDismissed() } })
     ) {
       NavigationStack {
-        NativeQRScanner { result in
-          switch result {
-          case .success(let code): store.scanned(code)
-          case .failure: store.scannerFailed()
+        Group {
+          #if DEBUG
+          if let uiTestScannerCode {
+            NativeScannerSheetUITestCamera(code: uiTestScannerCode, completion: handleScan)
+          } else {
+            NativeQRScanner(completion: handleScan)
           }
+          #else
+          NativeQRScanner(completion: handleScan)
+          #endif
         }
         .ignoresSafeArea()
         .navigationTitle("Scan Ellie code")
@@ -144,6 +152,12 @@ struct NativeEnrollmentView: View {
     catch { syncCleanupError = true }
   }
   private func shortPin(_ pin: String) -> String { "\(pin.prefix(12))…\(pin.suffix(12))" }
+  private func handleScan(_ result: Result<String, NativeEnrollmentFailure>) {
+    switch result {
+    case .success(let code): store.scanned(code)
+    case .failure: store.scannerFailed()
+    }
+  }
 }
 
 func nativeEnrollmentAccessDescription(_ grant: NativeGrant) -> String? {
