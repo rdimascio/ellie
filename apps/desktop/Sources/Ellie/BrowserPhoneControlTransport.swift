@@ -1,6 +1,6 @@
 import Foundation
 
-enum BrowserPhoneSource: String, Equatable, Sendable { case webmcp, accessibility }
+enum BrowserPhoneSource: String, Equatable, Sendable { case webmcp, accessibility, companion }
 enum BrowserPhoneCommandStatus: String, Equatable, Sendable {
   case completed, failed, unknown, cancelled, timedOut = "timed_out"
 }
@@ -10,15 +10,30 @@ struct BrowserPhoneItem: Equatable, Identifiable, Sendable {
   let state: String?
 }
 enum BrowserPhoneYouTubePage: String, Equatable, Sendable {
-  case home, results, watch, login, unsupported
+  case home, results, browse, watch, login, unsupported
 }
+enum BrowserPhoneProvider: String, Equatable, Sendable { case youtube, netflix }
 enum BrowserPhonePlayback: String, Equatable, Sendable {
   case playing, paused, unavailable, ambiguous
 }
 struct BrowserPhoneSite: Equatable, Sendable {
+  let provider: BrowserPhoneProvider
   let page: BrowserPhoneYouTubePage
   let playback: BrowserPhonePlayback
   let currentTimeSeconds: Double?
+  let horizontalScrollAvailable: Bool?
+
+  init(
+    provider: BrowserPhoneProvider = .youtube, page: BrowserPhoneYouTubePage,
+    playback: BrowserPhonePlayback, currentTimeSeconds: Double?,
+    horizontalScrollAvailable: Bool? = nil
+  ) {
+    self.provider = provider
+    self.page = page
+    self.playback = playback
+    self.currentTimeSeconds = currentTimeSeconds
+    self.horizontalScrollAvailable = horizontalScrollAvailable
+  }
 }
 struct BrowserPhonePage: Equatable, Sendable {
   let nodeID: String
@@ -246,15 +261,25 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
 }
 
 private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPhoneSite {
-  guard Set(value.keys) == Set(["provider", "page", "playback"])
-      || Set(value.keys) == Set(["provider", "page", "playback", "currentTimeSeconds"]),
-    value["provider"] as? String == "youtube",
+  guard Set(value.keys).isSubset(of: ["provider", "page", "playback", "currentTimeSeconds", "horizontalScrollAvailable"]),
+    Set(["provider", "page", "playback"]).isSubset(of: Set(value.keys)),
+    let providerValue = value["provider"] as? String,
+    let provider = BrowserPhoneProvider(rawValue: providerValue),
     let pageValue = value["page"] as? String,
     let page = BrowserPhoneYouTubePage(rawValue: pageValue),
     let playbackValue = value["playback"] as? String,
     let playback = BrowserPhonePlayback(rawValue: playbackValue),
-    page == .watch || playback == .unavailable
+    page == .watch || playback == .unavailable,
+    (provider == .youtube && [.home, .results, .watch, .login, .unsupported].contains(page))
+      || (provider == .netflix && [.browse, .watch, .login, .unsupported].contains(page))
   else { throw PhoneControlFailure.invalidResponse }
+  let row: Bool?
+  if let rawRow = value["horizontalScrollAvailable"] {
+    guard provider == .netflix, page == .browse,
+      let number = rawRow as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID()
+    else { throw PhoneControlFailure.invalidResponse }
+    row = number.boolValue
+  } else { row = nil }
   let time: Double?
   if let rawTime = value["currentTimeSeconds"] {
     guard playback == .playing || playback == .paused,
@@ -265,7 +290,9 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
   } else {
     time = nil
   }
-  return BrowserPhoneSite(page: page, playback: playback, currentTimeSeconds: time)
+  return BrowserPhoneSite(
+    provider: provider, page: page, playback: playback,
+    currentTimeSeconds: time, horizontalScrollAvailable: row)
 }
 
 private func validBrowserIdentifier(_ value: String) -> Bool {

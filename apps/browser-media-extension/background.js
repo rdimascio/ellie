@@ -1,5 +1,6 @@
 const productionOrigins = new Set(["https://www.netflix.com", "https://www.youtube.com"]);
 const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);
+const companionBindingOrigins = new Set(["https://www.netflix.com"]);
 const mutationLedgers = new Map();
 const mutationTypes = new Set(["scrollViewport", "scrollRow", "open", "play", "pause", "seek"]);
 const actionPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -54,6 +55,7 @@ function supportedNativeRequest(request) {
       "binding.status",
       "binding.refresh",
       "page.inspect",
+      "media.execute",
       "tools.list",
       "tool.execute",
     ].includes(request.type)
@@ -76,7 +78,7 @@ function allowedOrigin(url) {
   }
 }
 
-async function dispatch(tabId, command) {
+async function dispatch(tabId, command, expectedBinding) {
   const deadline = Date.now() + 2000;
   if (mutationTypes.has(command?.type)) {
     if (!actionPattern.test(command?.actionId)) throw new Error("invalid_command");
@@ -88,12 +90,33 @@ async function dispatch(tabId, command) {
   }
   const before = await chrome.tabs.get(tabId);
   if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
+  if (
+    expectedBinding &&
+    (before.url !== expectedBinding.url ||
+      before.windowId !== expectedBinding.windowId ||
+      before.active !== true ||
+      before.status !== "complete" ||
+      !(await chrome.windows.get(expectedBinding.windowId)).focused)
+  )
+    throw new Error("page_changed");
   const installed = await chrome.scripting.executeScript({
     target: { tabId },
     files: ["media-controller.js"],
   });
   const documentId = installed[0]?.documentId;
   if (!documentId) throw new Error("page_changed");
+  if (expectedBinding && documentId !== expectedBinding.documentId) throw new Error("page_changed");
+  if (expectedBinding) {
+    const armed = await chrome.tabs.get(tabId);
+    if (
+      armed.url !== expectedBinding.url ||
+      armed.windowId !== expectedBinding.windowId ||
+      armed.active !== true ||
+      armed.status !== "complete" ||
+      !(await chrome.windows.get(expectedBinding.windowId)).focused
+    )
+      throw new Error("page_changed");
+  }
   const execution = chrome.scripting.executeScript({
     target: { tabId, documentIds: [documentId] },
     func: async (value, expectedUrl, deadline) => {
@@ -176,7 +199,9 @@ function bindingAvailability(origin) {
     ? "webmcp"
     : accessibilityBindingOrigins.has(origin)
       ? "accessibility"
-      : undefined;
+      : companionBindingOrigins.has(origin)
+        ? "companion"
+        : undefined;
 }
 
 function clearWebMCPSelection() {
@@ -448,6 +473,67 @@ async function inspectSelectedPage(request, controller) {
   return { bindingId: binding.bindingId, documentId: binding.documentId, url: binding.url, site };
 }
 
+async function executeCompanion(request, controller) {
+  if (
+    Object.keys(request).sort().join() !== "bindingId,command,documentId,id,protocol,type" ||
+    typeof request.bindingId !== "string" ||
+    typeof request.documentId !== "string" ||
+    !request.command ||
+    typeof request.command !== "object" ||
+    !["inspect", "scrollViewport", "scrollRow", "open", "play", "pause"].includes(
+      request.command.type,
+    )
+  )
+    throw new Error("invalid_arguments");
+  const binding = liveBinding();
+  const selection = liveSelection();
+  if (
+    binding.availability !== "companion" ||
+    binding.origin !== "https://www.netflix.com" ||
+    selection.tabId !== binding.tabId ||
+    selection.windowId !== binding.windowId ||
+    request.bindingId !== binding.bindingId ||
+    request.documentId !== binding.documentId
+  )
+    throw new Error("page_changed");
+  const navigationGeneration = selection.navigationGeneration;
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const before = await selectedAnchorTab(selection);
+  await currentWebMCPDocument(binding);
+  if (
+    controller.signal.aborted ||
+    before.url !== binding.url ||
+    webMCPSelection !== selection ||
+    webMCPBinding !== binding ||
+    selection.navigationGeneration !== navigationGeneration
+  )
+    throw new Error("page_changed");
+  const mutates = request.command.type !== "inspect";
+  // Once a mutation is admitted, the old binding cannot authorize another operation.
+  if (mutates) webMCPBinding = undefined;
+  let value;
+  try {
+    value = await dispatch(binding.tabId, request.command, binding);
+  } catch (error) {
+    if (mutates) throw new Error("unknown");
+    throw error;
+  }
+  if (controller.signal.aborted) throw new Error(mutates ? "unknown" : "cancelled");
+  if (!mutates) {
+    const after = await selectedAnchorTab(selection);
+    await currentWebMCPDocument(binding);
+    if (
+      webMCPSelection !== selection ||
+      webMCPBinding !== binding ||
+      selection.navigationGeneration !== navigationGeneration ||
+      before.url !== after.url ||
+      after.url !== binding.url
+    )
+      throw new Error("page_changed");
+  }
+  return { bindingId: binding.bindingId, documentId: binding.documentId, url: binding.url, value };
+}
+
 async function executeWebMCP(request, controller) {
   const binding = liveBinding();
   const before = await chrome.tabs.get(binding.tabId);
@@ -568,6 +654,7 @@ async function handleNativeRequest(request) {
     }
     if (request.type === "tools.list") return await listWebMCPTools();
     if (request.type === "page.inspect") return await inspectSelectedPage(request, controller);
+    if (request.type === "media.execute") return await executeCompanion(request, controller);
     if (request.type === "tool.execute") return await executeWebMCP(request, controller);
     throw new Error("unavailable");
   } finally {

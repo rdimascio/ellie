@@ -296,13 +296,14 @@ export type BrowserView = {
   summary?: string;
   items: { id: string; label: string; state?: string }[];
   site?: {
-    provider: "youtube";
-    page: "home" | "results" | "watch" | "login" | "unsupported";
+    provider: "youtube" | "netflix";
+    page: "home" | "results" | "browse" | "watch" | "login" | "unsupported";
     playback: "playing" | "paused" | "unavailable" | "ambiguous";
     currentTimeSeconds?: number;
+    horizontalScrollAvailable?: boolean;
   };
 };
-export type BrowserExecutionSource = "webmcp" | "accessibility";
+export type BrowserExecutionSource = "webmcp" | "accessibility" | "companion";
 export type BrowserWebMCPStructuredResult =
   | {
       source: BrowserExecutionSource;
@@ -389,7 +390,11 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         ? ["source", "operation", "status", "revision", "origin"]
         : ["source", "operation", "status"],
     );
-    if (browser.source !== "webmcp" && browser.source !== "accessibility")
+    if (
+      browser.source !== "webmcp" &&
+      browser.source !== "accessibility" &&
+      browser.source !== "companion"
+    )
       throw new Error("Invalid browser operation result.");
     if (!connected && browser.source !== "webmcp")
       throw new Error("Invalid browser operation result.");
@@ -418,7 +423,11 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
   }
   if (browser.operation === "read") {
     exactObject(browser, ["source", "operation", "status", "revision", "view"]);
-    if (browser.source !== "webmcp" && browser.source !== "accessibility")
+    if (
+      browser.source !== "webmcp" &&
+      browser.source !== "accessibility" &&
+      browser.source !== "companion"
+    )
       throw new Error("Invalid browser operation result.");
     if (browser.status !== "completed") throw new Error("Invalid browser operation result.");
     if (body.ok !== true) throw new Error("Invalid browser operation result.");
@@ -449,17 +458,27 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
       if (!observed || typeof observed !== "object" || Array.isArray(observed))
         throw new Error("Invalid browser operation result.");
       const hasTime = Object.hasOwn(observed, "currentTimeSeconds");
-      exactObject(
-        observed,
-        hasTime
-          ? ["provider", "page", "playback", "currentTimeSeconds"]
-          : ["provider", "page", "playback"],
-      );
+      const hasRow = Object.hasOwn(observed, "horizontalScrollAvailable");
+      exactObject(observed, [
+        "provider",
+        "page",
+        "playback",
+        ...(hasTime ? ["currentTimeSeconds"] : []),
+        ...(hasRow ? ["horizontalScrollAvailable"] : []),
+      ]);
       if (
-        observed.provider !== "youtube" ||
-        !["home", "results", "watch", "login", "unsupported"].includes(observed.page as string) ||
+        !["youtube", "netflix"].includes(observed.provider as string) ||
+        !(
+          observed.provider === "youtube"
+            ? ["home", "results", "watch", "login", "unsupported"]
+            : ["browse", "watch", "login", "unsupported"]
+        ).includes(observed.page as string) ||
         !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
         (observed.page !== "watch" && observed.playback !== "unavailable") ||
+        (hasRow &&
+          (observed.provider !== "netflix" ||
+            observed.page !== "browse" ||
+            typeof observed.horizontalScrollAvailable !== "boolean")) ||
         (hasTime &&
           (observed.page !== "watch" ||
             !["playing", "paused"].includes(observed.playback as string) ||
@@ -471,6 +490,8 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         throw new Error("Invalid browser operation result.");
       site = observed as BrowserView["site"];
     }
+    if (browser.source === "companion" && site?.provider !== "netflix")
+      throw new Error("Invalid browser operation result.");
     return {
       ok: body.ok,
       message,
@@ -489,7 +510,11 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     };
   }
   exactObject(browser, ["source", "operation", "status", "revision"]);
-  if (browser.source !== "webmcp" && browser.source !== "accessibility")
+  if (
+    browser.source !== "webmcp" &&
+    browser.source !== "accessibility" &&
+    browser.source !== "companion"
+  )
     throw new Error("Invalid browser operation result.");
   if (
     browser.operation !== "command" ||

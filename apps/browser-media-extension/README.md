@@ -1,8 +1,8 @@
 # Ellie Media Companion (experimental)
 
-This unpacked Manifest V3 extension is a browser-side development companion for explicit controls on the active tab. Its production permission surface is `activeTab` and `scripting`; it has no persistent host access, native messaging, cookies, profile access, or remote connection.
+This unpacked Manifest V3 extension is a browser-side companion for explicit controls on the selected active tab. Its production permission surface is `activeTab`, `scripting`, and local native messaging; it has no persistent site access, browser-cookie reads, or website-to-household connection.
 
-The initial provider origins are Netflix and YouTube. YouTube title-link behavior is conservative and experimental. Authenticated Netflix catalogue browsing remains unaccepted because the observed public page exposes marketing controls rather than playable title links. YouTube TV, Disney+, and Arc compatibility are unsupported pending direct adapter and extension-runtime validation.
+The exact reviewed origins are `https://www.netflix.com` and `https://www.youtube.com`. Netflix uses a distinct DOM companion source over the authenticated native-host selection, not the YouTube Accessibility adapter. It reads bounded same-origin title/watch links, scrolls vertically, scrolls horizontally only when one visible row is unambiguous, opens one item from a fresh read, and dispatches play or pause only from a single observed watch-page player state. Search, account/profile/payment controls, and multi-row horizontal choice are unsupported. A dispatched action is reported unknown until a separate fresh read; it is never replayed or switched to another adapter. YouTube TV and Disney+ remain unsupported. Actual authenticated Netflix, playback, and Arc acceptance are pending.
 
 The popup can inspect currently visible title links, scroll one viewport or one real horizontal scroll container, open a fresh inspected candidate, and operate exactly one visible HTML video. Opening confirms navigation only. Playback controls verify observed media state and never replay an action after timeout or navigation.
 

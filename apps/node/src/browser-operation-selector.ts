@@ -9,6 +9,7 @@ import type {
   BrowserAccessibilityRuntime,
 } from "./browser-accessibility-runtime.ts";
 import { browserBindingRevision, type BrowserBinding } from "./browser-operations.ts";
+import type { BrowserCompanionOperations } from "./browser-companion-operations.ts";
 
 type WebMCP = {
   execute(action: Action, signal: AbortSignal): Promise<Result>;
@@ -31,6 +32,7 @@ export class BrowserOperationSelector {
   ) => Promise<BrowserBinding | "unbound" | "unsupported">;
   private readonly webmcp: WebMCP;
   private readonly accessibility: BrowserAccessibilityRuntime;
+  private readonly companion?: BrowserCompanionOperations;
   constructor(
     binding: (
       signal: AbortSignal,
@@ -38,10 +40,12 @@ export class BrowserOperationSelector {
     ) => Promise<BrowserBinding | "unbound" | "unsupported">,
     webmcp: WebMCP,
     accessibility: BrowserAccessibilityRuntime,
+    companion?: BrowserCompanionOperations,
   ) {
     this.binding = binding;
     this.webmcp = webmcp;
     this.accessibility = accessibility;
+    this.companion = companion;
   }
 
   async execute(action: Action, signal: AbortSignal): Promise<Result> {
@@ -72,6 +76,10 @@ export class BrowserOperationSelector {
     }
     if (typeof binding !== "object" || binding.availability === "webmcp")
       return this.webmcp.execute(adapterAction, signal);
+    if (binding.availability === "companion") {
+      if (!this.companion) throw new Error("Browser companion is unavailable.");
+      return this.companion.execute(browserAction, binding, signal);
+    }
     if (browserAction.tool === "browser.read") {
       this.observationEpoch += 1;
       this.observedSite = undefined;
