@@ -42,7 +42,6 @@ struct NativeScannerSheetUITestCamera: View {
         .accessibilityIdentifier("scanner-fixture-decode")
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .accessibilityIdentifier("scanner-fixture-content")
   }
 }
 
