@@ -4,10 +4,12 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./decision": "./src/decision.ts"
   },
   "dependencies": {
     "@ellie/config": "*",
+    "@ellie/decisions": "*",
     "@ellie/protocol": "*"
   }
 }

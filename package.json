@@ -25,6 +25,7 @@
     "improvement:queue": "node scripts/improvement-queue.ts",
     "life:quality:browser": "bun run life:build && node scripts/life-browser-quality.ts",
     "life": "bun run life:build && bun run life:start",
+    "eval:routing": "node scripts/evaluate-routing.ts",
     "build:macos": "node scripts/build-macos.mjs",
     "desktop:build": "node scripts/build-desktop.mjs",
     "desktop:package": "node scripts/package-desktop.mjs",
