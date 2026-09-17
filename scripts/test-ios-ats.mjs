@@ -19,6 +19,7 @@ import { createBrowserServer } from "../apps/server/src/browser-server.ts";
 import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
+import { createIOSGoogleLifeFixture } from "./ios-google-life-fixture.mjs";
 import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
 import { SpeechStartDiagnostics } from "./speech-start-diagnostics.mjs";
 
@@ -35,6 +36,7 @@ let simulatorID,
   browserAuth,
   nativeAuth,
   nativeSpeech,
+  googleLife,
   activeChild,
   interruptChild,
   requestedSignal,
@@ -60,6 +62,13 @@ const endpointRequests = {
   unexpected: 0,
 };
 const endpointResponses = { ...endpointRequests };
+const googleRequests = { session: 0, list: 0, agenda: 0, preview: 0, detail: 0, other: 0 };
+const googleResponses = { ...googleRequests };
+const googleTokens = {
+  allowed: "12".repeat(32),
+  denied: "34".repeat(32),
+  revocable: "78".repeat(32),
+};
 
 function enterDiagnosticStage(stage) {
   diagnosticStage = stage;
@@ -68,7 +77,11 @@ function enterDiagnosticStage(stage) {
 
 function endpointStage(request) {
   const path = request.url?.split("?", 1)[0];
-  if (path?.startsWith("/native/v1/speech/") || path?.startsWith("/__ellie-test/speech/")) {
+  if (
+    path?.startsWith("/native/v1/speech/") ||
+    path?.startsWith("/__ellie-test/speech/") ||
+    path?.startsWith("/__ellie-test/google/")
+  ) {
     return undefined;
   }
   if (request.method === "GET" && path === "/native/v1/session") return "session";
@@ -79,6 +92,28 @@ function endpointStage(request) {
 }
 
 function recordEndpointRequest(request, response) {
+  const path = request.url?.split("?", 1)[0];
+  let google;
+  if (request.method === "POST" && path === "/native/v1/life/session") google = "session";
+  else if (request.method === "GET" && path === "/api/connections") google = "list";
+  else if (request.method === "GET" && /^\/api\/connections\/[^/]+\/agenda$/.test(path ?? ""))
+    google = "agenda";
+  else if (request.method === "GET" && /^\/api\/connections\/[^/]+\/preview$/.test(path ?? ""))
+    google = "preview";
+  else if (
+    request.method === "GET" &&
+    /^\/api\/connections\/[^/]+\/messages\/[^/]+$/.test(path ?? "")
+  )
+    google = "detail";
+  else if (path?.startsWith("/api/connections/") || path?.startsWith("/native/v1/life/"))
+    google = "other";
+  if (google) {
+    googleRequests[google] += 1;
+    response.once("finish", () => {
+      googleResponses[google] += 1;
+    });
+    return;
+  }
   const stage = endpointStage(request);
   if (!stage) return;
   endpointRequests[stage] += 1;
@@ -91,6 +126,10 @@ function diagnosticSummary() {
   const bounded = (value) => Math.min(Math.max(value, 0), 999_999);
   const counts = (value) =>
     ["session", "inventory", "command", "logout", "unexpected"]
+      .map((key) => `${key}:${Math.min(value[key], 99)}`)
+      .join(",");
+  const lifeCounts = (value) =>
+    ["session", "list", "agenda", "preview", "detail", "other"]
       .map((key) => `${key}:${Math.min(value[key], 99)}`)
       .join(",");
   let speech = "unavailable";
@@ -107,6 +146,8 @@ function diagnosticSummary() {
     `totalMs=${bounded(Math.round(performance.now() - diagnosticStartedAt))}`,
     `requests=${counts(endpointRequests)}`,
     `responses=${counts(endpointResponses)}`,
+    `lifeRequests=${lifeCounts(googleRequests)}`,
+    `lifeResponses=${lifeCounts(googleResponses)}`,
     `speech=${speech}`,
     `xcode=${platform.xcode}`,
     `sdk=${platform.sdk}`,
@@ -342,13 +383,26 @@ if (audio[44] >= 3) {
   await new Promise((resolveClose) => reservation.close(resolveClose));
   browserAuth = new BrowserAuth(BrowserAuth.empty(), async () => {});
   const nativeIDs = [
+    "invite-primary",
     "native-ats",
+    "invite-speech-denied",
     "speech-denied",
+    "invite-speech-granted",
     "speech-granted",
+    "invite-speech-revoked",
     "speech-revoked",
+    "invite-session-revoked",
     "session-revoked",
+    "invite-speech-cancel",
     "speech-cancel",
+    "invite-speech-disconnect",
     "speech-disconnect",
+    "invite-google-allowed",
+    "google-allowed",
+    "invite-google-denied",
+    "google-denied",
+    "invite-google-revocable",
+    "google-revocable",
   ];
   nativeAuth = new NativeAuth(NativeAuth.empty(), async () => {}, {
     token: () => "a".repeat(64),
@@ -404,6 +458,23 @@ if (audio[44] >= 3) {
   });
   await nativeSpeech.revoke(speechClients[2].id);
   await nativeAuth.revoke(speechClients[3].id);
+  const googleClients = {};
+  for (const role of ["allowed", "denied", "revocable"]) {
+    const next = await nativeAuth.invite({
+      label: `Google ${role}`,
+      grants: [{ target: "google-fixture-no-node", capabilities: ["app.open"] }],
+    });
+    googleClients[role] = await nativeAuth.pair(next.code, googleTokens[role]);
+    if (googleClients[role].id !== `google-${role}`)
+      throw new Error("Google fixture client identity is invalid.");
+  }
+  const googleDirectory = join(owned, "google-life");
+  mkdirSync(googleDirectory, { mode: 0o700 });
+  googleLife = await createIOSGoogleLifeFixture({
+    directory: googleDirectory,
+    nativeAuth,
+    grantedClientIds: [googleClients.allowed.id, googleClients.revocable.id],
+  });
   const disconnectBearer = `Bearer ${"de".repeat(32)}`;
   const cancelBearer = `Bearer ${"cd".repeat(32)}`;
   readSpeechMarkers = () => {
@@ -439,6 +510,8 @@ if (audio[44] >= 3) {
     auth: browserAuth,
     nativeAuth,
     speech: nativeSpeech,
+    nativeLife: googleLife.nativeLife,
+    lifeApplication: googleLife.lifeApplication,
     remote: {
       async nodes() {
         remoteNodeReads += 1;
@@ -458,6 +531,47 @@ if (audio[44] >= 3) {
   hosted.server.removeAllListeners("request");
   hosted.server.on("request", (request, response) => {
     recordEndpointRequest(request, response);
+    const googleControl = /^\/__ellie-test\/google\/(held-started\/[123]|release)$/.exec(
+      request.url ?? "",
+    );
+    if (googleControl) {
+      void (async () => {
+        const expected = `Bearer ${googleTokens.allowed}`;
+        if (
+          request.method !== "GET" ||
+          request.headers.authorization !== expected ||
+          request.headers["x-ellie-version"] !== "1"
+        ) {
+          response.writeHead(403, {
+            "content-type": "application/json",
+            "cache-control": "no-store",
+          });
+          response.end('{"ok":false}');
+          return;
+        }
+        if (googleControl[1] === "release") googleLife.control.releaseHeld();
+        else {
+          const target = Number(googleControl[1].at(-1));
+          const deadline = Date.now() + 5_000;
+          while (Date.now() < deadline && googleLife.control.heldReadStarted() < target)
+            await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+          if (googleLife.control.heldReadStarted() < target) {
+            response.writeHead(503, {
+              "content-type": "application/json",
+              "cache-control": "no-store",
+            });
+            response.end('{"ok":false}');
+            return;
+          }
+        }
+        response.writeHead(200, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end('{"ok":true}');
+      })().catch(() => response.destroy());
+      return;
+    }
     const control = /^\/__ellie-test\/speech\/(cancel|disconnect)\/(started|settled)$/.exec(
       request.url ?? "",
     );
@@ -635,10 +749,23 @@ if (audio[44] >= 3) {
   }
   if (
     JSON.stringify(endpointRequests) !==
-      JSON.stringify({ session: 1, inventory: 2, command: 1, logout: 1, unexpected: 0 }) ||
+      JSON.stringify({ session: 1, inventory: 2, command: 1, logout: 2, unexpected: 0 }) ||
     JSON.stringify(endpointResponses) !== JSON.stringify(endpointRequests)
   ) {
     throw new Error("The synthetic listener observed an unexpected request lifecycle.");
+  }
+  if (
+    googleRequests.other !== 0 ||
+    googleRequests.session < 4 ||
+    googleRequests.list < 3 ||
+    googleRequests.agenda < 1 ||
+    googleRequests.preview < 1 ||
+    googleRequests.detail < 6 ||
+    googleLife.control.bodyReads().unicode_message !== 1 ||
+    googleLife.control.bodyReads().truncated_message !== 1 ||
+    googleLife.control.bodyReads().unavailable_message !== 1
+  ) {
+    throw new Error("The Google fixture did not traverse the expected finite Life routes.");
   }
   enterDiagnosticStage("built-policy");
   const appInfo = JSON.parse(
@@ -679,6 +806,8 @@ if (audio[44] >= 3) {
     server.shutdown();
   }
   const teardownSettled = await settleFixtureTeardown(async () => {
+    googleLife?.control.releaseHeld();
+    await googleLife?.close();
     await nativeSpeech?.close();
     await nativeAuth?.close();
     await browserAuth?.close();
