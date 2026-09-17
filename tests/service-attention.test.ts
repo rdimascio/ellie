@@ -72,6 +72,10 @@ test("the held service never settles on its own and releases its timer on explic
 test("only the latest startup sequence can report credential attention", async () => {
   const state = await mkdtemp(join(tmpdir(), "ellie-service-attention-"));
   try {
+    assert.equal(await serviceCredentialState(state, "node"), "unknown");
+    const rotated = await ServiceLog.open(state, "node");
+    rotated.write("connected");
+    assert.equal(await serviceCredentialState(state, "node"), "none");
     const failed = await ServiceLog.open(state, "node");
     failed.write("starting");
     assert.equal(await serviceCredentialState(state, "node"), "starting");

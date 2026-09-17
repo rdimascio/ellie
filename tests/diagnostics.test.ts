@@ -307,6 +307,22 @@ test("unreadable attention records fail closed before Keychain", async () => {
   assert.doesNotMatch(report.lines.join("\n"), /synthetic private path|synthetic secret/);
 });
 
+test("missing startup records in a running service also skip Keychain", async () => {
+  const f = await fixture("node");
+  let credentialReads = 0;
+  const report = await doctorService("node", {
+    ...f.deps,
+    serviceCredentialState: async () => "unknown",
+    keychainGet: async () => {
+      credentialReads += 1;
+      return "synthetic secret";
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.match(report.lines[0]!, /no complete startup record/);
+});
+
 test("diagnostic failures and optional inference warnings stay redacted", async () => {
   const f = await fixture("node");
   const secret = "https://private-host.example/opaque-node-id?token=PRIVATE";
