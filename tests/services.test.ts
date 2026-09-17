@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, stat, rm, symlink, chmod } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaults } from "@ellie/config";
+import { defaults, KeychainFailure } from "@ellie/config";
 import {
   Services,
   label,
@@ -13,7 +13,28 @@ import {
   serviceEnabled,
 } from "../apps/cli/src/services.ts";
 import type { Run } from "../apps/cli/src/services.ts";
-import { ServiceLog, serviceLogs } from "../apps/cli/src/service-logs.ts";
+import { ServiceLog, failureEvent, serviceLogs } from "../apps/cli/src/service-logs.ts";
+
+test("service Keychain failures are fixed redacted events", async () => {
+  const f = await fixture();
+  try {
+    const log = await ServiceLog.open(f.dir, "coordinator");
+    for (const [reason, event] of [
+      ["timeout", "keychain_timeout"],
+      ["helper_unavailable", "keychain_helper_unavailable"],
+      ["access_unavailable", "keychain_access_unavailable"],
+    ] as const) {
+      const error = new KeychainFailure(reason);
+      log.write(failureEvent(error));
+      assert.equal((await serviceLogs(f.dir, "coordinator")).at(-1)?.event, event);
+    }
+    assert.equal(failureEvent(new Error("synthetic.account private/path")), "failed");
+    const disk = await readFile(join(f.dir, "logs/coordinator.jsonl"), "utf8");
+    assert.ok(!disk.includes("synthetic.account") && !disk.includes("private/path"));
+  } finally {
+    await f.close();
+  }
+});
 
 async function fixture() {
   const home = await mkdtemp(join(tmpdir(), "ellie-service-"));

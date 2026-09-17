@@ -9,6 +9,7 @@ import {
   writeSync,
 } from "node:fs";
 import { join } from "node:path";
+import { KeychainFailure } from "@ellie/config";
 import { privatePath } from "./services.ts";
 import type { ServiceRole } from "./services.ts";
 
@@ -24,6 +25,9 @@ export const SERVICE_EVENTS = [
   "configuration_missing",
   "port_in_use",
   "permission_denied",
+  "keychain_timeout",
+  "keychain_helper_unavailable",
+  "keychain_access_unavailable",
 ] as const;
 export type ServiceEvent = (typeof SERVICE_EVENTS)[number];
 export interface LogEntry {
@@ -92,6 +96,16 @@ export class ServiceLog {
   }
 }
 export function failureEvent(error: unknown): ServiceEvent {
+  if (error instanceof KeychainFailure) {
+    switch (error.reason) {
+      case "timeout":
+        return "keychain_timeout";
+      case "helper_unavailable":
+        return "keychain_helper_unavailable";
+      case "access_unavailable":
+        return "keychain_access_unavailable";
+    }
+  }
   switch ((error as NodeJS.ErrnoException | undefined)?.code) {
     case "ENOENT":
       return "configuration_missing";
