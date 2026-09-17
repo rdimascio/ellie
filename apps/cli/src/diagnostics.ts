@@ -188,6 +188,13 @@ export async function doctorService(
           "FAIL The service has not reported startup readiness. Doctor skipped Keychain; inspect service logs before another start.",
         ],
       };
+    if (runtime === "unknown")
+      return {
+        ok: false,
+        lines: [
+          "FAIL The running service has no complete startup record. Doctor skipped Keychain; inspect service logs and reconcile before another start.",
+        ],
+      };
   } catch {
     return {
       ok: false,
