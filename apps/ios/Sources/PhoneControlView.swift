@@ -69,6 +69,7 @@ struct PhoneControlView: View {
         }
       }
     }
+    .ellieScreen()
     .navigationTitle("Mac controls")
     .onChange(of: store.selectedNodeID) { _, value in
       browser.clearIfTargetChanged(to: value)

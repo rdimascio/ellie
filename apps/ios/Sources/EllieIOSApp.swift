@@ -6,7 +6,11 @@ struct EllieIOSApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
+            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
+                HomeAppearanceUITestFixtureView(
+                    accessibilityLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"),
+                    narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-native-scanner-sheet-fixture") {
@@ -48,6 +52,7 @@ private struct EllieIOSNormalRoot: View {
 
     var body: some View {
         IOSDashboardList(store: store, enrollment: enrollment)
-            .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
+            .tint(ElliePalette.accent)
+            .preferredColorScheme(.dark)
     }
 }

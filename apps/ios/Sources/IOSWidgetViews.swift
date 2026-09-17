@@ -31,7 +31,7 @@ struct IOSWidgetCard: View {
                 }.labelStyle(.iconOnly)
             }
         }
-        .padding().background(widget.type == .clock ? Color(red: 0.105, green: 0.12, blue: 0.15) : Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+        .ellieCard()
         .foregroundStyle(widget.type == .clock ? Color.white : Color.primary)
         .accessibilityElement(children: .contain)
     }
@@ -57,7 +57,7 @@ struct IOSWidgetGallery: View {
         NavigationStack {
             List(WidgetKind.allCases, id: \.self) { kind in
                 Button { add(kind) } label: { Label("Add \(kind.iosName)", systemImage: kind.iosSymbol) }
-            }.navigationTitle("Add a widget").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            }.ellieScreen().navigationTitle("Add a widget").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }.presentationDetents([.medium, .large])
     }
 }
@@ -78,6 +78,7 @@ struct IOSWidgetEditor: View {
                 if widget.type == .note { Section("Note") { TextEditor(text: $note).frame(minHeight: 180); Text("\(note.count) of 2,000 characters").font(.caption).foregroundStyle(.secondary) } }
                 if widget.type == .clock { Section("Time zone") { TextField("Europe/London", text: $zone).textInputAutocapitalization(.never).autocorrectionDisabled(); Text("Leave blank for this iPhone’s time zone.") } }
             }
+            .ellieScreen()
             .navigationTitle("Edit \(widget.type.iosName)").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
