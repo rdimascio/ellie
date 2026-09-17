@@ -127,6 +127,7 @@ struct IOSWidgetEditor: View {
                     }
                 }
             }
+            .accessibilityIdentifier("ios-widget-editor-form")
             .ellieScreen()
             .navigationTitle("Edit \(widget.type.iosName)").navigationBarTitleDisplayMode(.inline)
             .toolbar {
