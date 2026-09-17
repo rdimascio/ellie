@@ -6,8 +6,9 @@ watchOS UI tests, and carries messages through the apps' real `WCSession` delega
 Mac inventory and browser result are DEBUG-only synthetic data. No coordinator, browser, player,
 household account, Keychain identity, or physical device participates.
 
-On the leased Xcode host, choose **installed** iOS and watchOS runtime/device-type identifiers
-from `xcrun simctl list -j`. From the exact source checkout, use a new private output directory
+On the leased Xcode host, use `/Applications/Xcode.app/Contents/Developer` and choose
+**installed** iOS and watchOS runtime/device-type identifiers from `xcrun simctl list -j`.
+From the exact source checkout, use a new private output directory
 under an existing parent:
 
 ```sh
@@ -21,10 +22,12 @@ node scripts/test-watch-paired.mjs \
 ```
 
 The identifiers above are examples, not a claim that those device types or runtimes are installed.
-The runner refuses an existing output directory, records source hashes and Xcode result bundles,
-and retains a direct child handle and finite deadline for every command. It creates and later
-deletes only its two recorded Simulator IDs. If direct-child cleanup is uncertain, it retains the
-pair and evidence for owner inspection. A test counts only when `xcresulttool` reports exactly one
+The runner refuses an existing output directory and records source hashes, the exact Xcode/SDK/runtime
+versions, and Xcode result bundles. It retains one direct child handle and finite deadline for each
+command; signals use the same bounded stop/reap path. It accepts only exact UUIDs from its two
+Simulator creates, deletes only those IDs, and checks a final read-only inventory for their absence.
+If child or cleanup certainty is lost, it stops issuing commands and retains the IDs and evidence for
+owner inspection. A test counts only when `xcresulttool` reports exactly one
 executed pass with zero failed or skipped tests. The expected sequence is a fresh observed Mac A
 page, one Play sent with an unknown result and disabled follow-up controls, an unreachable phone
 phase, then a restarted phone explicitly selecting Mac B and a fresh B observation. The phone's

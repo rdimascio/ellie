@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // Deliberately opt-in: this creates and deletes only the two Simulator IDs it receives from
 // simctl create. Run on an explicitly leased Xcode host; never against an existing device.
-import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, openSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { resolve, dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createOwnedProcessRunner } from "./watch-paired-owned-process.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const project = join(root, "apps/ios/EllieIOS.xcodeproj");
@@ -25,12 +25,15 @@ if (!isAbsolute(output) || existsSync(output)) throw new Error("--out must be a 
 mkdirSync(output, { mode: 0o700 });
 const derived = join(output, "DerivedData");
 const receipt = { status: "incomplete", runID, source: {}, stages: [], simulator: {}, cleanup: [] };
-let activeChild;
-let childCertain = true;
-let interrupted = false;
+const commands = createOwnedProcessRunner({
+  cwd: root, output, deadline: totalDeadline,
+  env: { ...process.env, DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer" },
+});
 let phoneID;
 let watchID;
-for (const name of ["scripts/test-watch-paired.mjs", "apps/ios/Sources/EllieIOSApp.swift",
+let creationUncertain = false;
+for (const name of ["scripts/test-watch-paired.mjs", "scripts/watch-paired-owned-process.mjs",
+  "scripts/test-watch-paired-process.test.mjs", "apps/ios/Sources/EllieIOSApp.swift",
   "apps/ios/Sources/WatchMediaPhoneBridge.swift", "apps/ios/Sources/WatchMediaPhoneController.swift",
   "apps/ios/Sources/WatchPairedUITestFixture.swift", "apps/watch/Sources/WatchMediaView.swift",
   "apps/watch/Sources/WatchMediaWatchStore.swift", "apps/watch/UITests/WatchPairedUITests.swift",
@@ -41,62 +44,8 @@ for (const name of ["scripts/test-watch-paired.mjs", "apps/ios/Sources/EllieIOSA
 function persist() { writeFileSync(join(output, "receipt.json"), JSON.stringify(receipt, null, 2) + "\n", { mode: 0o600 }); }
 persist();
 
-function run(file, args, { label, timeout = 30_000, log, allowAfterSignal = false,
-                            allowAfterDeadline = false } = {}) {
-  if (interrupted && !allowAfterSignal) return Promise.reject(new Error("Paired run interrupted."));
-  const remaining = totalDeadline - performance.now();
-  if (remaining <= 0 && !allowAfterDeadline) return Promise.reject(new Error("Paired run exceeded its whole-run deadline."));
-  const bounded = allowAfterDeadline ? timeout : Math.min(timeout, remaining);
-  return new Promise((resolveResult, rejectResult) => {
-    let outputText = "";
-    let failure;
-    let settled = false;
-    let killTimer;
-    const fd = log ? openSync(join(output, log), "wx", 0o600) : undefined;
-    const child = spawn(file, args, {
-      cwd: root,
-      env: { ...process.env, DEVELOPER_DIR: process.env.DEVELOPER_DIR ?? "/Applications/Xcode.app/Contents/Developer" },
-      stdio: fd === undefined ? ["ignore", "pipe", "pipe"] : ["ignore", fd, fd],
-    });
-    activeChild = child;
-    if (fd !== undefined) closeSync(fd);
-    function stop(reason) {
-      failure ??= reason;
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
-      killTimer ??= setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      }, 5_000);
-    }
-    const timer = setTimeout(() => stop(new Error(`${label} exceeded ${bounded} ms.`)), bounded);
-    const reapTimer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      childCertain = false;
-      child.stdout?.destroy(); child.stderr?.destroy(); child.unref();
-      rejectResult(new Error(`${label} direct child was not reaped; owned simulators retained.`));
-    }, bounded + 8_000);
-    if (fd === undefined) for (const stream of [child.stdout, child.stderr]) {
-      stream.setEncoding("utf8").on("data", (chunk) => {
-        outputText += chunk;
-        if (outputText.length > 1_048_576) stop(new Error(`${label} output exceeded 1 MiB.`));
-      });
-    }
-    child.once("error", () => { failure ??= new Error(`${label} could not start.`); });
-    child.once("close", (code, signal) => {
-      clearTimeout(timer); clearTimeout(reapTimer); clearTimeout(killTimer);
-      if (activeChild === child) activeChild = undefined;
-      if (settled) return;
-      settled = true;
-      if (failure) rejectResult(failure);
-      else if (code === 0) resolveResult(outputText.trim());
-      else rejectResult(new Error(`${label} exited ${signal ?? code}; see ${log ?? "captured output"}. ${outputText.slice(-300)}`));
-    });
-  });
-}
-for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(signal, () => {
-  interrupted = true;
-  if (activeChild && activeChild.exitCode === null && activeChild.signalCode === null) activeChild.kill("SIGTERM");
-});
+const run = commands.run;
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) process.once(signal, commands.requestStop);
 async function stage(name, file, args, settings = {}) {
   const begun = performance.now();
   try {
@@ -109,6 +58,21 @@ async function stage(name, file, args, settings = {}) {
   }
 }
 const simctl = (name, args, settings) => stage(name, "xcrun", ["simctl", ...args], settings);
+const uuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+function createdID(value, kind) {
+  if (!uuid.test(value)) {
+    creationUncertain = true;
+    throw new Error(`${kind} creation did not return one exact Simulator UUID; no further Simulator operation is safe.`);
+  }
+  return value;
+}
+function ownedIDsPresent(inventory, ids) {
+  if (!inventory.devices || typeof inventory.devices !== "object" || Array.isArray(inventory.devices) ||
+      !Object.values(inventory.devices).every(Array.isArray)) {
+    throw new Error("Final Simulator inventory is malformed.");
+  }
+  return Object.values(inventory.devices).flat().some((device) => ids.includes(device.udid));
+}
 function requireEvents(path, target, playCount) {
   const rows = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   const plays = rows.filter((row) => row.operation === "play" && row.target === target);
@@ -159,18 +123,27 @@ try {
   if (process.platform !== "darwin" || Number(process.versions.node.split(".")[0]) !== 24) {
     throw new Error("Requires macOS and Node 24 on the leased Xcode host.");
   }
+  receipt.toolchain = {
+    developerDir: "/Applications/Xcode.app/Contents/Developer",
+    xcode: await stage("xcode-version", "xcodebuild", ["-version"]),
+    iosSDK: await stage("ios-sdk-version", "xcrun", ["--sdk", "iphonesimulator", "--show-sdk-version"]),
+    watchSDK: await stage("watch-sdk-version", "xcrun", ["--sdk", "watchsimulator", "--show-sdk-version"]),
+  };
+  persist();
   const inventory = JSON.parse(await simctl("simulator-inventory", ["list", "-j"], { timeout: 30_000 }));
   for (const [kind, runtime, type] of [
     ["iOS", options["--ios-runtime"], options["--ios-type"]],
     ["watchOS", options["--watch-runtime"], options["--watch-type"]],
   ]) {
-    if (!runtime.includes(`SimRuntime.${kind}-`) || !inventory.runtimes?.some((item) =>
-      item.identifier === runtime && item.isAvailable === true)) throw new Error(`${kind} runtime unavailable.`);
+    const installedRuntime = inventory.runtimes?.find((item) => item.identifier === runtime && item.isAvailable === true);
+    if (!runtime.includes(`SimRuntime.${kind}-`) || !installedRuntime) throw new Error(`${kind} runtime unavailable.`);
     if (!inventory.devicetypes?.some((item) => item.identifier === type)) throw new Error(`${kind} device type unavailable.`);
+    receipt.toolchain[`${kind}Runtime`] = { identifier: runtime, version: installedRuntime.version, buildversion: installedRuntime.buildversion };
   }
-  phoneID = await simctl("create-phone", ["create", `Ellie paired ${runID} phone`, options["--ios-type"], options["--ios-runtime"]]);
+  persist();
+  phoneID = createdID(await simctl("create-phone", ["create", `Ellie paired ${runID} phone`, options["--ios-type"], options["--ios-runtime"]]), "Phone");
   receipt.simulator.phone = phoneID; persist();
-  watchID = await simctl("create-watch", ["create", `Ellie paired ${runID} watch`, options["--watch-type"], options["--watch-runtime"]]);
+  watchID = createdID(await simctl("create-watch", ["create", `Ellie paired ${runID} watch`, options["--watch-type"], options["--watch-runtime"]]), "Watch");
   receipt.simulator.watch = watchID; persist();
   await simctl("pair", ["pair", watchID, phoneID]);
   await simctl("boot-phone", ["boot", phoneID], { timeout: 45_000 });
@@ -211,9 +184,11 @@ try {
   receipt.error = error.message;
   receipt.status = "failed";
 } finally {
-  if (childCertain) for (const [kind, id] of [["watch", watchID], ["phone", phoneID]]) {
-    if (!id) continue;
+  let cleanupCertain = !creationUncertain && commands.certain && !commands.active;
+  for (const [kind, id] of [["watch", watchID], ["phone", phoneID]]) {
+    if (!id || !cleanupCertain) break;
     for (const action of ["shutdown", "delete"]) {
+      if (!commands.certain || commands.active) { cleanupCertain = false; break; }
       try {
         await run("xcrun", ["simctl", action, id], {
           label: `${action}-${kind}`, timeout: 30_000, allowAfterSignal: true,
@@ -222,12 +197,27 @@ try {
         receipt.cleanup.push(`${action}-${kind}-complete`);
       } catch {
         receipt.cleanup.push(`${action}-${kind}-uncertain`);
+        cleanupCertain = false;
         primary ??= new Error("Owned Simulator cleanup is uncertain.");
+        break;
       }
     }
-  } else {
-    receipt.cleanup.push("retained-both-simulators-after-child-uncertainty");
-    primary ??= new Error("A direct child could not be reaped.");
+  }
+  if (cleanupCertain && (phoneID || watchID)) {
+    try {
+      const finalInventory = JSON.parse(await run("xcrun", ["simctl", "list", "-j"], {
+        label: "verify-owned-deletion", timeout: 30_000, allowAfterSignal: true, allowAfterDeadline: true,
+      }));
+      if (ownedIDsPresent(finalInventory, [phoneID, watchID].filter(Boolean))) throw new Error("Owned Simulator still appears after deletion.");
+      receipt.cleanup.push("owned-ids-absent-from-final-inventory");
+    } catch {
+      cleanupCertain = false;
+      primary ??= new Error("Owned Simulator deletion could not be verified.");
+    }
+  }
+  if (!cleanupCertain) {
+    receipt.cleanup.push("owned-ids-retained-for-inspection-after-cleanup-uncertainty");
+    primary ??= new Error("A direct child could not be reaped or Simulator cleanup was uncertain.");
   }
   if (primary) receipt.status = "failed";
   persist();
