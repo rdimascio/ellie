@@ -42,6 +42,15 @@ const SOURCE_AREAS = ["apps/cli", "apps/node", "apps/server", "packages"];
 const RELEASE = /^node-(v24\.\d+\.\d+)-darwin-(arm64|x64)\.tar\.xz$/;
 const PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const MINIMUM_MACOS = "14.0";
+const providerUtilsLicense = {
+  name: "@ai-sdk/provider-utils",
+  version: "5.0.43",
+  license: "Apache-2.0",
+  integrity:
+    "sha512-gw/bcNseOGSs59TMtV4H1KwqXXe24NHgx+uBYr98pa4Fg6Uvp8hPPxjuckVnfFFyIxHCDew8so0ujpvcSuyMZA==",
+  sha256: "b4f9adb7c568904834d0dd6cc98d16c390d21ca32fc17ae7a267715269bd5529",
+  source: "scripts/licenses/provider-utils-5.0.43.LICENSE",
+};
 const policyCompilerNames = [
   "EllieActivationPolicyBlob.h",
   "module.modulemap",
@@ -592,6 +601,81 @@ function licenseNames(names) {
   return names.filter((name) => /^(?:licen[cs]e|copying|notice)(?:[-.].*)?$/i.test(name)).sort();
 }
 
+function pinnedProviderUtilsLockEntry(lock) {
+  const lines = lock.split("\n");
+  const start = lines.indexOf('  "packages": {');
+  if (start < 0 || lines.indexOf('  "packages": {', start + 1) >= 0) return false;
+  const end = lines.findIndex((line, index) => index > start && /^  },?$/.test(line));
+  if (end < 0) return false;
+  const entries = lines
+    .slice(start + 1, end)
+    .filter((line) => line.startsWith('    "@ai-sdk/provider-utils": '));
+  if (entries.length !== 1) return false;
+  const match = entries[0].match(/^    "@ai-sdk\/provider-utils": (\[.*\]),?$/);
+  if (!match) return false;
+  let entry;
+  try {
+    entry = JSON.parse(match[1]);
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(entry) &&
+    entry.length === 4 &&
+    entry[0] === `${providerUtilsLicense.name}@${providerUtilsLicense.version}` &&
+    entry[1] === "" &&
+    entry[2] !== null &&
+    typeof entry[2] === "object" &&
+    !Array.isArray(entry[2]) &&
+    entry[3] === providerUtilsLicense.integrity
+  );
+}
+
+async function pinnedProviderUtilsLicenseBytes(source) {
+  const path = join(source, providerUtilsLicense.source);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const [named, info] = await Promise.all([lstat(path), handle.stat()]);
+    if (
+      named.isSymbolicLink() ||
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      named.dev !== info.dev ||
+      named.ino !== info.ino ||
+      info.size !== 552
+    )
+      throw new Error("Pinned @ai-sdk/provider-utils license is not one bounded regular file.");
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!read.bytesRead) throw new Error("Pinned @ai-sdk/provider-utils license ended early.");
+      offset += read.bytesRead;
+    }
+    const final = await handle.stat();
+    if (final.size !== info.size || final.mtimeMs !== info.mtimeMs || final.ino !== info.ino)
+      throw new Error("Pinned @ai-sdk/provider-utils license changed while it was read.");
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifiedProviderUtilsLicense(source, name, value) {
+  if (
+    name !== providerUtilsLicense.name ||
+    value.name !== providerUtilsLicense.name ||
+    value.version !== providerUtilsLicense.version ||
+    value.license !== providerUtilsLicense.license ||
+    !pinnedProviderUtilsLockEntry(await readFile(join(source, "bun.lock"), "utf8"))
+  )
+    throw new Error(`Production dependency ${name} has incomplete license metadata.`);
+  const bytes = await pinnedProviderUtilsLicenseBytes(source);
+  if (sha256(bytes) !== providerUtilsLicense.sha256)
+    throw new Error("Pinned @ai-sdk/provider-utils license does not match its upstream source.");
+  return bytes;
+}
+
 export async function stageApplication(source, destination, metadata = {}) {
   const closure = await productionClosure(source);
   const root = join(destination, "lib/ellie");
@@ -619,11 +703,22 @@ export async function stageApplication(source, destination, metadata = {}) {
     const sourcePackage = packagePath(source, name);
     const value = await json(join(sourcePackage, "package.json"));
     const licenses = licenseNames(await readdir(sourcePackage));
-    if (!licenses.length || typeof value.version !== "string" || typeof value.license !== "string")
+    if (typeof value.version !== "string" || typeof value.license !== "string")
       throw new Error(`Production dependency ${name} has incomplete license metadata.`);
+    const fallback = licenses.length
+      ? undefined
+      : await verifiedProviderUtilsLicense(source, name, value);
     await copyTree(sourcePackage, packagePath(root, name));
     const texts = [];
     for (const file of licenses) texts.push(await readFile(join(sourcePackage, file), "utf8"));
+    if (fallback) {
+      await writeFile(join(packagePath(root, name), "LICENSE"), fallback, {
+        mode: 0o644,
+        flag: "wx",
+      });
+      licenses.push("LICENSE");
+      texts.push(fallback.toString("utf8"));
+    }
     components.push({
       name,
       version: value.version,
