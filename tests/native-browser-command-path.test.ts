@@ -19,6 +19,20 @@ import { fixture } from "./helpers.ts";
 
 const target = "native-seam-mini";
 
+async function within<T>(work: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 async function availablePort(): Promise<number> {
   const reservation = createNetServer();
   await new Promise<void>((resolve, reject) => {
@@ -34,13 +48,16 @@ async function availablePort(): Promise<number> {
 
 test("native authenticated browser status reaches one terminal unavailable node job", async () => {
   const coordinator = await fixture(3_000);
-  const abort = new AbortController();
+  const agentAbort = new AbortController();
   let agent: Promise<void> | undefined;
   let browser: ReturnType<typeof createBrowserServer> | undefined;
   let bridgeRequests = 0;
   let accessibilityCalls = 0;
   let desktopCalls = 0;
   const events: string[] = [];
+  let primaryFailure: unknown;
+  let hasPrimaryFailure = false;
+  let cleanupFailures: unknown[] = [];
   try {
     const node = await coordinator.pair(target);
     const webmcp = new BrowserWebMCPOperations(
@@ -67,7 +84,7 @@ test("native authenticated browser status reaches one terminal unavailable node 
     agent = runNode({
       client: node,
       preferences: defaults,
-      signal: abort.signal,
+      signal: agentAbort.signal,
       executor: new BrowserNodeExecutor(
         {
           capabilities: async () => ["app.open"],
@@ -81,7 +98,7 @@ test("native authenticated browser status reaches one terminal unavailable node 
       onStatus: registered,
       onEvent: (event) => events.push(event),
     });
-    await ready;
+    await within(ready, 5_000, "Synthetic browser node did not register.");
 
     const identity = await generateBrowserTlsIdentity("ellie.local");
     const port = await availablePort();
@@ -175,16 +192,30 @@ test("native authenticated browser status reaches one terminal unavailable node 
     assert.equal(jobs.length, 1);
     assert.equal(jobs[0]!.state, "failed");
     assert.deepEqual(events, ["connected"]);
+  } catch (error) {
+    primaryFailure = error;
+    hasPrimaryFailure = true;
   } finally {
+    agentAbort.abort();
+    const cleanup: Promise<unknown>[] = [];
     if (browser) {
       const closed = browser.server.listening
         ? new Promise<void>((resolve) => browser!.server.once("close", resolve))
         : Promise.resolve();
       browser.shutdown();
-      await closed;
+      cleanup.push(within(closed, 5_000, "Owned native listener did not close."));
     }
-    abort.abort();
-    await coordinator.close();
-    await agent;
+    cleanup.push(within(coordinator.close(), 5_000, "Owned coordinator did not close."));
+    if (agent) cleanup.push(within(agent, 5_000, "Owned browser node did not stop."));
+    const results = await Promise.allSettled(cleanup);
+    cleanupFailures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason as unknown] : [],
+    );
   }
+  if (cleanupFailures.length)
+    throw new AggregateError(
+      hasPrimaryFailure ? [primaryFailure, ...cleanupFailures] : cleanupFailures,
+      "Synthetic browser cleanup failed.",
+    );
+  if (hasPrimaryFailure) throw primaryFailure;
 });
