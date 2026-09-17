@@ -156,24 +156,38 @@ test("broker publication waits for a delayed exact socket and ownership record",
   const lock = join(root, "broker.lock");
   const server = createServer();
   try {
-    const publish = (async () => {
-      await new Promise((resolve) => setTimeout(resolve, 650));
-      await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(socket, () => {
-          server.off("error", reject);
-          resolve();
-        });
+    let firstFailure: { error: unknown } | undefined;
+    const observed = <T>(promise: Promise<T>): Promise<T> =>
+      promise.catch((error) => {
+        firstFailure ??= { error };
+        throw error;
       });
-      await chmod(socket, 0o600);
-      const current = await lstat(socket);
-      await writeFile(lock, `v1 ${current.dev} ${current.ino}\n`, { mode: 0o600 });
-    })();
-    const current = await waitForPublishedBrokerSocket(socket, lock);
-    await publish;
-    assert.equal(current.isSocket(), true);
+    const publish = observed(
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(socket, () => {
+            server.off("error", reject);
+            resolve();
+          });
+        });
+        await chmod(socket, 0o600);
+        const current = await lstat(socket);
+        await writeFile(lock, `v1 ${current.dev} ${current.ino}\n`, { mode: 0o600 });
+      })(),
+    );
+    const readiness = observed(waitForPublishedBrokerSocket(socket, lock));
+    const [published, ready] = await Promise.allSettled([publish, readiness]);
+    if (firstFailure) throw firstFailure.error;
+    assert.equal(published.status, "fulfilled");
+    assert.equal(ready.status, "fulfilled");
+    if (ready.status === "fulfilled") assert.equal(ready.value.isSocket(), true);
   } finally {
-    if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+    if (server.listening)
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
     await rm(root, { recursive: true });
   }
 });
