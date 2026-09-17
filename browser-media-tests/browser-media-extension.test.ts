@@ -1044,6 +1044,70 @@ async function command(harness: Page, tabId: number, value: Record<string, unkno
 }
 
 test(
+  "companion inspects visible results when body scrolling is propagated to the viewport",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture();
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      await launched.page.setContent(`<!doctype html><style>
+        html { overflow: visible }
+        body { margin: 0; height: 0; overflow-y: scroll }
+        a { display: block; width: 240px; height: 40px }
+        #visible { position: absolute; left: 20px; top: 80px }
+        #clip { position: absolute; left: 20px; top: 160px; width: 250px; height: 20px; overflow: hidden }
+        #clipped { position: absolute; top: 50px }
+        #covered { position: absolute; left: 20px; top: 280px }
+        #cover { position: absolute; left: 20px; top: 280px; width: 240px; height: 40px; background: black; z-index: 2 }
+        #hidden { position: absolute; left: 20px; top: 360px; visibility: hidden }
+        #zero { position: absolute; left: 20px; top: 420px; width: 0; height: 0 }
+      </style>
+      <a id="visible" href="/watch?v=aaaaaaaaaaa">Visible public title</a>
+      <div id="clip"><a id="clipped" href="/watch?v=bbbbbbbbbbb">Clipped title</a></div>
+      <a id="covered" href="/watch?v=ccccccccccc">Covered title</a><div id="cover"></div>
+      <a id="hidden" href="/watch?v=ddddddddddd">Hidden title</a>
+      <a id="zero" href="/watch?v=eeeeeeeeeee">Zero-size title</a>`);
+      const geometry = await launched.page.evaluate(() => ({
+        bodyHeight: document.body.getBoundingClientRect().height,
+        bodyOverflowY: getComputedStyle(document.body).overflowY,
+        rootOverflowY: getComputedStyle(document.documentElement).overflowY,
+      }));
+      assert.deepEqual(geometry, {
+        bodyHeight: 0,
+        bodyOverflowY: "scroll",
+        rootOverflowY: "visible",
+      });
+      const tab = await launched.worker.evaluate(async (url) => {
+        const tabs = await globalThis["chrome"].tabs.query({});
+        return tabs.find((item: any) => item.url === url)?.id;
+      }, launched.page.url());
+      assert.ok(tab);
+      const inspected = await command(launched.harness, tab, { type: "inspect" });
+      assert.equal(inspected.ok, true);
+      assert.deepEqual(
+        inspected.value.candidates.map((candidate: any) => candidate.title),
+        ["Visible public title"],
+      );
+      await launched.page.setContent(`<!doctype html><style>
+        html { overflow: hidden }
+        body { position: relative; margin: 0; height: 20px; overflow: hidden }
+        a { position: absolute; left: 20px; top: 80px; display: block; width: 240px; height: 40px }
+      </style><a href="/watch?v=fffffffffff">Body-clipped title</a>`);
+      const bodyClipped = await command(launched.harness, tab, { type: "inspect" });
+      assert.equal(bodyClipped.ok, true);
+      assert.deepEqual(bodyClipped.value.candidates, []);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "selected Disney+ companion opens one observed synthetic entity without replay or playback",
   { timeout: 30_000 },
   async () => {

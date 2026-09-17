@@ -33,12 +33,22 @@
       if (parent) {
         const p = parent.getBoundingClientRect();
         const ps = getComputedStyle(parent);
+        // In HTML, body overflow is propagated to the viewport when the root
+        // overflow is visible. The body's own box can be zero-height even as
+        // its children render in the viewport (for example, YouTube results).
+        // Keep clipping checks for every other ancestor and for a body whose
+        // overflow has not been propagated.
+        const rootStyle = parent === document.body && getComputedStyle(document.documentElement);
+        const viewportBodyOverflow =
+          rootStyle && rootStyle.overflowX === "visible" && rootStyle.overflowY === "visible";
         if (
+          !viewportBodyOverflow &&
           (ps.overflowX === "hidden" || ps.overflowX === "auto" || ps.overflowX === "scroll") &&
           (rect.right <= p.left || rect.left >= p.right)
         )
           return false;
         if (
+          !viewportBodyOverflow &&
           (ps.overflowY === "hidden" || ps.overflowY === "auto" || ps.overflowY === "scroll") &&
           (rect.bottom <= p.top || rect.top >= p.bottom)
         )
