@@ -77,6 +77,7 @@ export class BrowserOperationSelector {
       this.observedSite = undefined;
     }
     if (
+      browserAction.tool === "browser.scroll" ||
       browserAction.tool === "browser.search" ||
       browserAction.tool === "browser.select" ||
       browserAction.tool === "browser.playback"

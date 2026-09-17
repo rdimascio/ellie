@@ -500,6 +500,13 @@ test("fresh site observation blocks login, unsupported, and unobservable playbac
       { tool: "browser.read", view: "summary", revision },
       AbortSignal.timeout(1000),
     );
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.scroll", direction: "down", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
   await read();
   await assert.rejects(
     selector.execute(
@@ -531,6 +538,13 @@ test("fresh site observation blocks login, unsupported, and unobservable playbac
     AbortSignal.timeout(1000),
   );
   assert.deepEqual(dispatched, ["browser.playback"]);
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.scroll", direction: "down", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
   await assert.rejects(
     selector.execute(
       { tool: "browser.playback", action: "pause", revision },
