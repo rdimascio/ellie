@@ -350,7 +350,14 @@ export function createEllieServer(options: {
             200,
             [...sessions.values()]
               .filter((s) => identity.role === "controller" || s.info.id === identity.id)
-              .map((s) => s.info),
+              .map((s) => ({
+                ...s.info,
+                ...(s.pending?.delivered &&
+                s.pending.cancelRequested &&
+                options.jobStore.get(s.pending.job.id)?.state === "cancellation_requested"
+                  ? { cancellationSettling: true as const }
+                  : {}),
+              })),
           );
         if (req.method === "POST" && path === "/v1/register" && identity.role === "node") {
           const body = record(await readJson(req));

@@ -3343,6 +3343,11 @@
             "maxLength": 100,
             "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
           },
+          "cancellationSettling": {
+            "type": "boolean",
+            "const": true,
+            "description": "A delivered command has a committed cancellation request and is still settling; no new command has been admitted."
+          },
           "capabilities": {
             "type": "array",
             "items": {

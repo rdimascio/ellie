@@ -4,6 +4,35 @@ import XCTest
 @testable import Ellie
 
 final class BrowserPhoneControlTests: XCTestCase {
+  func testRecoveryHTTPFailuresRemainReadOnlyAndTruthful() throws {
+    let settling = Data(
+      #"{"error":"A previous browser command is still settling. Wait and read again.","code":"browser_read_settling"}"#.utf8)
+    for action in [BrowserPhoneAction.refresh, .read(revision: "observed-revision")] {
+      XCTAssertThrowsError(
+        try decodeBrowserPhoneHTTPResult(
+          status: 409, data: settling, action: action, nodeID: "mac")) {
+            XCTAssertEqual($0 as? PhoneControlFailure, .browserReadSettling)
+          }
+      XCTAssertThrowsError(
+        try decodeBrowserPhoneHTTPResult(
+          status: 502, data: Data(#"{"outcome":"unknown"}"#.utf8),
+          action: action, nodeID: "mac")) {
+            XCTAssertEqual($0 as? PhoneControlFailure, .browserObservationUnavailable)
+          }
+    }
+    XCTAssertThrowsError(
+      try decodeBrowserPhoneHTTPResult(
+        status: 409, data: Data(#"{"error":"Device busy."}"#.utf8),
+        action: .refresh, nodeID: "mac")) {
+          XCTAssertEqual($0 as? PhoneControlFailure, .rejected)
+        }
+    XCTAssertEqual(
+      try decodeBrowserPhoneHTTPResult(
+        status: 502, data: Data(#"{"outcome":"unknown"}"#.utf8),
+        action: .scroll(.down, revision: "observed-revision"), nodeID: "mac"),
+      .command(source: .webmcp, status: .unknown, revision: "observed-revision"))
+  }
+
   func testCanonicalStatusReadAndCommandResultsDecode() throws {
     let revision = String(repeating: "a", count: 64)
     let status = Data(
@@ -730,7 +759,10 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertTrue(try persistence.recordIfClear(
       token: "00000000-0000-4000-8000-000000000011", for: scope))
 
-    for failure in [PhoneControlFailure.cancelled, .revoked] {
+    for failure in [
+      PhoneControlFailure.cancelled, .revoked, .browserReadSettling,
+      .browserObservationUnavailable,
+    ] {
       let transport = BrowserPhoneFakeTransport(readFailure: failure)
       let store = BrowserPhoneControlStore(
         credential: credential, transport: transport, uncertainty: persistence)
@@ -739,12 +771,19 @@ final class BrowserPhoneControlTests: XCTestCase {
       XCTAssertTrue(store.refresh(on: node))
       await eventually {
         switch (failure, store.phase) {
-        case (.cancelled, .idle), (.revoked, .revoked): true
+        case (.cancelled, .idle), (.revoked, .revoked),
+          (.browserReadSettling, .failed), (.browserObservationUnavailable, .failed): true
         default: false
         }
       }
       XCTAssertTrue(store.hasPendingBrowserCommand)
       XCTAssertTrue(store.showsSeparatePendingBrowserWarning)
+      if failure == .browserReadSettling || failure == .browserObservationUnavailable {
+        guard case .failed(let message) = store.phase else {
+          return XCTFail("Recovery failure must expose a retryable read diagnostic")
+        }
+        XCTAssertTrue(message.contains("Read current page"))
+      }
       XCTAssertNotNil(persistence.pendingTokenValue(for: scope))
       XCTAssertNil(store.page)
       let actions = await transport.actions.count

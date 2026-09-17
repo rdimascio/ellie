@@ -985,6 +985,12 @@ function openApi(): Json {
           required: ["id", "capabilities", "executionCapabilities", "lastSeen"],
           properties: {
             id: identifier,
+            cancellationSettling: {
+              type: "boolean",
+              const: true,
+              description:
+                "A delivered command has a committed cancellation request and is still settling; no new command has been admitted.",
+            },
             capabilities: { type: "array", items: ref("Capability") },
             executionCapabilities: { type: "array", items: ref("Capability") },
             computeCapabilities: ref("ComputeCapabilities"),
