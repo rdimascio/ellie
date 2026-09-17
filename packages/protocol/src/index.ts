@@ -57,6 +57,8 @@ export interface Plan {
 }
 export interface NodeInfo {
   id: string;
+  /** A delivered command is settling after its caller requested cancellation. */
+  cancellationSettling?: true;
   /** Legacy execution capabilities; retained for V1 clients. */
   capabilities: Capability[];
   executionCapabilities: Capability[];

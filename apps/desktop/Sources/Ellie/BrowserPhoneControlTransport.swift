@@ -132,14 +132,8 @@ final class BrowserPhoneControlTransport: BrowserPhoneControlTransporting, @unch
       if Task.isCancelled { throw PhoneControlFailure.cancelled }
       throw PhoneControlFailure.unavailable
     }
-    if response.statusCode == 200 {
-      return try decodeBrowserPhoneResponse(data, nodeID: nodeID)
-    }
-    if response.statusCode == 502 {
-      return .command(source: .webmcp, status: .unknown, revision: revision(action) ?? "unknown")
-    }
-    try requireBrowserStatus(response.statusCode, data: data)
-    throw PhoneControlFailure.invalidResponse
+    return try decodeBrowserPhoneHTTPResult(
+      status: response.statusCode, data: data, action: action, nodeID: nodeID)
   }
 
   private func wireAction(_ action: BrowserPhoneAction) throws -> [String: Any] {
@@ -175,6 +169,32 @@ final class BrowserPhoneControlTransport: BrowserPhoneControlTransporting, @unch
       return ["tool": "browser.playback", "action": intent == .play ? "play" : "pause", "revision": revision]
     }
   }
+}
+
+func decodeBrowserPhoneHTTPResult(
+  status: Int, data: Data, action: BrowserPhoneAction, nodeID: String
+) throws -> BrowserPhoneResponse {
+  if status == 200 { return try decodeBrowserPhoneResponse(data, nodeID: nodeID) }
+  if status == 502 {
+    if !action.requiresControl { throw PhoneControlFailure.browserObservationUnavailable }
+    return .command(source: .webmcp, status: .unknown, revision: revision(action) ?? "unknown")
+  }
+  if status == 409 && !action.requiresControl && isBrowserReadSettling(data) {
+    throw PhoneControlFailure.browserReadSettling
+  }
+  try requireBrowserStatus(status, data: data)
+  throw PhoneControlFailure.invalidResponse
+}
+
+func isBrowserReadSettling(_ data: Data) -> Bool {
+  guard data.count <= 512,
+    let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    Set(object.keys) == Set(["error", "code"]),
+    object["error"] as? String
+      == "A previous browser command is still settling. Wait and read again.",
+    object["code"] as? String == "browser_read_settling"
+  else { return false }
+  return true
 }
 
 private func revision(_ action: BrowserPhoneAction) -> String? {
