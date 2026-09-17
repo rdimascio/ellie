@@ -79,7 +79,9 @@ private struct IOSPlaylistWebView: UIViewRepresentable {
     let playlistID: String
     @ObservedObject var model: IOSPlaylistPlayerModel
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model, policy: PlaylistNavigationPolicy(bundleIdentifier: Bundle.main.bundleIdentifier))
+    }
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -100,11 +102,12 @@ private struct IOSPlaylistWebView: UIViewRepresentable {
         ) { list, _ in
             Task { @MainActor in
                 guard context.coordinator.isActive else { return }
-                guard let list, let html = PlaylistNavigationPolicy.playerHTML(playlistID: playlistID)
+                guard let list, let policy = context.coordinator.policy,
+                      let html = policy.playerHTML(playlistID: playlistID)
                 else { context.coordinator.failSetup(); return }
                 view.configuration.userContentController.add(list)
                 context.coordinator.startTimeout()
-                view.loadHTMLString(html, baseURL: PlaylistNavigationPolicy.documentOrigin)
+                view.loadHTMLString(html, baseURL: policy.documentURL)
             }
         }
         return view
@@ -124,10 +127,14 @@ private struct IOSPlaylistWebView: UIViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         private let model: IOSPlaylistPlayerModel
+        let policy: PlaylistNavigationPolicy?
         private var timeoutTask: Task<Void, Never>?
         private(set) var isActive = true
 
-        init(model: IOSPlaylistPlayerModel) { self.model = model }
+        init(model: IOSPlaylistPlayerModel, policy: PlaylistNavigationPolicy?) {
+            self.model = model
+            self.policy = policy
+        }
         func startTimeout() {
             timeoutTask?.cancel()
             timeoutTask = Task { [weak self] in
@@ -142,7 +149,7 @@ private struct IOSPlaylistWebView: UIViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             let origin = message.frameInfo.securityOrigin
             guard isActive, message.name == "elliePlayer", message.frameInfo.isMainFrame,
-                  origin.protocol == "https", origin.host == "ellie.local",
+                  let policy, origin.protocol == "https", origin.host.lowercased() == policy.origin.host,
                   let body = message.body as? [String: Any], body.count <= 2,
                   let type = body["type"] as? String, type.utf8.count <= 16 else { return }
             if type == "ready" { timeoutTask?.cancel(); model.state = .ready }
@@ -158,13 +165,13 @@ private struct IOSPlaylistWebView: UIViewRepresentable {
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.shouldPerformDownload { decisionHandler(.cancel); return }
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            decisionHandler(PlaylistNavigationPolicy.allows(url,
-                mainFrame: navigationAction.targetFrame?.isMainFrame == true) ? .allow : .cancel)
+            decisionHandler(policy?.allows(url,
+                mainFrame: navigationAction.targetFrame?.isMainFrame == true) == true ? .allow : .cancel)
         }
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
             guard let url = navigationResponse.response.url,
-                  PlaylistNavigationPolicy.allows(url, mainFrame: navigationResponse.isForMainFrame),
+                  policy?.allows(url, mainFrame: navigationResponse.isForMainFrame) == true,
                   navigationResponse.canShowMIMEType else { decisionHandler(.cancel); return }
             decisionHandler(.allow)
         }

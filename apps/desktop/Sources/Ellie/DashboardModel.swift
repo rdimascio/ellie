@@ -270,35 +270,55 @@ enum YouTubePlaylist {
 }
 
 enum PlaylistPlayerState: Equatable {
-    case loading, ready, unavailable, embeddingDisabled, networkUnavailable, playerStopped
+    case loading, ready, unavailable, embeddingDisabled, clientIdentityMissing, networkUnavailable, playerStopped
 
     var message: String? {
         switch self {
         case .loading, .ready: nil
         case .unavailable: "This playlist is unavailable. It may be private, removed, or restricted."
         case .embeddingDisabled: "The playlist contains media that its owner does not allow in embedded players."
+        case .clientIdentityMissing: "YouTube could not verify this app's embedded player identity. Open the playlist in YouTube or update Ellie."
         case .networkUnavailable: "YouTube could not be reached. Check the network and try again."
         case .playerStopped: "The embedded player stopped unexpectedly. Close this window and try again."
         }
     }
 
     static func playerError(_ code: Int?) -> Self {
-        code == 101 || code == 150 ? .embeddingDisabled : .unavailable
+        if code == 101 || code == 150 { return .embeddingDisabled }
+        if code == 153 { return .clientIdentityMissing }
+        return .unavailable
     }
 }
 
-enum PlaylistNavigationPolicy {
-    static let documentOrigin = URL(string: "https://ellie.local/playlist-player")!
+struct PlaylistNavigationPolicy {
+    let origin: URL
+    let documentURL: URL
+
+    init?(bundleIdentifier: String?) {
+        guard let bundleIdentifier, bundleIdentifier.utf8.count <= 255 else { return nil }
+        let labels = bundleIdentifier.lowercased().split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2, labels.allSatisfy({ label in
+            guard !label.isEmpty, label.utf8.count <= 63,
+                  let first = label.utf8.first, let last = label.utf8.last,
+                  ((48...57).contains(first) || (97...122).contains(first)),
+                  ((48...57).contains(last) || (97...122).contains(last)) else { return false }
+            return label.utf8.allSatisfy { (48...57).contains($0) || (97...122).contains($0) || $0 == 45 }
+        }), let origin = URL(string: "https://\(bundleIdentifier.lowercased())"),
+            let documentURL = URL(string: "https://\(bundleIdentifier.lowercased())/playlist-player") else { return nil }
+        self.origin = origin
+        self.documentURL = documentURL
+    }
+
     static let contentRuleListJSON = #"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*youtube\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*youtube-nocookie\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*googlevideo\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*ytimg\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*ggpht\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^blob:https://www\\.youtube-nocookie\\.com/"},"action":{"type":"ignore-previous-rules"}}]"#
 
-    static func allows(_ url: URL, mainFrame: Bool) -> Bool {
-        if mainFrame { return url == documentOrigin }
+    func allows(_ url: URL, mainFrame: Bool) -> Bool {
+        if mainFrame { return url == documentURL }
         if url.absoluteString == "about:blank" { return true }
         return url.scheme == "https" && url.host?.lowercased() == "www.youtube-nocookie.com" &&
             (url.path == "/embed" || url.path.hasPrefix("/embed/"))
     }
 
-    static func playerHTML(playlistID: String) -> String? {
+    func playerHTML(playlistID: String) -> String? {
         guard YouTubePlaylist.isValidID(playlistID) else { return nil }
         return """
         <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -308,7 +328,7 @@ enum PlaylistNavigationPolicy {
         function send(type, value) { window.webkit.messageHandlers.elliePlayer.postMessage({type:type,value:value||0}); }
         function onYouTubeIframeAPIReady() {
           new YT.Player('player', {host:'https://www.youtube-nocookie.com',width:'100%',height:'100%',
-            playerVars:{listType:'playlist',list:'\(playlistID)',autoplay:1,playsinline:1,origin:'https://ellie.local'},
+            playerVars:{listType:'playlist',list:'\(playlistID)',autoplay:1,playsinline:1,origin:'\(origin.absoluteString)'},
             events:{onReady:function(){send('ready')},onError:function(e){send('error',e.data)}}});
         }
         window.addEventListener('offline', function(){send('network')});
