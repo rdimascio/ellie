@@ -30,6 +30,9 @@ export function stageApplication(
   metadata?: { created?: string },
 ): Promise<DependencyComponent[]>;
 
+export function verifyBrowserCompanionClosure(directory: string): Promise<string[]>;
+export function stageBrowserCompanion(source: string, destination: string): Promise<string>;
+
 export function verifyManifest(release: string): Promise<Record<string, unknown>>;
 
 export function createReleaseArchive(release: string, archive: string): void;
