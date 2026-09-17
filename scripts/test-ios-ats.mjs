@@ -20,6 +20,7 @@ import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
 import { createIOSGoogleLifeFixture } from "./ios-google-life-fixture.mjs";
+import { fixtureNodeLauncher } from "./ios-fixture-node-launcher.mjs";
 import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
 import { SpeechStartDiagnostics } from "./speech-start-diagnostics.mjs";
 
@@ -343,14 +344,14 @@ try {
   const pin = createHash("sha256").update(readFileSync(der)).digest("hex");
   const token = "c".repeat(64);
   const fakeWhisper = join(owned, "fake-whisper.mjs");
+  const fakeWhisperLauncher = join(owned, "fake-whisper");
   const fakeModel = join(owned, "fake-model.bin");
   const invocationLog = join(owned, "speech-invocations");
   const processExitLog = join(owned, "speech-process-exits");
   writeFileSync(fakeModel, "synthetic model fixture", { mode: 0o600 });
   writeFileSync(
     fakeWhisper,
-    `#!/usr/bin/env node
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+    `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const value = (name) => process.argv[process.argv.indexOf(name) + 1];
 const audio = readFileSync(value("-f"));
 const marker = String(audio[44]);
@@ -374,9 +375,12 @@ if (audio[44] >= 3) {
   appendFileSync(${JSON.stringify(processExitLog)}, marker + "\\n");
 }
 `,
-    { mode: 0o700 },
+    { mode: 0o600 },
   );
-  chmodSync(fakeWhisper, 0o700);
+  writeFileSync(fakeWhisperLauncher, fixtureNodeLauncher(process.execPath, fakeWhisper), {
+    mode: 0o700,
+  });
+  chmodSync(fakeWhisperLauncher, 0o700);
   const reservation = createNetServer();
   await new Promise((resolveListen, reject) => {
     reservation.once("error", reject);
@@ -437,7 +441,7 @@ if (audio[44] >= 3) {
     nativeAuth,
     () =>
       new WhisperCliSpeechInput({
-        executable: fakeWhisper,
+        executable: fakeWhisperLauncher,
         model: fakeModel,
         maxAudioBytes: 1_100_000,
         maxAudioDurationMs: 30_000,
