@@ -28,7 +28,8 @@ type FixtureMode =
   | "kill-escalation"
   | "split"
   | "build-failure"
-  | "test-failure";
+  | "test-failure"
+  | "test-suite-timeout";
 
 async function fixture(mode: FixtureMode) {
   const root = await mkdtemp(join(tmpdir(), "ellie-ios-runner-test-"));
@@ -45,6 +46,14 @@ async function fixture(mode: FixtureMode) {
       false,
       "the production deadline must have one exact fixture replacement",
     );
+    runner = shortened;
+  }
+  if (mode === "test-suite-timeout") {
+    const shortened = runner.replace(
+      '{ timeout: 1_200_000, label: "Xcode test without building" }',
+      '{ timeout: 100, label: "Xcode test without building" }',
+    );
+    assert.notEqual(shortened, runner, "UI suite deadline fixture replacement must apply");
     runner = shortened;
   }
   if (mode === "kill-escalation") {
@@ -116,6 +125,10 @@ fi
   );
   await chmod(join(bin, "xcrun"), 0o700);
   await writeFile(
+    join(root, "hold-test.mjs"),
+    'process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000);\n',
+  );
+  await writeFile(
     join(bin, "xcodebuild"),
     `#!/bin/sh
 printf '%s\n' "$$" >> "$ELLIE_RUNNER_TEST_ROOT/mock-process-groups"
@@ -129,6 +142,8 @@ if [ "$last_argument" = "test-without-building" ] && [ -n "$result_bundle" ]; th
 printf '%s\n' END >> "$ELLIE_RUNNER_TEST_ROOT/xcodebuild-arguments"
 if [ "$1" = "-version" ]; then
   printf '%s\n' 'Xcode 16.4' 'Build version 16F6'
+elif [ "$ELLIE_RUNNER_TEST_MODE" = "test-suite-timeout" ] && [ "$last_argument" = "test-without-building" ]; then
+  exec "$ELLIE_RUNNER_TEST_NODE" "$ELLIE_RUNNER_TEST_ROOT/hold-test.mjs"
 elif [ "$ELLIE_RUNNER_TEST_MODE" = "build-failure" ] && [ "$last_argument" = "build-for-testing" ]; then
   exit 9
 elif [ "$ELLIE_RUNNER_TEST_MODE" = "test-failure" ] && [ "$last_argument" = "test-without-building" ]; then
@@ -163,6 +178,7 @@ async function runFixture(mode: FixtureMode, keepResult = "") {
       env: {
         ...process.env,
         ELLIE_RUNNER_TEST_MODE: mode,
+        ELLIE_RUNNER_TEST_NODE: process.execPath,
         ELLIE_RUNNER_TEST_ROOT: owned.root,
         ELLIE_IOS_KEEP_RESULT: keepResult,
         PATH: `${owned.bin}:${process.env.PATH ?? ""}`,
@@ -296,6 +312,15 @@ test("a test-without-building failure retains its distinct stage and result", as
   assert.match(diagnostic, /stage=xcode-test-without-building outcome=exit-status/);
   assert.match(diagnostic, /result=retained/);
   assert.match(xcodeArguments, /build-for-testing/);
+  assert.match(xcodeArguments, /test-without-building/);
+});
+
+test("the bounded UI suite deadline retains its result and cleans the owned simulator", async () => {
+  const { diagnostic, result, xcodeArguments } = await runFixture("test-suite-timeout");
+  assert.equal(result.status, 1);
+  assert.match(diagnostic, /stage=xcode-test-without-building outcome=timeout/);
+  assert.match(diagnostic, /result=retained/);
+  assert.match(diagnostic, /cleanup=shutdown-complete,delete-complete,derived-removed/);
   assert.match(xcodeArguments, /test-without-building/);
 });
 
