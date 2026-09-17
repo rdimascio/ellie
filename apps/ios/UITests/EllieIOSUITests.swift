@@ -15,23 +15,23 @@ final class EllieIOSUITests: XCTestCase {
         let calls = app.staticTexts["home-fixture-weather-calls"]
         XCTAssertEqual(calls.label, "Fixture weather requests: 0")
         openDashboard(named: "Home", in: app)
-        revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
+        try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
         XCTAssertEqual(calls.label, "Fixture weather requests: 0")
         app.buttons["Cancel"].tap()
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
             "Opening and cancelling setup must not opt in")
-        revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
-        revealWeatherControl(app.switches["ios-weather-enable"], in: app).tap()
-        try typeTextReliably("London QA", into: revealWeatherControl(app.textFields["ios-weather-name"], in: app), in: app)
-        try typeTextReliably("51.5074", into: revealWeatherControl(app.textFields["ios-weather-latitude"], in: app), in: app)
-        try typeTextReliably("-0.1278", into: revealWeatherControl(app.textFields["ios-weather-longitude"], in: app), in: app)
+        try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
+        try setWeatherEnable(in: app, expectedValue: "1")
+        try typeTextReliably("London QA", into: revealWeatherControl(app.textFields["ios-weather-name"], in: app, editor: true), in: app)
+        try typeTextReliably("51.5074", into: revealWeatherControl(app.textFields["ios-weather-latitude"], in: app, editor: true), in: app)
+        try typeTextReliably("-0.1278", into: revealWeatherControl(app.textFields["ios-weather-longitude"], in: app, editor: true), in: app)
         app.buttons["Save"].tap()
         XCTAssertTrue(app.staticTexts["ios-weather-place"].waitForExistence(timeout: 5))
         XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
         XCTAssertTrue(app.staticTexts["Partly cloudy"].waitForExistence(timeout: 5))
         XCTAssertEqual(calls.label, "Fixture weather requests: 1")
         app.buttons["home-fixture-weather-fail-next"].tap()
-        let refresh = revealWeatherControl(app.buttons["ios-weather-refresh"], in: app)
+        let refresh = try revealWeatherControl(app.buttons["ios-weather-refresh"], in: app)
         XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "enabled == true"), object: refresh)], timeout: 5), .completed)
         refresh.tap()
@@ -62,8 +62,8 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
             "A second dashboard must reuse the same fresh cached forecast")
-        revealWeatherControl(app.buttons["ios-weather-settings"], in: app).tap()
-        revealWeatherControl(app.switches["ios-weather-enable"], in: app).tap()
+        try revealWeatherControl(app.buttons["ios-weather-settings"], in: app).tap()
+        try setWeatherEnable(in: app, expectedValue: "0")
         app.buttons["Save"].tap()
         XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5))
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
@@ -74,20 +74,60 @@ final class EllieIOSUITests: XCTestCase {
             "Disabling shared weather must clear the first dashboard too")
     }
 
-    private func revealWeatherControl(_ element: XCUIElement, in app: XCUIApplication) -> XCUIElement {
-        if element.exists && element.isHittable { return element }
-        let form = app.collectionViews.firstMatch.exists
-            ? app.collectionViews.firstMatch : app.scrollViews.firstMatch
-        XCTAssertTrue(form.waitForExistence(timeout: 5), "Expected the weather editor or dashboard scroll container")
-        for _ in 0..<4 {
-            if element.exists && element.isHittable { return element }
-            form.swipeUp()
+    private enum WeatherControlError: Error { case unavailable }
+
+    private func setWeatherEnable(in app: XCUIApplication, expectedValue: String) throws {
+        let row = try revealWeatherControl(app.switches["ios-weather-enable"], in: app, editor: true)
+        let toggle = row.switches.firstMatch
+        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
+            throw weatherControlFailure("Physical weather opt-in switch was not reachable in the open editor", in: app)
+        }
+        toggle.tap()
+        let value = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", expectedValue), object: row)
+        guard XCTWaiter.wait(for: [value], timeout: 5) == .completed else {
+            throw weatherControlFailure("Weather opt-in switch did not reach value \(expectedValue) in the open editor", in: app)
+        }
+    }
+
+    private func weatherControlFailure(_ message: String, in app: XCUIApplication) -> WeatherControlError {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "weather-control-first-unmet-screenshot"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "weather-control-first-unmet-hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTFail(message)
+        return .unavailable
+    }
+
+    private func revealWeatherControl(_ element: XCUIElement, in app: XCUIApplication,
+                                      editor: Bool = false) throws -> XCUIElement {
+        let navigation = app.navigationBars["Edit Weather"]
+        let container = editor
+            ? app.descendants(matching: .any).matching(identifier: "ios-widget-editor-form").firstMatch
+            : app.scrollViews["ios-dashboard-detail-scroll"]
+        guard container.waitForExistence(timeout: 5), !editor || navigation.exists else {
+            throw weatherControlFailure("Expected the active weather editor or dashboard scroll container", in: app)
         }
         for _ in 0..<4 {
             if element.exists && element.isHittable { return element }
-            form.swipeDown()
+            guard !editor || (navigation.exists && container.exists) else {
+                throw weatherControlFailure("Weather editor disappeared before its control was reachable", in: app)
+            }
+            container.swipeUp()
         }
-        XCTAssertTrue(element.exists && element.isHittable, "Expected the weather control to become reachable")
+        if !editor {
+            for _ in 0..<4 {
+                if element.exists && element.isHittable { return element }
+                container.swipeDown()
+            }
+        }
+        guard element.exists && element.isHittable, !editor || (navigation.exists && container.exists) else {
+            throw weatherControlFailure("Expected weather control \(element.identifier) in the active \(editor ? "editor" : "dashboard")", in: app)
+        }
         return element
     }
 
@@ -872,7 +912,17 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(app.buttons["ios-chore-toggle-\(id)"].label, "Undo completion of \(task)")
         app.buttons["ios-chore-delete-\(id)"].tap()
         app.buttons["Delete chore"].tap()
-        XCTAssertFalse(app.buttons["Edit \(task)"].exists)
+        let removed = app.buttons["Edit \(task)"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: removed)], timeout: 5), .completed,
+            "Confirming deletion must remove the chore")
+        app.buttons["Done"].tap()
+        app.terminate()
+        app.launch()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertFalse(app.buttons["Edit \(task)"].exists,
+            "A deleted chore must stay absent after relaunch")
         app.buttons["Done"].tap()
         returnToDashboardList(from: dashboardName, in: app)
         openDashboard(named: dashboardName, in: app)

@@ -305,6 +305,7 @@ private struct IOSDashboardDetail: View {
             }
             .padding()
         }
+        .accessibilityIdentifier("ios-dashboard-detail-scroll")
         .ellieScreen()
         .navigationTitle(dashboard?.name ?? "Dashboard")
         .navigationBarTitleDisplayMode(.large)

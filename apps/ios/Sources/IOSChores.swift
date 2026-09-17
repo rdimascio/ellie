@@ -126,9 +126,11 @@ struct IOSChoresSheet: View {
         .sheet(item: $form) { route in IOSChoreEditor(store: store, chore: route.chore) }
         .confirmationDialog("Delete \(deleting?.title ?? "this chore")?", isPresented: Binding(
             get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
-                Button("Delete chore", role: .destructive) {
-                    if let deleting { store.delete(id: deleting.id) }
-                    deleting = nil
+                if let choreToDelete = deleting {
+                    Button("Delete chore", role: .destructive) {
+                        store.delete(id: choreToDelete.id)
+                        deleting = nil
+                    }
                 }
                 Button("Cancel", role: .cancel) { deleting = nil }
             } message: { Text("This removes the task and its completion from this iPhone.") }
