@@ -129,13 +129,51 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
       url.port == credential.origin.port, url.user == nil, url.password == nil,
       url.fragment == nil
     else { throw NativeEnrollmentFailure.invalidCode }
+    return try await pinnedLifeGET(url: url, host: host, credential: credential,
+      sessionToken: sessionToken, maximumBytes: 48_000)
+  }
+
+  /// Exact read-only Gmail routes. No generic Life URL or provider action is admitted.
+  func lifeGmailGET(path: String, credential: LifeWebCredential, sessionToken: String)
+    async throws -> (Data, HTTPURLResponse)
+  {
+    guard let maximumBytes = Self.lifeGmailMaximumBytes(path: path),
+      sessionToken.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+      credential.origin.scheme == "https",
+      let host = nativeTLSHost(credential.origin.host),
+      let url = URL(string: path, relativeTo: credential.origin)?.absoluteURL,
+      url.scheme == "https", url.host == credential.origin.host,
+      url.port == credential.origin.port, url.user == nil, url.password == nil,
+      url.fragment == nil
+    else { throw NativeEnrollmentFailure.invalidCode }
+    return try await pinnedLifeGET(url: url, host: host, credential: credential,
+      sessionToken: sessionToken, maximumBytes: maximumBytes)
+  }
+
+  static func lifeGmailMaximumBytes(path: String) -> Int? {
+    guard let components = URLComponents(string: path),
+      components.scheme == nil, components.host == nil,
+      components.query == nil, components.fragment == nil,
+      components.percentEncodedPath == path,
+      (path == "/api/connections" ||
+        path.range(of: "^/api/connections/[A-Za-z0-9_-]{1,128}/preview$",
+          options: .regularExpression) != nil ||
+        path.range(of: "^/api/connections/[A-Za-z0-9_-]{1,128}/messages/[A-Za-z0-9_-]{1,1024}$",
+          options: .regularExpression) != nil)
+    else { return nil }
+    return path.contains("/messages/") ? 240 * 1_024 : 48_000
+  }
+
+  private func pinnedLifeGET(url: URL, host: String, credential: LifeWebCredential,
+    sessionToken: String, maximumBytes: Int) async throws -> (Data, HTTPURLResponse)
+  {
     var request = URLRequest(
       url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
     request.httpMethod = "GET"
     request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
     request.setValue("__Host-ellie_life=\(sessionToken)", forHTTPHeaderField: "Cookie")
     let delegate = PinnedSessionDelegate(
-      host: host, pin: credential.certificateSha256, maximumBytes: 48_000,
+      host: host, pin: credential.certificateSha256, maximumBytes: maximumBytes,
       timeout: timeout, verificationDate: now())
     let configuration = URLSessionConfiguration.ephemeral
     configuration.httpCookieStorage = nil
