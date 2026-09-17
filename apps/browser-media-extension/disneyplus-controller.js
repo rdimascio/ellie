@@ -93,6 +93,15 @@
     if (anchor.hasAttribute("download")) return false;
     const target = anchor.getAttribute("target");
     if (target && target.toLowerCase() !== "_self") return false;
+    for (let node = anchor; node; node = node.parentElement) {
+      if (
+        node.hasAttribute("inert") ||
+        node.hasAttribute("disabled") ||
+        node.getAttribute("aria-disabled")?.trim().toLowerCase() === "true" ||
+        node.getAttribute("aria-hidden")?.trim().toLowerCase() === "true"
+      )
+        return false;
+    }
     const url = new URL(anchor.href, location.href);
     return (
       url.origin === origin &&

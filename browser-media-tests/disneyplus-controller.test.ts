@@ -218,6 +218,48 @@ test(
 );
 
 test(
+  "Disney+ disabled or inert entity links never become clickable handles",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await page.locator("#title").evaluate((node) => node.setAttribute("aria-disabled", "true"));
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).candidates,
+        [],
+      );
+      await page.locator("#title").evaluate((node) => {
+        node.removeAttribute("aria-disabled");
+        node.setAttribute("disabled", "");
+      });
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).candidates,
+        [],
+      );
+      await page.locator("#title").evaluate((node) => node.removeAttribute("disabled"));
+      await page.locator("main").evaluate((node) => node.setAttribute("inert", ""));
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).candidates,
+        [],
+      );
+      await page.locator("main").evaluate((node) => node.removeAttribute("inert"));
+      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.equal(read.candidates.length, 1);
+      await page.locator("main").evaluate((node) => node.setAttribute("aria-disabled", "true"));
+      await assert.rejects(
+        dispatch(page, {
+          type: "open",
+          actionId: actionId(),
+          snapshotId: read.snapshotId,
+          candidateId: read.candidates[0].id,
+        }),
+        /stale_candidate/,
+      );
+      assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), []);
+    });
+  },
+);
+
+test(
   "Disney+ unobserved navigation is an unknown outcome with no replay",
   { timeout: 15_000 },
   async () => {
