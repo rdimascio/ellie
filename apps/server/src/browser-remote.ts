@@ -9,6 +9,7 @@ export interface BrowserRemoteNode {
   label: string;
   online: boolean;
   capabilities: Capability[];
+  cancellationSettling?: true;
 }
 export interface BrowserRemote {
   nodes(options?: { signal?: AbortSignal }): Promise<BrowserRemoteNode[]>;
@@ -121,6 +122,7 @@ export function createBrowserRemote(
           capabilities: (["app.open", "browser.read", "browser.control"] as Capability[]).filter(
             (capability) => advertised.includes(capability),
           ),
+          ...(node?.cancellationSettling === true ? { cancellationSettling: true as const } : {}),
         };
       });
     },
