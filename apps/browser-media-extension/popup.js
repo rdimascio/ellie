@@ -38,7 +38,7 @@ async function run(command) {
     return await send(command);
   } catch (error) {
     const friendly = {
-      unsupported_page: "Open Netflix or YouTube first.",
+      unsupported_page: "Open a supported Netflix, YouTube, YouTube TV, or Disney+ tab first.",
       stale_snapshot: "Inspect titles again.",
       ambiguous_video: "More than one visible video.",
       busy: "Another action is still running.",

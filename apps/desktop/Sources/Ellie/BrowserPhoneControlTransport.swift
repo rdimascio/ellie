@@ -12,7 +12,7 @@ struct BrowserPhoneItem: Equatable, Identifiable, Sendable {
 enum BrowserPhoneYouTubePage: String, Equatable, Sendable {
   case home, results, browse, watch, login, unsupported
 }
-enum BrowserPhoneProvider: String, Equatable, Sendable { case youtube, netflix, youtubeTV = "youtube_tv" }
+enum BrowserPhoneProvider: String, Equatable, Sendable { case youtube, netflix, youtubeTV = "youtube_tv", disneyplus }
 enum BrowserPhonePlayback: String, Equatable, Sendable {
   case playing, paused, unavailable, ambiguous
 }
@@ -265,7 +265,7 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     } else {
       site = nil
     }
-    if source == .companion && site?.provider != .netflix && site?.provider != .youtubeTV {
+    if source == .companion && site?.provider != .netflix && site?.provider != .youtubeTV && site?.provider != .disneyplus {
       throw PhoneControlFailure.invalidResponse
     }
     return .page(
@@ -296,6 +296,7 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
     (provider == .youtube && [.home, .results, .watch, .login, .unsupported].contains(page))
       || (provider == .netflix && [.browse, .results, .watch, .login, .unsupported].contains(page))
       || (provider == .youtubeTV && [.browse, .watch, .login, .unsupported].contains(page))
+      || (provider == .disneyplus && [.browse, .login, .unsupported].contains(page))
   else { throw PhoneControlFailure.invalidResponse }
   let row: Bool?
   if let rawRow = value["horizontalScrollAvailable"] {

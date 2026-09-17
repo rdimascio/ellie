@@ -49,6 +49,10 @@ struct BrowserControlView: View {
               Text("YouTube TV search, title selection, and horizontal rows are unavailable until their controls can be safely observed. Browsing and player controls require a fresh read.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
+            if site.provider == .disneyplus {
+              Text("Only visible Disney+ title links on this page can be selected. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
           }
           if site.provider == .netflix && site.page == .browse, let rows = site.rows,
             !rows.isEmpty {
@@ -168,6 +172,13 @@ struct BrowserControlView: View {
   }
 
   private func observedPageLabel(_ site: BrowserPhoneSite) -> String {
+    if site.provider == .disneyplus {
+      switch site.page {
+      case .browse: return "Observed Disney+ title page"
+      case .login: return "Observed Disney+ sign-in page"
+      default: return "Observed Disney+ page is unsupported"
+      }
+    }
     if site.provider == .youtubeTV {
       switch site.page {
       case .browse: return "Observed YouTube TV page; program identity unavailable"

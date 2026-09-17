@@ -127,7 +127,8 @@ export class BrowserWebMCPOperations {
     if (
       (availability === "companion" &&
         origin.origin !== "https://www.netflix.com" &&
-        origin.origin !== "https://tv.youtube.com") ||
+        origin.origin !== "https://tv.youtube.com" &&
+        origin.origin !== "https://www.disneyplus.com") ||
       (availability === "accessibility" && origin.origin !== "https://www.youtube.com")
     )
       throw new Error();
