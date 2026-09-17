@@ -482,6 +482,13 @@ async function main(): Promise<void> {
     });
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
+      const key = await startupCredential(
+        () => secrets.get("server.key"),
+        (error) => {
+          startupCredentialFailure = error;
+        },
+      );
+      const auth = await Auth.open();
       let decisionRouting;
       try {
         decisionRouting = await createDecisionRouting(config.decisionRouting, secrets);
@@ -491,14 +498,9 @@ async function main(): Promise<void> {
         );
       }
       const created = createEllieServer({
-        key: await startupCredential(
-          () => secrets.get("server.key"),
-          (error) => {
-            startupCredentialFailure = error;
-          },
-        ),
+        key,
         cert,
-        auth: await Auth.open(),
+        auth,
         preferences: config.preferences,
         jobStore,
         browser,
