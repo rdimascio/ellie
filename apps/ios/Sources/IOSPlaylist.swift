@@ -48,7 +48,9 @@ private struct IOSPlaylistPlayerSheet: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                IOSPlaylistWebView(playlistID: playlistID, model: model)
+                if model.state.message == nil {
+                    IOSPlaylistWebView(playlistID: playlistID, model: model)
+                }
                 if model.state == .loading {
                     ProgressView("Connecting to YouTube…")
                         .padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
