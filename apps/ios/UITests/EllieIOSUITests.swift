@@ -21,13 +21,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
             "Opening and cancelling setup must not opt in")
         try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
-        let enabled = try revealWeatherControl(app.switches["ios-weather-enable"], in: app, editor: true)
-        enabled.tap()
-        let enabledValue = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "value == %@", "1"), object: enabled)
-        guard XCTWaiter.wait(for: [enabledValue], timeout: 5) == .completed else {
-            throw weatherControlFailure("Weather opt-in did not become enabled in the open editor", in: app)
-        }
+        try setWeatherEnable(in: app, expectedValue: "1")
         try typeTextReliably("London QA", into: revealWeatherControl(app.textFields["ios-weather-name"], in: app, editor: true), in: app)
         try typeTextReliably("51.5074", into: revealWeatherControl(app.textFields["ios-weather-latitude"], in: app, editor: true), in: app)
         try typeTextReliably("-0.1278", into: revealWeatherControl(app.textFields["ios-weather-longitude"], in: app, editor: true), in: app)
@@ -69,7 +63,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
             "A second dashboard must reuse the same fresh cached forecast")
         try revealWeatherControl(app.buttons["ios-weather-settings"], in: app).tap()
-        try revealWeatherControl(app.switches["ios-weather-enable"], in: app, editor: true).tap()
+        try setWeatherEnable(in: app, expectedValue: "0")
         app.buttons["Save"].tap()
         XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5))
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
@@ -81,6 +75,20 @@ final class EllieIOSUITests: XCTestCase {
     }
 
     private enum WeatherControlError: Error { case unavailable }
+
+    private func setWeatherEnable(in app: XCUIApplication, expectedValue: String) throws {
+        let row = try revealWeatherControl(app.switches["ios-weather-enable"], in: app, editor: true)
+        let toggle = row.switches.firstMatch
+        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
+            throw weatherControlFailure("Physical weather opt-in switch was not reachable in the open editor", in: app)
+        }
+        toggle.tap()
+        let value = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", expectedValue), object: row)
+        guard XCTWaiter.wait(for: [value], timeout: 5) == .completed else {
+            throw weatherControlFailure("Weather opt-in switch did not reach value \(expectedValue) in the open editor", in: app)
+        }
+    }
 
     private func weatherControlFailure(_ message: String, in app: XCUIApplication) -> WeatherControlError {
         let screenshot = XCTAttachment(screenshot: app.screenshot())
