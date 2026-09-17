@@ -24,6 +24,126 @@ const binding = (suffix: string, url = "https://www.netflix.com/browse"): Browse
   availability: "companion",
 });
 
+test("YouTube TV companion permits only observed vertical browsing and unique-player playback", async () => {
+  const siteResult = (site: Record<string, unknown>) => ({
+    ok: true,
+    message: "Observed.",
+    browser: {
+      source: "companion",
+      operation: "read",
+      status: "completed",
+      revision: "a".repeat(64),
+      view: { items: [], site },
+    },
+  });
+  assert.equal(
+    browserWebMCPOperationResult(
+      siteResult({ provider: "youtube_tv", page: "watch", playback: "paused" }),
+    ).browser.operation,
+    "read",
+  );
+  for (const invalid of [
+    { provider: "youtube_tv", page: "results", playback: "unavailable" },
+    { provider: "youtube_tv", page: "browse", playback: "playing" },
+    { provider: "youtube_tv", page: "browse", playback: "unavailable", rows: [] },
+    {
+      provider: "youtube_tv",
+      page: "browse",
+      playback: "unavailable",
+      searchControl: { id: randomUUID(), label: "Search" },
+    },
+  ])
+    assert.throws(() => browserWebMCPOperationResult(siteResult(invalid)));
+  const current: BrowserBinding = {
+    ...binding("tv", "https://tv.youtube.com/live"),
+    origin: "https://tv.youtube.com",
+  };
+  const revision = browserBindingRevision(current);
+  const commands: string[] = [];
+  let page: "browse" | "watch" | "login" = "browse";
+  let webmcp = 0;
+  let ax = 0;
+  const companion = new BrowserCompanionOperations({
+    async request(request) {
+      if (request.type !== "media.execute") throw new Error("wrong request");
+      commands.push(request.command.type);
+      return browserWebMCPResultFor(request.id, "ok", {
+        bindingId: current.bindingId,
+        documentId: current.documentId,
+        url: current.url,
+        value:
+          request.command.type === "inspect"
+            ? {
+                snapshotId: randomUUID(),
+                candidates: [],
+                playback: { available: page === "watch", paused: page === "watch" },
+                site: {
+                  provider: "youtube_tv",
+                  page,
+                  playback: page === "watch" ? "paused" : "unavailable",
+                },
+              }
+            : { outcome: "dispatched_unverified" },
+      });
+    },
+  });
+  const selector = new BrowserOperationSelector(
+    async () => current,
+    {
+      execute: async () => {
+        webmcp += 1;
+        throw new Error("wrong WebMCP adapter");
+      },
+    },
+    {
+      execute: async () => {
+        ax += 1;
+        throw new Error("wrong AX adapter");
+      },
+    } as never,
+    companion,
+  );
+  const signal = new AbortController().signal;
+  const read = () => selector.execute({ tool: "browser.read", view: "summary", revision }, signal);
+  await read();
+  for (const action of [
+    { tool: "browser.search", query: "news", revision },
+    { tool: "browser.select", itemId: randomUUID(), revision },
+    { tool: "browser.scroll", direction: "right", revision },
+  ])
+    await assert.rejects(() => selector.execute(action as never, signal), /not observed/);
+  assert.deepEqual(commands, ["inspect"]);
+  const scroll = browserWebMCPOperationResult(
+    await selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+  );
+  assert.equal(scroll.browser.operation, "command");
+  assert.equal(scroll.browser.status, "unknown");
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+    /Read the YouTube TV page/,
+  );
+  page = "watch";
+  await read();
+  const play = browserWebMCPOperationResult(
+    await selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
+  );
+  assert.equal(play.browser.operation, "command");
+  assert.equal(play.browser.status, "unknown");
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
+    /Read the YouTube TV page/,
+  );
+  page = "login";
+  await read();
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+    /needs attention/,
+  );
+  assert.deepEqual(commands, ["inspect", "scrollViewport", "inspect", "play", "inspect"]);
+  assert.equal(webmcp, 0);
+  assert.equal(ax, 0);
+});
+
 test("companion wire admits only fixed commands and rejects arbitrary input", () => {
   const rowId = randomUUID();
   assert.deepEqual(

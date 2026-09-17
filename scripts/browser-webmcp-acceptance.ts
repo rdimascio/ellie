@@ -140,6 +140,7 @@ async function prepareExtension(root: string, origin: string) {
     "background.js",
     "manifest.json",
     "media-controller.js",
+    "youtube-tv-controller.js",
     "webmcp-controller.js",
   ];
   const productionFiles = await Promise.all(
@@ -179,7 +180,7 @@ async function prepareExtension(root: string, origin: string) {
   });
   await replaceExactly(
     background,
-    'const productionOrigins = new Set(["https://www.netflix.com", "https://www.youtube.com"]);',
+    `const productionOrigins = new Set([\n  "https://www.netflix.com",\n  "https://www.youtube.com",\n  "https://tv.youtube.com",\n]);`,
     `const productionOrigins = new Set([${JSON.stringify(origin)}]);`,
   );
   await replaceExactly(

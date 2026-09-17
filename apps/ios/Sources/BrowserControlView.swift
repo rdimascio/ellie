@@ -45,6 +45,10 @@ struct BrowserControlView: View {
               Text("No safely identified horizontal rows are available on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
+            if site.provider == .youtubeTV {
+              Text("YouTube TV search, title selection, and horizontal rows are unavailable until their controls can be safely observed. Browsing and player controls require a fresh read.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
           }
           if site.provider == .netflix && site.page == .browse, let rows = site.rows,
             !rows.isEmpty {
@@ -164,6 +168,14 @@ struct BrowserControlView: View {
   }
 
   private func observedPageLabel(_ site: BrowserPhoneSite) -> String {
+    if site.provider == .youtubeTV {
+      switch site.page {
+      case .browse: return "Observed YouTube TV page; program identity unavailable"
+      case .watch: return "Observed YouTube TV player; program identity unavailable"
+      case .login: return "Observed YouTube TV sign-in or welcome page"
+      default: return "Observed YouTube TV page is unsupported"
+      }
+    }
     if site.provider == .netflix {
       switch site.page {
       case .browse: return "Observed Netflix catalogue"
@@ -174,7 +186,7 @@ struct BrowserControlView: View {
       case .home: return "Observed Netflix page is unsupported"
       }
     }
-    switch site.page {
+    return switch site.page {
     case .home: "Observed YouTube home page"
     case .results: "Observed YouTube results page"
     case .browse: "Observed YouTube page is unsupported"
