@@ -326,6 +326,13 @@ try {
   await page.locator(".bottom").getByRole("button", { name: "Integrations", exact: true }).click();
   await page.getByRole("heading", { name: /A little more connected/ }).waitFor();
   await page.locator(".connections-page .connection-identity").first().waitFor();
+  const integrationCalendar = page
+    .locator(".connections-page .connection-list article")
+    .filter({ hasText: "Private fixture calendar" });
+  await integrationCalendar.getByRole("button", { name: "View imported activity" }).click();
+  await integrationCalendar.getByText("Doctor appointment").waitFor();
+  await integrationCalendar.getByLabel("Calendar to read").waitFor();
+  await integrationCalendar.getByRole("button", { name: "Hide imported activity" }).click();
   await page.goto(`${listening.url}/?section=connections&view=settings`);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await page.goto(`${listening.url}/?view=settings&section=connections`);
