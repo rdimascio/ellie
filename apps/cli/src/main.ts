@@ -14,6 +14,7 @@ import {
   nodeConfig,
   serverUrl,
   Keychain,
+  KeychainFailure,
 } from "@ellie/config";
 import { identifier, jobMetadata, record, string } from "@ellie/protocol";
 import { Client, discoverCertificate, fingerprint } from "@ellie/transport";
@@ -53,8 +54,17 @@ import { parseBrowserCommand, runBrowserCommand } from "./browser-commands.ts";
 import { parseNativeCommand, runNativeCommand } from "./native-commands.ts";
 import { parseHouseholdCommand, runHouseholdCommand } from "./household-commands.ts";
 import { parseSpeechCommand, runSpeechCommand } from "./speech-commands.ts";
-import { Services, serviceRole } from "./services.ts";
+import { Services, run, serviceRole } from "./services.ts";
+import { packagedServiceContext, packagedServiceStatus } from "./packaged-service-status.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
+import {
+  attentionRecovery,
+  holdForServiceAttention,
+  serviceCredentialState,
+  settleStartupCleanup,
+  startupCredential,
+  unknownAttentionRecovery,
+} from "./service-attention.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
 import {
   implicitSayTarget,
@@ -83,6 +93,8 @@ const browserEnvironment = {
   now: Date.now,
 };
 let serviceLog: ServiceLog | undefined;
+let startupCredentialFailure: KeychainFailure | undefined;
+let startupCleanupUncertain = false;
 let commandOutcomeMayBeUnknown = false;
 const lifeConfigGuidance =
   "Life service configuration is unavailable. Review the private Life config or run service configure coordinator --disable-life.";
@@ -350,7 +362,18 @@ async function main(): Promise<void> {
       );
     } else {
       if (action === "status") {
-        const status = await services.status(role);
+        const context = packagedServiceContext();
+        const status = context
+          ? await packagedServiceStatus(role, context, run)
+          : await services.status(role);
+        let runtime: Awaited<ReturnType<typeof serviceCredentialState>> = "none";
+        if (status.state === "running") {
+          try {
+            runtime = await serviceCredentialState(stateDir, role);
+          } catch {
+            throw new Error("Service attention records could not be inspected safely.");
+          }
+        }
         const selectedLife =
           role === "coordinator" ? await selectedLifeConfigForService() : undefined;
         console.log(
@@ -358,9 +381,22 @@ async function main(): Promise<void> {
             role === "coordinator"
               ? {
                   ...status,
+                  ...(runtime === "needs_attention"
+                    ? { runtime: "needs_attention", recovery: attentionRecovery }
+                    : runtime === "starting"
+                      ? { runtime: "starting" }
+                      : runtime === "unknown"
+                        ? { runtime: "unknown", recovery: unknownAttentionRecovery }
+                        : {}),
                   lifeOnNextStart: selectedLife ? "enabled" : "disabled",
                 }
-              : status,
+              : runtime === "needs_attention"
+                ? { ...status, runtime: "needs_attention", recovery: attentionRecovery }
+                : runtime === "starting"
+                  ? { ...status, runtime: "starting" }
+                  : runtime === "unknown"
+                    ? { ...status, runtime: "unknown", recovery: unknownAttentionRecovery }
+                    : status,
             null,
             2,
           ),
@@ -441,7 +477,12 @@ async function main(): Promise<void> {
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
       const created = createEllieServer({
-        key: await secrets.get("server.key"),
+        key: await startupCredential(
+          () => secrets.get("server.key"),
+          (error) => {
+            startupCredentialFailure = error;
+          },
+        ),
         cert,
         auth: await Auth.open(),
         preferences: config.preferences,
@@ -454,11 +495,18 @@ async function main(): Promise<void> {
         created.server.listen(config.port, config.host, () => resolve());
       });
     } catch (error) {
-      await browser.shutdown();
-      await lifeLifecycle.shutdown(() => {
-        if (app) app.shutdown();
-        else jobStore.close();
-      });
+      const cleanupUncertain = await settleStartupCleanup([
+        () => browser.shutdown(),
+        () =>
+          lifeLifecycle.shutdown(() => {
+            if (app) app.shutdown();
+            else jobStore.close();
+          }),
+      ]);
+      if (cleanupUncertain) {
+        if (error === startupCredentialFailure) startupCleanupUncertain = true;
+        else throw new Error("Coordinator startup cleanup is uncertain.");
+      }
       throw error;
     }
     if (!app) throw new Error("Coordinator failed to initialize.");
@@ -567,7 +615,12 @@ async function main(): Promise<void> {
     const client = new Client(
       config.serverUrl,
       await readFile(join(stateDir, "node-server-cert.pem"), "utf8"),
-      await secrets.get(`node.${config.id}`),
+      await startupCredential(
+        () => secrets.get(`node.${config.id}`),
+        (error) => {
+          startupCredentialFailure = error;
+        },
+      ),
     );
     const abort = new AbortController();
     for (const signal of ["SIGINT", "SIGTERM"] as const)
@@ -756,12 +809,22 @@ async function main(): Promise<void> {
       "                         Transcribe one bounded WAV turn with local whisper.cpp",
   );
 }
-main().catch((error) => {
+main().catch(async (error) => {
   if (serviceLog) {
+    const needsAttention = error === startupCredentialFailure && error instanceof KeychainFailure;
     try {
       serviceLog.write(failureEvent(error));
+      if (startupCleanupUncertain) serviceLog.write("service_cleanup_uncertain");
+      if (needsAttention) serviceLog.write("needs_attention");
     } catch {
       /* Stderr is discarded by launchd; never fall back to raw errors. */
+    }
+    if (needsAttention) {
+      console.error(
+        "Service credentials need attention. Review service logs and stop/start explicitly.",
+      );
+      await holdForServiceAttention();
+      return;
     }
     console.error("Service failed. Run doctor and service logs for diagnostics.");
     process.exitCode = 1;

@@ -30,6 +30,8 @@ Use the same commands for both roles if one Mac runs both. Never use `sudo`. A l
 
 `service start` is idempotent and does not kill a running process. `service status` reports installed, GUI session, enabled, loaded, running/waiting/stopped state, PID, and last exit code when launchd supplies them. A PID confirms a process exists, not that it is ready; use role-specific doctor checks for readiness. The human-readable `launchctl print` format is parsed conservatively and may require adjustment for future macOS releases.
 
+A service that cannot read its required startup credential waits without retrying. Its LaunchAgent can still report `running`, while Ellie reports `needs_attention`. After resolving ordinary Keychain access in the logged-in session, use an explicit `service stop` followed by `service start`; running `start` alone preserves the waiting process. This does not initialize, pair, or replace credentials. If the log records `keychain_cleanup_uncertain` or `service_cleanup_uncertain`, first reconcile the retained helper or startup resources with the operator; a timeout or stopped parent alone does not confirm cleanup.
+
 ```sh
 bun run ellie service stop node
 bun run ellie service start node
@@ -64,6 +66,8 @@ The fixed `service run coordinator` path and both native launchers ignore inheri
 ## Diagnostics and logs
 
 `doctor` retains the original native-tool check. `doctor coordinator` and `doctor node` additionally check private configuration permissions, certificate dates, existing Keychain access, helper signature, GUI and LaunchAgent state, pinned authenticated reachability, and the node's registration freshness. Optional local model availability is a warning and does not fail a working desktop node. Unlock the login Keychain and allow the existing helper if macOS requests access. A terminal's successful Accessibility check does not establish permission for launchd: verify a harmless desktop command through the running service on each execution Mac and grant the service's responsible executable if System Settings requires it.
+
+When the latest service run records `needs_attention`, role-specific doctor reports the credential startup failure without another Keychain read. It also avoids another read while that run is still `starting` or its log cannot be safely inspected. It does not claim readiness because a process is alive. A new service start records `starting` and clears the previous log-derived attention state; readiness still requires the normal checks. The packaged CLI combines the selected installer's process status with these runtime diagnostics; the native installer's own status remains a process-liveness report. These diagnostics do not dismiss a macOS prompt or grant access.
 
 From the coordinator Mac, use the read-only readiness test after starting both services:
 
@@ -112,6 +116,8 @@ Service processes write only allowlisted timestamped events to `~/.ellie/logs/co
 ## Failure, network, and sleep behavior
 
 launchd keeps each enabled role alive and throttles rapid crash loops to at most one spawn per 30 seconds. A process that has already run longer than that can restart immediately. Shutdown receives SIGTERM with a 15-second grace period before launchd can force termination. A process exit never proves whether a native action completed. Durable job recovery and cancellation must be deployed before using unattended desktop services: delivered work has an unknown outcome after a coordinator crash, and no desktop action is automatically replayed. Check the Mac before explicitly submitting another command.
+
+Required startup credential failures are handled before the coordinator opens its listener or the node connects. The service logs the fixed Keychain failure category followed by `needs_attention`, then remains idle so KeepAlive does not repeat that failed attempt. It sends no desktop command and performs no credential retry. Ordinary crashes and network reconnection retain their existing behavior, and foreground `server start` or `node start` still fails normally. Logout, forced termination, or a later explicit launch creates a new startup; this pause is not a persistent disable flag. See the [credential pause validation and pending installed checks](validation/2026-09-17-service-credential-pause.md).
 
 The node owns network recovery; the plist deliberately has no network-dependent KeepAlive condition. Disconnections and coordinator restarts trigger bounded request deadlines and capped reconnect delays. Sleep suspends useful work; waking lets the current request expire or reconnect. This does not prevent sleep, wake another Mac, discover a changed coordinator address, bypass a locked Keychain, or restore logged-out GUI sessions. A changed coordinator address must be corrected locally while preserving the pinned certificate and identity. Actual sleep/wake and outage recovery on the paired Macs remains an acceptance check.
 
