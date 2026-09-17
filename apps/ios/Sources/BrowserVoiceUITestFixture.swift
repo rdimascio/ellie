@@ -13,10 +13,10 @@ struct BrowserVoiceUITestFixtureView: View {
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
   @State private var backgroundCount = 0
 
-  init() {
+  init(completeActions: Bool = false) {
     let credential = BrowserVoiceUITestFixture.credential
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
-    let browserTransport = BrowserVoiceUITestTransport()
+    let browserTransport = BrowserVoiceUITestTransport(completeActions: completeActions)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
@@ -63,13 +63,19 @@ struct BrowserTargetUITestFixtureView: View {
   @StateObject private var browser: BrowserPhoneControlStore
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
 
-  init() {
-    let credential = BrowserVoiceUITestFixture.credential
+  private let credential: NativeEnrollmentCredential
+
+  init(readOnly: Bool = false, unavailablePlayback: Bool = false) {
+    let credential = readOnly
+      ? BrowserVoiceUITestFixture.readOnlyCredential : BrowserVoiceUITestFixture.credential
+    self.credential = credential
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
-    let browserTransport = BrowserVoiceUITestTransport()
+    let browserTransport = BrowserVoiceUITestTransport(
+      siteOverride: unavailablePlayback
+        ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil) : nil)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
-        credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
+        credential: credential, transport: BrowserVoiceUITestPhoneTransport(readOnly: readOnly)))
     _browser = StateObject(
       wrappedValue: BrowserPhoneControlStore(
         credential: credential, transport: browserTransport,
@@ -80,7 +86,7 @@ struct BrowserTargetUITestFixtureView: View {
   var body: some View {
     NavigationStack {
       PhoneControlView(
-        credential: BrowserVoiceUITestFixture.credential, store: controls, browser: browser)
+        credential: credential, store: controls, browser: browser)
     }
     .overlay(alignment: .bottomTrailing) {
       VStack(alignment: .trailing) {
@@ -238,6 +244,13 @@ private enum BrowserVoiceUITestFixture {
       ],
       createdAt: 1, expiresAt: 2),
     token: String(repeating: "c", count: 64))
+  static let readOnlyCredential = NativeEnrollmentCredential(
+    origin: credential.origin, certificateSha256: credential.certificateSha256,
+    client: NativeClient(
+      id: credential.client.id, role: credential.client.role, label: credential.client.label,
+      grants: [NativeGrant(target: nodeAID, capabilities: ["browser.read"])],
+      createdAt: 1, expiresAt: 2),
+    token: credential.token)
 }
 
 @MainActor
@@ -264,8 +277,15 @@ private final class BrowserVoiceUITestUncertaintyStore: BrowserMutationUncertain
 }
 
 private struct BrowserVoiceUITestPhoneTransport: PhoneControlTransporting {
+  var readOnly = false
+
   func nodes(for credential: NativeEnrollmentCredential) async throws -> [PhoneControlNode] {
-    [
+    if readOnly {
+      return [PhoneControlNode(
+        id: BrowserVoiceUITestFixture.nodeAID, label: "Fixture Mac A", online: true,
+        capabilities: ["browser.read"])]
+    }
+    return [
       PhoneControlNode(
         id: BrowserVoiceUITestFixture.nodeAID, label: "Fixture Mac A", online: true,
         capabilities: ["browser.read", "browser.control"]),
@@ -308,9 +328,16 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   @Published private(set) var mutationCount = 0
   @Published private(set) var readNodeIDs: [String] = []
   private var failNextRead: Bool
+  private let completeActions: Bool
+  private let siteOverride: BrowserPhoneSite?
 
-  init(failNextRead: Bool = false) {
+  init(
+    failNextRead: Bool = false, completeActions: Bool = false,
+    siteOverride: BrowserPhoneSite? = nil
+  ) {
     self.failNextRead = failNextRead
+    self.completeActions = completeActions
+    self.siteOverride = siteOverride
   }
 
   func execute(
@@ -335,20 +362,36 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
             BrowserPhoneItem(
               id: isA ? "public-video-a" : "public-video-b",
               label: isA ? "A result" : "B result", state: nil)
-          ]))
+          ], site: siteOverride ?? (completeActions ? observedSite : nil)))
     case .search:
       mutationCount += 1
       return .command(
         source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
     case .select:
       mutationCount += 1
-      do { try await Task.sleep(for: .seconds(30)) } catch { throw PhoneControlFailure.cancelled }
+      if !completeActions {
+        do { try await Task.sleep(for: .seconds(30)) }
+        catch { throw PhoneControlFailure.cancelled }
+      }
       return .command(
         source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
     case .scroll, .playback:
       mutationCount += 1
       return .command(
         source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+    }
+  }
+
+  private var observedSite: BrowserPhoneSite {
+    switch mutationCount {
+    case 0:
+      BrowserPhoneSite(page: .home, playback: .unavailable, currentTimeSeconds: nil)
+    case 1:
+      BrowserPhoneSite(page: .results, playback: .unavailable, currentTimeSeconds: nil)
+    case 3:
+      BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1)
+    default:
+      BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: 1)
     }
   }
 }

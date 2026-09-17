@@ -383,6 +383,176 @@ final class EllieIOSUITests: XCTestCase {
             object: mutationCount)
         noReplay.isInverted = true
         XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+
+        let recoveryRead = app.buttons["Read current page"]
+        XCTAssertTrue(recoveryRead.waitForExistence(timeout: 5))
+        recoveryRead.tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
+        XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
+        XCTAssertTrue(app.buttons["Play"].isEnabled)
+    }
+
+    func testReviewedVoiceRequiresFreshPageBetweenSearchSelectionAndPlayback() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-complete-actions"
+        ]
+        app.launch()
+
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["Cancel recording"].waitForExistence(timeout: 5))
+        app.buttons["Cancel recording"].tap()
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textViews["speech-transcript"].exists)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        app.buttons["Discard transcript"].tap()
+        XCTAssertFalse(app.textViews["speech-transcript"].exists)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+
+        // A separate reviewed turn is required after discard. Its transcript remains inert
+        // until the page has been observed and the person taps Run.
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for public video")
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        app.buttons["speech-browser-read"].tap()
+        let runEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: run)
+        XCTAssertEqual(XCTWaiter.wait(for: [runEnabled], timeout: 5), .completed)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        run.tap()
+        XCTAssertTrue(app.buttons["speech-browser-read-updated"].waitForExistence(timeout: 5))
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["speech-browser-continue"].exists)
+
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        let updatedReadEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: updatedRead)
+        XCTAssertEqual(XCTWaiter.wait(for: [updatedReadEnabled], timeout: 5), .completed)
+        updatedRead.tap()
+        XCTAssertTrue(app.buttons["speech-browser-continue"].waitForExistence(timeout: 5))
+        app.buttons["speech-browser-continue"].tap()
+        XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
+        let observedSite = app.descendants(matching: .any)["browser-observed-site"]
+        let observedPlayback = app.descendants(matching: .any)["browser-observed-playback"]
+        XCTAssertEqual(observedSite.label, "Observed YouTube results page")
+        XCTAssertFalse(observedPlayback.exists)
+        XCTAssertFalse(app.buttons["Play"].isEnabled)
+        XCTAssertFalse(app.buttons["Pause"].isEnabled)
+        let result = app.buttons["browser-result-1"]
+        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        XCTAssertTrue(result.isEnabled)
+        result.tap()
+        waitForFixturePageToClear(in: app)
+        waitForFixtureMutations(2, in: app)
+        XCTAssertFalse(app.buttons["Play"].exists)
+        XCTAssertFalse(observedSite.exists)
+
+        app.buttons["Read current page"].tap()
+        let play = app.buttons["Play"]
+        XCTAssertTrue(play.waitForExistence(timeout: 5))
+        XCTAssertTrue(play.isEnabled)
+        XCTAssertEqual(observedSite.label, "Observed YouTube watch page")
+        XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
+        XCTAssertFalse(app.buttons["Pause"].isEnabled)
+        play.tap()
+        waitForFixturePageToClear(in: app)
+        waitForFixtureMutations(3, in: app)
+        XCTAssertFalse(app.buttons["Pause"].exists)
+
+        app.buttons["Read current page"].tap()
+        let pause = app.buttons["Pause"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 5))
+        XCTAssertTrue(pause.isEnabled)
+        XCTAssertEqual(observedPlayback.label, "Observed playback: playing")
+        XCTAssertFalse(app.buttons["Play"].isEnabled)
+        pause.tap()
+        waitForFixturePageToClear(in: app)
+        waitForFixtureMutations(4, in: app)
+        XCTAssertFalse(observedPlayback.exists)
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(observedPlayback.waitForExistence(timeout: 5))
+        XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
+        XCTAssertTrue(app.buttons["Play"].isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 4")
+    }
+
+    func testReadOnlyBrowserPageDoesNotOfferEnabledMutationControls() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-read-only-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+        XCTAssertFalse(app.buttons["Search"].exists)
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["browser-read-only-grant-warning"].exists)
+        for label in ["Search", "Up", "Down", "Left", "Right", "Play", "Pause"] {
+            XCTAssertFalse(app.buttons[label].isEnabled, "\(label) requires browser.control")
+        }
+        XCTAssertFalse(app.buttons["browser-result-1"].isEnabled)
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+    }
+
+    func testUnavailableObservedPlaybackDisablesMediaActionsWithoutDispatch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-unavailable-playback-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+        app.buttons["Read current page"].tap()
+        let observed = app.descendants(matching: .any)["browser-observed-playback"]
+        XCTAssertTrue(observed.waitForExistence(timeout: 5))
+        XCTAssertEqual(observed.label, "Playback state is unavailable")
+        XCTAssertFalse(app.buttons["Play"].isEnabled)
+        XCTAssertFalse(app.buttons["Pause"].isEnabled)
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+    }
+
+    private func waitForFixtureMutations(_ expected: Int, in app: XCUIApplication) {
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        let observed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture mutations: \(expected)"),
+            object: count)
+        XCTAssertEqual(XCTWaiter.wait(for: [observed], timeout: 5), .completed)
+    }
+
+    private func waitForFixturePageToClear(in app: XCUIApplication) {
+        let page = app.staticTexts["Mac A page"]
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: page)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
     }
 
     func testChangingMacThroughPhoneControlClearsObservedBrowserPage() {
