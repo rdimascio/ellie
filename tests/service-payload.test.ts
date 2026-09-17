@@ -335,7 +335,9 @@ test("supplies only the pinned provider-utils upstream license when its npm pack
   await assert.rejects(stage("wrong-lock-version"), /incomplete license metadata/);
   await writeFile(lock, lockText(integrity));
   const tampered = Buffer.from(upstream);
-  tampered[0] ^= 1;
+  const firstByte = tampered[0];
+  assert.ok(firstByte !== undefined);
+  tampered[0] = firstByte ^ 1;
   await writeFile(license, tampered);
   await assert.rejects(stage("tampered-notice"), /does not match its upstream source/);
   await rm(license);
