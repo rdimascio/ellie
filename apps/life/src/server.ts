@@ -1118,6 +1118,17 @@ export class LifeHttpServer {
         );
         return;
       }
+      const messageRead = /^\/api\/connections\/([^/]+)\/messages\/([^/]+)$/.exec(path);
+      if (messageRead && request.method === "GET") {
+        const connectors = this.options.connectors;
+        if (!connectors) throw new HttpError(503, "Connected accounts are unavailable.");
+        const id = identifier(decodeURIComponent(messageRead[1]!));
+        const messageId = decodeURIComponent(messageRead[2]!);
+        if (!/^[A-Za-z0-9_-]{1,1024}$/.test(messageId))
+          throw new HttpError(400, "Message identifier is invalid.");
+        this.send(response, 200, await connectors.messageDetail(this.actor.userId, id, messageId));
+        return;
+      }
       const connectionRead = /^\/api\/connections\/([^/]+)\/(calendars|preview|agenda)$/.exec(path);
       if (connectionRead && request.method === "GET") {
         const connectors = this.options.connectors;

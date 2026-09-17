@@ -87,6 +87,16 @@ export interface ProviderPullResult {
 
 export interface LifeProviderAdapter {
   readonly id: ProviderId;
+  /** Explicit, transient read of an already imported Gmail message. Never an observation. */
+  readMessageText?(
+    messageId: string,
+    credential: ProviderCredential,
+    signal: AbortSignal,
+  ): Promise<{
+    status: "plain" | "truncated" | "unavailable";
+    text?: string;
+    additionalPartsOmitted?: true;
+  }>;
   /** Read-only resource picker for providers with multiple calendars. */
   calendars?(
     credential: ProviderCredential,

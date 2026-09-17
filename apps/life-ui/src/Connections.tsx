@@ -5,7 +5,9 @@ import {
   type ConnectorConnection,
   type ConnectorMode,
   type ConnectorProvider,
+  type GmailMessageDetail as MessageDetail,
 } from "./api";
+import { GmailMessageDetail } from "./GmailMessageDetail";
 
 export function Connections() {
   const [connections, setConnections] = useState<ConnectorConnection[]>([]);
@@ -19,7 +21,23 @@ export function Connections() {
   const listRequest = useRef(0);
   const actionInFlight = useRef(false);
   const detailRequest = useRef(0);
+  const messageRequest = useRef(0);
+  const activeDetailId = useRef("");
+  const currentConnections = useRef<ConnectorConnection[]>([]);
+  useEffect(
+    () => () => {
+      listRequest.current++;
+      detailRequest.current++;
+      messageRequest.current++;
+      activeDetailId.current = "";
+    },
+    [],
+  );
   const [detailId, setDetailId] = useState("");
+  const [selectedMessageId, setSelectedMessageId] = useState("");
+  const [messageDetail, setMessageDetail] = useState<MessageDetail | null>(null);
+  const [messageLoading, setMessageLoading] = useState(false);
+  const [messageError, setMessageError] = useState("");
   const [preview, setPreview] = useState<ConnectionPreview | null>(null);
   const [calendarOptions, setCalendarOptions] = useState<
     { id: string; label: string; primary: boolean }[]
@@ -27,11 +45,32 @@ export function Connections() {
   const [calendarChoice, setCalendarChoice] = useState("");
   const [detailError, setDetailError] = useState("");
   const detailSync = connections.find((item) => item.id === detailId)?.lastSyncAt;
+  const clearMessage = () => {
+    messageRequest.current++;
+    setSelectedMessageId("");
+    setMessageDetail(null);
+    setMessageLoading(false);
+    setMessageError("");
+  };
+  const applyConnections = (value: ConnectorConnection[]) => {
+    currentConnections.current = value;
+    if (
+      activeDetailId.current &&
+      !value.some((item) => item.id === activeDetailId.current && item.state === "connected")
+    ) {
+      detailRequest.current++;
+      clearMessage();
+      setPreview(null);
+    }
+    setConnections(value);
+  };
   useEffect(() => {
     if (!detailId) return;
     const current = connections.find((item) => item.id === detailId);
     if (!current || current.state === "revoked") {
       detailRequest.current++;
+      activeDetailId.current = "";
+      clearMessage();
       setDetailId("");
       setPreview(null);
       setCalendarOptions([]);
@@ -54,7 +93,7 @@ export function Connections() {
     const request = ++listRequest.current;
     const value = await api.connections.list();
     if (request !== listRequest.current) return false;
-    setConnections(value.connections);
+    applyConnections(value.connections);
     setProviders(value.providers);
     setLoadError("");
     return true;
@@ -86,7 +125,7 @@ export function Connections() {
       try {
         const value = await api.connections.list();
         if (!current || request !== listRequest.current) return;
-        setConnections(value.connections);
+        applyConnections(value.connections);
         setProviders(value.providers);
         setLoadError("");
       } catch (caught) {
@@ -117,12 +156,14 @@ export function Connections() {
       detailRequest.current++;
       setPreview(null);
     }
+    clearMessage();
     try {
       await operation();
       await load();
       if (detailId && !key.startsWith("revoke:") && !key.startsWith("cancel:"))
         await openDetails(detailId);
       else if (key.startsWith("revoke:") || key.startsWith("cancel:")) {
+        activeDetailId.current = "";
         setDetailId("");
         setCalendarOptions([]);
         setPreview(null);
@@ -145,6 +186,8 @@ export function Connections() {
   };
   const openDetails = async (id: string) => {
     const request = ++detailRequest.current;
+    activeDetailId.current = id;
+    clearMessage();
     setDetailId(id);
     setPreview(null);
     setCalendarOptions([]);
@@ -167,6 +210,34 @@ export function Connections() {
         setDetailError(
           caught instanceof Error ? caught.message : "Imported activity is unavailable.",
         );
+    }
+  };
+  const openMessage = async (id: string, messageId: string) => {
+    const request = ++messageRequest.current;
+    setSelectedMessageId(messageId);
+    setMessageDetail(null);
+    setMessageError("");
+    setMessageLoading(true);
+    try {
+      const value = await api.connections.message(id, messageId);
+      if (
+        request !== messageRequest.current ||
+        activeDetailId.current !== id ||
+        !currentConnections.current.some((item) => item.id === id && item.state === "connected")
+      )
+        return;
+      setMessageDetail(value);
+    } catch (caught) {
+      if (
+        request === messageRequest.current &&
+        activeDetailId.current === id &&
+        currentConnections.current.some((item) => item.id === id && item.state === "connected")
+      )
+        setMessageError(
+          caught instanceof Error ? caught.message : "The selected message is unavailable.",
+        );
+    } finally {
+      if (request === messageRequest.current) setMessageLoading(false);
     }
   };
   const connect = async (provider: ConnectorProvider) => {
@@ -325,7 +396,11 @@ export function Connections() {
                     disabled={busy !== ""}
                     onClick={() =>
                       detailId === connection.id
-                        ? (detailRequest.current++, setDetailId(""), setPreview(null))
+                        ? (detailRequest.current++,
+                          (activeDetailId.current = ""),
+                          clearMessage(),
+                          setDetailId(""),
+                          setPreview(null))
                         : void openDetails(connection.id)
                     }
                   >
@@ -397,18 +472,39 @@ export function Connections() {
                       ) : (
                         <ul>
                           {preview.items.map((item, index) => (
-                            <li key={index}>
-                              {item.kind === "event"
-                                ? `${item.title}${item.startAt ? ` · ${new Date(item.startAt).toLocaleString()}` : item.startDate ? ` · ${item.startDate}` : ""}`
-                                : `${item.subject} · ${item.from}${item.snippet ? ` · ${item.snippet}` : ""}`}
+                            <li key={item.kind === "message" ? item.messageId : index}>
+                              {item.kind === "event" ? (
+                                `${item.title}${item.startAt ? ` · ${new Date(item.startAt).toLocaleString()}` : item.startDate ? ` · ${item.startDate}` : ""}`
+                              ) : connection.provider === "gmail" ? (
+                                <button
+                                  type="button"
+                                  className="gmail-preview-item"
+                                  aria-pressed={selectedMessageId === item.messageId}
+                                  onClick={() => void openMessage(connection.id, item.messageId)}
+                                >
+                                  {item.subject} · {item.from}
+                                  {item.snippet ? ` · ${item.snippet}` : ""}
+                                </button>
+                              ) : (
+                                `${item.subject} · ${item.from}${item.snippet ? ` · ${item.snippet}` : ""}`
+                              )}
                             </li>
                           ))}
                         </ul>
                       )}
                       <small>
-                        Private read-only preview. Gmail shows headers and a bounded snippet, not
-                        message bodies.
+                        Private read-only preview. Select a Gmail message to read its bounded
+                        plain-text body.
                       </small>
+                      {selectedMessageId && (
+                        <div className="gmail-selected-message">
+                          {messageLoading && <p>Reading selected message…</p>}
+                          {messageError && <p role="alert">{messageError}</p>}
+                          {messageDetail && (
+                            <GmailMessageDetail message={messageDetail} onClose={clearMessage} />
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
                 </div>

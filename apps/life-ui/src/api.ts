@@ -60,8 +60,27 @@ export interface ConnectionPreview {
   error?: string;
   items: (
     | { kind: "event"; title: string; startAt?: number; startDate?: string }
-    | { kind: "message"; subject: string; from: string; snippet?: string; sentAt: number }
+    | {
+        kind: "message";
+        messageId: string;
+        subject: string;
+        from: string;
+        to: string[];
+        snippet?: string;
+        sentAt: number;
+      }
   )[];
+}
+export interface GmailMessageDetail {
+  messageId: string;
+  subject: string;
+  from: string;
+  to: string[];
+  sentAt: number;
+  snippet?: string;
+  status: "plain" | "truncated" | "unavailable";
+  text?: string;
+  additionalPartsOmitted?: true;
 }
 export interface ConnectorProvider {
   id: ConnectorProviderId;
@@ -171,6 +190,10 @@ export const api = {
       }),
     preview: (id: string) =>
       request<ConnectionPreview>(`/api/connections/${encodeURIComponent(id)}/preview`),
+    message: (id: string, messageId: string) =>
+      request<GmailMessageDetail>(
+        `/api/connections/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
+      ),
   },
   groups: {
     list: () => request<{ groups: Group[] }>("/api/life/groups"),
