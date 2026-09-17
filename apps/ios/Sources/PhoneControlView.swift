@@ -4,6 +4,7 @@ struct PhoneControlView: View {
   @Environment(\.scenePhase) private var scenePhase
   @StateObject private var store: PhoneControlStore
   @StateObject private var browser: BrowserPhoneControlStore
+  @ObservedObject private var watch = WatchMediaPhoneBridge.shared
   private let credential: NativeEnrollmentCredential
 
   init(
@@ -60,6 +61,28 @@ struct PhoneControlView: View {
         .disabled(store.selectedNode == nil)
       }
 
+      Section("Apple Watch") {
+        if let target = watch.enabledTargetID {
+          Label("Enabled for \(nodeLabel(target))", systemImage: "applewatch")
+          Button("Disable Watch control", role: .destructive) { watch.disable() }
+        } else {
+          Button("Enable Watch control for selected Mac") {
+            if let node = store.selectedNode { _ = watch.enable(credential: credential, node: node) }
+          }
+          .disabled(!watchTargetEligible || !watch.available || isBusy)
+          Text("The Watch uses this iPhone's current browser grants. Open Ellie on Watch and tap Read; actions are never queued for later delivery.")
+            .font(.footnote).foregroundStyle(.secondary)
+          if store.selectedNode != nil && !watchTargetEligible {
+            Text("Select an online Mac with browser reading and control granted to this iPhone.")
+              .font(.footnote).foregroundStyle(.secondary)
+          }
+        }
+        if !watch.available {
+          Text("A paired Watch with Ellie installed is not available yet.")
+            .font(.footnote).foregroundStyle(.secondary)
+        }
+      }
+
       status
 
       if isBusy {
@@ -73,6 +96,7 @@ struct PhoneControlView: View {
     .navigationTitle("Mac controls")
     .onChange(of: store.selectedNodeID) { _, value in
       browser.clearIfTargetChanged(to: value)
+      if watch.enabledTargetID != value { watch.disable() }
     }
     .onDisappear {
       store.cancel()
@@ -118,6 +142,16 @@ struct PhoneControlView: View {
     if case .sending = store.phase { return true }
     if case .cancelling = store.phase { return true }
     return false
+  }
+
+  private var watchTargetEligible: Bool {
+    guard let node = store.selectedNode, node.online,
+      node.capabilities.contains("browser.read"), node.capabilities.contains("browser.control")
+    else { return false }
+    return credential.client.grants.contains {
+      $0.target == node.id && $0.capabilities.contains("browser.read")
+        && $0.capabilities.contains("browser.control")
+    }
   }
 
   private func nodeLabel(_ id: String) -> String {
