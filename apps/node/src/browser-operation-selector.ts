@@ -1,4 +1,9 @@
-import { browserWebMCPAction, type Action, type Result } from "@ellie/protocol";
+import {
+  browserWebMCPAction,
+  browserWebMCPOperationResult,
+  type Action,
+  type Result,
+} from "@ellie/protocol";
 import type {
   BrowserAccessibilityBinding,
   BrowserAccessibilityRuntime,
@@ -32,7 +37,21 @@ export class BrowserOperationSelector {
     if (!action.tool.startsWith("browser.")) throw new Error("Unsupported browser operation.");
     const browserAction = browserWebMCPAction(action);
     const refresh = browserAction.tool === "browser.refresh";
-    const binding = await this.binding(signal, refresh);
+    if (signal.aborted) throw new Error("Browser request was cancelled.");
+    let binding: BrowserBinding | "unbound" | "unsupported";
+    try {
+      binding = await this.binding(signal, refresh);
+    } catch {
+      if (signal.aborted) throw new Error("Browser request was cancelled.");
+      if (browserAction.tool !== "browser.status" && !refresh)
+        throw new Error("Browser connection is unavailable.");
+      return browserWebMCPOperationResult({
+        ok: false,
+        message: "Browser connection is unavailable.",
+        browser: { source: "webmcp", operation: "status", status: "unavailable" },
+      });
+    }
+    if (signal.aborted) throw new Error("Browser request was cancelled.");
     const adapterAction = refresh ? browserWebMCPAction({ tool: "browser.status" }) : browserAction;
     if (typeof binding !== "object" || binding.availability === "webmcp")
       return this.webmcp.execute(adapterAction, signal);

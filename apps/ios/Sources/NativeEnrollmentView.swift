@@ -4,6 +4,9 @@ import SwiftUI
 struct NativeEnrollmentView: View {
   @ObservedObject var store: NativeEnrollmentStore
   @ObservedObject var dashboards: DashboardStore
+  #if DEBUG
+  var uiTestScannerCode: String? = nil
+  #endif
   @Environment(\.scenePhase) private var scenePhase
   @State private var syncCleanupError = false
 
@@ -113,14 +116,19 @@ struct NativeEnrollmentView: View {
     .sheet(
       isPresented: Binding(
         get: { if case .scanning = store.phase { true } else { false } },
-        set: { if !$0 { store.cancelTransient() } })
+        set: { if !$0 { store.scannerDismissed() } })
     ) {
       NavigationStack {
-        NativeQRScanner { result in
-          switch result {
-          case .success(let code): store.scanned(code)
-          case .failure: store.scannerFailed()
+        Group {
+          #if DEBUG
+          if let uiTestScannerCode {
+            NativeScannerSheetUITestCamera(code: uiTestScannerCode, completion: handleScan)
+          } else {
+            NativeQRScanner(completion: handleScan)
           }
+          #else
+          NativeQRScanner(completion: handleScan)
+          #endif
         }
         .ignoresSafeArea()
         .navigationTitle("Scan Ellie code")
@@ -144,6 +152,12 @@ struct NativeEnrollmentView: View {
     catch { syncCleanupError = true }
   }
   private func shortPin(_ pin: String) -> String { "\(pin.prefix(12))…\(pin.suffix(12))" }
+  private func handleScan(_ result: Result<String, NativeEnrollmentFailure>) {
+    switch result {
+    case .success(let code): store.scanned(code)
+    case .failure: store.scannerFailed()
+    }
+  }
 }
 
 func nativeEnrollmentAccessDescription(_ grant: NativeGrant) -> String? {
@@ -156,6 +170,40 @@ func nativeEnrollmentAccessDescription(_ grant: NativeGrant) -> String? {
     default: capability
     }
   }.joined(separator: ", ")
+}
+
+// A scan belongs to one presentation. Delayed authorization, preview, and timeout
+// work must not revive a camera after dismissal or submit a second result.
+final class NativeScannerRunGate {
+  private let lock = NSLock()
+  private var generation = 0
+  private var state = 0 // 0 = new, 1 = scanning, 2 = finished or stopped
+
+  func begin() -> Int? {
+    lock.lock(); defer { lock.unlock() }
+    guard state == 0 else { return nil }
+    state = 1
+    generation += 1
+    return generation
+  }
+  func isCurrent(_ token: Int) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    return state == 1 && generation == token
+  }
+  func finish(_ token: Int) -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    guard state == 1 && generation == token else { return false }
+    state = 2
+    generation += 1
+    return true
+  }
+  @discardableResult func stop() -> Bool {
+    lock.lock(); defer { lock.unlock() }
+    guard state != 2 else { return false }
+    state = 2
+    generation += 1
+    return true
+  }
 }
 
 private struct NativeQRScanner: UIViewControllerRepresentable {
@@ -175,9 +223,10 @@ private final class ScannerController: UIViewController, AVCaptureMetadataOutput
   var completion: ((Result<String, NativeEnrollmentFailure>) -> Void)?
   private let session = AVCaptureSession()
   private let captureQueue = DispatchQueue(label: "org.ellie.ios.enrollment.camera")
-  private var preview: AVCaptureVideoPreviewLayer?
-  private var generation = 0
-  private var active = false
+  private let run = NativeScannerRunGate()
+  private var preview: AVCaptureVideoPreviewLayer? // Main thread only.
+  private var activeToken: Int? // Capture queue only.
+  private var timeoutWorkItem: DispatchWorkItem? // Capture queue only.
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
@@ -193,85 +242,105 @@ private final class ScannerController: UIViewController, AVCaptureMetadataOutput
   }
 
   private func start() {
-    captureQueue.async {
-      self.generation += 1
-      let expected = self.generation
-      self.active = true
-      AVCaptureDevice.requestAccess(for: .video) { allowed in
-        self.captureQueue.async {
-          guard allowed, self.active, self.generation == expected else {
-            if !allowed { self.finish(.failure(.unavailable), generation: expected) }
-            return
-          }
-          guard let camera = AVCaptureDevice.default(for: .video),
-            let input = try? AVCaptureDeviceInput(device: camera), self.session.canAddInput(input)
-          else {
-            self.finish(.failure(.unavailable), generation: expected)
-            return
-          }
-          self.session.beginConfiguration()
-          self.session.addInput(input)
-          let output = AVCaptureMetadataOutput()
-          guard self.session.canAddOutput(output) else {
-            self.session.removeInput(input)
-            self.session.commitConfiguration()
-            self.finish(.failure(.unavailable), generation: expected)
-            return
-          }
-          self.session.addOutput(output)
-          output.setMetadataObjectsDelegate(self, queue: self.captureQueue)
-          output.metadataObjectTypes = [.qr]
-          self.session.commitConfiguration()
-          guard self.active, self.generation == expected else {
-            self.teardown()
-            return
-          }
-          DispatchQueue.main.async {
-            let layer = AVCaptureVideoPreviewLayer(session: self.session)
-            layer.videoGravity = .resizeAspectFill
-            layer.frame = self.view.bounds
-            self.view.layer.addSublayer(layer)
-            self.preview = layer
-          }
-          self.session.startRunning()
-          self.captureQueue.asyncAfter(deadline: .now() + 60) {
-            if self.active && self.generation == expected {
-              self.finish(.failure(.cancelled), generation: expected)
-            }
+    guard let token = run.begin() else { return }
+    captureQueue.async { [weak self] in
+      guard let self, self.run.isCurrent(token) else { return }
+      self.activeToken = token
+      let timeout = DispatchWorkItem { [weak self] in
+        self?.finish(.failure(.cancelled), token: token)
+      }
+      self.timeoutWorkItem = timeout
+      self.captureQueue.asyncAfter(deadline: .now() + 60, execute: timeout)
+      switch AVCaptureDevice.authorizationStatus(for: .video) {
+      case .authorized:
+        self.configure(token: token)
+      case .notDetermined:
+        AVCaptureDevice.requestAccess(for: .video) { [weak self] allowed in
+          guard let self else { return }
+          self.captureQueue.async { [weak self] in
+            guard let self, self.run.isCurrent(token) else { return }
+            if allowed { self.configure(token: token) }
+            else { self.finish(.failure(.unavailable), token: token) }
           }
         }
+      default:
+        self.finish(.failure(.unavailable), token: token)
       }
     }
   }
-  func stop() {
-    if Thread.isMainThread {
-      completion = nil
-    } else {
-      DispatchQueue.main.sync { self.completion = nil }
-    }
-    captureQueue.async {
-      self.generation += 1
-      self.active = false
-      self.teardown()
-    }
-  }
-  private func teardown() {
-    if session.isRunning { session.stopRunning() }
+
+  private func configure(token: Int) {
+    guard run.isCurrent(token),
+      let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+      let input = try? AVCaptureDeviceInput(device: camera)
+    else { finish(.failure(.unavailable), token: token); return }
     session.beginConfiguration()
-    session.inputs.forEach(session.removeInput)
-    session.outputs.forEach(session.removeOutput)
+    guard session.canSetSessionPreset(.vga640x480), session.canAddInput(input) else {
+      session.commitConfiguration()
+      finish(.failure(.unavailable), token: token)
+      return
+    }
+    session.sessionPreset = .vga640x480
+    session.addInput(input)
+    let output = AVCaptureMetadataOutput()
+    guard session.canAddOutput(output) else {
+      session.commitConfiguration()
+      finish(.failure(.unavailable), token: token)
+      return
+    }
+    session.addOutput(output)
     session.commitConfiguration()
-    DispatchQueue.main.async {
-      self.preview?.removeFromSuperlayer()
-      self.preview = nil
+    guard run.isCurrent(token) else { teardownCapture(); return }
+    // Assigning an unavailable metadata type raises an Objective-C exception.
+    guard output.availableMetadataObjectTypes.contains(.qr) else {
+      finish(.failure(.unavailable), token: token)
+      return
+    }
+    output.setMetadataObjectsDelegate(self, queue: captureQueue)
+    output.metadataObjectTypes = [.qr]
+    session.startRunning()
+    guard run.isCurrent(token) else { teardownCapture(); return }
+    DispatchQueue.main.async { [weak self] in
+      guard let self, self.run.isCurrent(token), self.preview == nil else { return }
+      let layer = AVCaptureVideoPreviewLayer(session: self.session)
+      layer.videoGravity = .resizeAspectFill
+      layer.frame = self.view.bounds
+      self.view.layer.addSublayer(layer)
+      self.preview = layer
     }
   }
-  private func finish(_ result: Result<String, NativeEnrollmentFailure>, generation expected: Int) {
-    guard active, generation == expected else { return }
-    active = false
-    generation += 1
-    teardown()
-    DispatchQueue.main.async {
+
+  func stop() {
+    let needsTeardown = run.stop() // Invalidate callbacks before capture-queue teardown.
+    completion = nil
+    removePreview()
+    if needsTeardown { captureQueue.async { [self] in teardownCapture() } }
+  }
+  private func removePreview() {
+    preview?.removeFromSuperlayer()
+    preview = nil
+  }
+  private func teardownCapture() {
+    timeoutWorkItem?.cancel()
+    timeoutWorkItem = nil
+    activeToken = nil
+    for case let output as AVCaptureMetadataOutput in session.outputs {
+      output.setMetadataObjectsDelegate(nil, queue: nil)
+    }
+    if session.isRunning { session.stopRunning() }
+    if !session.inputs.isEmpty || !session.outputs.isEmpty {
+      session.beginConfiguration()
+      session.outputs.forEach(session.removeOutput)
+      session.inputs.forEach(session.removeInput)
+      session.commitConfiguration()
+    }
+  }
+  private func finish(_ result: Result<String, NativeEnrollmentFailure>, token: Int) {
+    guard run.finish(token) else { return }
+    teardownCapture() // Release camera buffers and delegate before notifying SwiftUI.
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      self.removePreview()
       guard let completion = self.completion else { return }
       self.completion = nil
       completion(result)
@@ -281,8 +350,9 @@ private final class ScannerController: UIViewController, AVCaptureMetadataOutput
     _ output: AVCaptureMetadataOutput, didOutput metadataObjects: [AVMetadataObject],
     from connection: AVCaptureConnection
   ) {
-    guard let value = (metadataObjects.first as? AVMetadataMachineReadableCodeObject)?.stringValue
+    guard let token = activeToken, run.isCurrent(token),
+      let value = (metadataObjects.first as? AVMetadataMachineReadableCodeObject)?.stringValue
     else { return }
-    finish(.success(value), generation: generation)
+    finish(.success(value), token: token)
   }
 }

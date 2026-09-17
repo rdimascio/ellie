@@ -3,6 +3,29 @@ import XCTest
 @testable import Ellie
 
 final class NativeEnrollmentATSTests: XCTestCase {
+  func testScannerDismissalInvalidatesDelayedAuthorizationPreviewAndTimeout() throws {
+    let run = NativeScannerRunGate()
+    let token = try XCTUnwrap(run.begin())
+    XCTAssertNil(run.begin(), "Repeated viewDidAppear must not configure another capture pipeline")
+    let delayedAuthorization = { run.isCurrent(token) }
+    let delayedPreview = { run.isCurrent(token) }
+    let delayedTimeout = { run.finish(token) }
+    XCTAssertTrue(run.stop())
+    XCTAssertFalse(delayedAuthorization())
+    XCTAssertFalse(delayedPreview())
+    XCTAssertFalse(delayedTimeout())
+    XCTAssertNil(run.begin(), "A dismissed controller cannot restart its camera")
+  }
+
+  func testScannerQrResultCommitsOnceBeforeDismissal() throws {
+    let run = NativeScannerRunGate()
+    let token = try XCTUnwrap(run.begin())
+    XCTAssertTrue(run.finish(token))
+    XCTAssertFalse(run.finish(token), "Duplicate metadata must not deliver another code")
+    XCTAssertFalse(run.isCurrent(token), "Queued preview must not revive after the code")
+    XCTAssertFalse(run.stop())
+  }
+
   func testRequestedAccessDescriptionsCoverBrowserOnlyMixedAndInvalidScopes() {
     XCTAssertEqual(
       nativeEnrollmentAccessDescription(

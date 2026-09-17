@@ -1,11 +1,164 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { defaults } from "@ellie/config";
 import { CAPABILITIES, DESKTOP_CAPABILITIES } from "@ellie/protocol";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 import { doctor, doctorService } from "../apps/cli/src/diagnostics.ts";
+import {
+  packagedServiceContext,
+  packagedServiceStatus,
+} from "../apps/cli/src/packaged-service-status.ts";
 import type { DiagnosticDependencies } from "../apps/cli/src/diagnostics.ts";
+
+const packagedReleaseID = `0.1.0-${"a".repeat(40)}-arm64`;
+const packagedRoot = join("/synthetic/releases", packagedReleaseID);
+const packagedModule = pathToFileURL(
+  join(packagedRoot, "payload/lib/ellie/apps/cli/src/packaged-service-status.ts"),
+).href;
+const packagedNode = join(packagedRoot, "payload/bin/node");
+
+test("packaged doctor uses only its own staged Node and shipped read-only installer", async () => {
+  assert.equal(packagedServiceContext(import.meta.url, process.execPath), undefined);
+  assert.throws(() => packagedServiceContext(packagedModule, "/usr/local/bin/node"));
+  const invalidRelease = join(
+    "/synthetic/releases",
+    `${"1".repeat(33)}.0.0-${"a".repeat(40)}-arm64`,
+  );
+  assert.throws(() =>
+    packagedServiceContext(
+      pathToFileURL(
+        join(invalidRelease, "payload/lib/ellie/apps/cli/src/packaged-service-status.ts"),
+      ).href,
+      join(invalidRelease, "payload/bin/node"),
+    ),
+  );
+  const context = packagedServiceContext(packagedModule, packagedNode);
+  assert.deepEqual(context, {
+    installer: join(packagedRoot, "payload/bin/ellie-service-installer"),
+    releaseID: packagedReleaseID,
+  });
+  const x64Release = packagedRoot.replace(/-arm64$/, "-x64");
+  assert.deepEqual(
+    packagedServiceContext(
+      pathToFileURL(join(x64Release, "payload/lib/ellie/apps/cli/src/packaged-service-status.ts"))
+        .href,
+      join(x64Release, "payload/bin/node"),
+    ),
+    {
+      installer: join(x64Release, "payload/bin/ellie-service-installer"),
+      releaseID: packagedReleaseID.replace(/-arm64$/, "-x64"),
+    },
+  );
+  assert.ok(context);
+  const calls: Array<[string, string[]]> = [];
+  const status = await packagedServiceStatus("coordinator", context, async (file, args) => {
+    calls.push([file, args]);
+    return {
+      code: 0,
+      stdout: `${JSON.stringify({
+        enabled: true,
+        loadedFromSelectedPlist: true,
+        releaseID: packagedReleaseID,
+        role: "coordinator",
+        selected: true,
+        state: "running",
+      })}\n`,
+    };
+  });
+  assert.deepEqual(calls, [[context.installer, ["status", "coordinator"]]]);
+  assert.deepEqual(status, {
+    role: "coordinator",
+    installed: true,
+    guiSession: true,
+    loaded: true,
+    enabled: true,
+    state: "running",
+  });
+});
+
+test("packaged doctor rejects unavailable, unselected, foreign, or malformed native status", async () => {
+  const context = packagedServiceContext(packagedModule, packagedNode)!;
+  const selected = {
+    role: "node",
+    selected: true,
+    releaseID: packagedReleaseID,
+    enabled: true,
+    state: "running",
+    loadedFromSelectedPlist: true,
+  };
+  const invalid: Array<{ code: number; stdout: string }> = [
+    { code: 1, stdout: JSON.stringify(selected) },
+    { code: 0, stdout: "not-json" },
+    { code: 0, stdout: JSON.stringify({ role: "node", selected: false, state: "unselected" }) },
+    {
+      code: 0,
+      stdout: JSON.stringify({ ...selected, releaseID: `0.1.0-${"b".repeat(40)}-arm64` }),
+    },
+    { code: 0, stdout: JSON.stringify({ ...selected, loadedFromSelectedPlist: false }) },
+    { code: 0, stdout: JSON.stringify({ ...selected, state: "unavailable" }) },
+    { code: 0, stdout: JSON.stringify({ ...selected, enabled: "true" }) },
+    { code: 0, stdout: JSON.stringify({ ...selected, extra: true }) },
+    { code: 0, stdout: "x".repeat(1025) },
+  ];
+  for (const response of invalid) {
+    let calls = 0;
+    await assert.rejects(() =>
+      packagedServiceStatus("node", context, async (file, args) => {
+        calls++;
+        assert.equal(file, context.installer);
+        assert.deepEqual(args, ["status", "node"]);
+        return response;
+      }),
+    );
+    assert.equal(calls, 1);
+  }
+  const waiting = await packagedServiceStatus("node", context, async () => ({
+    code: 0,
+    stdout: JSON.stringify({ ...selected, state: "waiting" }),
+  }));
+  assert.equal(waiting.loaded, true);
+  assert.equal(waiting.state, "waiting");
+  const stopped = await packagedServiceStatus("node", context, async () => ({
+    code: 0,
+    stdout: JSON.stringify({
+      ...selected,
+      enabled: false,
+      state: "stopped",
+      loadedFromSelectedPlist: false,
+    }),
+  }));
+  assert.equal(stopped.enabled, false);
+  assert.equal(stopped.loaded, false);
+});
+
+test("role doctor uses validated packaged status without changing other diagnostics", async () => {
+  const f = await fixture("coordinator");
+  const context = packagedServiceContext(packagedModule, packagedNode)!;
+  const report = await doctorService("coordinator", {
+    ...f.deps,
+    serviceStatus: (role) =>
+      packagedServiceStatus(role, context, async (file, args) => {
+        assert.equal(file, context.installer);
+        assert.deepEqual(args, ["status", "coordinator"]);
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            role,
+            selected: true,
+            releaseID: packagedReleaseID,
+            enabled: true,
+            state: "running",
+            loadedFromSelectedPlist: true,
+          }),
+        };
+      }),
+  });
+  assert.equal(report.ok, true, report.lines.join("\n"));
+  assert.ok(report.lines.includes("PASS Coordinator LaunchAgent is installed and running."));
+});
 
 async function fixture(role: "coordinator" | "node") {
   const generated = await generateCertificate();
@@ -58,6 +211,7 @@ async function fixture(role: "coordinator" | "node") {
       state: "running",
       pid: 123,
     }),
+    serviceCredentialState: async () => "none",
     client: () => ({
       call: async () =>
         role === "node"
@@ -99,6 +253,74 @@ test("role diagnostics cover private state, Keychain, certificate, helper, GUI, 
       ),
     );
   }
+});
+
+test("attention diagnostic refuses a second Keychain query", async () => {
+  const f = await fixture("node");
+  let credentialReads = 0;
+  const report = await doctorService("node", {
+    ...f.deps,
+    serviceCredentialState: async () => "needs_attention",
+    keychainGet: async () => {
+      credentialReads += 1;
+      throw new Error("synthetic private account");
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.equal(report.lines.length, 1);
+  assert.match(report.lines[0]!, /needs credential attention/);
+  assert.doesNotMatch(report.lines[0]!, /synthetic private account/);
+});
+
+test("an unfinished startup diagnostic also refuses a second Keychain query", async () => {
+  const f = await fixture("coordinator");
+  let credentialReads = 0;
+  const report = await doctorService("coordinator", {
+    ...f.deps,
+    serviceCredentialState: async () => "starting",
+    keychainGet: async () => {
+      credentialReads += 1;
+      throw new Error("synthetic private account");
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.match(report.lines[0]!, /not reported startup readiness/);
+});
+
+test("unreadable attention records fail closed before Keychain", async () => {
+  const f = await fixture("node");
+  let credentialReads = 0;
+  const report = await doctorService("node", {
+    ...f.deps,
+    serviceCredentialState: async () => {
+      throw new Error("synthetic private path");
+    },
+    keychainGet: async () => {
+      credentialReads += 1;
+      return "synthetic secret";
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.doesNotMatch(report.lines.join("\n"), /synthetic private path|synthetic secret/);
+});
+
+test("missing startup records in a running service also skip Keychain", async () => {
+  const f = await fixture("node");
+  let credentialReads = 0;
+  const report = await doctorService("node", {
+    ...f.deps,
+    serviceCredentialState: async () => "unknown",
+    keychainGet: async () => {
+      credentialReads += 1;
+      return "synthetic secret";
+    },
+  });
+  assert.equal(report.ok, false);
+  assert.equal(credentialReads, 0);
+  assert.match(report.lines[0]!, /no complete startup record/);
 });
 
 test("diagnostic failures and optional inference warnings stay redacted", async () => {

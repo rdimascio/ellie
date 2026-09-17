@@ -203,7 +203,9 @@ private func disabled(_ output: String, label: String) throws -> Bool {
   var lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
   while lines.first == "" { lines.removeFirst() }
   while lines.last == "" { lines.removeLast() }
-  guard lines.first == "disabled services = {", lines.last == "}", lines.count <= 258 else {
+  let unindented = lines.first == "disabled services = {" && lines.last == "}"
+  let indented = lines.first == "\tdisabled services = {" && lines.last == "\t}"
+  guard (unindented || indented), lines.count <= 258 else {
     throw LifecycleFailure.unavailable
   }
   for line in lines.dropFirst().dropLast() {
@@ -275,7 +277,12 @@ private func observation(
       if let separator = content.range(of: " = ") {
         let nestedKey = String(content[..<separator.lowerBound])
         let nestedField = String(content[separator.upperBound...])
-        if critical.contains(nestedKey) { throw LifecycleFailure.unavailable }
+        // launchctl may report coalition metadata with its own type/state fields.
+        // They are data at depth two, never the service's top-level authority fields.
+        let coalitionField =
+          depth == 2 && (block == "resource coalition" || block == "jetsam coalition")
+          && (nestedKey == "type" || nestedKey == "state") && nestedField != "{"
+        if critical.contains(nestedKey) && !coalitionField { throw LifecycleFailure.unavailable }
         if nestedField == "{" {
           depth += 1
           guard depth <= 4 else { throw LifecycleFailure.unavailable }
