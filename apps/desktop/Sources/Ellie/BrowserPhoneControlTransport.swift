@@ -9,6 +9,17 @@ struct BrowserPhoneItem: Equatable, Identifiable, Sendable {
   let label: String
   let state: String?
 }
+enum BrowserPhoneYouTubePage: String, Equatable, Sendable {
+  case home, results, watch, login, unsupported
+}
+enum BrowserPhonePlayback: String, Equatable, Sendable {
+  case playing, paused, unavailable, ambiguous
+}
+struct BrowserPhoneSite: Equatable, Sendable {
+  let page: BrowserPhoneYouTubePage
+  let playback: BrowserPhonePlayback
+  let currentTimeSeconds: Double?
+}
 struct BrowserPhonePage: Equatable, Sendable {
   let nodeID: String
   let source: BrowserPhoneSource
@@ -16,6 +27,20 @@ struct BrowserPhonePage: Equatable, Sendable {
   let title: String?
   let summary: String?
   let items: [BrowserPhoneItem]
+  let site: BrowserPhoneSite?
+
+  init(
+    nodeID: String, source: BrowserPhoneSource, revision: String, title: String?,
+    summary: String?, items: [BrowserPhoneItem], site: BrowserPhoneSite? = nil
+  ) {
+    self.nodeID = nodeID
+    self.source = source
+    self.revision = revision
+    self.title = title
+    self.summary = summary
+    self.items = items
+    self.site = site
+  }
 }
 enum BrowserPhoneResponse: Equatable, Sendable {
   case status(source: BrowserPhoneSource, connected: Bool, revision: String?)
@@ -173,7 +198,7 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     guard status == "completed",
       Set(browser.keys) == Set(["source", "operation", "status", "revision", "view"]),
       let view = browser["view"] as? [String: Any],
-      Set(view.keys).isSubset(of: ["title", "summary", "items"]),
+      Set(view.keys).isSubset(of: ["title", "summary", "items", "site"]),
       view.keys.contains("items"), let rawItems = view["items"] as? [[String: Any]],
       rawItems.count <= 64
     else { throw PhoneControlFailure.invalidResponse }
@@ -195,10 +220,20 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     guard title.map({ validBrowserText($0, maximum: 500) }) ?? true,
       summary.map({ validBrowserText($0, maximum: 2_000) }) ?? true
     else { throw PhoneControlFailure.invalidResponse }
+    let site: BrowserPhoneSite?
+    if view.keys.contains("site") {
+      let rawSite = view["site"]
+      guard let value = rawSite as? [String: Any] else {
+        throw PhoneControlFailure.invalidResponse
+      }
+      site = try decodeBrowserPhoneSite(value)
+    } else {
+      site = nil
+    }
     return .page(
       BrowserPhonePage(
         nodeID: nodeID, source: source, revision: revision, title: title, summary: summary,
-        items: items))
+        items: items, site: site))
   }
   guard operation == "command", Set(browser.keys) == Set(["source", "operation", "status", "revision"]),
     let commandStatus = BrowserPhoneCommandStatus(rawValue: status)
@@ -208,6 +243,29 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     throw PhoneControlFailure.invalidResponse
   }
   return .command(source: source, status: commandStatus, revision: revision)
+}
+
+private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPhoneSite {
+  guard Set(value.keys) == Set(["provider", "page", "playback"])
+      || Set(value.keys) == Set(["provider", "page", "playback", "currentTimeSeconds"]),
+    value["provider"] as? String == "youtube",
+    let pageValue = value["page"] as? String,
+    let page = BrowserPhoneYouTubePage(rawValue: pageValue),
+    let playbackValue = value["playback"] as? String,
+    let playback = BrowserPhonePlayback(rawValue: playbackValue),
+    page == .watch || playback == .unavailable
+  else { throw PhoneControlFailure.invalidResponse }
+  let time: Double?
+  if let rawTime = value["currentTimeSeconds"] {
+    guard playback == .playing || playback == .paused,
+      let number = rawTime as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+      number.doubleValue.isFinite, (0...86_400).contains(number.doubleValue)
+    else { throw PhoneControlFailure.invalidResponse }
+    time = number.doubleValue
+  } else {
+    time = nil
+  }
+  return BrowserPhoneSite(page: page, playback: playback, currentTimeSeconds: time)
 }
 
 private func validBrowserIdentifier(_ value: String) -> Bool {

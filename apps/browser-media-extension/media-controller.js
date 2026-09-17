@@ -79,7 +79,7 @@
   };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
-    if (c.type === "inspect" || c.type === "play" || c.type === "pause")
+    if (c.type === "inspect" || c.type === "observe" || c.type === "play" || c.type === "pause")
       return exact(c, ["type", "actionId"]);
     if (c.type === "cancel")
       return exact(c, ["type", "actionId", "targetActionId"]) && uuid(c.targetActionId);
@@ -116,6 +116,67 @@
     if (values.length !== 1) throw new Error(values.length ? "ambiguous_video" : "video_not_found");
     return values[0];
   };
+  const siteObservation = () => {
+    if (!youtubeOrigins.has(location.origin)) throw new Error("unsupported_page");
+    const url = new URL(location.href);
+    const page =
+      url.pathname === "/"
+        ? "home"
+        : url.pathname === "/results" &&
+            url.searchParams.getAll("search_query").length === 1 &&
+            Boolean(url.searchParams.get("search_query")?.trim())
+          ? "results"
+          : url.pathname === "/watch" &&
+              url.searchParams.getAll("v").length === 1 &&
+              /^[A-Za-z0-9_-]{11}$/.test(url.searchParams.get("v") ?? "")
+            ? "watch"
+            : url.pathname === "/signin"
+              ? "login"
+              : "unsupported";
+    if (page !== "watch") return { provider: "youtube", page, playback: "unavailable" };
+    const videos = [...document.querySelectorAll("video")];
+    if (videos.length > 16) return { provider: "youtube", page, playback: "ambiguous" };
+    const rendered = videos.filter((video) => {
+      const rect = video.getBoundingClientRect();
+      if (
+        rect.width <= 2 ||
+        rect.height <= 2 ||
+        rect.bottom <= 0 ||
+        rect.top >= innerHeight ||
+        rect.right <= 0 ||
+        rect.left >= innerWidth
+      )
+        return false;
+      for (let node = video; node && node !== document.documentElement; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          Number(style.opacity) === 0
+        )
+          return false;
+      }
+      return true;
+    });
+    if (rendered.length > 1) return { provider: "youtube", page, playback: "ambiguous" };
+    if (rendered.length === 0) return { provider: "youtube", page, playback: "unavailable" };
+    // A visible video can be an advertisement. Never identify it as the selected title.
+    if (document.querySelector(".html5-video-player.ad-showing, [aria-modal='true']"))
+      return { provider: "youtube", page, playback: "ambiguous" };
+    const video = rendered[0];
+    if (video.error || video.readyState < 2)
+      return { provider: "youtube", page, playback: "unavailable" };
+    const playback = video.paused || video.ended ? "paused" : "playing";
+    const time = video.currentTime;
+    return {
+      provider: "youtube",
+      page,
+      playback,
+      ...(Number.isFinite(time) && time >= 0 && time <= 86_400
+        ? { currentTimeSeconds: Math.round(time * 10) / 10 }
+        : {}),
+    };
+  };
   async function dispatch(command, expectedUrl, deadline) {
     if (!allowedOrigins.has(location.origin)) throw new Error("unsupported_page");
     if (location.href !== expectedUrl) throw new Error("page_changed");
@@ -129,10 +190,14 @@
     if (seen.has(command.actionId)) throw new Error("duplicate_action");
     remember(seen, command.actionId);
     active(command, expectedUrl, deadline);
-    const mutates = command.type !== "inspect";
+    const mutates = command.type !== "inspect" && command.type !== "observe";
     if (mutates && mutation) throw new Error("busy");
     if (mutates) mutation = command.actionId;
     try {
+      if (command.type === "observe") {
+        active(command, expectedUrl, deadline);
+        return siteObservation();
+      }
       if (command.type === "inspect") {
         const snapshotId = crypto.randomUUID();
         const entries = [];

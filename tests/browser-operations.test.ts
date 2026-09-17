@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   BROWSER_WEBMCP_PROTOCOL,
   browserWebMCPAction,
+  browserWebMCPRequest,
   browserWebMCPResultFor,
   browserWebMCPOperationResult,
   result,
@@ -135,6 +136,101 @@ test("browser operation and structured result contracts are closed and bounded",
       },
     }),
   );
+  const observation = {
+    ok: true,
+    message: "Observed.",
+    browser: {
+      source: "accessibility",
+      operation: "read",
+      status: "completed",
+      revision: "a".repeat(64),
+      view: {
+        items: [],
+        site: {
+          provider: "youtube",
+          page: "watch",
+          playback: "paused",
+          currentTimeSeconds: 12.5,
+        },
+      },
+    },
+  };
+  const observed = browserWebMCPOperationResult(observation).browser;
+  assert.equal(observed.operation, "read");
+  if (observed.operation !== "read") throw new Error("Expected a read result.");
+  assert.deepEqual(observed.view.site, observation.browser.view.site);
+  for (const site of [
+    { ...observation.browser.view.site, currentTimeSeconds: 86_401 },
+    { ...observation.browser.view.site, page: "results" },
+    { provider: "youtube", page: "login", playback: "playing" },
+    { provider: "youtube", page: "watch", playback: "ambiguous", currentTimeSeconds: 2 },
+    { ...observation.browser.view.site, extra: true },
+  ])
+    assert.throws(() =>
+      browserWebMCPOperationResult({
+        ...observation,
+        browser: { ...observation.browser, view: { items: [], site } },
+      }),
+    );
+  const inspect = {
+    protocol: BROWSER_WEBMCP_PROTOCOL,
+    id: "read-1",
+    type: "page.inspect",
+    bindingId: "binding-1",
+    documentId: "document-1",
+  };
+  assert.deepEqual(browserWebMCPRequest(inspect), inspect);
+  assert.throws(() => browserWebMCPRequest({ ...inspect, extra: true }));
+  assert.throws(() => browserWebMCPRequest({ ...inspect, documentId: "bad document" }));
+});
+
+test("accessibility page observation requires exact selected binding and a valid bounded site", async () => {
+  const binding = {
+    bindingId: "binding-1",
+    documentId: "document-1",
+    origin: "https://www.youtube.com",
+    url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+    expiresAt: Date.now() + 60_000,
+    availability: "accessibility" as const,
+  };
+  let value: Record<string, unknown> = {
+    bindingId: binding.bindingId,
+    documentId: binding.documentId,
+    url: binding.url,
+    site: { provider: "youtube", page: "watch", playback: "paused", currentTimeSeconds: 2 },
+  };
+  const calls: BrowserWebMCPRequest[] = [];
+  const operations = new BrowserWebMCPOperations(
+    {
+      async request(request) {
+        calls.push(request);
+        return browserWebMCPResultFor(request.id, "ok", value);
+      },
+    },
+    { version: 1, bindings: [] },
+  );
+  assert.deepEqual(
+    await operations.inspectSelectedPage(binding, AbortSignal.timeout(1000)),
+    value.site,
+  );
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.type, "page.inspect");
+  value = { ...value, documentId: "replacement" };
+  await assert.rejects(operations.inspectSelectedPage(binding, AbortSignal.timeout(1000)));
+  value = { ...value, documentId: binding.documentId, url: `${binding.url}&t=3` };
+  await assert.rejects(operations.inspectSelectedPage(binding, AbortSignal.timeout(1000)));
+  value = {
+    ...value,
+    url: binding.url,
+    site: {
+      provider: "youtube",
+      page: "watch",
+      playback: "playing",
+      currentTimeSeconds: Number.POSITIVE_INFINITY,
+    },
+  };
+  await assert.rejects(operations.inspectSelectedPage(binding, AbortSignal.timeout(1000)));
+  assert.equal(calls.length, 4);
 });
 
 test("reviewed browser registry is canonical, private and rejects unsafe authority", async (t) => {
