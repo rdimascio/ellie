@@ -249,6 +249,7 @@ struct IOSDashboardList: View {
 private struct IOSDashboardDetail: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: DashboardStore
+    @StateObject private var choresStore = ChoresStore()
     let dashboardID: String
     @State private var editing = false
     @State private var adding = false
@@ -264,7 +265,7 @@ private struct IOSDashboardDetail: View {
             LazyVStack(spacing: 16) {
                 if let dashboard {
                     ForEach(dashboard.widgets) { widget in
-                        IOSWidgetCard(widget: widget, editing: editing,
+                        IOSWidgetCard(widget: widget, choresStore: choresStore, editing: editing,
                             edit: { editedWidget = widget },
                             earlier: { select(); store.moveWidget(id: widget.id, offset: -1) },
                             later: { select(); store.moveWidget(id: widget.id, offset: 1) },

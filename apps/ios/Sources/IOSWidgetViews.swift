@@ -8,7 +8,8 @@ extension WidgetKind {
 }
 
 struct IOSWidgetCard: View {
-    let widget: DashboardWidget; let editing: Bool; let edit: () -> Void; let earlier: () -> Void; let later: () -> Void; let remove: () -> Void; let isFirst: Bool; let isLast: Bool
+    let widget: DashboardWidget; @ObservedObject var choresStore: ChoresStore
+    let editing: Bool; let edit: () -> Void; let earlier: () -> Void; let later: () -> Void; let remove: () -> Void; let isFirst: Bool; let isLast: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Label(widget.title, systemImage: widget.type.iosSymbol).font(.headline); Spacer() }
@@ -22,6 +23,8 @@ struct IOSWidgetCard: View {
                 }.buttonStyle(.plain).accessibilityIdentifier("note-\(widget.id)")
             } else if widget.type == .playlist {
                 IOSPlaylistWidget(widget: widget, configure: edit)
+            } else if widget.type == .chores {
+                IOSChoresWidget(store: choresStore)
             } else { ContentUnavailableView("Not connected", systemImage: widget.type.iosSymbol, description: Text("This widget is ready for a future provider connection.")) }
             if editing {
                 HStack {
