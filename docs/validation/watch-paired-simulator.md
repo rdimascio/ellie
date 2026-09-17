@@ -26,6 +26,11 @@ The runner refuses an existing output directory and records source hashes, the e
 versions, and Xcode result bundles. It retains one direct child handle and finite deadline for each
 command; signals use the same bounded stop/reap path. It accepts only exact UUIDs from its two
 Simulator creates, deletes only those IDs, and checks a final read-only inventory for their absence.
+Before each reachable Watch test, the DEBUG iPhone fixture must publish bounded readiness evidence
+for an activated session, paired and installed Watch, foreground app, and the exact expected fixture
+Mac. Watch reachability is recorded but cannot be required until the Watch app launches. A missing
+or malformed readiness record fails within 15 seconds and still enters owned Simulator cleanup;
+the Watch UI test includes a fixed activation/reachability diagnostic if its Read control stays disabled.
 If child or cleanup certainty is lost, it stops issuing commands and retains the IDs and evidence for
 owner inspection. A test counts only when `xcresulttool` reports exactly one
 executed pass with zero failed or skipped tests. The expected sequence is a fresh observed Mac A

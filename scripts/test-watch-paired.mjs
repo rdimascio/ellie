@@ -7,6 +7,7 @@ import { performance } from "node:perf_hooks";
 import { resolve, dirname, join, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createOwnedProcessRunner, ownedCleanupTargets } from "./watch-paired-owned-process.mjs";
+import { parsePhoneReadiness, waitForPhoneReadiness } from "./watch-paired-readiness.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const project = join(root, "apps/ios/EllieIOS.xcodeproj");
@@ -31,8 +32,11 @@ const commands = createOwnedProcessRunner({
 });
 let phoneID;
 let watchID;
+let readinessPath;
 let creationUncertain = false;
 for (const name of ["scripts/test-watch-paired.mjs", "scripts/watch-paired-owned-process.mjs",
+  "scripts/watch-paired-readiness.mjs",
+  "scripts/test-watch-paired-readiness.test.mjs",
   "scripts/test-watch-paired-process.test.mjs", "apps/ios/Sources/EllieIOSApp.swift",
   "apps/ios/Sources/WatchMediaPhoneBridge.swift", "apps/ios/Sources/WatchMediaPhoneController.swift",
   "apps/ios/Sources/WatchPairedUITestFixture.swift", "apps/watch/Sources/WatchMediaView.swift",
@@ -58,6 +62,17 @@ async function stage(name, file, args, settings = {}) {
   }
 }
 const simctl = (name, args, settings) => stage(name, "xcrun", ["simctl", ...args], settings);
+async function readyStage(name, target) {
+  const begun = performance.now();
+  try {
+    const state = await waitForPhoneReadiness(readinessPath, target);
+    receipt.phoneReadiness = state;
+    receipt.stages.push({ name, ok: true, elapsedMs: Math.round(performance.now() - begun) }); persist();
+  } catch (error) {
+    receipt.stages.push({ name, ok: false, elapsedMs: Math.round(performance.now() - begun), error: error.message }); persist();
+    throw error;
+  }
+}
 const uuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 function createdID(value, kind) {
   if (!uuid.test(value)) {
@@ -164,7 +179,9 @@ try {
   await simctl("install-watch", ["install", watchID, watchApp], { timeout: 120_000 });
   const container = await simctl("phone-container", ["get_app_container", phoneID, bundle, "data"]);
   const eventPath = join(container, "Library/Application Support/Ellie/WatchPaired", `${runID}.jsonl`);
+  readinessPath = join(container, "Library/Application Support/Ellie/WatchPaired", `${runID}.readiness.json`);
   await simctl("launch-A", ["launch", phoneID, bundle, "--ellie-ui-watch-paired-fixture", runID]);
+  await readyStage("phone-ready-A", "watch-fixture-mac-a");
   await watchTest("testTargetAReadThenOnePlayIsUnknownWithoutReplay");
   let events = await waitForEvent(eventPath, "play", "watch-fixture-mac-a");
   if (!events.some((row) => row.operation === "read" && row.target === "watch-fixture-mac-a")) {
@@ -173,6 +190,7 @@ try {
   await simctl("terminate-phone", ["terminate", phoneID, bundle]);
   await watchTest("testUnreachablePhoneHasNoAction");
   await simctl("relaunch-B", ["launch", phoneID, bundle, "--ellie-ui-watch-paired-fixture", runID, "--ellie-ui-watch-target-b"]);
+  await readyStage("phone-ready-B", "watch-fixture-mac-b");
   await watchTest("testTargetBNeedsFreshReadAndShowsSelectedMac");
   events = await waitForEvent(eventPath, "read", "watch-fixture-mac-b");
   if (!events.some((row) => row.operation === "read" && row.target === "watch-fixture-mac-b") ||
@@ -182,6 +200,10 @@ try {
   receipt.events = events;
   receipt.status = "passed-synthetic-backend-real-paired-ui-wcsession";
 } catch (error) {
+  if (readinessPath && existsSync(readinessPath)) {
+    try { receipt.phoneReadinessAtFailure = parsePhoneReadiness(readFileSync(readinessPath, "utf8")); }
+    catch { receipt.phoneReadinessAtFailure = "invalid"; }
+  }
   primary = error;
   receipt.error = error.message;
   receipt.status = "failed";

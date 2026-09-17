@@ -29,13 +29,24 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     disable()
     guard available, controller.enable(credential: credential, node: node) else { return false }
     enabledTargetID = node.id
+    recordPairedFixtureReadiness()
     return true
   }
 
   func disable() {
     controller.disable()
     enabledTargetID = nil
+    recordPairedFixtureReadiness()
   }
+
+  #if DEBUG
+  func recordPairedFixtureReadiness() {
+    guard WCSession.isSupported() else { return }
+    WatchPairedUITestReadiness.record(session: WCSession.default, enabledTargetID: enabledTargetID)
+  }
+  #else
+  private func recordPairedFixtureReadiness() {}
+  #endif
 
   #if DEBUG
   /// The paired-Simulator fixture changes only the phone's backend. WCSession and this delegate
@@ -60,6 +71,10 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
   }
 
   nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+    Task { @MainActor in self.updateAvailability(session) }
+  }
+
+  nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
     Task { @MainActor in self.updateAvailability(session) }
   }
 
@@ -97,5 +112,6 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     available = session.activationState == .activated && session.isPaired
       && session.isWatchAppInstalled
     if !available { disable() }
+    recordPairedFixtureReadiness()
   }
 }

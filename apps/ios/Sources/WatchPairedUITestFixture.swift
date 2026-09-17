@@ -1,6 +1,56 @@
 #if DEBUG
 import Foundation
 import SwiftUI
+import UIKit
+import WatchConnectivity
+
+/// Fixed, payload-free evidence for the opt-in paired Simulator runner. It is never enabled by
+/// the normal app and does not change Watch authority or transport behavior.
+@MainActor
+enum WatchPairedUITestReadiness {
+  private struct Snapshot: Encodable {
+    let version = 1
+    let activation: String
+    let paired: Bool
+    let watchAppInstalled: Bool
+    let reachable: Bool
+    let enabledTarget: String
+    let foreground: Bool
+    let recordedAtMilliseconds: Int64
+  }
+
+  static func record(session: WCSession, enabledTargetID: String?) {
+    let arguments = ProcessInfo.processInfo.arguments
+    guard let marker = arguments.firstIndex(of: "--ellie-ui-watch-paired-fixture"),
+          arguments.indices.contains(marker + 1),
+          UUID(uuidString: arguments[marker + 1]) != nil else { return }
+    let activation: String
+    switch session.activationState {
+    case .activated: activation = "activated"
+    case .inactive: activation = "inactive"
+    case .notActivated: activation = "not_activated"
+    @unknown default: activation = "unknown"
+    }
+    let snapshot = Snapshot(
+      activation: activation, paired: session.isPaired,
+      watchAppInstalled: session.isWatchAppInstalled, reachable: session.isReachable,
+      enabledTarget: enabledTargetID ?? "",
+      foreground: UIApplication.shared.applicationState == .active,
+      recordedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000))
+    let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    let directory = support.appendingPathComponent("Ellie/WatchPaired")
+    let file = directory.appendingPathComponent("\(arguments[marker + 1]).readiness.json")
+    do {
+      let data = try JSONEncoder().encode(snapshot)
+      guard data.count <= 512 else { return }
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try data.write(to: file, options: .atomic)
+      try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+    } catch {
+      // The runner fails its readiness prerequisite rather than treating missing evidence as ready.
+    }
+  }
+}
 
 /// Only the inventory and browser result are synthetic. The installed iPhone and Watch apps
 /// still exchange the production WatchMediaRequest/Reply through their real WCSession delegates.
@@ -46,6 +96,7 @@ private final class WatchPairedUITestFixture {
 }
 
 struct WatchPairedUITestFixtureView: View {
+  @Environment(\.scenePhase) private var scenePhase
   @ObservedObject private var bridge = WatchMediaPhoneBridge.shared
   private let fixture = WatchPairedUITestFixture.shared
   @State private var installed = false
@@ -62,6 +113,7 @@ struct WatchPairedUITestFixtureView: View {
     .onChange(of: bridge.available) { _, available in
       if available { configure() }
     }
+    .onChange(of: scenePhase) { _, _ in bridge.recordPairedFixtureReadiness() }
   }
 
   private func configure() {
@@ -73,6 +125,7 @@ struct WatchPairedUITestFixtureView: View {
     if bridge.available && bridge.enabledTargetID != fixture.target.id {
       _ = bridge.enable(credential: fixture.credential, node: fixture.target)
     }
+    bridge.recordPairedFixtureReadiness()
   }
 }
 

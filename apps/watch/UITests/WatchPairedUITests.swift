@@ -5,10 +5,12 @@ import XCTest
 final class WatchPairedUITests: XCTestCase {
   func testTargetAReadThenOnePlayIsUnknownWithoutReplay() {
     let app = XCUIApplication()
+    app.launchArguments = ["--ellie-watch-paired-diagnostic"]
     app.launch()
     let read = app.buttons["watch-read"]
     XCTAssertTrue(read.waitForExistence(timeout: 15))
-    XCTAssertTrue(waitForEnabled(read, timeout: 25), "WCSession did not reach the paired iPhone")
+    XCTAssertTrue(waitForEnabled(read, timeout: 25),
+                  "WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
     read.tap()
     let title = app.staticTexts["watch-observed-title"]
     XCTAssertTrue(title.waitForExistence(timeout: 15))
@@ -26,10 +28,12 @@ final class WatchPairedUITests: XCTestCase {
 
   func testTargetBNeedsFreshReadAndShowsSelectedMac() {
     let app = XCUIApplication()
+    app.launchArguments = ["--ellie-watch-paired-diagnostic"]
     app.launch()
     let read = app.buttons["watch-read"]
     XCTAssertTrue(read.waitForExistence(timeout: 15))
-    XCTAssertTrue(waitForEnabled(read, timeout: 25))
+    XCTAssertTrue(waitForEnabled(read, timeout: 25),
+                  "WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
     XCTAssertFalse(app.buttons["watch-play"].isEnabled)
     read.tap()
     let title = app.staticTexts["watch-observed-title"]
@@ -41,6 +45,7 @@ final class WatchPairedUITests: XCTestCase {
 
   func testUnreachablePhoneHasNoAction() {
     let app = XCUIApplication()
+    app.launchArguments = ["--ellie-watch-paired-diagnostic"]
     app.launch()
     let read = app.buttons["watch-read"]
     XCTAssertTrue(read.waitForExistence(timeout: 15))

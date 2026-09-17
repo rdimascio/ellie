@@ -8,6 +8,9 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   @Published private(set) var observation: WatchMediaObservation?
   @Published private(set) var waiting = false
   @Published private(set) var reachable = false
+  #if DEBUG
+  @Published private(set) var pairedDiagnostic = "supported=unknown activation=unknown reachable=false foreground=false"
+  #endif
 
   private var pendingID: String?
   private var pendingOperation: WatchMediaOperation?
@@ -20,7 +23,10 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
 
   func activate() {
     foreground = true
-    guard WCSession.isSupported() else { return }
+    guard WCSession.isSupported() else {
+      updatePairedDiagnostic(nil)
+      return
+    }
     let session = WCSession.default
     if !activated {
       activated = true
@@ -33,6 +39,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   func suspend() {
     foreground = false
     reachable = false
+    updatePairedDiagnostic(WCSession.isSupported() ? WCSession.default : nil)
     if let pendingOperation { finishUncertain(pendingOperation) }
     else {
       observation = nil
@@ -132,12 +139,27 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
 
   private func updateReachability(_ session: WCSession) {
     reachable = foreground && session.activationState == .activated && session.isReachable
+    updatePairedDiagnostic(session)
     if !reachable {
       let operation = pendingOperation
       observation = nil
       if let operation { finishUncertain(operation) }
       else { status = "The iPhone is unreachable. Open Ellie on iPhone, then read again." }
     }
+  }
+
+  private func updatePairedDiagnostic(_ session: WCSession?) {
+    #if DEBUG
+    let activation: String
+    switch session?.activationState {
+    case .activated: activation = "activated"
+    case .inactive: activation = "inactive"
+    case .notActivated: activation = "not_activated"
+    case nil: activation = "unsupported"
+    @unknown default: activation = "unknown"
+    }
+    pairedDiagnostic = "supported=\(session != nil) activation=\(activation) reachable=\(session?.isReachable ?? false) foreground=\(foreground)"
+    #endif
   }
 
   nonisolated func session(
