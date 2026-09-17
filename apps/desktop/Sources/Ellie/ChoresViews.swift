@@ -103,7 +103,12 @@ struct ChoresSheet: View {
         .frame(minWidth: 640, minHeight: 560)
         .sheet(isPresented: $showingAdd) { AddChoreSheet(store: store) }
         .confirmationDialog("Delete \(deleting?.title ?? "this chore")?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible) {
-            Button("Delete chore", role: .destructive) { if let deleting { store.delete(id: deleting.id) }; deleting = nil }
+            if let choreToDelete = deleting {
+                Button("Delete chore", role: .destructive) {
+                    store.delete(id: choreToDelete.id)
+                    deleting = nil
+                }
+            }
             Button("Cancel", role: .cancel) { deleting = nil }
         } message: { Text("This removes the task and its completion from this Mac.") }
         .alert("Couldn’t save this change", isPresented: Binding(get: { store.error != nil }, set: { if !$0 { store.error = nil } })) {

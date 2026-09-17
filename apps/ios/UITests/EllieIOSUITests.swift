@@ -872,7 +872,17 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(app.buttons["ios-chore-toggle-\(id)"].label, "Undo completion of \(task)")
         app.buttons["ios-chore-delete-\(id)"].tap()
         app.buttons["Delete chore"].tap()
-        XCTAssertFalse(app.buttons["Edit \(task)"].exists)
+        let removed = app.buttons["Edit \(task)"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: removed)], timeout: 5), .completed,
+            "Confirming deletion must remove the chore")
+        app.buttons["Done"].tap()
+        app.terminate()
+        app.launch()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertFalse(app.buttons["Edit \(task)"].exists,
+            "A deleted chore must stay absent after relaunch")
         app.buttons["Done"].tap()
         returnToDashboardList(from: dashboardName, in: app)
         openDashboard(named: dashboardName, in: app)
