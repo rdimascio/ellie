@@ -1,6 +1,75 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testHomeLifeEntryRequiresExplicitTapAndFollowsEnrollment() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture"]
+        app.launch()
+
+        let life = app.buttons["open-ellie-life"]
+        let opens = app.staticTexts["home-fixture-life-opens"]
+        let reads = app.staticTexts["home-fixture-vault-reads"]
+        let transport = app.staticTexts["home-fixture-transport-calls"]
+        XCTAssertTrue(opens.waitForExistence(timeout: 5))
+        XCTAssertEqual(opens.label, "Fixture Life opens: 0")
+        XCTAssertEqual(reads.label, "Fixture vault reads: 0")
+        XCTAssertEqual(transport.label, "Fixture transport calls: 0")
+        XCTAssertFalse(life.exists)
+
+        app.buttons["home-fixture-load-pairing"].tap()
+        XCTAssertTrue(life.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "open-ellie-life").count, 1)
+        XCTAssertEqual(reads.label, "Fixture vault reads: 1")
+        XCTAssertEqual(opens.label, "Fixture Life opens: 0")
+        XCTAssertFalse(app.staticTexts["home-fixture-life-destination"].exists)
+        revealHomeControl(life, in: app)
+        life.tap()
+        let destination = app.staticTexts["home-fixture-life-destination"]
+        XCTAssertTrue(destination.waitForExistence(timeout: 5))
+        XCTAssertEqual(destination.label, "Synthetic Life destination: home-fixture-phone")
+        let opened = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture Life opens: 1"), object: opens)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 5), .completed)
+        XCTAssertEqual(transport.label, "Fixture transport calls: 0")
+
+        returnToDashboardList(from: "Fixture Life", in: app)
+        app.buttons["home-fixture-remove-pairing"].tap()
+        let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: life)
+        XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 5), .completed)
+        XCTAssertEqual(opens.label, "Fixture Life opens: 1")
+        XCTAssertEqual(transport.label, "Fixture transport calls: 0")
+    }
+
+    func testNarrowHomeAtAccessibilitySizeKeepsNavigationReachable() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-home-accessibility"]
+        app.launch()
+
+        let scroll = app.scrollViews["dashboard-list"]
+        XCTAssertTrue(scroll.waitForExistence(timeout: 5))
+        XCTAssertEqual(scroll.frame.width, 320, accuracy: 1)
+        let title = app.staticTexts["home-invitation-title"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+        XCTAssertTrue(title.label.contains("A little more"))
+        XCTAssertTrue(title.label.contains("headspace."))
+        XCTAssertGreaterThan(title.frame.height, 100, "Accessibility text must scale instead of shrinking")
+        XCTAssertGreaterThanOrEqual(title.frame.minX, scroll.frame.minX)
+        XCTAssertLessThanOrEqual(title.frame.maxX, scroll.frame.maxX)
+
+        for identifier in ["dashboard-home", "coordinator-enrollment"] {
+            let control = app.buttons[identifier]
+            revealHomeControl(control, in: app)
+            XCTAssertGreaterThanOrEqual(control.frame.height, 44)
+            XCTAssertGreaterThanOrEqual(control.frame.minX, scroll.frame.minX)
+            XCTAssertLessThanOrEqual(control.frame.maxX, scroll.frame.maxX)
+        }
+        app.buttons["coordinator-enrollment"].tap()
+        XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["home-fixture-vault-reads"].label, "Fixture vault reads: 0")
+        XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+    }
+
     func testScannerSheetDismissalKeepsDecodedReviewUntilExplicitCancel() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-native-scanner-sheet-fixture"]
@@ -289,6 +358,7 @@ final class EllieIOSUITests: XCTestCase {
         app.launch()
         let coordinator = app.buttons["coordinator-enrollment"]
         XCTAssertTrue(coordinator.waitForExistence(timeout: 5))
+        revealHomeControl(coordinator, in: app)
         coordinator.tap()
         XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
@@ -339,8 +409,18 @@ final class EllieIOSUITests: XCTestCase {
         let link = identifier.map { app.buttons[$0] }
             ?? app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 5), "Expected the \(name) dashboard link")
+        revealHomeControl(link, in: app)
         link.tap()
         XCTAssertTrue(app.navigationBars[name].waitForExistence(timeout: 5), "Expected the \(name) dashboard detail")
+    }
+
+    private func revealHomeControl(_ control: XCUIElement, in app: XCUIApplication) {
+        let scroll = app.scrollViews["dashboard-list"]
+        for _ in 0..<12 {
+            if control.isHittable { break }
+            scroll.swipeUp()
+        }
+        XCTAssertTrue(control.isHittable, "Expected the home control to remain reachable by scrolling")
     }
 
     private func returnToDashboardList(from title: String, in app: XCUIApplication) {
