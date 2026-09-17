@@ -29,7 +29,7 @@ struct IOSWeatherWidget: View {
                     Text("Conditions as of \(snapshot.observedAt.formatted(date: .omitted, time: .shortened))")
                         .font(.caption).foregroundStyle(.secondary)
                     TimelineView(.periodic(from: .now, by: 60)) { context in
-                        Text("\(store.needsRefresh || store.message != nil ? "Cached forecast" : "Current forecast") · \(store.freshness(at: context.date))")
+                        Text("\(!store.fetchedInCurrentSession || store.needsRefresh || store.message != nil ? "Cached forecast" : "Current forecast") · \(store.freshness(at: context.date))")
                             .font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("ios-weather-freshness")
                     }

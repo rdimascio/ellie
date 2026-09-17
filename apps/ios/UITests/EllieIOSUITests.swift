@@ -46,6 +46,8 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
         XCTAssertTrue(app.staticTexts["Partly cloudy"].exists,
             "The private cache should survive an app relaunch")
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].label.contains("Cached forecast"),
+            "A restored value must identify itself as cached even when less than 30 minutes old")
         XCTAssertEqual(calls.label, "Fixture weather requests: 0",
             "Fresh persisted weather must not cause an implicit second request")
         returnToDashboardList(from: "Home", in: app)
