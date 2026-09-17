@@ -118,6 +118,10 @@ const oauth: ConnectedOAuth = {
 };
 
 const life = new LifeStore(join(root, "life.sqlite"));
+const sharedGroup = life.createGroup(
+  { userId: actorId },
+  { id: "connected-e2e-family", name: "Connected E2E family" },
+);
 const plugins = new PluginStore(join(root, "plugins.sqlite"));
 const tasks = new TaskRuntime({
   directory: join(root, "tasks"),
@@ -333,6 +337,45 @@ try {
   await integrationCalendar.getByText("Doctor appointment").waitFor();
   await integrationCalendar.getByLabel("Calendar to read").waitFor();
   await integrationCalendar.getByRole("button", { name: "Hide imported activity" }).click();
+  await page.setViewportSize({ width: 1024, height: 844 });
+  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
+  await page.getByRole("button", { name: "Open personal integrations" }).waitFor();
+  assert.equal(await page.locator(".connections-page").count(), 0);
+  assert.equal(await page.getByText("Private fixture calendar").count(), 0);
+  let accountRequests = 0;
+  const countAccountRequests = (request: import("@playwright/test").Request) => {
+    if (
+      request.method() === "GET" &&
+      new URL(request.url()).pathname.startsWith("/api/connections")
+    )
+      accountRequests++;
+  };
+  page.on("request", countAccountRequests);
+  await page.waitForTimeout(5_200);
+  assert.equal(accountRequests, 0, "household Integrations must not poll private accounts");
+  await page.getByRole("button", { name: "Open personal integrations" }).click();
+  await page.locator(".connections-page .connection-list article").first().waitFor();
+  assert.ok(accountRequests > 0, "explicit personal entry should load connected accounts");
+  const personalCalendar = page
+    .locator(".connections-page .connection-list article")
+    .filter({ hasText: "Private fixture calendar" });
+  await personalCalendar.getByRole("button", { name: "View imported activity" }).click();
+  await personalCalendar.getByText("Doctor appointment").waitFor();
+  await page.getByLabel("Sharing with").selectOption(`group:${sharedGroup.id}`);
+  await page.getByRole("button", { name: "Open personal integrations" }).waitFor();
+  assert.equal(await page.locator(".connections-page").count(), 0);
+  assert.equal(await page.getByText("Doctor appointment").count(), 0);
+  const beforeHouseholdPoll = accountRequests;
+  await page.waitForTimeout(5_200);
+  assert.equal(
+    accountRequests,
+    beforeHouseholdPoll,
+    "leaving personal scope must stop account polling",
+  );
+  page.off("request", countAccountRequests);
+  await page.getByRole("button", { name: "Open personal integrations" }).click();
+  await page.locator(".connections-page .connection-list article").first().waitFor();
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${listening.url}/?section=connections&view=settings`);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await page.goto(`${listening.url}/?view=settings&section=connections`);

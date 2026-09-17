@@ -1010,7 +1010,18 @@ export function App() {
         )}
         {view === "integrations" && (
           <Page title="Integrations" lede="Your favorite services, a little more connected.">
-            <Connections standalone />
+            {data.scope === `user:${data.profile.id}` ? (
+              <Connections key={`${data.profile.id}:${data.scope}`} standalone />
+            ) : (
+              <div className="finance-empty">
+                <InterfaceIcon name="integrations" />
+                <h2>A space just for you</h2>
+                <p>Connected accounts and imported activity belong in your personal space.</p>
+                <button className="primary" onClick={() => switchScope(`user:${data.profile.id}`)}>
+                  Open personal integrations
+                </button>
+              </div>
+            )}
           </Page>
         )}
         {view === "world" && (
