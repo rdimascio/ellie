@@ -50,6 +50,9 @@ jobs:
       - name: Build native iPhone dashboard app
         run: bun run ios:build
       - name: Test native iPhone dashboard app
+        id: native_ios_ui
+        env:
+          ELLIE_IOS_KEEP_RESULT: "1"
         run: bun run ios:test
       - name: Test native iPhone pinned HTTPS and Keychain
         run: bun run test:ios-ats
@@ -60,8 +63,8 @@ jobs:
           name: native-iphone-transport-test-result
           path: test-results/native-ios-ats.xcresult
           retention-days: 3
-      - name: Preserve native iPhone failure result
-        if: failure()
+      - name: Preserve native iPhone UI result and appearance attachments
+        if: ${{ always() && steps.native_ios_ui.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         with:
           name: native-iphone-test-result

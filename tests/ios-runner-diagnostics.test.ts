@@ -142,7 +142,7 @@ fi
   return { bin, root };
 }
 
-async function runFixture(mode: FixtureMode) {
+async function runFixture(mode: FixtureMode, keepResult = "") {
   const owned = await fixture(mode);
   let outcome:
     | {
@@ -150,6 +150,7 @@ async function runFixture(mode: FixtureMode) {
         result: ReturnType<typeof spawnSync>;
         retainedDerived: number;
         retainedEvidence: string | undefined;
+        retainedResultBundle: boolean;
         xcodeArguments: string;
       }
     | undefined;
@@ -163,6 +164,7 @@ async function runFixture(mode: FixtureMode) {
         ...process.env,
         ELLIE_RUNNER_TEST_MODE: mode,
         ELLIE_RUNNER_TEST_ROOT: owned.root,
+        ELLIE_IOS_KEEP_RESULT: keepResult,
         PATH: `${owned.bin}:${process.env.PATH ?? ""}`,
       },
       timeout: 10_000,
@@ -180,13 +182,26 @@ async function runFixture(mode: FixtureMode) {
       mode === "retained"
         ? await readFile(join(owned.root, "test-results/native-ios.xcresult/retained"), "utf8")
         : undefined;
+    const retainedResultBundle = await access(join(owned.root, "test-results/native-ios.xcresult"))
+      .then(() => true)
+      .catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return false;
+        throw error;
+      });
     let xcodeArguments = "";
     try {
       xcodeArguments = await readFile(join(owned.root, "xcodebuild-arguments"), "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
-    outcome = { diagnostic, result, retainedDerived, retainedEvidence, xcodeArguments };
+    outcome = {
+      diagnostic,
+      result,
+      retainedDerived,
+      retainedEvidence,
+      retainedResultBundle,
+      xcodeArguments,
+    };
   } catch (error) {
     operationError = error;
   }
@@ -217,8 +232,9 @@ async function runFixture(mode: FixtureMode) {
 }
 
 test("build and UI execution use separate xcodebuild invocations", async () => {
-  const { result, xcodeArguments } = await runFixture("split");
+  const { result, xcodeArguments, retainedResultBundle } = await runFixture("split");
   assert.equal(result.status, 0);
+  assert.equal(retainedResultBundle, false);
   const calls = xcodeArguments
     .split("END\n")
     .map((value) => value.trim().split("\n"))
@@ -251,6 +267,19 @@ test("build and UI execution use separate xcodebuild invocations", async () => {
     testCall.filter((argument) => argument === "ONLY_ACTIVE_ARCH=YES"),
     ["ONLY_ACTIVE_ARCH=YES"],
   );
+});
+
+test("successful UI evidence is retained only by explicit opt-in", async () => {
+  const retained = await runFixture("split", "1");
+  assert.equal(retained.result.status, 0);
+  assert.equal(retained.retainedResultBundle, true);
+  assert.match(retained.diagnostic, /outcome=passed.*result=retained-by-request/);
+  assert.match(retained.diagnostic, /derived-removed/);
+
+  const ordinary = await runFixture("split", "true");
+  assert.equal(ordinary.result.status, 0);
+  assert.equal(ordinary.retainedResultBundle, false);
+  assert.match(ordinary.diagnostic, /outcome=passed.*result=removed-after-success/);
 });
 
 test("a build-for-testing failure never starts UI execution", async () => {

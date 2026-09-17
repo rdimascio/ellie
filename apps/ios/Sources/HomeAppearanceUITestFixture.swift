@@ -6,12 +6,14 @@ import SwiftUI
 @MainActor
 struct HomeAppearanceUITestFixtureView: View {
     let accessibilityLayout: Bool
+    let narrowLayout: Bool
     @StateObject private var dashboards: DashboardStore
     @StateObject private var enrollment: NativeEnrollmentStore
     @StateObject private var probe: HomeAppearanceProbe
 
-    init(accessibilityLayout: Bool) {
+    init(accessibilityLayout: Bool, narrowLayout: Bool) {
         self.accessibilityLayout = accessibilityLayout
+        self.narrowLayout = narrowLayout
         let probe = HomeAppearanceProbe()
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("ellie-home-appearance-\(UUID().uuidString).json")
@@ -32,7 +34,7 @@ struct HomeAppearanceUITestFixtureView: View {
                 .onAppear { probe.lifeOpens += 1 })
         })
         .dynamicTypeSize(accessibilityLayout ? .accessibility5 : .large)
-        .frame(width: accessibilityLayout ? 320 : nil)
+        .frame(width: narrowLayout || accessibilityLayout ? 320 : nil)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .safeAreaInset(edge: .bottom) {
             VStack(spacing: 4) {

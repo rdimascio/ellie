@@ -15,6 +15,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(reads.label, "Fixture vault reads: 0")
         XCTAssertEqual(transport.label, "Fixture transport calls: 0")
         XCTAssertFalse(life.exists)
+        keepHomeScreenshot(app, name: "native-home-normal")
 
         app.buttons["home-fixture-load-pairing"].tap()
         XCTAssertTrue(life.waitForExistence(timeout: 5))
@@ -23,6 +24,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(opens.label, "Fixture Life opens: 0")
         XCTAssertFalse(app.staticTexts["home-fixture-life-destination"].exists)
         revealHomeControl(life, in: app)
+        keepHomeScreenshot(app, name: "native-home-normal-life-entry")
         life.tap()
         let destination = app.staticTexts["home-fixture-life-destination"]
         XCTAssertTrue(destination.waitForExistence(timeout: 5))
@@ -40,34 +42,54 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(transport.label, "Fixture transport calls: 0")
     }
 
-    func testNarrowHomeAtAccessibilitySizeKeepsNavigationReachable() {
+    func testNarrowHomeKeepsNavigationReachableAtRegularAndAccessibilitySizes() {
         let app = XCUIApplication()
-        app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-home-accessibility"]
-        app.launch()
+        for accessibility in [false, true] {
+            app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-home-narrow"]
+            if accessibility { app.launchArguments.append("--ellie-ui-home-accessibility") }
+            app.launch()
+            let appearance = accessibility ? "accessibility5" : "regular"
 
-        let scroll = app.scrollViews["dashboard-list"]
-        XCTAssertTrue(scroll.waitForExistence(timeout: 5))
-        XCTAssertEqual(scroll.frame.width, 320, accuracy: 1)
-        let title = app.staticTexts["home-invitation-title"]
-        XCTAssertTrue(title.waitForExistence(timeout: 5))
-        XCTAssertTrue(title.label.contains("A little more"))
-        XCTAssertTrue(title.label.contains("headspace."))
-        XCTAssertGreaterThan(title.frame.height, 100, "Accessibility text must scale instead of shrinking")
-        XCTAssertGreaterThanOrEqual(title.frame.minX, scroll.frame.minX)
-        XCTAssertLessThanOrEqual(title.frame.maxX, scroll.frame.maxX)
+            let scroll = app.scrollViews["dashboard-list"]
+            XCTAssertTrue(scroll.waitForExistence(timeout: 5))
+            XCTAssertEqual(scroll.frame.width, 320, accuracy: 1)
+            let title = app.staticTexts["home-invitation-title"]
+            XCTAssertTrue(title.waitForExistence(timeout: 5))
+            XCTAssertTrue(title.label.contains("A little more"))
+            XCTAssertTrue(title.label.contains("headspace."))
+            if accessibility {
+                XCTAssertGreaterThan(title.frame.height, 100, "Accessibility text must scale instead of shrinking")
+            }
+            XCTAssertGreaterThanOrEqual(title.frame.minX, scroll.frame.minX)
+            XCTAssertLessThanOrEqual(title.frame.maxX, scroll.frame.maxX)
+            keepHomeScreenshot(app, name: "native-home-320-\(appearance)-invitation")
 
-        for identifier in ["dashboard-home", "coordinator-enrollment"] {
-            let control = app.buttons[identifier]
-            revealHomeControl(control, in: app)
-            XCTAssertGreaterThanOrEqual(control.frame.height, 44)
-            XCTAssertGreaterThanOrEqual(control.frame.minX, scroll.frame.minX)
-            XCTAssertLessThanOrEqual(control.frame.maxX, scroll.frame.maxX)
+            for identifier in ["dashboard-home", "coordinator-enrollment"] {
+                let control = app.buttons[identifier]
+                revealHomeControl(control, in: app)
+                XCTAssertGreaterThanOrEqual(control.frame.height, 44)
+                XCTAssertGreaterThanOrEqual(control.frame.minX, scroll.frame.minX)
+                XCTAssertLessThanOrEqual(control.frame.maxX, scroll.frame.maxX)
+            }
+            keepHomeScreenshot(app, name: "native-home-320-\(appearance)-navigation")
+            app.buttons["coordinator-enrollment"].tap()
+            XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.staticTexts["home-fixture-vault-reads"].label, "Fixture vault reads: 0")
+            XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+            app.terminate()
         }
-        app.buttons["coordinator-enrollment"].tap()
-        XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
-        XCTAssertEqual(app.staticTexts["home-fixture-vault-reads"].label, "Fixture vault reads: 0")
-        XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+    }
+
+    private func keepHomeScreenshot(_ app: XCUIApplication, name: String) {
+        guard app.launchArguments.contains("--ellie-ui-home-appearance-fixture") else {
+            XCTFail("Appearance screenshots require the isolated home fixture")
+            return
+        }
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
     }
 
     func testScannerSheetDismissalKeepsDecodedReviewUntilExplicitCancel() {

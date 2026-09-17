@@ -7,8 +7,9 @@ struct EllieIOSApp: App {
         WindowGroup {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
-                HomeAppearanceUITestFixtureView(accessibilityLayout:
-                    ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"))
+                HomeAppearanceUITestFixtureView(
+                    accessibilityLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"),
+                    narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(
