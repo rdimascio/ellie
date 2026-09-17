@@ -48,23 +48,44 @@ final class PlaylistTests: XCTestCase {
     }
 
     func testNavigationPolicyAllowsOnlyEmbedMainFrameAndRequiredHTTPSSubframes() {
-        XCTAssertTrue(PlaylistNavigationPolicy.allows(PlaylistNavigationPolicy.documentOrigin, mainFrame: true))
-        XCTAssertTrue(PlaylistNavigationPolicy.allows(URL(string: "https://www.youtube-nocookie.com/embed")!, mainFrame: false))
-        XCTAssertTrue(PlaylistNavigationPolicy.allows(URL(string: "https://www.youtube-nocookie.com/embed/synthetic")!, mainFrame: false))
-        XCTAssertTrue(PlaylistNavigationPolicy.allows(URL(string: "about:blank")!, mainFrame: false))
-        XCTAssertFalse(PlaylistNavigationPolicy.allows(URL(string: "about:config")!, mainFrame: false))
-        XCTAssertFalse(PlaylistNavigationPolicy.allows(URL(string: "https://www.youtube-nocookie.com/watch?v=synthetic")!, mainFrame: false))
-        XCTAssertFalse(PlaylistNavigationPolicy.allows(URL(string: "https://www.youtube.com/watch?v=synthetic")!, mainFrame: true))
-        XCTAssertFalse(PlaylistNavigationPolicy.allows(URL(string: "http://www.youtube-nocookie.com/embed")!, mainFrame: true))
-        XCTAssertFalse(PlaylistNavigationPolicy.allows(URL(string: "https://youtube-nocookie.com.evil.example/embed")!, mainFrame: false))
-        XCTAssertFalse(PlaylistNavigationPolicy.allows(URL(string: "file:///tmp/media")!, mainFrame: false))
+        let policy = PlaylistNavigationPolicy(bundleIdentifier: "org.ellie.dashboard")!
+        XCTAssertEqual(policy.origin.absoluteString, "https://org.ellie.dashboard")
+        XCTAssertEqual(policy.documentURL.absoluteString, "https://org.ellie.dashboard/playlist-player")
+        XCTAssertTrue(policy.allows(policy.documentURL, mainFrame: true))
+        XCTAssertTrue(policy.allows(URL(string: "https://www.youtube-nocookie.com/embed")!, mainFrame: false))
+        XCTAssertTrue(policy.allows(URL(string: "https://www.youtube-nocookie.com/embed/synthetic")!, mainFrame: false))
+        XCTAssertTrue(policy.allows(URL(string: "about:blank")!, mainFrame: false))
+        XCTAssertFalse(policy.allows(URL(string: "about:config")!, mainFrame: false))
+        XCTAssertFalse(policy.allows(URL(string: "https://www.youtube-nocookie.com/watch?v=synthetic")!, mainFrame: false))
+        XCTAssertFalse(policy.allows(URL(string: "https://www.youtube.com/watch?v=synthetic")!, mainFrame: true))
+        XCTAssertFalse(policy.allows(URL(string: "http://www.youtube-nocookie.com/embed")!, mainFrame: true))
+        XCTAssertFalse(policy.allows(URL(string: "https://ellie.local/playlist-player")!, mainFrame: true))
+        XCTAssertFalse(policy.allows(URL(string: "https://youtube-nocookie.com.evil.example/embed")!, mainFrame: false))
+        XCTAssertFalse(policy.allows(URL(string: "file:///tmp/media")!, mainFrame: false))
+        XCTAssertNil(PlaylistNavigationPolicy(bundleIdentifier: nil))
+        XCTAssertNil(PlaylistNavigationPolicy(bundleIdentifier: "org.ellie.dashboard/evil"))
     }
 
     func testPlayerErrorsDistinguishEmbeddingDisabledFromUnavailable() {
         XCTAssertEqual(PlaylistPlayerState.playerError(101), .embeddingDisabled)
         XCTAssertEqual(PlaylistPlayerState.playerError(150), .embeddingDisabled)
+        XCTAssertEqual(PlaylistPlayerState.playerError(153), .clientIdentityMissing)
         XCTAssertEqual(PlaylistPlayerState.playerError(100), .unavailable)
         XCTAssertEqual(PlaylistPlayerState.playerError(nil), .unavailable)
+    }
+
+    func testSharedPlayerDocumentAcceptsOnlyValidatedPlaylistIDs() throws {
+        let desktop = try XCTUnwrap(PlaylistNavigationPolicy(bundleIdentifier: "org.ellie.dashboard"))
+        let ios = try XCTUnwrap(PlaylistNavigationPolicy(bundleIdentifier: "org.ellie.dashboard.ios"))
+        let html = try XCTUnwrap(desktop.playerHTML(playlistID: syntheticID))
+        XCTAssertTrue(html.contains("list:'\(syntheticID)'"))
+        XCTAssertTrue(html.contains("origin:'https://org.ellie.dashboard'"))
+        XCTAssertTrue(try XCTUnwrap(ios.playerHTML(playlistID: syntheticID)).contains("origin:'https://org.ellie.dashboard.ios'"))
+        XCTAssertTrue(html.contains("https://www.youtube-nocookie.com"))
+        XCTAssertTrue(html.contains("autoplay:1"))
+        XCTAssertNil(desktop.playerHTML(playlistID: "bad');alert(1)//"))
+        XCTAssertEqual(YouTubePlaylist.publicURL(for: syntheticID)?.absoluteString,
+            "https://www.youtube.com/playlist?list=\(syntheticID)")
     }
 
     @MainActor
