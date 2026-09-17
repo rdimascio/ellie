@@ -26,7 +26,9 @@ export function verifiedATSResult(summary, tests) {
     throw new Error("ATS xcresult test inventory is unavailable.");
   const cases = [];
   const pending = [...tests.testNodes];
+  let visited = 0;
   while (pending.length) {
+    if (++visited > 10_000) throw new Error("ATS xcresult test inventory exceeds its bound.");
     const node = pending.pop();
     if (!node || typeof node !== "object")
       throw new Error("ATS xcresult test inventory is malformed.");
@@ -36,8 +38,6 @@ export function verifiedATSResult(summary, tests) {
         throw new Error("ATS xcresult test inventory is malformed.");
       pending.push(...node.children);
     }
-    if (cases.length + pending.length > 10_000)
-      throw new Error("ATS xcresult test inventory exceeds its bound.");
   }
   if (cases.length !== counts.total || cases.some((test) => test.result !== "Passed"))
     throw new Error("ATS xcresult test inventory disagrees with the summary.");

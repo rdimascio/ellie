@@ -72,6 +72,11 @@ test("ATS result rejects zero, skipped, failed, missing, duplicated, and inconsi
     },
     () => {
       const value = result();
+      value.tests.testNodes[0]!.children[3]!.nodeIdentifier = names[0]!;
+      return value;
+    },
+    () => {
+      const value = result();
       value.tests.testNodes[0]!.children.pop();
       return value;
     },
