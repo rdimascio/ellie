@@ -18,6 +18,7 @@ export interface Connection {
   mode: ConnectionMode;
   generation: number;
   accountId?: string;
+  selectedCalendarId?: string;
   grantedScopes: string[];
   lastSyncAt?: number;
   cursor?: string;
@@ -171,6 +172,7 @@ export class ConnectorStore {
         | "mode"
         | "label"
         | "accountId"
+        | "selectedCalendarId"
         | "grantedScopes"
         | "error"
         | "cursor"
@@ -248,6 +250,28 @@ export class ConnectorStore {
       this.db.prepare("DELETE FROM evidence WHERE connection=?").run(id);
       this.db.prepare("DELETE FROM analysis WHERE connection=?").run(id);
       this.touch(actorId);
+    });
+  }
+  /** Change one calendar and its cursor/evidence in the same durable transaction. */
+  selectCalendar(actorId: string, id: string, generation: number, calendarId: string): Connection {
+    return this.transaction(() => {
+      const current = this.require(actorId, id, generation);
+      if (current.provider !== "google-calendar" || current.state !== "connected")
+        throw new Error("Calendar connection is unavailable.");
+      const next: Connection = {
+        ...current,
+        selectedCalendarId: calendarId,
+        generation: current.generation + 1,
+        cursor: undefined,
+        continuation: undefined,
+        lastSyncAt: undefined,
+        error: undefined,
+      };
+      this.db.prepare("UPDATE connections SET value=? WHERE id=?").run(JSON.stringify(next), id);
+      this.db.prepare("DELETE FROM evidence WHERE connection=?").run(id);
+      this.db.prepare("DELETE FROM analysis WHERE connection=?").run(id);
+      this.touch(actorId);
+      return next;
     });
   }
   evidenceCurrent(actorId: string, refs: EvidenceRef[]): boolean {
