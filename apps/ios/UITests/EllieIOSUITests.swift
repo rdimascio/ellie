@@ -1,6 +1,49 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testGmailRequiresExplicitBodyReadAndCancelsLateOrRevokedResults() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-gmail-read-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        let reads = app.staticTexts["ios-gmail-fixture-reads"]
+        XCTAssertEqual(reads.label, "Fixture body reads: 0")
+        app.buttons["ios-gmail-refresh"].tap()
+        let account = app.buttons["ios-gmail-account-fixture_gmail"]
+        XCTAssertTrue(account.waitForExistence(timeout: 5))
+        account.tap()
+        let message = app.buttons["ios-gmail-message-fixture_message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        XCTAssertEqual(reads.label, "Fixture body reads: 0",
+            "listing and preview must not fetch full message bodies")
+        app.buttons["Hold next body"].tap()
+        message.tap()
+        let oneRead = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture body reads: 1"), object: reads)
+        XCTAssertEqual(XCTWaiter.wait(for: [oneRead], timeout: 5), .completed)
+        app.buttons["ios-gmail-cancel"].tap()
+        app.buttons["Release held body"].tap()
+        let cancelledBody = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true"), object: app.staticTexts["ios-gmail-body"])
+        cancelledBody.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [cancelledBody], timeout: 1), .completed,
+            "cancelled response must not restore private body")
+        message.tap()
+        XCTAssertTrue(app.staticTexts["ios-gmail-body"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["ios-gmail-body"].label, "Transient fixture message body")
+        app.buttons["Hold next body"].tap()
+        message.tap()
+        let thirdRead = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture body reads: 3"), object: reads)
+        XCTAssertEqual(XCTWaiter.wait(for: [thirdRead], timeout: 5), .completed)
+        app.buttons["Revoke fixture"].tap()
+        let notice = app.staticTexts["ios-gmail-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertTrue(notice.label.contains("access was removed"))
+        XCTAssertFalse(app.staticTexts["ios-gmail-body"].exists)
+        XCTAssertFalse(message.exists)
+    }
+
     func testCalendarRequiresExplicitReadAndKeepsFailedReadVisiblyCached() throws {
         let app = XCUIApplication()
         let session = UUID().uuidString
