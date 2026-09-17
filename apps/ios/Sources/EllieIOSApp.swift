@@ -17,7 +17,11 @@ struct EllieIOSApp: App {
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(
-                        "--ellie-ui-browser-complete-actions"))
+                        "--ellie-ui-browser-complete-actions"),
+                    netflixRows: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-netflix-voice-rows"),
+                    netflixSearch: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-netflix-voice-search"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-household-chores-fixture") {
                 HouseholdChoresUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(
@@ -25,6 +29,8 @@ struct EllieIOSApp: App {
                 NativeScannerSheetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-netflix-rows-fixture") {
+                BrowserTargetUITestFixtureView(netflixRows: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-read-only-fixture") {
                 BrowserTargetUITestFixtureView(readOnly: true)

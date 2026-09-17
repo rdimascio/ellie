@@ -207,6 +207,24 @@ export const OPERATION_REGISTRY = {
       output: RESULT,
     },
     {
+      id: "browser.scrollRow",
+      requiredCapability: "browser.control",
+      description: "Scroll one explicitly chosen row from the current browser observation.",
+      localPolicy: { appFields: [], urlFields: [] },
+      input: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tool", "direction", "rowId", "revision"],
+        properties: {
+          tool: { const: "browser.scrollRow" },
+          direction: { type: "string", enum: ["left", "right"] },
+          rowId: BROWSER_IDENTIFIER,
+          revision: BROWSER_REVISION,
+        },
+      },
+      output: RESULT,
+    },
+    {
       id: "browser.search",
       requiredCapability: "browser.control",
       description: "Submit a bounded search to the authorized browser page.",
@@ -301,6 +319,8 @@ export type BrowserView = {
     playback: "playing" | "paused" | "unavailable" | "ambiguous";
     currentTimeSeconds?: number;
     horizontalScrollAvailable?: boolean;
+    rows?: { id: string; label: string }[];
+    searchControl?: { id: string; label: string };
   };
 };
 export type BrowserExecutionSource = "webmcp" | "accessibility" | "companion";
@@ -459,19 +479,23 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         throw new Error("Invalid browser operation result.");
       const hasTime = Object.hasOwn(observed, "currentTimeSeconds");
       const hasRow = Object.hasOwn(observed, "horizontalScrollAvailable");
+      const hasRows = Object.hasOwn(observed, "rows");
+      const hasSearchControl = Object.hasOwn(observed, "searchControl");
       exactObject(observed, [
         "provider",
         "page",
         "playback",
         ...(hasTime ? ["currentTimeSeconds"] : []),
         ...(hasRow ? ["horizontalScrollAvailable"] : []),
+        ...(hasRows ? ["rows"] : []),
+        ...(hasSearchControl ? ["searchControl"] : []),
       ]);
       if (
         !["youtube", "netflix"].includes(observed.provider as string) ||
         !(
           observed.provider === "youtube"
             ? ["home", "results", "watch", "login", "unsupported"]
-            : ["browse", "watch", "login", "unsupported"]
+            : ["browse", "results", "watch", "login", "unsupported"]
         ).includes(observed.page as string) ||
         !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
         (observed.page !== "watch" && observed.playback !== "unavailable") ||
@@ -479,6 +503,52 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
           (observed.provider !== "netflix" ||
             observed.page !== "browse" ||
             typeof observed.horizontalScrollAvailable !== "boolean")) ||
+        (hasRows &&
+          (observed.provider !== "netflix" ||
+            observed.page !== "browse" ||
+            !Array.isArray(observed.rows) ||
+            observed.rows.length > 8 ||
+            observed.rows.some((raw) => {
+              const row = raw as Record<string, unknown>;
+              try {
+                exactObject(row, ["id", "label"]);
+                browserIdentifier(row.id);
+                if (
+                  !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                    row.id as string,
+                  )
+                )
+                  return true;
+                boundedText(row.label, 100);
+                return false;
+              } catch {
+                return true;
+              }
+            }) ||
+            new Set(observed.rows.map((row: { id: string }) => row.id)).size !==
+              observed.rows.length)) ||
+        (hasSearchControl &&
+          (() => {
+            if (
+              observed.provider !== "netflix" ||
+              (observed.page !== "browse" && observed.page !== "results")
+            )
+              return true;
+            try {
+              const control = exactObject(observed.searchControl, ["id", "label"]);
+              browserIdentifier(control.id);
+              if (
+                !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                  control.id as string,
+                )
+              )
+                return true;
+              boundedText(control.label, 100);
+              return false;
+            } catch {
+              return true;
+            }
+          })()) ||
         (hasTime &&
           (observed.page !== "watch" ||
             !["playing", "paused"].includes(observed.playback as string) ||

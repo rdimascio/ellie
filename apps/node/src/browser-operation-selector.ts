@@ -74,6 +74,15 @@ export class BrowserOperationSelector {
       this.observationEpoch += 1;
       this.observedSite = undefined;
     }
+    if (
+      browserAction.tool === "browser.scrollRow" &&
+      (typeof binding !== "object" ||
+        binding.availability !== "companion" ||
+        binding.origin !== "https://www.netflix.com")
+    )
+      throw new Error(
+        "Observed row scrolling is available only for the selected Netflix companion page.",
+      );
     if (typeof binding !== "object" || binding.availability === "webmcp")
       return this.webmcp.execute(adapterAction, signal);
     if (binding.availability === "companion") {

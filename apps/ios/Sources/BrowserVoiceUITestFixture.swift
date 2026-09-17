@@ -13,10 +13,14 @@ struct BrowserVoiceUITestFixtureView: View {
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
   @State private var backgroundCount = 0
 
-  init(completeActions: Bool = false) {
+  init(completeActions: Bool = false, netflixRows: Bool = false, netflixSearch: Bool = false) {
     let credential = BrowserVoiceUITestFixture.credential
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
-    let browserTransport = BrowserVoiceUITestTransport(completeActions: completeActions)
+    let browserTransport = BrowserVoiceUITestTransport(
+      completeActions: completeActions,
+      source: netflixRows || netflixSearch ? .companion : .webmcp,
+      siteOverride: netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite : nil,
+      netflixSearch: netflixSearch)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
@@ -27,7 +31,8 @@ struct BrowserVoiceUITestFixtureView: View {
     _speech = StateObject(
       wrappedValue: SpeechTurnStore(
         credential: credential, recorder: BrowserVoiceUITestRecorder(),
-        transport: BrowserVoiceUITestSpeechTransport()))
+        transport: BrowserVoiceUITestSpeechTransport(
+          transcript: netflixRows ? "Scroll right" : "Search for public video")))
     _browserTransport = StateObject(wrappedValue: browserTransport)
   }
 
@@ -65,14 +70,16 @@ struct BrowserTargetUITestFixtureView: View {
 
   private let credential: NativeEnrollmentCredential
 
-  init(readOnly: Bool = false, unavailablePlayback: Bool = false) {
+  init(readOnly: Bool = false, unavailablePlayback: Bool = false, netflixRows: Bool = false) {
     let credential = readOnly
       ? BrowserVoiceUITestFixture.readOnlyCredential : BrowserVoiceUITestFixture.credential
     self.credential = credential
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
+      source: netflixRows ? .companion : .webmcp,
       siteOverride: unavailablePlayback
-        ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil) : nil)
+        ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil)
+        : netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite : nil)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport(readOnly: readOnly)))
@@ -231,6 +238,20 @@ private enum BrowserVoiceUITestFixture {
   static let nodeBID = "ui-fixture-mac-b"
   static let nodeID = nodeAID
   static let revision = String(repeating: "a", count: 64)
+  static let netflixRowsSite = BrowserPhoneSite(
+    provider: .netflix, page: .browse, playback: .unavailable, currentTimeSeconds: nil,
+    rows: [
+      BrowserPhoneRow(id: "10000000-0000-4000-8000-000000000001", label: "Row 1: Featured"),
+      BrowserPhoneRow(id: "10000000-0000-4000-8000-000000000002", label: "Row 2: New"),
+    ])
+  static let netflixSearchSite = BrowserPhoneSite(
+    provider: .netflix, page: .browse, playback: .unavailable, currentTimeSeconds: nil,
+    searchControl: BrowserPhoneSearchControl(
+      id: "10000000-0000-4000-8000-000000000003", label: "Search"))
+  static let netflixResultsSite = BrowserPhoneSite(
+    provider: .netflix, page: .results, playback: .unavailable, currentTimeSeconds: nil,
+    searchControl: BrowserPhoneSearchControl(
+      id: "10000000-0000-4000-8000-000000000004", label: "Search"))
   static let credential = NativeEnrollmentCredential(
     origin: URL(string: "https://127.0.0.1:8444")!,
     certificateSha256: String(repeating: "b", count: 64),
@@ -312,11 +333,12 @@ private actor BrowserVoiceUITestRecorder: SpeechRecording {
 }
 
 private struct BrowserVoiceUITestSpeechTransport: SpeechTransporting {
+  let transcript: String
   func availability(for credential: NativeEnrollmentCredential) async throws {}
   func transcribe(
     _ artifact: SpeechAudioArtifact, turnID: UUID, credential: NativeEnrollmentCredential
   ) async throws -> String {
-    "Search for public video"
+    transcript
   }
   func cancel(turnID: UUID, credential: NativeEnrollmentCredential) async {}
 }
@@ -330,14 +352,19 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   private var failNextRead: Bool
   private let completeActions: Bool
   private let siteOverride: BrowserPhoneSite?
+  private let netflixSearch: Bool
+  private let source: BrowserPhoneSource
 
   init(
     failNextRead: Bool = false, completeActions: Bool = false,
-    siteOverride: BrowserPhoneSite? = nil
+    source: BrowserPhoneSource = .webmcp,
+    siteOverride: BrowserPhoneSite? = nil, netflixSearch: Bool = false
   ) {
     self.failNextRead = failNextRead
     self.completeActions = completeActions
     self.siteOverride = siteOverride
+    self.netflixSearch = netflixSearch
+    self.source = source
   }
 
   func execute(
@@ -346,7 +373,7 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
     switch action {
     case .status, .refresh:
       return .status(
-        source: .webmcp, connected: true, revision: BrowserVoiceUITestFixture.revision)
+        source: source, connected: true, revision: BrowserVoiceUITestFixture.revision)
     case .read:
       readNodeIDs.append(nodeID)
       if failNextRead {
@@ -356,17 +383,21 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
       let isA = nodeID == BrowserVoiceUITestFixture.nodeAID
       return .page(
         BrowserPhonePage(
-          nodeID: nodeID, source: .webmcp, revision: BrowserVoiceUITestFixture.revision,
+          nodeID: nodeID, source: source, revision: BrowserVoiceUITestFixture.revision,
           title: isA ? "Mac A page" : "Mac B page", summary: "One observed public result",
-          items: [
+          items: netflixSearch && mutationCount == 0 ? [] : [
             BrowserPhoneItem(
               id: isA ? "public-video-a" : "public-video-b",
               label: isA ? "A result" : "B result", state: nil)
-          ], site: siteOverride ?? (completeActions ? observedSite : nil)))
+          ], site: netflixSearch
+            ? (mutationCount == 0
+                ? BrowserVoiceUITestFixture.netflixSearchSite
+                : BrowserVoiceUITestFixture.netflixResultsSite)
+            : siteOverride ?? (completeActions ? observedSite : nil)))
     case .search:
       mutationCount += 1
       return .command(
-        source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
     case .select:
       mutationCount += 1
       if !completeActions {
@@ -374,11 +405,11 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
         catch { throw PhoneControlFailure.cancelled }
       }
       return .command(
-        source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
-    case .scroll, .playback:
+        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+    case .scroll, .scrollRow, .playback:
       mutationCount += 1
       return .command(
-        source: .webmcp, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
     }
   }
 

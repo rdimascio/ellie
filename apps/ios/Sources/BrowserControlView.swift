@@ -37,13 +37,33 @@ struct BrowserControlView: View {
               Text("Visible media state does not confirm which video is playing.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
-            if site.provider == .netflix {
-              Text("Netflix search is not supported yet.")
+            if site.provider == .netflix && site.searchControl == nil {
+              Text("No unambiguous accessible Netflix search field was observed. Search is unavailable on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
-            if site.provider == .netflix && site.page == .browse && site.horizontalScrollAvailable != true {
-              Text("Horizontal browsing needs one unambiguous visible row.")
+            if site.provider == .netflix && site.page == .browse && site.rows?.isEmpty != false {
+              Text("No safely identified horizontal rows are available on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
+            }
+          }
+          if site.provider == .netflix && site.page == .browse, let rows = site.rows,
+            !rows.isEmpty {
+            Section("Netflix rows") {
+              Text("Choose a row, then use Left or Right. Read again after scrolling.")
+                .font(.footnote).foregroundStyle(.secondary)
+              ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                Button {
+                  browser.selectObservedRow(row.id, on: controls.selectedNode)
+                } label: {
+                  HStack {
+                    Text(row.label)
+                    Spacer()
+                    if browser.selectedRowID == row.id { Image(systemName: "checkmark") }
+                  }
+                }
+                .accessibilityIdentifier("browser-netflix-row-\(index + 1)")
+                .disabled(browser.isBusy || controls.selectedNode?.capabilities.contains("browser.control") != true)
+              }
             }
           }
         }
@@ -56,6 +76,10 @@ struct BrowserControlView: View {
           }
         }
         Section("Search") {
+          if let control = page.site?.searchControl {
+            Text("Observed search field: \(control.label). Search effects remain unverified until you read the page again.")
+              .font(.footnote).foregroundStyle(.secondary)
+          }
           TextField("Search this page", text: $search)
           Button("Search") { browser.perform(.search(query: search), on: controls.selectedNode) }
             .disabled(!browser.canPerform(.search(query: search), on: controls.selectedNode))
@@ -143,10 +167,11 @@ struct BrowserControlView: View {
     if site.provider == .netflix {
       switch site.page {
       case .browse: return "Observed Netflix catalogue"
+      case .results: return "Observed Netflix search results"
       case .watch: return "Observed Netflix watch page"
       case .login: return "Observed Netflix sign-in page"
       case .unsupported: return "Observed Netflix page is unsupported"
-      case .home, .results: return "Observed Netflix page is unsupported"
+      case .home: return "Observed Netflix page is unsupported"
       }
     }
     return switch site.page {

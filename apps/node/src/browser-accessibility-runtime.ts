@@ -414,6 +414,8 @@ export class BrowserAccessibilityRuntime {
       });
     }
     if (!session.generation) throw new Error("Browser selection is stale.");
+    if (action.tool === "browser.scrollRow")
+      throw new Error("Observed row scrolling requires the Netflix companion.");
     const operation = action.tool.slice("browser.".length);
     const fields =
       action.tool === "browser.scroll"

@@ -5,6 +5,7 @@ import {
   NATIVE_SESSION_CONTRACT,
   NATIVE_CONTROL_CONTRACT,
   nativeAppCommand,
+  nativeCommand,
   VERSION,
   nativePairingQr,
   nativeGrants,
@@ -126,6 +127,19 @@ test("native app contract accepts only exact canonical finite commands", () => {
     const command = { nodeId: "test-mini", action: { tool: "app.open", app } };
     assert.deepEqual(nativeAppCommand(command), command);
   }
+  const rowCommand = {
+    nodeId: "test-mini",
+    action: {
+      tool: "browser.scrollRow",
+      direction: "right",
+      rowId: "10000000-0000-4000-8000-000000000001",
+      revision: "a".repeat(64),
+    },
+  };
+  assert.deepEqual(nativeCommand(rowCommand), rowCommand);
+  assert.throws(() =>
+    nativeCommand({ ...rowCommand, action: { ...rowCommand.action, rowId: "a[href]" } }),
+  );
   for (const command of [
     null,
     [],
@@ -140,6 +154,12 @@ test("native app contract accepts only exact canonical finite commands", () => {
     assert.throws(() => nativeAppCommand(command));
   const document = JSON.parse(generatedContracts()["native-openapi.v1.json"]!);
   const alternatives = document.components.schemas.NativeAppRequest.properties.action.oneOf;
+  const rowScroll = alternatives.find(
+    (candidate: any) => candidate.properties?.tool?.const === "browser.scrollRow",
+  );
+  assert.ok(rowScroll);
+  assert.equal(rowScroll.additionalProperties, false);
+  assert.deepEqual(rowScroll.required, ["tool", "direction", "rowId", "revision"]);
   const appOpen = alternatives.filter(
     (candidate: any) => candidate.properties?.tool?.const === "app.open",
   );

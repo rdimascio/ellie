@@ -71,6 +71,38 @@ struct SpeechTurnView: View {
             Text("This selects \(app.label). Use the separate Open button to send the command.")
               .font(.footnote).foregroundStyle(.secondary)
           } else if let intent = BrowserVoiceIntentParser.parse(speech.transcript) {
+            if case .search = intent, let site = browserStore.page?.site,
+              site.provider == .netflix, let control = site.searchControl {
+              Text("Run will use the observed \(control.label) field on \(controlStore.selectedNode?.label ?? "the selected Mac"). Read again to observe any result.")
+                .font(.footnote)
+                .accessibilityIdentifier("speech-netflix-search-review")
+            }
+            if case .scroll(let direction) = intent,
+              direction == .left || direction == .right,
+              let site = browserStore.page?.site, site.provider == .netflix,
+              site.page == .browse, let rows = site.rows, !rows.isEmpty
+            {
+              Text("Choose a row on \(controlStore.selectedNode?.label ?? "the selected Mac") before running this command.")
+                .font(.footnote).foregroundStyle(.secondary)
+              ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                Button {
+                  browserStore.selectObservedRow(row.id, on: controlStore.selectedNode)
+                } label: {
+                  HStack {
+                    Text(row.label)
+                    Spacer()
+                    if browserStore.selectedRowID == row.id { Image(systemName: "checkmark") }
+                  }
+                }
+                .accessibilityIdentifier("speech-netflix-row-\(index + 1)")
+                .disabled(controlsBusy || browserStore.isBusy)
+              }
+              if let chosen = rows.first(where: { $0.id == browserStore.selectedRowID }) {
+                Text("Run will scroll \(chosen.label) on \(controlStore.selectedNode?.label ?? "the selected Mac").")
+                  .font(.footnote)
+                  .accessibilityIdentifier("speech-netflix-row-review")
+              }
+            }
             Button("Run \(intent.displayLabel) on selected Mac") {
               if browserStore.perform(intent, on: controlStore.selectedNode) {
                 speech.discardReview()

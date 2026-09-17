@@ -27,6 +27,8 @@ type Observation = {
   snapshotId: string;
   items: Map<string, string>;
   rowCandidateId?: string;
+  rows: Map<string, string>;
+  searchControl?: { id: string; label: string };
   site: NonNullable<BrowserView["site"]>;
 };
 const exact = (value: unknown, keys: readonly string[]): Record<string, unknown> => {
@@ -176,32 +178,51 @@ export class BrowserCompanionOperations {
         snapshotId: value.snapshotId,
         items,
         ...(value.rowCandidateId === undefined ? {} : { rowCandidateId: value.rowCandidateId }),
+        rows: new Map(checked.browser.view.site.rows?.map((row) => [row.id, row.label]) || []),
+        ...(checked.browser.view.site.searchControl
+          ? { searchControl: checked.browser.view.site.searchControl }
+          : {}),
         site: checked.browser.view.site,
       };
       return checked;
     }
-    if (action.tool === "browser.search") throw new Error("Netflix search is unsupported.");
     const observed = this.observed;
     if (!observed) throw new Error("Read the Netflix page before an action.");
     if (observed.site.page === "login" || observed.site.page === "unsupported")
       throw new Error("Netflix page needs attention before an action.");
     let command: BrowserCompanionCommand;
-    if (action.tool === "browser.scroll") {
+    if (action.tool === "browser.search") {
+      if (
+        (observed.site.page !== "browse" && observed.site.page !== "results") ||
+        !observed.searchControl
+      )
+        throw new Error("Netflix search control is unavailable; read the page again.");
+      command = {
+        type: "searchObserved",
+        actionId: randomUUID(),
+        snapshotId: observed.snapshotId,
+        controlId: observed.searchControl.id,
+        query: action.query,
+      };
+    } else if (action.tool === "browser.scrollRow") {
+      if (observed.site.page !== "browse" || !observed.rows.has(action.rowId))
+        throw new Error("Netflix row choice is stale; read and choose a row again.");
+      command = {
+        type: "scrollSelectedRow",
+        actionId: randomUUID(),
+        snapshotId: observed.snapshotId,
+        rowId: action.rowId,
+        direction: action.direction,
+      };
+    } else if (action.tool === "browser.scroll") {
       if (action.direction === "up" || action.direction === "down")
         command = { type: "scrollViewport", actionId: randomUUID(), direction: action.direction };
-      else {
-        if (!observed.rowCandidateId || observed.site.page !== "browse")
-          throw new Error("Netflix row is ambiguous; select a row before horizontal browsing.");
-        command = {
-          type: "scrollRow",
-          actionId: randomUUID(),
-          snapshotId: observed.snapshotId,
-          candidateId: observed.rowCandidateId,
-          direction: action.direction,
-        };
-      }
+      else throw new Error("Choose an observed Netflix row before horizontal browsing.");
     } else if (action.tool === "browser.select") {
-      if (observed.site.page !== "browse" || !observed.items.has(action.itemId))
+      if (
+        (observed.site.page !== "browse" && observed.site.page !== "results") ||
+        !observed.items.has(action.itemId)
+      )
         throw new Error("Netflix selection is stale.");
       command = {
         type: "open",

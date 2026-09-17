@@ -16,23 +16,36 @@ enum BrowserPhoneProvider: String, Equatable, Sendable { case youtube, netflix }
 enum BrowserPhonePlayback: String, Equatable, Sendable {
   case playing, paused, unavailable, ambiguous
 }
+struct BrowserPhoneRow: Equatable, Identifiable, Sendable {
+  let id: String
+  let label: String
+}
+struct BrowserPhoneSearchControl: Equatable, Sendable {
+  let id: String
+  let label: String
+}
 struct BrowserPhoneSite: Equatable, Sendable {
   let provider: BrowserPhoneProvider
   let page: BrowserPhoneYouTubePage
   let playback: BrowserPhonePlayback
   let currentTimeSeconds: Double?
   let horizontalScrollAvailable: Bool?
+  let rows: [BrowserPhoneRow]?
+  let searchControl: BrowserPhoneSearchControl?
 
   init(
     provider: BrowserPhoneProvider = .youtube, page: BrowserPhoneYouTubePage,
     playback: BrowserPhonePlayback, currentTimeSeconds: Double?,
-    horizontalScrollAvailable: Bool? = nil
+    horizontalScrollAvailable: Bool? = nil, rows: [BrowserPhoneRow]? = nil,
+    searchControl: BrowserPhoneSearchControl? = nil
   ) {
     self.provider = provider
     self.page = page
     self.playback = playback
     self.currentTimeSeconds = currentTimeSeconds
     self.horizontalScrollAvailable = horizontalScrollAvailable
+    self.rows = rows
+    self.searchControl = searchControl
   }
 }
 struct BrowserPhonePage: Equatable, Sendable {
@@ -67,6 +80,7 @@ enum BrowserPhoneAction: Equatable, Sendable {
   case refresh
   case read(revision: String)
   case scroll(BrowserScrollDirection, revision: String)
+  case scrollRow(String, BrowserScrollDirection, revision: String)
   case search(String, revision: String)
   case select(String, revision: String)
   case playback(BrowserVoiceIntent, revision: String)
@@ -138,6 +152,12 @@ final class BrowserPhoneControlTransport: BrowserPhoneControlTransporting, @unch
     case .scroll(let direction, let revision):
       guard validBrowserIdentifier(revision) else { throw PhoneControlFailure.rejected }
       return ["tool": "browser.scroll", "direction": direction.rawValue, "revision": revision]
+    case .scrollRow(let rowID, let direction, let revision):
+      guard validBrowserRowID(rowID), validBrowserIdentifier(revision),
+        direction == .left || direction == .right
+      else { throw PhoneControlFailure.rejected }
+      return ["tool": "browser.scrollRow", "direction": direction.rawValue,
+        "rowId": rowID, "revision": revision]
     case .search(let query, let revision):
       guard validBrowserIdentifier(revision), validBrowserQuery(query) else {
         throw PhoneControlFailure.rejected
@@ -160,7 +180,7 @@ final class BrowserPhoneControlTransport: BrowserPhoneControlTransporting, @unch
 private func revision(_ action: BrowserPhoneAction) -> String? {
   switch action {
   case .status, .refresh: nil
-  case .read(let value), .scroll(_, let value), .search(_, let value),
+  case .read(let value), .scroll(_, let value), .scrollRow(_, _, let value), .search(_, let value),
     .select(_, let value), .playback(_, let value): value
   }
 }
@@ -264,7 +284,7 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
 }
 
 private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPhoneSite {
-  guard Set(value.keys).isSubset(of: ["provider", "page", "playback", "currentTimeSeconds", "horizontalScrollAvailable"]),
+  guard Set(value.keys).isSubset(of: ["provider", "page", "playback", "currentTimeSeconds", "horizontalScrollAvailable", "rows", "searchControl"]),
     Set(["provider", "page", "playback"]).isSubset(of: Set(value.keys)),
     let providerValue = value["provider"] as? String,
     let provider = BrowserPhoneProvider(rawValue: providerValue),
@@ -274,7 +294,7 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
     let playback = BrowserPhonePlayback(rawValue: playbackValue),
     page == .watch || playback == .unavailable,
     (provider == .youtube && [.home, .results, .watch, .login, .unsupported].contains(page))
-      || (provider == .netflix && [.browse, .watch, .login, .unsupported].contains(page))
+      || (provider == .netflix && [.browse, .results, .watch, .login, .unsupported].contains(page))
   else { throw PhoneControlFailure.invalidResponse }
   let row: Bool?
   if let rawRow = value["horizontalScrollAvailable"] {
@@ -283,6 +303,29 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
     else { throw PhoneControlFailure.invalidResponse }
     row = number.boolValue
   } else { row = nil }
+  let rows: [BrowserPhoneRow]?
+  if let rawRows = value["rows"] {
+    guard provider == .netflix, page == .browse,
+      let entries = rawRows as? [[String: Any]], entries.count <= 8
+    else { throw PhoneControlFailure.invalidResponse }
+    var seen = Set<String>()
+    rows = try entries.map { entry in
+      guard Set(entry.keys) == Set(["id", "label"]),
+        let id = entry["id"] as? String, validBrowserRowID(id), seen.insert(id).inserted,
+        let label = entry["label"] as? String, validBrowserText(label, maximum: 100)
+      else { throw PhoneControlFailure.invalidResponse }
+      return BrowserPhoneRow(id: id, label: label)
+    }
+  } else { rows = nil }
+  let searchControl: BrowserPhoneSearchControl?
+  if let raw = value["searchControl"] {
+    guard provider == .netflix, (page == .browse || page == .results),
+      let entry = raw as? [String: Any], Set(entry.keys) == Set(["id", "label"]),
+      let id = entry["id"] as? String, validBrowserRowID(id),
+      let label = entry["label"] as? String, validBrowserText(label, maximum: 100)
+    else { throw PhoneControlFailure.invalidResponse }
+    searchControl = BrowserPhoneSearchControl(id: id, label: label)
+  } else { searchControl = nil }
   let time: Double?
   if let rawTime = value["currentTimeSeconds"] {
     guard playback == .playing || playback == .paused,
@@ -295,7 +338,14 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
   }
   return BrowserPhoneSite(
     provider: provider, page: page, playback: playback,
-    currentTimeSeconds: time, horizontalScrollAvailable: row)
+    currentTimeSeconds: time, horizontalScrollAvailable: row, rows: rows,
+    searchControl: searchControl)
+}
+
+private func validBrowserRowID(_ value: String) -> Bool {
+  let bytes = Array(value.utf8)
+  return bytes.count == 36 && UUID(uuidString: value)?.uuidString.lowercased() == value
+    && bytes[14] == 52 && [56, 57, 97, 98].contains(bytes[19])
 }
 
 private func validBrowserIdentifier(_ value: String) -> Bool {

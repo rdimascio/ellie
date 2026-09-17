@@ -310,6 +310,8 @@ export class BrowserWebMCPOperations {
       browserBindingRevision(binding) !== action.revision
     )
       throw new Error("Browser page changed before the requested action.");
+    if (action.tool === "browser.scrollRow")
+      throw new Error("Observed row scrolling requires the Netflix companion.");
     const operation = action.tool.slice("browser.".length) as ReviewedBrowserBinding["operation"];
     const key = action.tool === "browser.read" ? action.view : operation;
     const reviewed = this.reviewed(binding.origin, operation, key);
