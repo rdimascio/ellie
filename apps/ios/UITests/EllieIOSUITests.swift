@@ -1,6 +1,43 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testScannerSheetDismissalKeepsDecodedReviewUntilExplicitCancel() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-native-scanner-sheet-fixture"]
+        app.launch()
+
+        let scan = app.buttons["Scan enrollment code"]
+        XCTAssertTrue(scan.waitForExistence(timeout: 5))
+        scan.tap()
+        let dismiss = app.buttons["scanner-fixture-dismiss"]
+        XCTAssertTrue(dismiss.waitForExistence(timeout: 5))
+        dismiss.tap()
+        XCTAssertTrue(scan.waitForExistence(timeout: 5), "Dismissing the sheet returns to idle")
+        XCTAssertFalse(app.buttons["Pair this iPhone"].exists)
+
+        scan.tap()
+        let decode = app.buttons["scanner-fixture-decode"]
+        XCTAssertTrue(decode.waitForExistence(timeout: 5))
+        decode.tap()
+        let sheetGone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: decode)
+        XCTAssertEqual(XCTWaiter.wait(for: [sheetGone], timeout: 5), .completed)
+        let pair = app.buttons["Pair this iPhone"]
+        XCTAssertTrue(pair.waitForExistence(timeout: 5),
+            "A decoded code must remain on the production review screen after sheet dismissal")
+        let reviewedLabel = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@ OR value == %@", "Fixture phone", "Fixture phone"
+            )).firstMatch
+        XCTAssertTrue(reviewedLabel.waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["Open applications on fixture-mac"].exists)
+
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(scan.waitForExistence(timeout: 5), "Explicit Cancel returns review to idle")
+        XCTAssertFalse(pair.exists)
+    }
+
     func testBrowserMutationUnknownSurvivesProcessRelaunchUntilExplicitRead() {
         let identifier = UUID().uuidString.lowercased()
         let app = XCUIApplication()
