@@ -8,6 +8,8 @@ The selected files have no overlapping upstream changes between those commits. T
 
 The byte-identical extraction was committed as `23fd936e4fc71fdd1b25837d9ecbd8f6c7a2f4a7`. Subsequent review corrections tighten financial provenance and test cleanup only in the candidate; their paths and purpose are recorded separately in the manifest. Original source hashes continue to describe the initial extraction, not these later corrections.
 
+Current main `45151925e3342c61e69e8e75fafa8be3052de140` was merged without conflicts in `73286bc08a48dd1bd31a0dc56a74ebbca6ed84c1`, preserving branch history. Retained Life browser CI run `35199487851` exposed a stale custom-tools navigation step in the embedded browser test. Commit `48187c1898b20175c9da8e97be8a00bb88f59f7c` changes that step to the existing Settings route; the product behavior is unchanged. See [owner QA and the separate native delta](mobile-design-qa.md).
+
 ## Design system
 
 | Token     | Color     | Role                    |
@@ -63,6 +65,7 @@ ELLIE_DESIGN_BROWSER=webkit node apps/life-ui/tests/mobile-design.e2e.ts
 bun run life:test:mobile-orb
 node apps/life-ui/tests/life.e2e.ts
 node apps/life-ui/tests/connections.e2e.ts
+node apps/life-ui/tests/native.e2e.ts
 ```
 
 The new acceptance test covers all primary mobile views, 320/390/430/1024 pixel widths, horizontal overflow, navigation selection and scroll reset, 44 pixel navigation hit areas, retained drafts, composer focus, Escape and close behavior, financial loading errors and recovery, unconfigured Plaid state, and no write requests while navigating or drafting. Financial insight unit tests cover source freshness, personal scope, connection eligibility, and missing, empty, non-derived, mismatched, or invalidated provenance. A cleanup test injects a browser launch failure and verifies that the owned preview server closes. Screenshots are written to the ignored `test-results/mobile-redesign` directory. WebKit checks browser rendering, not a physical iPhone or its keyboard and permission dialogs.
@@ -73,4 +76,4 @@ The candidate is validated with the gates above: lint, formatting, generated-con
 
 The existing Life end-to-end suite passed against the redesign, including conversation, dashboard editing, source, plan, and data-management behavior. The desktop orb assertion now verifies separation from dashboard controls rather than its former exact screen-center coordinate.
 
-No native build, device job, model job, merge, deployment, or service rollout is part of this candidate. Browser screenshots do not validate physical iPhone keyboard or permission behavior.
+No local native build, device job, model job, shared-main merge, deployment, or service rollout was performed for this candidate. Browser screenshots do not validate physical iPhone keyboard or permission behavior.

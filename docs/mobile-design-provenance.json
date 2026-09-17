@@ -124,5 +124,18 @@
       "paths": ["docs/mobile-design.md", "docs/mobile-design-provenance.json"],
       "reason": "Record review corrections and distinguish the original extraction provenance from current candidate validation."
     }
-  ]
+  ],
+  "integration": {
+    "base": "45151925e3342c61e69e8e75fafa8be3052de140",
+    "mergeCommit": "73286bc08a48dd1bd31a0dc56a74ebbca6ed84c1",
+    "method": "History-preserving merge; no conflicts; no native redesign edits transferred.",
+    "ciCorrectionCommit": "48187c1898b20175c9da8e97be8a00bb88f59f7c",
+    "ciFailureRun": "35199487851",
+    "ciCorrection": "Update only the embedded Life browser test navigation from the removed Add or make an app shortcut to Settings > Library and tools > Open custom tools. Exact old head reproduced the retained timeout; corrected browser fixture passed.",
+    "preservedNativeOverlapWithCurrentBase": [
+      "apps/ios/EllieIOS.xcodeproj/project.pbxproj",
+      "apps/ios/Sources/EllieIOSApp.swift",
+      "apps/ios/Sources/NativeEnrollmentView.swift"
+    ]
+  }
 }
