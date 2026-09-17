@@ -26,7 +26,8 @@ document.addEventListener('click', event => {
   if (!anchor) return;
   event.preventDefault();
   window.clicks.push(anchor.id);
-  if (anchor.id === 'title' && !window.noNavigate) history.pushState({}, '', anchor.href);
+  if (anchor.id === 'title' && !window.noNavigate)
+    history.pushState({}, '', window.wrongNavigate ? '/commerce/plans' : anchor.href);
 });
 </script>`;
 
@@ -203,6 +204,31 @@ test(
       await assert.rejects(dispatch(page, open), /navigation_not_observed/);
       await assert.rejects(dispatch(page, open), /duplicate_action/);
       assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), ["title"]);
+    });
+  },
+);
+
+test(
+  "Disney+ a click that lands away from the observed entity is never a verified selection",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await page.evaluate(() => {
+        globalThis["wrongNavigate"] = true;
+      });
+      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const open = {
+        type: "open",
+        actionId: actionId(),
+        snapshotId: read.snapshotId,
+        candidateId: read.candidates[0].id,
+      };
+      await assert.rejects(dispatch(page, open), /page_changed/);
+      assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), ["title"]);
+      await assert.rejects(
+        dispatch(page, open, "https://www.disneyplus.com/commerce/plans"),
+        /duplicate_action/,
+      );
     });
   },
 );

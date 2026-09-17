@@ -180,7 +180,10 @@
         await new Promise((resolve) => setTimeout(resolve, 50));
         if (cancelled.has(command.actionId)) throw new Error("cancelled");
         if (Date.now() >= deadline) throw new Error("command_timeout");
-        if (location.href !== before) return { outcome: "navigation_observed" };
+        if (location.href !== before) {
+          if (location.href !== entry.href) throw new Error("page_changed");
+          return { outcome: "navigation_observed" };
+        }
       }
       throw new Error("navigation_not_observed");
     } finally {
