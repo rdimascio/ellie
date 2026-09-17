@@ -41,8 +41,8 @@ const installerSources = [
   "ServicePayloadInstaller.swift",
 ].map(native);
 const canonicalArm =
-  '{"authorizationFormatVersion":1,"candidateBindingScope":"authenticated-candidate-capture","candidateBindingVersion":1,"digestAlgorithm":"sha256","envelopePolicyDigest":"4869431c87452a2a378b72ac62e018bca62d60caadef2f65bdfed50d70a16cb5","launcherVerification":"full-candidate-and-installed-role-v1","payloadPolicyDigest":"8018ebd7d746542ef0a42cb70a0a0fad41f8218189c8b44592f0b23029571783","publisherTeamID":"ABCDEFGHIJ","receiptVersion":2,"roles":[{"bundleIdentifier":"org.ellie.assistant.coordinator.app","name":"coordinator"},{"bundleIdentifier":"org.ellie.assistant.node.app","name":"node"}],"scope":"authenticated-service-activation","selectionJournalVersion":2,"version":1}\n';
-const armDigest = "3497bc3e451d746bdbc0241fdef8cd93e262448811a96dacd41d8c6b3ddae064";
+  '{"authorizationFormatVersion":1,"candidateBindingScope":"authenticated-candidate-capture","candidateBindingVersion":1,"digestAlgorithm":"sha256","envelopePolicyDigest":"4869431c87452a2a378b72ac62e018bca62d60caadef2f65bdfed50d70a16cb5","launcherVerification":"full-candidate-and-installed-role-v1","payloadPolicyDigest":"0dff1b03a67c5213ead9dcc4b8c05a0327847f99ef6f7202ceb466401dcf3eae","publisherTeamID":"ABCDEFGHIJ","receiptVersion":2,"roles":[{"bundleIdentifier":"org.ellie.assistant.coordinator.app","name":"coordinator"},{"bundleIdentifier":"org.ellie.assistant.node.app","name":"node"}],"scope":"authenticated-service-activation","selectionJournalVersion":2,"version":1}\n';
+const armDigest = "8c87fc9f9b6dc2439e9fab1fea8dc951472155fb93a2c2db80a79000df402582";
 const validProbe = Buffer.from(`${canonicalArm}${armDigest}\n`);
 const policyChildDeadline = 120_000;
 const childCleanupGrace = 7_000;
@@ -304,9 +304,9 @@ test(
     });
     assert.equal(
       x64.payloadPolicyDigest,
-      "1e70693bf0d7d7ec7193903287ed19e6dcbcd2499cf9fb57d85f8e3c2a9008dd",
+      "41abb344d41dd8d08232dcee11810488171ffb8beac16c329b57e0c2ac4f17ef",
     );
-    assert.equal(x64.digest, "d4f01560545cdf7d2f41a008965a8e4c911d0bf67af2ee9ecf9f065171966d9c");
+    assert.equal(x64.digest, "d2ac2dcef599662315aac9a4ca9bddc1cdec44b98b4b67a3039a1de11ee1e753");
     const changed = await generateActivationPolicySource({
       source: repository,
       output: join(root, "changed.c"),
@@ -319,7 +319,7 @@ test(
     );
     assert.equal(
       changed.digest,
-      "3a6b61ac7577076e46d658ef6fa9d674dde4a01685302cbf40cbb6e062aa7686",
+      "f14442e08eec4a1ad787ef4514859badb3501a8262f18ad9bf5a13836f53ce34",
     );
     const race = join(root, "race.c");
     const outcomes = await Promise.allSettled([
