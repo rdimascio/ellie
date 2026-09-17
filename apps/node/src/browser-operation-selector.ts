@@ -10,10 +10,21 @@ import type {
 } from "./browser-accessibility-runtime.ts";
 import { browserBindingRevision, type BrowserBinding } from "./browser-operations.ts";
 
-type WebMCP = { execute(action: Action, signal: AbortSignal): Promise<Result> };
+type WebMCP = {
+  execute(action: Action, signal: AbortSignal): Promise<Result>;
+  inspectSelectedPage?: (
+    binding: BrowserBinding,
+    signal: AbortSignal,
+  ) => Promise<NonNullable<import("@ellie/protocol").BrowserView["site"]>>;
+};
 
 /** Selects the adapter from fresh pre-dispatch binding evidence. It never falls through after dispatch. */
 export class BrowserOperationSelector {
+  private observationEpoch = 0;
+  private observedSite?: {
+    revision: string;
+    site: NonNullable<import("@ellie/protocol").BrowserView["site"]>;
+  };
   private readonly binding: (
     signal: AbortSignal,
     refresh?: boolean,
@@ -53,14 +64,65 @@ export class BrowserOperationSelector {
     }
     if (signal.aborted) throw new Error("Browser request was cancelled.");
     const adapterAction = refresh ? browserWebMCPAction({ tool: "browser.status" }) : browserAction;
+    const revision = typeof binding === "object" ? browserBindingRevision(binding) : undefined;
+    if (this.observedSite?.revision !== revision) this.observedSite = undefined;
+    if (refresh) {
+      this.observationEpoch += 1;
+      this.observedSite = undefined;
+    }
     if (typeof binding !== "object" || binding.availability === "webmcp")
       return this.webmcp.execute(adapterAction, signal);
+    if (browserAction.tool === "browser.read") {
+      this.observationEpoch += 1;
+      this.observedSite = undefined;
+    }
+    if (
+      browserAction.tool === "browser.search" ||
+      browserAction.tool === "browser.select" ||
+      browserAction.tool === "browser.playback"
+    ) {
+      const site = this.observedSite?.site;
+      if (binding.origin === "https://www.youtube.com" && !site)
+        throw new Error("Browser page needs a fresh read before an action.");
+      if (site && (site.page === "login" || site.page === "unsupported"))
+        throw new Error("Browser page needs attention before an action.");
+      if (
+        browserAction.tool === "browser.playback" &&
+        site &&
+        (site.page !== "watch" ||
+          (browserAction.action === "play" && site.playback !== "paused") ||
+          (browserAction.action === "pause" && site.playback !== "playing"))
+      )
+        throw new Error("Browser playback state is unavailable.");
+      // A dispatched mutation may change the page without changing the binding revision.
+      // The next action requires an explicit fresh read, even after an unknown outcome.
+      this.observationEpoch += 1;
+      this.observedSite = undefined;
+    }
+    const readEpoch = this.observationEpoch;
     const accessibilityBinding: BrowserAccessibilityBinding = {
       availability: "accessibility",
       documentId: binding.documentId,
       url: binding.url,
       revision: browserBindingRevision(binding),
     };
-    return this.accessibility.execute(adapterAction, accessibilityBinding, signal);
+    const result = await this.accessibility.execute(adapterAction, accessibilityBinding, signal);
+    if (browserAction.tool !== "browser.read" || binding.origin !== "https://www.youtube.com")
+      return result;
+    if (signal.aborted) throw new Error("Browser request was cancelled.");
+    if (result.browser.operation !== "read" || !this.webmcp.inspectSelectedPage)
+      throw new Error("Browser page observation is unavailable.");
+    const site = await this.webmcp.inspectSelectedPage(binding, signal);
+    if (signal.aborted) throw new Error("Browser request was cancelled.");
+    if (readEpoch !== this.observationEpoch) throw new Error("Browser page changed during read.");
+    const observed = browserWebMCPOperationResult({
+      ...result,
+      browser: {
+        ...result.browser,
+        view: { ...result.browser.view, site },
+      },
+    });
+    this.observedSite = { revision: browserBindingRevision(binding), site };
+    return observed;
   }
 }

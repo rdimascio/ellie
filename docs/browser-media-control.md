@@ -4,9 +4,9 @@ Ellie must control content inside streaming websites. Opening a URL does not sat
 
 ## Current status
 
-The installed node has four desktop operations: app opening, URL opening, window placement and adjacent placement. It cannot inspect or operate a website. The native YouTube playlist widget has a separate embedded player; its acceptance does not establish control of youtube.com or YouTube TV.
+The current production browser route supports an explicitly selected companion tab, reviewed WebMCP tools when present, and a scoped Accessibility adapter for YouTube when WebMCP is unavailable. Native browser status, read, search, result selection, and play/pause requests cross the authenticated coordinator and node. Accessibility mutations are dispatched once and reported as unknown until a separate read observes the page; the result never proves the prior command caused that state.
 
-The first companion is in development on `codex/browser-media-control`, based on `9e75923`. Its branch was successfully pushed before implementation. It is an isolated development extension, not an installed browser integration, a native remote release or verified streaming-service support.
+A fresh YouTube read now includes a bounded `view.site` observation of home, results, watch, login, or unsupported, plus unambiguous visible player state when available. Each Accessibility mutation consumes that observation and needs another read before a further action. Login, unsupported pages, stale documents and ambiguous player state block an unsupported action before dispatch. The field is optional for older companions. Synthetic browser and native-route tests cover this contract; they do not establish a successful real-site or physical iPhone-to-browser workflow. Actual Arc acceptance still requires an unobstructed selected page and the attended companion connection.
 
 Apple Watch is now part of the requested media experience: while an Ellie-controlled session plays, the watch should surface its title, target device and supported player controls. This is a new requirement, not an existing Watch app or accepted system Now Playing integration.
 

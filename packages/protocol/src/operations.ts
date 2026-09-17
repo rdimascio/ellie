@@ -295,6 +295,12 @@ export type BrowserView = {
   title?: string;
   summary?: string;
   items: { id: string; label: string; state?: string }[];
+  site?: {
+    provider: "youtube";
+    page: "home" | "results" | "watch" | "login" | "unsupported";
+    playback: "playing" | "paused" | "unavailable" | "ambiguous";
+    currentTimeSeconds?: number;
+  };
 };
 export type BrowserExecutionSource = "webmcp" | "accessibility";
 export type BrowserWebMCPStructuredResult =
@@ -419,7 +425,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     const view = browser.view as Record<string, unknown>;
     if (!view || typeof view !== "object" || Array.isArray(view))
       throw new Error("Invalid browser operation result.");
-    const allowed = ["title", "summary", "items"];
+    const allowed = ["title", "summary", "items", "site"];
     if (
       Object.keys(view).some((key) => !allowed.includes(key)) ||
       !Array.isArray(view.items) ||
@@ -437,6 +443,34 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     });
     if (new Set(items.map((item) => item.id)).size !== items.length)
       throw new Error("Invalid browser operation result.");
+    let site: BrowserView["site"];
+    if (view.site !== undefined) {
+      const observed = view.site as Record<string, unknown>;
+      if (!observed || typeof observed !== "object" || Array.isArray(observed))
+        throw new Error("Invalid browser operation result.");
+      const hasTime = Object.hasOwn(observed, "currentTimeSeconds");
+      exactObject(
+        observed,
+        hasTime
+          ? ["provider", "page", "playback", "currentTimeSeconds"]
+          : ["provider", "page", "playback"],
+      );
+      if (
+        observed.provider !== "youtube" ||
+        !["home", "results", "watch", "login", "unsupported"].includes(observed.page as string) ||
+        !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
+        (observed.page !== "watch" && observed.playback !== "unavailable") ||
+        (hasTime &&
+          (observed.page !== "watch" ||
+            !["playing", "paused"].includes(observed.playback as string) ||
+            typeof observed.currentTimeSeconds !== "number" ||
+            !Number.isFinite(observed.currentTimeSeconds) ||
+            observed.currentTimeSeconds < 0 ||
+            observed.currentTimeSeconds > 86_400))
+      )
+        throw new Error("Invalid browser operation result.");
+      site = observed as BrowserView["site"];
+    }
     return {
       ok: body.ok,
       message,
@@ -449,6 +483,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
           ...(view.title === undefined ? {} : { title: boundedText(view.title, 500) }),
           ...(view.summary === undefined ? {} : { summary: boundedText(view.summary, 2000) }),
           items,
+          ...(site === undefined ? {} : { site }),
         },
       },
     };

@@ -423,6 +423,151 @@ test("validated extension availability reaches the accessibility selector", asyn
   assert.equal(accessibilityCalls, 1);
 });
 
+test("fresh site observation blocks login, unsupported, and unobservable playback before AX dispatch", async () => {
+  const binding = {
+    availability: "accessibility" as const,
+    bindingId: "binding-1",
+    documentId: "document-1",
+    origin: "https://www.youtube.com",
+    url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+    expiresAt: Date.now() + 60_000,
+  };
+  let page: "login" | "unsupported" | "watch" = "login";
+  let playback: "unavailable" | "paused" | "playing" = "unavailable";
+  let inspectionGate: Promise<void> | undefined;
+  let inspectionEntered: (() => void) | undefined;
+  const dispatched: string[] = [];
+  const selector = new BrowserOperationSelector(
+    async () => binding,
+    {
+      async execute() {
+        throw new Error("WebMCP action must not run.");
+      },
+      async inspectSelectedPage() {
+        inspectionEntered?.();
+        await inspectionGate;
+        return { provider: "youtube", page, playback };
+      },
+    },
+    {
+      async execute(action: BrowserAction, selected: BrowserAccessibilityBinding) {
+        if (action.tool === "browser.status")
+          return {
+            ok: true,
+            message: "Connected.",
+            browser: {
+              source: "accessibility",
+              operation: "status",
+              status: "connected",
+              revision: selected.revision,
+              origin: binding.origin,
+            },
+          };
+        if (action.tool === "browser.read")
+          return {
+            ok: true,
+            message: "Read.",
+            browser: {
+              source: "accessibility",
+              operation: "read",
+              status: "completed",
+              revision: selected.revision,
+              view: { items: [] },
+            },
+          };
+        dispatched.push(action.tool);
+        return {
+          ok: false,
+          message: "Outcome unknown.",
+          browser: {
+            source: "accessibility",
+            operation: "command",
+            status: "unknown",
+            revision: selected.revision,
+          },
+        };
+      },
+    } as unknown as BrowserAccessibilityRuntime,
+  );
+  const statusResult = await selector.execute(
+    { tool: "browser.status" },
+    AbortSignal.timeout(1000),
+  );
+  assert.ok("browser" in statusResult);
+  const revision = statusResult.browser.revision!;
+  const read = () =>
+    selector.execute(
+      { tool: "browser.read", view: "summary", revision },
+      AbortSignal.timeout(1000),
+    );
+  await read();
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.search", query: "public video", revision },
+      AbortSignal.timeout(1000),
+    ),
+  );
+  page = "unsupported";
+  await read();
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.select", itemId: "item-1", revision },
+      AbortSignal.timeout(1000),
+    ),
+  );
+  page = "watch";
+  await read();
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.playback", action: "play", revision },
+      AbortSignal.timeout(1000),
+    ),
+  );
+  assert.deepEqual(dispatched, []);
+  playback = "paused";
+  await read();
+  await selector.execute(
+    { tool: "browser.playback", action: "play", revision },
+    AbortSignal.timeout(1000),
+  );
+  assert.deepEqual(dispatched, ["browser.playback"]);
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.playback", action: "pause", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
+  assert.deepEqual(dispatched, ["browser.playback"]);
+  playback = "playing";
+  await read();
+  await selector.execute(
+    { tool: "browser.playback", action: "pause", revision },
+    AbortSignal.timeout(1000),
+  );
+  assert.deepEqual(dispatched, ["browser.playback", "browser.playback"]);
+  let releaseInspection!: () => void;
+  inspectionGate = new Promise<void>((resolve) => {
+    releaseInspection = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    inspectionEntered = resolve;
+  });
+  const staleRead = read();
+  await entered;
+  await selector.execute({ tool: "browser.refresh" }, AbortSignal.timeout(1000));
+  releaseInspection();
+  await assert.rejects(staleRead, /changed during read/);
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.playback", action: "pause", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
+  assert.deepEqual(dispatched, ["browser.playback", "browser.playback"]);
+});
+
 test("selector requests renewal only for explicit refresh and passes adapters ordinary status", async () => {
   const refreshModes: boolean[] = [];
   const adapterTools: string[] = [];

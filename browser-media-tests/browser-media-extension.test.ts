@@ -641,6 +641,12 @@ async function fixture(
           : accessibilityNeedle,
       )
       .replace(
+        'binding.origin !== "https://www.youtube.com"',
+        options.accessibilityOnly
+          ? 'binding.origin !== "http://127.0.0.1:PORT"'
+          : 'binding.origin !== "https://www.youtube.com"',
+      )
+      .replace(
         tabGetNeedle,
         `${tabGetNeedle.split("\n  const before")[0]}
   if (globalThis.__ellieTestBeforeTabGet) await globalThis.__ellieTestBeforeTabGet;
@@ -724,6 +730,139 @@ test(
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "loaded companion observes only the selected document and treats uncertain player state conservatively",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ accessibilityOnly: true, stableNativePort: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
+      const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
+      assert.ok(tab?.id);
+      const binding = await launched.worker.evaluate(
+        (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+        tab.id,
+      );
+      async function observe(selected: { bindingId: string; documentId: string }) {
+        return launched.worker.evaluate(
+          async (value) =>
+            globalThis.__ellieTestWebMCP.request({
+              protocol: "ellie.browser-webmcp.v1",
+              id: crypto.randomUUID(),
+              type: "page.inspect",
+              ...value,
+            }),
+          selected,
+        );
+      }
+      const status = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      assert.equal(status.availability, "accessibility");
+      const home = await observe({ bindingId: binding.bindingId, documentId: status.documentId });
+      assert.deepEqual(home.site, { provider: "youtube", page: "home", playback: "unavailable" });
+      await assert.rejects(observe({ bindingId: binding.bindingId, documentId: "wrong-document" }));
+      await launched.page.goto(`${new URL(launched.page.url()).origin}/watch?v=iTHUUjTA-LI`);
+      await launched.page.bringToFront();
+      await assert.rejects(
+        observe({ bindingId: binding.bindingId, documentId: status.documentId }),
+      );
+      const watchBinding = await launched.worker.evaluate(
+        (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+        tab.id,
+      );
+      const watchStatus = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      const watch = { bindingId: watchBinding.bindingId, documentId: watchStatus.documentId };
+      assert.deepEqual((await observe(watch)).site, {
+        provider: "youtube",
+        page: "watch",
+        playback: "unavailable",
+      });
+      await launched.page.evaluate(() => {
+        const first = document.createElement("video");
+        first.style.cssText = "position:fixed;top:10px;left:10px;width:200px;height:100px";
+        const second = first.cloneNode() as HTMLVideoElement;
+        document.body.append(first, second);
+      });
+      assert.deepEqual((await observe(watch)).site, {
+        provider: "youtube",
+        page: "watch",
+        playback: "ambiguous",
+      });
+      await launched.page.evaluate(() => {
+        const videos = document.querySelectorAll("video");
+        videos[1]?.remove();
+        videos[2]?.remove();
+      });
+      await launched.page.evaluate(() => (globalThis as any).showPlayer());
+      await launched.page
+        .locator("video")
+        .evaluate((video: HTMLVideoElement) =>
+          video.readyState >= 2
+            ? undefined
+            : new Promise<void>((resolve) =>
+                video.addEventListener("loadeddata", () => resolve(), { once: true }),
+              ),
+        );
+      assert.deepEqual((await observe(watch)).site, {
+        provider: "youtube",
+        page: "watch",
+        playback: "paused",
+        currentTimeSeconds: 0,
+      });
+      await launched.page.locator("video").evaluate((video: HTMLVideoElement) => video.play());
+      const playing = (await observe(watch)).site;
+      assert.equal(playing.playback, "playing");
+      assert.equal(typeof playing.currentTimeSeconds, "number");
+      for (const [path, expectedPage] of [
+        ["/signin", "login"],
+        ["/channel/not-a-supported-page", "unsupported"],
+      ]) {
+        await launched.page.goto(`${new URL(launched.page.url()).origin}${path}`);
+        await launched.page.bringToFront();
+        const selected = await launched.worker.evaluate(
+          (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+          tab.id,
+        );
+        const latest = await launched.worker.evaluate(() =>
+          globalThis.__ellieTestWebMCP.request({
+            protocol: "ellie.browser-webmcp.v1",
+            id: crypto.randomUUID(),
+            type: "binding.status",
+          }),
+        );
+        assert.deepEqual(
+          (
+            await observe({
+              bindingId: selected.bindingId,
+              documentId: latest.documentId,
+            })
+          ).site,
+          { provider: "youtube", page: expectedPage, playback: "unavailable" },
+        );
+      }
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(owned.root, { recursive: true, force: true });
     }
   },
