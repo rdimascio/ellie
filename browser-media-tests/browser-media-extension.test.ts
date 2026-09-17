@@ -1163,6 +1163,64 @@ test(
       await launched.page
         .locator("button")
         .evaluate((button) => button.setAttribute("aria-label", "Play"));
+      for (const condition of ["disabled", "aria-disabled", "inert", "covered"] as const) {
+        binding = await request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.refresh",
+        });
+        observed = await inspect();
+        assert.equal(observed.value.site.playback, "paused");
+        await launched.page.locator("button").evaluate((button, kind) => {
+          if (kind === "disabled") (button as HTMLButtonElement).disabled = true;
+          else if (kind === "aria-disabled") button.setAttribute("aria-disabled", "true");
+          else if (kind === "inert") button.setAttribute("inert", "");
+          else {
+            const rect = button.getBoundingClientRect();
+            const cover = document.createElement("div");
+            cover.id = "button-cover";
+            Object.assign(cover.style, {
+              position: "fixed",
+              left: `${rect.left}px`,
+              top: `${rect.top}px`,
+              width: `${rect.width}px`,
+              height: `${rect.height}px`,
+              zIndex: "9999",
+            });
+            document.body.append(cover);
+          }
+        }, condition);
+        const denied = await launched.worker.evaluate(
+          async (body) => {
+            try {
+              await globalThis.__ellieTestWebMCP.request(body);
+              return "accepted";
+            } catch (error) {
+              return error instanceof Error ? error.message : "failed";
+            }
+          },
+          {
+            protocol: "ellie.browser-webmcp.v1",
+            id: crypto.randomUUID(),
+            type: "media.execute",
+            bindingId: binding.bindingId,
+            documentId: binding.documentId,
+            command: { type: "play", actionId: crypto.randomUUID() },
+          },
+        );
+        assert.notEqual(denied, "accepted", `${condition} must not dispatch player action`);
+        assert.equal(
+          await launched.page.locator("video").evaluate((video: HTMLVideoElement) => video.paused),
+          true,
+          `${condition} must leave the player paused`,
+        );
+        await launched.page.locator("button").evaluate((button) => {
+          (button as HTMLButtonElement).disabled = false;
+          button.removeAttribute("aria-disabled");
+          button.removeAttribute("inert");
+          document.querySelector("#button-cover")?.remove();
+        });
+      }
       binding = await request({
         protocol: "ellie.browser-webmcp.v1",
         id: crypto.randomUUID(),
