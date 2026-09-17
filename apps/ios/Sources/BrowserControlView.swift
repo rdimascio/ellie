@@ -23,24 +23,52 @@ struct BrowserControlView: View {
           Label(page.source == .webmcp ? "WebMCP" : "Accessibility", systemImage: "link")
             .font(.caption).foregroundStyle(.secondary)
         }
+        if let site = page.site {
+          Section("Observed site") {
+            Label(observedPageLabel(site.page), systemImage: "eye")
+              .accessibilityIdentifier("browser-observed-site")
+            if site.page == .watch {
+              Text(observedPlaybackLabel(site.playback))
+                .accessibilityIdentifier("browser-observed-playback")
+              if let seconds = site.currentTimeSeconds {
+                Text("Observed media position: \(Int(seconds)) seconds")
+                  .font(.caption).foregroundStyle(.secondary)
+              }
+              Text("Visible media state does not confirm which video is playing.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+          }
+        }
+        if controls.selectedNode?.capabilities.contains("browser.control") != true {
+          Section {
+            Label(
+              "This Mac allows browser reading only. Browser actions require a separate grant.",
+              systemImage: "lock")
+              .accessibilityIdentifier("browser-read-only-grant-warning")
+          }
+        }
         Section("Search") {
           TextField("Search this page", text: $search)
           Button("Search") { browser.perform(.search(query: search), on: controls.selectedNode) }
-            .disabled(search.isEmpty || browser.isBusy)
+            .disabled(!browser.canPerform(.search(query: search), on: controls.selectedNode))
         }
         Section("Page controls") {
           HStack {
             Button("Up") { browser.perform(.scroll(.up), on: controls.selectedNode) }
+              .disabled(!browser.canPerform(.scroll(.up), on: controls.selectedNode))
             Button("Down") { browser.perform(.scroll(.down), on: controls.selectedNode) }
+              .disabled(!browser.canPerform(.scroll(.down), on: controls.selectedNode))
             Button("Left") { browser.perform(.scroll(.left), on: controls.selectedNode) }
+              .disabled(!browser.canPerform(.scroll(.left), on: controls.selectedNode))
             Button("Right") { browser.perform(.scroll(.right), on: controls.selectedNode) }
+              .disabled(!browser.canPerform(.scroll(.right), on: controls.selectedNode))
           }
-          .disabled(browser.isBusy)
           HStack {
             Button("Play") { browser.perform(.play, on: controls.selectedNode) }
+              .disabled(!browser.canPerform(.play, on: controls.selectedNode))
             Button("Pause") { browser.perform(.pause, on: controls.selectedNode) }
+              .disabled(!browser.canPerform(.pause, on: controls.selectedNode))
           }
-          .disabled(browser.isBusy)
         }
         if !page.items.isEmpty {
           Section("Results") {
@@ -49,7 +77,8 @@ struct BrowserControlView: View {
                 browser.perform(.openResult(index: index + 1), on: controls.selectedNode)
               }
               .accessibilityIdentifier("browser-result-\(index + 1)")
-              .disabled(browser.isBusy)
+              .disabled(
+                !browser.canPerform(.openResult(index: index + 1), on: controls.selectedNode))
             }
           }
         }
@@ -99,6 +128,25 @@ struct BrowserControlView: View {
       }
     case .failed(let message): Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked: Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
+    }
+  }
+
+  private func observedPageLabel(_ page: BrowserPhoneYouTubePage) -> String {
+    switch page {
+    case .home: "Observed YouTube home page"
+    case .results: "Observed YouTube results page"
+    case .watch: "Observed YouTube watch page"
+    case .login: "Observed YouTube sign-in page"
+    case .unsupported: "Observed YouTube page is unsupported"
+    }
+  }
+
+  private func observedPlaybackLabel(_ playback: BrowserPhonePlayback) -> String {
+    switch playback {
+    case .playing: "Observed playback: playing"
+    case .paused: "Observed playback: paused"
+    case .unavailable: "Playback state is unavailable"
+    case .ambiguous: "Playback state is unclear"
     }
   }
 }

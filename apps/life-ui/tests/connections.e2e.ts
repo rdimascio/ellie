@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import {
   ConnectorBroker,
   type ConnectedOAuth,
@@ -87,15 +87,19 @@ const adapter = (id: ProviderId, items: ProviderObservation[]): LifeProviderAdap
   },
 });
 
+let latestOAuthState = "";
+let tokenExchanges = 0;
 const oauth: ConnectedOAuth = {
   begin({ actorId: owner, provider, redirectUri }) {
+    latestOAuthState = `fixture-${provider}-${owner}`;
     const target = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     target.searchParams.set("client_id", "fixture-client.apps.googleusercontent.com");
     target.searchParams.set("redirect_uri", redirectUri);
-    target.searchParams.set("state", `fixture-${provider}-${owner}`);
-    return { authorizationUrl: target.href, state: `fixture-${provider}-${owner}` };
+    target.searchParams.set("state", latestOAuthState);
+    return { authorizationUrl: target.href, state: latestOAuthState };
   },
   async complete() {
+    tokenExchanges++;
     return {
       actorId,
       provider: "gmail" as const,
@@ -147,6 +151,7 @@ const harness = createLifeHarness({
     },
   },
 });
+let openExternally = true;
 const server = createLifeServer({
   stateDir: root,
   assetsDir: resolve("apps/life-ui/dist"),
@@ -160,6 +165,7 @@ const server = createLifeServer({
   userName: "Connected E2E",
   timeZone: "America/Los_Angeles",
   now: () => now,
+  openAuthorizationUrl: async () => openExternally,
 });
 const browser = await chromium.launch({ headless: true });
 
@@ -207,6 +213,43 @@ try {
     if (await mobile.isVisible()) await mobile.click();
     else await page.locator("aside .settings-link").click();
   };
+  const holdNextConnectionsList = async () => {
+    let capture!: () => void;
+    let release!: () => void;
+    let delivered!: () => void;
+    const captured = new Promise<void>((resolve) => (capture = resolve));
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const finished = new Promise<void>((resolve) => (delivered = resolve));
+    let held = false;
+    const routePattern = "**/api/connections";
+    const handler = async (route: import("@playwright/test").Route) => {
+      if (held || route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      held = true;
+      const stale = await route.fetch();
+      capture();
+      await gate;
+      await route.fulfill({ response: stale });
+      delivered();
+    };
+    await page.route(routePattern, handler);
+    await Promise.race([
+      captured,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for the owned status poll.")), 7_000),
+      ),
+    ]);
+    return async () => {
+      release();
+      await finished;
+      await page.unroute(routePattern, handler);
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+    };
+  };
   await page.getByText("Private fixture calendar").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
   assert.equal(
@@ -233,31 +276,79 @@ try {
         ?.mode === "prepare"
     );
   });
-
-  const startRoute = "**/api/connections/start";
-  await page.route(startRoute, (route) =>
+  const calendarArticle = page
+    .locator(".connection-list article")
+    .filter({ hasText: "Private fixture calendar" });
+  const refreshRoute = "**/api/connections/*/refresh";
+  await page.route(refreshRoute, (route) =>
     route.fulfill({
-      status: 200,
+      status: 503,
       contentType: "application/json",
-      body: JSON.stringify({
-        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=host-opened-fixture",
-        openedExternally: true,
-      }),
+      body: JSON.stringify({ error: "Calendar refresh is unavailable." }),
     }),
   );
+  await calendarArticle.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("alert").getByText("Calendar refresh is unavailable.").waitFor();
+  await page.getByText(/Google Calendar · Connected/).waitFor();
+  await page.unroute(refreshRoute);
+  await calendarArticle.getByRole("button", { name: "Refresh" }).click();
+  await page.getByText(/Google Calendar · Connected/).waitFor();
+
   const ellieUrl = page.url();
   const gmailConnect = () =>
     page
       .locator(".provider-list article")
       .filter({ hasText: "Gmail" })
       .getByRole("button", { name: "Connect" });
+  await expect(gmailConnect()).toBeEnabled();
+  const deliverPreStartList = await holdNextConnectionsList();
   await gmailConnect().click();
   await page
     .getByRole("status")
     .getByText("Finish connecting in your browser. Ellie will update here when it’s ready.")
     .waitFor();
   assert.equal(page.url(), ellieUrl, "host-opened OAuth keeps the Ellie WebView in place");
-  await page.unroute(startRoute);
+  assert.equal(await gmailConnect().count(), 0, "pending setup cannot create a duplicate");
+  await deliverPreStartList();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "a delayed pre-start list must not clear the current setup",
+  );
+  const cancelRoute = "**/api/connections/*/revoke";
+  await page.route(cancelRoute, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Connection cancellation is unavailable." }),
+    }),
+  );
+  await page.getByRole("button", { name: "Stop setup" }).click();
+  await page.getByRole("alert").getByText("Connection cancellation is unavailable.").waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "failed cancellation must retain the pending setup and its recovery control",
+  );
+  await page.unroute(cancelRoute);
+  await expect(page.getByRole("button", { name: "Stop setup" })).toBeEnabled();
+  const deliverPreStopList = await holdNextConnectionsList();
+  await page.getByRole("button", { name: "Stop setup" }).click();
+  await page
+    .getByRole("status")
+    .getByText("Google connection setup did not finish. You can start again.")
+    .waitFor();
+  await deliverPreStopList();
+  assert.equal(await page.getByRole("button", { name: "Stop setup" }).count(), 0);
+  await page.getByText(/Gmail · Disconnected/).waitFor();
+  const stoppedCallback = await fetch(
+    `${listening.url}/api/connections/callback?state=${encodeURIComponent(latestOAuthState)}&code=late-synthetic-code`,
+    { redirect: "manual" },
+  );
+  assert.equal(stoppedCallback.status, 400);
+  assert.equal(tokenExchanges, 0, "stopped setup never reaches the token exchange");
+  await gmailConnect().waitFor();
+  openExternally = false;
   await page.reload();
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await openSettings();
@@ -283,7 +374,8 @@ try {
   const callback = `${listening.url}/api/connections/callback?state=${encodeURIComponent(authorization.searchParams.get("state")!)}&code=fixture-code`;
   const completed = await fetch(callback, { redirect: "manual" });
   assert.equal(completed.status, 303, "OAuth callback does not require the browser session cookie");
-  assert.equal(completed.headers.get("location"), "/?connected=1");
+  assert.equal(tokenExchanges, 1, "only the explicitly completed setup exchanges a token");
+  assert.equal(completed.headers.get("location"), "/connections/complete");
   const replay = await fetch(callback, { redirect: "manual" });
   assert.equal(replay.status, 400, "OAuth callback state is one-use");
 
@@ -335,11 +427,18 @@ try {
   assert.match(archive, /Doctor appointment/);
   assert.doesNotMatch(archive, /browser-fixture-secret/);
 
-  await page
-    .locator(".connection-list article")
-    .filter({ hasText: "Private fixture calendar" })
-    .getByRole("button", { name: "Disconnect" })
-    .click();
+  await page.route(cancelRoute, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Calendar disconnect is unavailable." }),
+    }),
+  );
+  await calendarArticle.getByRole("button", { name: "Disconnect" }).click();
+  await page.getByRole("alert").getByText("Calendar disconnect is unavailable.").waitFor();
+  await page.getByText(/Google Calendar · Connected/).waitFor();
+  await page.unroute(cancelRoute);
+  await calendarArticle.getByRole("button", { name: "Disconnect" }).click();
   await page
     .locator(".provider-list article")
     .filter({ hasText: "Google Calendar" })
@@ -348,6 +447,37 @@ try {
   assert.equal(
     [...vault.values.values()].some((value) => value.accessToken === "browser-fixture-secret"),
     false,
+  );
+  await page
+    .locator(".provider-list article")
+    .filter({ hasText: "Google Calendar" })
+    .getByRole("button", { name: "Connect" })
+    .click();
+  const cancelledLink = await page
+    .getByRole("link", {
+      name: "Open Google sign-in in an external browser",
+    })
+    .getAttribute("href");
+  assert.ok(cancelledLink);
+  const cancelledState = new URL(cancelledLink).searchParams.get("state");
+  assert.ok(cancelledState);
+  const denied = await fetch(
+    `${listening.url}/api/connections/callback?state=${encodeURIComponent(cancelledState)}&error=access_denied`,
+    { redirect: "manual" },
+  );
+  assert.equal(denied.status, 303);
+  await page
+    .getByRole("status")
+    .getByText("Google connection setup did not finish. You can start again.")
+    .waitFor({ timeout: 10_000 });
+  assert.equal(
+    await page
+      .getByRole("link", {
+        name: "Open Google sign-in in an external browser",
+      })
+      .count(),
+    0,
+    "a denied OAuth link must no longer be offered",
   );
   await page.getByRole("button", { name: "Refresh summary" }).click();
   await page.getByRole("button", { name: "Review reset" }).waitFor();

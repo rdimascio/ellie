@@ -379,6 +379,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     guard node.capabilities.contains("browser.control"), let page, page.nodeID == node.id else {
       return false
     }
+    guard Self.observedSiteAllows(intent, on: page) else { return false }
     switch intent {
     case .search(let query):
       return query == query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -441,6 +442,10 @@ final class BrowserPhoneControlStore: ObservableObject {
       phase = .failed("Read the current browser page on the selected Mac first.")
       return false
     }
+    guard Self.observedSiteAllows(intent, on: page) else {
+      phase = .failed("The observed page does not offer that browser command.")
+      return false
+    }
     let scope: String
     do {
       scope = try browserMutationUncertaintyScope(credential: credential, targetID: node.id)
@@ -484,6 +489,9 @@ final class BrowserPhoneControlStore: ObservableObject {
     }
     let label = intent.displayLabel
     let token = operationToken()
+    // The reviewed handles belong to the pre-command document. Hide them as soon as this
+    // mutation is admitted; even a slow or lost response must not expose stale controls.
+    self.page = nil
     phase = .sending(label)
     launch(targetID: node.id, mayDispatch: true) {
       guard try self.uncertainty.recordIfClear(token: token, for: scope) else {
@@ -606,6 +614,18 @@ final class BrowserPhoneControlStore: ObservableObject {
               ?? PhoneControlFailure.unavailable.localizedDescription)
         }
       }
+    }
+  }
+
+  private static func observedSiteAllows(_ intent: BrowserVoiceIntent, on page: BrowserPhonePage)
+    -> Bool
+  {
+    guard let site = page.site else { return true }
+    guard site.page != .login, site.page != .unsupported else { return false }
+    switch intent {
+    case .play: return site.page == .watch && site.playback == .paused
+    case .pause: return site.page == .watch && site.playback == .playing
+    case .inspect, .refresh, .search, .scroll, .openResult, .back: return true
     }
   }
 }

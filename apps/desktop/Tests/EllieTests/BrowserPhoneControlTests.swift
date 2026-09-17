@@ -17,6 +17,7 @@ final class BrowserPhoneControlTests: XCTestCase {
       return XCTFail("Expected page")
     }
     XCTAssertEqual(page.items.map(\.id), ["item-1"])
+    XCTAssertNil(page.site, "Older browser readers remain valid without site observation")
     let unknown = Data(
       #"{"outcome":"unknown","result":{"ok":false,"message":"Unverified.","browser":{"source":"webmcp","operation":"command","status":"unknown","revision":"\#(revision)"}}}"#.utf8)
     XCTAssertEqual(
@@ -30,6 +31,79 @@ final class BrowserPhoneControlTests: XCTestCase {
       try decodeBrowserPhoneResponse(
         Data(String(decoding: read, as: UTF8.self).replacingOccurrences(of: #""title":"News""#, with: #""title":1"#).utf8),
         nodeID: "mac"))
+  }
+
+  func testOptionalYouTubeObservationIsBoundedAndNeverInferredFromCommandStatus() throws {
+    let revision = String(repeating: "a", count: 64)
+    func read(_ site: String) -> Data {
+      Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Browser view read.","browser":{"source":"accessibility","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    }
+    let valid = [
+      (#"{"provider":"youtube","page":"home","playback":"unavailable"}"#, BrowserPhoneYouTubePage.home),
+      (#"{"provider":"youtube","page":"results","playback":"unavailable"}"#, .results),
+      (#"{"provider":"youtube","page":"watch","playback":"playing","currentTimeSeconds":78.5}"#, .watch),
+      (#"{"provider":"youtube","page":"login","playback":"unavailable"}"#, .login),
+      (#"{"provider":"youtube","page":"unsupported","playback":"unavailable"}"#, .unsupported),
+    ]
+    for (site, expectedPage) in valid {
+      guard case .page(let page) = try decodeBrowserPhoneResponse(read(site), nodeID: "mac")
+      else { return XCTFail("Expected observed page") }
+      XCTAssertEqual(page.site?.page, expectedPage)
+    }
+    guard case .page(let observedWatch) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"youtube","page":"watch","playback":"paused","currentTimeSeconds":86400}"#),
+      nodeID: "mac")
+    else { return XCTFail("Expected observed watch page") }
+    XCTAssertEqual(observedWatch.site?.currentTimeSeconds, 86_400)
+
+    for invalid in [
+      #"null"#,
+      #"{"provider":"other","page":"watch","playback":"paused"}"#,
+      #"{"provider":"youtube","page":"results","playback":"playing"}"#,
+      #"{"provider":"youtube","page":"home","playback":"unavailable","currentTimeSeconds":1}"#,
+      #"{"provider":"youtube","page":"watch","playback":"playing","currentTimeSeconds":true}"#,
+      #"{"provider":"youtube","page":"watch","playback":"playing","currentTimeSeconds":86401}"#,
+      #"{"provider":"youtube","page":"watch","playback":"paused","extra":"unexpected"}"#,
+    ] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac"))
+    }
+    let command = Data(
+      #"{"outcome":"unknown","result":{"ok":false,"message":"Unverified.","browser":{"source":"accessibility","operation":"command","status":"unknown","revision":"\#(revision)"}}}"#.utf8)
+    XCTAssertEqual(
+      try decodeBrowserPhoneResponse(command, nodeID: "mac"),
+      .command(source: .accessibility, status: .unknown, revision: revision))
+  }
+
+  @MainActor
+  func testObservedYouTubeStateBlocksUnavailableControlsBeforeDispatch() async {
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let cases: [(BrowserPhoneSite, BrowserVoiceIntent, Bool)] = [
+      (BrowserPhoneSite(page: .login, playback: .unavailable, currentTimeSeconds: nil), .search(query: "video"), false),
+      (BrowserPhoneSite(page: .unsupported, playback: .unavailable, currentTimeSeconds: nil), .scroll(.down), false),
+      (BrowserPhoneSite(page: .results, playback: .unavailable, currentTimeSeconds: nil), .play, false),
+      (BrowserPhoneSite(page: .watch, playback: .ambiguous, currentTimeSeconds: nil), .play, false),
+      (BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil), .pause, false),
+      (BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: 1), .pause, false),
+      (BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: 1), .play, true),
+      (BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1), .pause, true),
+    ]
+    for (site, intent, allowed) in cases {
+      let transport = BrowserPhoneFakeTransport(site: site)
+      let store = BrowserPhoneControlStore(
+        credential: credential(), transport: transport,
+        uncertainty: BrowserPhoneFakeUncertaintyStore())
+      XCTAssertTrue(store.refresh(on: node))
+      await eventually { store.phase == .ready }
+      XCTAssertEqual(store.canPerform(intent, on: node), allowed)
+      if !allowed {
+        XCTAssertFalse(store.perform(intent, on: node))
+        let actions = await transport.actions
+        XCTAssertEqual(actions.count, 2, "A rejected observed state cannot dispatch")
+      }
+    }
   }
 
   func testCanonicalAccessibilityResultsDecodeWithoutWeakeningTheClosedSourceSet() throws {
@@ -77,6 +151,8 @@ final class BrowserPhoneControlTests: XCTestCase {
       [.refresh, .read(revision: String(repeating: "a", count: 64))])
     XCTAssertEqual(store.page?.items.first?.id, "opaque-1")
     store.perform(.openResult(index: 1), on: node)
+    XCTAssertNil(store.page, "Admitting a mutation immediately invalidates reviewed handles")
+    XCTAssertFalse(store.canPerform(.play, on: node))
     await eventually { await transport.actions.count == 3 }
     store.cancel()
     await transport.finishCommand()
@@ -808,12 +884,14 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private let source: BrowserPhoneSource
   private let commandStatus: BrowserPhoneCommandStatus?
   private let items: [BrowserPhoneItem]
+  private let site: BrowserPhoneSite?
   private var commandContinuation: CheckedContinuation<Void, Never>?
   private var readContinuation: CheckedContinuation<Void, Never>?
   init(
     delayRead: Bool = false, readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
-    items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)]
+    items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)],
+    site: BrowserPhoneSite? = nil
   ) {
     self.delayRead = delayRead
     self.readFailure = readFailure
@@ -821,6 +899,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     self.source = source
     self.commandStatus = commandStatus
     self.items = items
+    self.site = site
   }
   func execute(
     _ action: BrowserPhoneAction, nodeID: String, credential: NativeEnrollmentCredential
@@ -835,7 +914,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
       return .page(
         BrowserPhonePage(
           nodeID: nodeID, source: source, revision: revision, title: "Page", summary: nil,
-          items: items))
+          items: items, site: site))
     default:
       if commandError { throw PhoneControlFailure.unavailable }
       if let commandStatus {

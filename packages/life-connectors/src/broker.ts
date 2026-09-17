@@ -67,6 +67,7 @@ export class ConnectorBroker {
     string,
     { controller: AbortController; promise: Promise<void> }
   >();
+  private readonly pendingOAuthState = new Map<string, string>();
   private readonly blocked = new Set<string>();
   private closed = false;
   constructor(options: {
@@ -225,17 +226,20 @@ export class ConnectorBroker {
       throw new Error("This provider requires host setup.");
     if (this.closed || this.blocked.has(actorId)) throw new Error("Connected work is unavailable.");
     const c = this.store.create(actorId, provider, mode);
+    let started: { authorizationUrl: string; state: string } | undefined;
     try {
-      const started = this.oauth.begin({ actorId, provider, redirectUri });
+      started = this.oauth.begin({ actorId, provider, redirectUri });
       this.vault.put(`link-${hash(started.state)}`, {
         actorId,
         connectionId: c.id,
         generation: c.generation,
         redirectUri,
       });
-      return { authorizationUrl: started.authorizationUrl };
+      this.pendingOAuthState.set(c.id, started.state);
+      return { authorizationUrl: started.authorizationUrl, connectionId: c.id };
     } catch (error) {
       this.store.revoke(actorId, c.id);
+      if (started) this.oauth.cancelAuthorization?.(started.state);
       throw error;
     }
   }
@@ -244,6 +248,7 @@ export class ConnectorBroker {
       link = this.vault.get<{ actorId: string; connectionId: string }>(key);
     if (!link) throw new Error("Connection authorization is unavailable.");
     this.vault.delete(key);
+    this.pendingOAuthState.delete(link.connectionId);
     this.oauth?.cancelAuthorization?.(state);
     if (this.store.get(link.actorId, link.connectionId)?.state === "connecting")
       await this.revoke(link.actorId, link.connectionId);
@@ -265,6 +270,7 @@ export class ConnectorBroker {
     if (!link || link.redirectUri !== redirectUri)
       throw new Error("Connection authorization expired or was already used.");
     this.vault.delete(key);
+    this.pendingOAuthState.delete(link.connectionId);
     this.current(link.actorId, link.connectionId, link.generation);
     try {
       const result = await this.oauth.complete({ state, code, redirectUri }, signal);
@@ -705,6 +711,23 @@ export class ConnectorBroker {
     this.store.revoke(actorId, id);
     this.active.get(id)?.controller.abort();
     this.vault.delete(credentialId(id));
+    // A stopped setup cannot later exchange a code. The in-memory state handles the current
+    // process; the encrypted vault scan also covers a pending setup restored after restart.
+    const state = this.pendingOAuthState.get(id);
+    this.pendingOAuthState.delete(id);
+    if (state) {
+      this.vault.delete(`link-${hash(state)}`);
+      this.oauth?.cancelAuthorization?.(state);
+    }
+    const pendingHashes: string[] = [];
+    this.vault.deleteMatching?.((key, value) => {
+      if (!/^link-[0-9a-f]{64}$/.test(key)) return false;
+      const link = value as { actorId?: unknown; connectionId?: unknown };
+      if (link.actorId !== actorId || link.connectionId !== id) return false;
+      pendingHashes.push(key.slice(5));
+      return true;
+    });
+    for (const digest of pendingHashes) this.vault.delete(`oauth-state:${digest}`);
     await this.research.revoke(actorId, id);
     await this.active.get(id)?.promise.catch(() => {});
     this.invalidateDerived(actorId, id, true);
@@ -728,6 +751,7 @@ export class ConnectorBroker {
   }
   async close(): Promise<void> {
     this.closed = true;
+    this.pendingOAuthState.clear();
     for (const active of this.active.values()) active.controller.abort();
     await this.research.close();
     await Promise.allSettled([...this.active.values()].map((a) => a.promise));

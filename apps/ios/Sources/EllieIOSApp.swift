@@ -3,6 +3,8 @@ import SwiftUI
 @main
 @MainActor
 struct EllieIOSApp: App {
+    init() { WatchMediaPhoneBridge.shared.activate() }
+
     var body: some Scene {
         WindowGroup {
             #if DEBUG
@@ -11,12 +13,20 @@ struct EllieIOSApp: App {
                     accessibilityLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"),
                     narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
-                BrowserVoiceUITestFixtureView()
+                BrowserVoiceUITestFixtureView(
+                    completeActions: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-complete-actions"))
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-native-scanner-sheet-fixture") {
                 NativeScannerSheetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-browser-read-only-fixture") {
+                BrowserTargetUITestFixtureView(readOnly: true)
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-browser-unavailable-playback-fixture") {
+                BrowserTargetUITestFixtureView(unavailablePlayback: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-unknown-relaunch-fixture") {
                 if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
@@ -54,5 +64,12 @@ private struct EllieIOSNormalRoot: View {
         IOSDashboardList(store: store, enrollment: enrollment)
             .tint(ElliePalette.accent)
             .preferredColorScheme(.dark)
+            .onChange(of: enrollment.phase) { _, phase in
+                if case .enrolled(let credential) = phase {
+                    WatchMediaPhoneBridge.shared.retainOnly(credential)
+                } else {
+                    WatchMediaPhoneBridge.shared.disable()
+                }
+            }
     }
 }

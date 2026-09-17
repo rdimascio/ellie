@@ -21,6 +21,7 @@ const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const requestTypes = [
   "binding.status",
   "binding.refresh",
+  "page.inspect",
   "tools.list",
   "tool.execute",
   "cancel",
@@ -43,6 +44,13 @@ export type BrowserWebMCPStatus = (typeof BROWSER_WEBMCP_STATUSES)[number];
 export type BrowserWebMCPRequest =
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.status" }
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.refresh" }
+  | {
+      protocol: typeof BROWSER_WEBMCP_PROTOCOL;
+      id: string;
+      type: "page.inspect";
+      bindingId: string;
+      documentId: string;
+    }
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "tools.list" }
   | {
       protocol: typeof BROWSER_WEBMCP_PROTOCOL;
@@ -146,6 +154,15 @@ export function browserWebMCPRequest(value: unknown): BrowserWebMCPRequest {
   if (body.type === "cancel") {
     exactKeys(body, ["protocol", "id", "type", "targetId"]);
     return { ...base, type: "cancel", targetId: identifier(body.targetId) };
+  }
+  if (body.type === "page.inspect") {
+    exactKeys(body, ["protocol", "id", "type", "bindingId", "documentId"]);
+    return {
+      ...base,
+      type: "page.inspect",
+      bindingId: identifier(body.bindingId),
+      documentId: identifier(body.documentId),
+    };
   }
   exactKeys(body, ["protocol", "id", "type", "bindingId", "documentId", "toolHandle", "args"]);
   return {
