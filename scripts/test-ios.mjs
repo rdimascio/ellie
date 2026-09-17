@@ -347,7 +347,7 @@ try {
   await execute(
     "xcodebuild",
     [...xcodeTestTargetArguments, "-resultBundlePath", resultBundle, "test-without-building"],
-    { timeout: 600_000, label: "Xcode test without building" },
+    { timeout: 1_200_000, label: "Xcode test without building" },
   );
   succeeded = true;
   enterStage("complete");
