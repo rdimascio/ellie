@@ -35,15 +35,26 @@ async function within<T>(work: Promise<T>, milliseconds: number, message: string
 
 async function availablePort(): Promise<number> {
   const reservation = createNetServer();
-  await new Promise<void>((resolve, reject) => {
-    reservation.once("error", reject);
-    reservation.listen(0, "127.0.0.1", resolve);
-  });
-  const port = (reservation.address() as AddressInfo).port;
-  await new Promise<void>((resolve, reject) =>
-    reservation.close((error) => (error ? reject(error) : resolve())),
-  );
-  return port;
+  try {
+    await within(
+      new Promise<void>((resolve, reject) => {
+        reservation.once("error", reject);
+        reservation.listen(0, "127.0.0.1", resolve);
+      }),
+      5_000,
+      "Port reservation did not start.",
+    );
+    return (reservation.address() as AddressInfo).port;
+  } finally {
+    if (reservation.listening)
+      await within(
+        new Promise<void>((resolve, reject) =>
+          reservation.close((error) => (error ? reject(error) : resolve())),
+        ),
+        5_000,
+        "Port reservation did not close.",
+      );
+  }
 }
 
 test("native authenticated browser status reaches one terminal unavailable node job", async () => {
@@ -111,10 +122,14 @@ test("native authenticated browser status reaches one terminal unavailable node 
       nativeAuth,
       remote: createBrowserRemote(coordinator.controller, [{ id: target, label: "Test Mini" }]),
     });
-    await new Promise<void>((resolve, reject) => {
-      browser!.server.once("error", reject);
-      browser!.server.listen(port, "127.0.0.1", resolve);
-    });
+    await within(
+      new Promise<void>((resolve, reject) => {
+        browser!.server.once("error", reject);
+        browser!.server.listen(port, "127.0.0.1", resolve);
+      }),
+      5_000,
+      "Owned native listener did not start.",
+    );
 
     async function nativeRequest(path: string, body: unknown, token?: string) {
       const data = JSON.stringify(body);
@@ -202,14 +217,20 @@ test("native authenticated browser status reaches one terminal unavailable node 
       const closed = browser.server.listening
         ? new Promise<void>((resolve) => browser!.server.once("close", resolve))
         : Promise.resolve();
-      browser.shutdown();
+      try {
+        browser.shutdown();
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
       cleanup.push(within(closed, 5_000, "Owned native listener did not close."));
     }
     cleanup.push(within(coordinator.close(), 5_000, "Owned coordinator did not close."));
     if (agent) cleanup.push(within(agent, 5_000, "Owned browser node did not stop."));
     const results = await Promise.allSettled(cleanup);
-    cleanupFailures = results.flatMap((result) =>
-      result.status === "rejected" ? [result.reason as unknown] : [],
+    cleanupFailures.push(
+      ...results.flatMap((result) =>
+        result.status === "rejected" ? [result.reason as unknown] : [],
+      ),
     );
   }
   if (cleanupFailures.length)
