@@ -322,7 +322,7 @@ function recordedGroupsAbsent(groups: number[], zeroSignal: typeof process.kill)
 }
 
 test("an EPERM zero-signal observation never establishes process-group absence", () => {
-  const calls: Array<[number, number | NodeJS.Signals | undefined]> = [];
+  const calls: Array<Parameters<typeof process.kill>> = [];
   let observation = 0;
   const zeroSignal: typeof process.kill = (pid, signal) => {
     calls.push([pid, signal]);
@@ -341,7 +341,7 @@ test("an EPERM zero-signal observation never establishes process-group absence",
 test("persistent EPERM exhausts the existing bound and retains owned evidence", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-ios-group-observation-"));
   let now = 0;
-  const calls: Array<[number, number | NodeJS.Signals | undefined]> = [];
+  const calls: Array<Parameters<typeof process.kill>> = [];
   try {
     await writeFile(join(root, "mock-process-groups"), "12345\n");
     await writeFile(join(root, "owned-evidence"), "retained\n");
