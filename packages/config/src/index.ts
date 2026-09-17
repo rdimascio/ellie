@@ -176,6 +176,21 @@ export interface MutableSecretStore extends SecretStore {
   add(account: string, value: string): Promise<void>;
   delete(account: string): Promise<void>;
 }
+export type KeychainFailureReason = "timeout" | "helper_unavailable" | "access_unavailable";
+export class KeychainFailure extends Error {
+  readonly reason: KeychainFailureReason;
+  constructor(reason: KeychainFailureReason) {
+    super(
+      reason === "timeout"
+        ? "Keychain request timed out."
+        : reason === "helper_unavailable"
+          ? "Build the macOS helper first: bun run build:macos"
+          : "Keychain access failed. Unlock the login keychain and allow the helper.",
+    );
+    this.name = "KeychainFailure";
+    this.reason = reason;
+  }
+}
 export class Keychain implements MutableSecretStore {
   async call(request: Record<string, string>): Promise<string> {
     if (process.platform !== "darwin")
@@ -187,7 +202,7 @@ export class Keychain implements MutableSecretStore {
       let output = "";
       const timer = setTimeout(() => {
         child.kill();
-        reject(new Error("Keychain request timed out."));
+        reject(new KeychainFailure("timeout"));
       }, 60_000);
       child.stdout.on("data", (data) => {
         output += String(data);
@@ -196,20 +211,15 @@ export class Keychain implements MutableSecretStore {
       child.stderr.resume();
       child.on("error", () => {
         clearTimeout(timer);
-        reject(new Error("Build the macOS helper first: bun run build:macos"));
+        reject(new KeychainFailure("helper_unavailable"));
       });
       child.on("close", (code) => {
         clearTimeout(timer);
         try {
-          if (code !== 0)
-            throw new Error(
-              "Keychain access failed. Unlock the login keychain and allow the helper.",
-            );
+          if (code !== 0) throw new KeychainFailure("access_unavailable");
           resolve(String(record(JSON.parse(output)).value ?? ""));
         } catch {
-          reject(
-            new Error("Keychain access failed. Unlock the login keychain and allow the helper."),
-          );
+          reject(new KeychainFailure("access_unavailable"));
         }
       });
       child.stdin.on("error", () => {});

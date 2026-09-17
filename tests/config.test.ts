@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat, readFile } from "node:fs/promises";
+import { mkdtemp, rm, stat, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
   serverConfig,
   nodeConfig,
   Keychain,
+  KeychainFailure,
   nativeHelperPath,
 } from "@ellie/config";
 import { Auth, newToken } from "../apps/server/src/auth.ts";
@@ -47,6 +48,41 @@ test("Keychain presence checks reject unknown helper responses", async () => {
   }
   await assert.rejects(new InvalidPresenceKeychain().has("browser-ca-key"), /invalid presence/);
 });
+test(
+  "Keychain classifies missing and rejecting synthetic helpers without exposing their output",
+  {
+    skip: process.platform !== "darwin",
+  },
+  async () => {
+    const dir = await mkdtemp(join(tmpdir(), "ellie-keychain-helper-"));
+    const previous = process.env.ELLIE_MACOS_HELPER;
+    try {
+      process.env.ELLIE_MACOS_HELPER = join(dir, "missing-helper");
+      await assert.rejects(
+        new Keychain().get("synthetic.account"),
+        (error: unknown) =>
+          error instanceof KeychainFailure && error.reason === "helper_unavailable",
+      );
+      const helper = join(dir, "rejecting-helper");
+      await writeFile(helper, "#!/bin/sh\nprintf 'synthetic-private-output'\nexit 1\n", {
+        mode: 0o700,
+      });
+      process.env.ELLIE_MACOS_HELPER = helper;
+      await assert.rejects(
+        new Keychain().get("synthetic.account"),
+        (error: unknown) =>
+          error instanceof KeychainFailure &&
+          error.reason === "access_unavailable" &&
+          !error.message.includes("synthetic-private-output") &&
+          !error.message.includes("synthetic.account"),
+      );
+    } finally {
+      if (previous === undefined) delete process.env.ELLIE_MACOS_HELPER;
+      else process.env.ELLIE_MACOS_HELPER = previous;
+      await rm(dir, { recursive: true, force: true });
+    }
+  },
+);
 test("packaged helper resolution is explicit, absolute, and preserves the developer fallback", () => {
   assert.equal(nativeHelperPath({}, "/synthetic/.ellie"), "/synthetic/.ellie/bin/ellie-macos");
   assert.equal(
