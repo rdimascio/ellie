@@ -1,0 +1,102 @@
+{
+  "sourceBranch": "codex/mobile-redesign",
+  "sourceHead": "6d5d404cda0c809ecd104a4b350e753d015ff1bf",
+  "sourceState": "Uncommitted owner-approved working tree; original preview and native appearance edits remain there.",
+  "candidateBase": "8c058ddbcc34e47aa1bde95fd4aab367a94e5e47",
+  "upstreamOverlappingSelectedPaths": [],
+  "upstreamOverlappingExcludedPaths": ["apps/ios/Sources/NativeEnrollmentView.swift"],
+  "excludedPaths": [
+    "apps/ios/EllieIOS.xcodeproj/project.pbxproj",
+    "apps/ios/Sources/BrowserControlView.swift",
+    "apps/ios/Sources/DashboardSyncView.swift",
+    "apps/ios/Sources/EllieIOSApp.swift",
+    "apps/ios/Sources/IOSAppearance.swift",
+    "apps/ios/Sources/IOSDashboardView.swift",
+    "apps/ios/Sources/IOSWidgetViews.swift",
+    "apps/ios/Sources/NativeEnrollmentView.swift",
+    "apps/ios/Sources/PhoneControlView.swift",
+    "apps/ios/Sources/SpeechTurnView.swift"
+  ],
+  "files": [
+    {
+      "path": "apps/life-ui/index.html",
+      "sourceSha256": "8d805248a30898bc51facc1001d878235c180bb7c5df2c3083b7d8baf3338414",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/App.tsx",
+      "sourceSha256": "8e378e98fe11b2fd97eba4e0b7690ff9d22ee8a0b9cf70e9f18e173681ec01fd",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/Connections.tsx",
+      "sourceSha256": "ad5cb6b371435f2b77b62e472393142d4313d1053669307cd95afdae44ca4ee2",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/Finances.tsx",
+      "sourceSha256": "db967dac29278aff8c22b38a2d4ee8f33fff8ad96c1e0278d90c0e273837c2e4",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/InterfaceIcon.tsx",
+      "sourceSha256": "0cb992d27c02fc4b83a282b20e15ddf75ae09e0e991ab9b03750b1ac6eb57e67",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/financial-insights.ts",
+      "sourceSha256": "1f9314a976dd5e2ea1848c1aa522f7683c8bf28ec51ea2e5d19b3fe450e7a741",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/interface.css",
+      "sourceSha256": "5e150e0e9b211a28364b460b70d9a149c27e33493388bb6b3607fd5b3f4ef9ae",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/main.tsx",
+      "sourceSha256": "9d0adda3cfe987fab699832852d7bd0eb4601a9bfc03e4e19c199eef8f2c7110",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/src/style.css",
+      "sourceSha256": "2deb78bd00b52ec66e30a7d586e7878429ee7ad4c72b7b822e5f59132f7e91e5",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/tests/design-preview.ts",
+      "sourceSha256": "3a25b30f9bcfee94e0cb9468f063b39ec77260996fb200c4e02a878a92583c10",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/tests/financial-insights.test.ts",
+      "sourceSha256": "8f14cb85aeb093049324e2d260976cf1b7689ebc0a9e737c0baa6c0e5b9bb72a",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/tests/fixtures/mobile-design-review.html",
+      "sourceSha256": "670313ca23f2e7c262441b4e9ade099b0501f6ed484cfb99b35299cc071cccfe",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/tests/life.e2e.ts",
+      "sourceSha256": "d0a4b61b0877b63329be225a91c6c0557f332e205dac9d1fa8b26d7c5a34a25e",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "apps/life-ui/tests/mobile-design.e2e.ts",
+      "sourceSha256": "30fff0cabde5b00337dff24508aaa03591e696a30ba52cf1f1ac7a8d28d0dec9",
+      "transfer": "byte-identical"
+    },
+    {
+      "path": "docs/mobile-design.md",
+      "sourceSha256": "6b16a470be7803faaf47e8c2a4564c82409df1b2166134b6f00d97fc872c2f23",
+      "transfer": "Adapted for web-only scope and candidate validation; original source hash retained."
+    },
+    {
+      "path": "package.json",
+      "sourceSha256": "4fef8f62c67bd216e28d8ca897095a9fec3218b4de65849ba418d74bf7620e6e",
+      "transfer": "byte-identical"
+    }
+  ]
+}

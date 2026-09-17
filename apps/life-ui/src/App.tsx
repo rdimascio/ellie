@@ -25,9 +25,19 @@ import type {
 import { agendaDate, compareAgenda, dateValue, dayHeading, dayKey, friendlyDay } from "./dates";
 import { deliveryLabel, occurrenceLabel } from "./delivery";
 import { Connections } from "./Connections";
-import ellieIcon from "../../../packages/macos/assets/Ellie.png";
+import { Finances } from "./Finances";
+import { InterfaceIcon, ElliePresence } from "./InterfaceIcon";
 
-type View = "dashboard" | "chat" | "today" | "world" | "space" | "activity" | "settings";
+type View =
+  | "dashboard"
+  | "chat"
+  | "today"
+  | "world"
+  | "space"
+  | "finances"
+  | "integrations"
+  | "activity"
+  | "settings";
 type Message = {
   id: string;
   role: "you" | "ellie";
@@ -121,21 +131,14 @@ const setChatUrl = (conversationId?: string, requestId?: string) => {
   else url.searchParams.delete("request");
   history.replaceState(null, "", `${url.pathname}${url.search}`);
 };
-const icons: Record<View, string> = {
-  dashboard: "⌂",
-  chat: "✦",
-  today: "◷",
-  world: "⌾",
-  space: "◇",
-  activity: "↻",
-  settings: "⚙",
-};
 const labels: Record<View, string> = {
   dashboard: "Home",
   chat: "Ellie",
   today: "Today",
   world: "Memory",
-  space: "Apps",
+  space: "Custom tools",
+  finances: "Finances",
+  integrations: "Integrations",
   activity: "Activity",
   settings: "Settings",
 };
@@ -254,6 +257,9 @@ export function App() {
     }
   };
   loadRef.current = load;
+  useEffect(() => {
+    window.scrollTo({ top: 0, left: 0, behavior: "instant" });
+  }, [view]);
   useEffect(() => {
     void (async () => {
       try {
@@ -384,7 +390,7 @@ export function App() {
       const controls = overlay
         ? [
             ...overlay.querySelectorAll<HTMLElement>(
-              "button:not(:disabled), input, textarea, select, [tabindex='0']",
+              "button:not(:disabled), input, textarea, select, summary, [tabindex='0']",
             ),
           ].filter((item) => item.getClientRects().length > 0)
         : [];
@@ -816,17 +822,27 @@ export function App() {
         />
         <nav aria-label="Main navigation">
           {(["dashboard"] as View[]).map((v) => (
-            <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
-              <span aria-hidden="true">{icons[v]}</span>
+            <button
+              key={v}
+              className={view === v ? "active" : ""}
+              aria-current={view === v ? "page" : undefined}
+              onClick={() => setView(v)}
+            >
+              <InterfaceIcon name={v} />
               {labels[v]}
             </button>
           ))}
           <details className="rail-more">
             <summary>More</summary>
-            {(["today", "world", "space", "activity"] as View[]).map((v) => (
-              <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
-                <span aria-hidden="true">{icons[v]}</span>
-                {v === "world" ? "Memory" : v === "space" ? "Apps" : labels[v]}
+            {(["today", "finances", "integrations", "activity"] as View[]).map((v) => (
+              <button
+                key={v}
+                className={view === v ? "active" : ""}
+                aria-current={view === v ? "page" : undefined}
+                onClick={() => setView(v)}
+              >
+                <InterfaceIcon name={v} />
+                {labels[v]}
                 {v === "activity" && data.tasks.length > 0 ? (
                   <b aria-hidden="true">{data.tasks.length}</b>
                 ) : null}
@@ -848,15 +864,31 @@ export function App() {
           </button>
         </div>
         <button className="settings-link" onClick={() => setView("settings")}>
-          {icons.settings} Settings
+          <InterfaceIcon name="settings" /> Settings
         </button>
       </aside>
       <main>
         <header className="mobile-head">
           <Brand />
-          <button onClick={() => setView("settings")} aria-label="Settings">
-            ⚙
-          </button>
+          <div className="mobile-head-actions">
+            <button
+              onClick={() => setView("activity")}
+              aria-label="Activity"
+              aria-current={view === "activity" ? "page" : undefined}
+            >
+              <InterfaceIcon name="activity" />
+              {data.tasks.some((task) => task.status === "running") && (
+                <span className="activity-indicator" />
+              )}
+            </button>
+            <button
+              onClick={() => setView("settings")}
+              aria-label="Settings"
+              aria-current={view === "settings" ? "page" : undefined}
+            >
+              <InterfaceIcon name="settings" />
+            </button>
+          </div>
         </header>
         {!conversationOpen && feedback}
         {view === "dashboard" && (
@@ -865,6 +897,7 @@ export function App() {
             data={data}
             openPlugin={setExpanded}
             openView={setView}
+            openConversation={() => showConversation(true)}
             openPlans={() => {
               setWorldTab("plans");
               setView("world");
@@ -898,7 +931,7 @@ export function App() {
                 requestAnimationFrame(() => orbRef.current?.focus());
               }}
             >
-              ×
+              <InterfaceIcon name="close" />
             </button>
             {feedback}
             <Chat
@@ -964,6 +997,22 @@ export function App() {
           </div>
         )}{" "}
         {view === "today" && <Today data={data} refresh={() => load(scope)} notify={setNotice} />}{" "}
+        {view === "finances" && (
+          <Finances
+            data={data}
+            openIntegrations={() => setView("integrations")}
+            openPersonal={() => switchScope(`user:${data.profile.id}`)}
+            ask={(draft) => {
+              setComposerDraft(draft);
+              showConversation(true);
+            }}
+          />
+        )}
+        {view === "integrations" && (
+          <Page title="Integrations" lede="Your favorite services, a little more connected.">
+            <Connections standalone />
+          </Page>
+        )}
         {view === "world" && (
           <World
             data={data}
@@ -1029,6 +1078,8 @@ export function App() {
           <Settings
             data={data}
             openConnections={ownerConnections}
+            openMemory={() => setView("world")}
+            openTools={() => setView("space")}
             save={async (settingsScope, values) => {
               const generation = scopeGeneration.current;
               setBusy("settings");
@@ -1063,7 +1114,7 @@ export function App() {
         }
         onClick={() => showConversation(true)}
       >
-        <span className="orb-core" aria-hidden="true" />
+        <ElliePresence className="orb-core" />
         <span className="orb-status" aria-hidden="true">
           {orbState === "working" ? "Working" : orbState === "attention" ? "Continue" : "Ask Ellie"}
         </span>
@@ -1076,9 +1127,14 @@ export function App() {
             : "Ellie is ready"}
       </span>
       <nav className="bottom" aria-label="Main navigation">
-        {(["dashboard", "today", "world", "space"] as View[]).map((v) => (
-          <button key={v} className={view === v ? "active" : ""} onClick={() => setView(v)}>
-            <span aria-hidden="true">{icons[v]}</span>
+        {(["dashboard", "today", "finances", "integrations"] as View[]).map((v) => (
+          <button
+            key={v}
+            className={view === v ? "active" : ""}
+            aria-current={view === v ? "page" : undefined}
+            onClick={() => setView(v)}
+          >
+            <InterfaceIcon name={v} />
             {labels[v].replace("Your ", "")}
           </button>
         ))}
@@ -1217,6 +1273,7 @@ function LifeDashboard({
   data,
   openPlugin,
   openView,
+  openConversation,
   openPlans,
   board,
   boards,
@@ -1226,6 +1283,7 @@ function LifeDashboard({
   data: Bootstrap;
   openPlugin: (plugin: PluginSummary) => void;
   openView: (view: View) => void;
+  openConversation: () => void;
   openPlans: () => void;
   board: LifeBoard;
   boards: LifeBoard[];
@@ -1292,7 +1350,14 @@ function LifeDashboard({
     <div className="life-dashboard">
       <header className="dashboard-title">
         <div>
-          <span>{now.toLocaleDateString([], { weekday: "long" })}</span>
+          <span>
+            {now.toLocaleDateString([], {
+              weekday: "long",
+              month: "short",
+              day: "numeric",
+              timeZone: data.profile.timeZone,
+            })}
+          </span>
           <h1>{board.name}</h1>
         </div>
         <div className="dashboard-title-actions">
@@ -1306,12 +1371,37 @@ function LifeDashboard({
               ))}
             </select>
           </label>
-          <button aria-pressed={customizing} onClick={() => setCustomizing((value) => !value)}>
+          <button
+            className="customize-dashboard"
+            aria-pressed={customizing}
+            onClick={() => setCustomizing((value) => !value)}
+          >
+            <InterfaceIcon name="tune" />
             {customizing ? "Done" : "Customize"}
           </button>
-          <button onClick={() => openView("settings")}>Settings</button>
         </div>
       </header>
+      <section className="assistant-invitation" aria-label="Your personal assistant">
+        <div className="invitation-copy">
+          <h2>
+            What’s on
+            <br />
+            your mind?
+          </h2>
+          <p>
+            A question. A plan.
+            <br />A little help with your day.
+          </p>
+          <button onClick={openConversation}>
+            Ask Ellie <InterfaceIcon name="arrow" />
+          </button>
+        </div>
+        <ElliePresence className="hero-presence" />
+      </section>
+      <div className="dashboard-section-heading">
+        <h2>Your space</h2>
+        <span>Made for your everyday</span>
+      </div>
       <div className="life-widget-grid">
         <section
           {...widgetProps("clock")}
@@ -1340,12 +1430,32 @@ function LifeDashboard({
         >
           {customizing && <DashboardWidgetTools widget="agenda" change={changeLayout} />}
           <button className="widget-open" onClick={() => openView("today")}>
-            <span className="widget-kicker">Coming up</span>
-            <h2>{agenda.length ? `${agenda.length} things in view` : "A clear day"}</h2>
-            {agenda.map(({ record }) => (
-              <span key={record.id}>{record.title}</span>
+            <span className="widget-heading">
+              <span className="widget-kicker">Coming up</span>
+              <InterfaceIcon name="today" />
+            </span>
+            <h2>{agenda.length ? "On your horizon" : "Room to breathe"}</h2>
+            {agenda.map(({ record, when }) => (
+              <span className="agenda-preview-row" key={record.id}>
+                <span className="agenda-preview-marker" />
+                <span>{record.title}</span>
+                <time>
+                  {when.allDay
+                    ? friendlyDay(when.value, data.profile.timeZone)
+                    : new Intl.DateTimeFormat(undefined, {
+                        hour: "numeric",
+                        minute: "2-digit",
+                        timeZone: data.profile.timeZone,
+                      }).format(dateValue(when.value))}
+                </time>
+              </span>
             ))}
-            <small>Open agenda</small>
+            {!agenda.length && (
+              <span className="widget-description">Your next commitments will appear here.</span>
+            )}
+            <small>
+              Open agenda <InterfaceIcon name="arrow" />
+            </small>
           </button>
         </section>
         <section
@@ -1354,7 +1464,10 @@ function LifeDashboard({
         >
           {customizing && <DashboardWidgetTools widget="plans" change={changeLayout} />}
           <button className="widget-open" onClick={openPlans}>
-            <span className="widget-kicker">Plans</span>
+            <span className="widget-heading">
+              <span className="widget-kicker">Plans</span>
+              <InterfaceIcon name="world" />
+            </span>
             <h2>
               {planLoading && !plans.length
                 ? "Loading plans…"
@@ -1367,11 +1480,23 @@ function LifeDashboard({
             {planLoading && plans.length > 0 && <span className="widget-state">Updating…</span>}
             {planError && <span>Plans are temporarily unavailable.</span>}
             {plans.slice(0, 2).map((plan) => (
-              <span key={plan.record.id}>
-                {plan.record.title} · {plan.completedSteps}/{plan.totalSteps}
+              <span className="plan-preview" key={plan.record.id}>
+                <span>{plan.record.title}</span>
+                <span className="plan-preview-progress">
+                  <span
+                    style={{
+                      width: `${plan.totalSteps ? Math.min(100, Math.max(0, (plan.completedSteps / plan.totalSteps) * 100)) : 0}%`,
+                    }}
+                  />
+                </span>
+                <span className="plan-preview-count">
+                  {plan.completedSteps} of {plan.totalSteps} steps
+                </span>
               </span>
             ))}
-            <small>Open plans</small>
+            <small>
+              Open plans <InterfaceIcon name="arrow" />
+            </small>
           </button>
         </section>
         {data.plugins.map((plugin) => (
@@ -1395,10 +1520,12 @@ function LifeDashboard({
         ))}
         <section {...widgetProps("add")} className={`${widgetProps("add").className} add-widget`}>
           {customizing && <DashboardWidgetTools widget="add" change={changeLayout} />}
-          <button className="widget-open" onClick={() => openView("space")}>
-            <span>＋</span>
-            <strong>Add or make an app</strong>
-            <small>Tell Ellie what would be useful.</small>
+          <button className="widget-open" onClick={() => openView("integrations")}>
+            <span className="add-app-icon">
+              <InterfaceIcon name="integrations" />
+            </span>
+            <strong>Connect your world</strong>
+            <small>Gmail, Plaid, and more.</small>
           </button>
         </section>
       </div>
@@ -1431,7 +1558,7 @@ function DashboardWidgetTools({
 function Brand() {
   return (
     <div className="brand">
-      <img src={ellieIcon} alt="" />
+      <InterfaceIcon name="chat" className="brand-symbol" />
       <strong>Ellie</strong>
     </div>
   );
@@ -1479,6 +1606,13 @@ function Composer({
   setText: (value: string) => void;
   placeholder?: string;
 }) {
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const input = inputRef.current;
+    if (!input) return;
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 140)}px`;
+  }, [text]);
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (text.trim()) {
@@ -1489,6 +1623,7 @@ function Composer({
   return (
     <form className="composer" onSubmit={submit}>
       <textarea
+        ref={inputRef}
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder={placeholder}
@@ -1714,7 +1849,7 @@ function Chat({
       )}
       {messages.length === 0 && (
         <div className="hello">
-          <span className="ellie-mark">e</span>
+          <ElliePresence className="conversation-presence" />
           <h1>{name === "You" ? "" : `Hi ${name}. `}What can I help with?</h1>
           {messages.length === 0 && (
             <>
@@ -4521,11 +4656,15 @@ function Settings({
   save,
   busy,
   openConnections,
+  openMemory,
+  openTools,
 }: {
   data: Bootstrap;
   save: (scope: string, v: Record<string, unknown>) => Promise<void>;
   busy: boolean;
   openConnections: boolean;
+  openMemory: () => void;
+  openTools: () => void;
 }) {
   const wrapped = data.settings.values;
   const initial =
@@ -4759,6 +4898,16 @@ function Settings({
         {busy ? "Saving…" : "Save settings"}
       </button>
       {settingsScope === `user:${data.profile.id}` && <Connections />}
+      <details className="library-settings">
+        <summary>Library and tools</summary>
+        <p>Review what Ellie remembers or manage tools you’ve already made.</p>
+        <button onClick={openMemory}>
+          <InterfaceIcon name="world" /> Manage saved memory <InterfaceIcon name="arrow" />
+        </button>
+        <button onClick={openTools}>
+          <InterfaceIcon name="space" /> Open custom tools <InterfaceIcon name="arrow" />
+        </button>
+      </details>
       <PersonalDataControls profileId={data.profile.id} />
     </Page>
   );
