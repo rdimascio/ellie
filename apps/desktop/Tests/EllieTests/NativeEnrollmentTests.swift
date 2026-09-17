@@ -543,6 +543,8 @@ final class NativeEnrollmentTests: XCTestCase {
     store.startScanning()
     await eventually { if case .pairingUncertain = store.phase { true } else { false } }
     if case .scanning = store.phase { XCTFail("Camera must stay closed") }
+    store.scannerDismissed()
+    XCTAssertEqual(store.phase, .pairingUncertain(pending))
   }
 
   @MainActor
@@ -556,6 +558,64 @@ final class NativeEnrollmentTests: XCTestCase {
     XCTAssertEqual(store.phase, .idle)
     let reads = await vault.reads
     XCTAssertEqual(reads, 2)
+  }
+
+  @MainActor
+  func testScannerDismissalPreservesScannedConfirmationUntilExplicitConfirm() async throws {
+    let vault = MemoryVault()
+    let transport = FakeTransport()
+    let store = NativeEnrollmentStore(vault: vault, transport: transport)
+    store.startScanning()
+    await eventually { if case .scanning = store.phase { true } else { false } }
+    let qr = pairingQR()
+    let payload = try NativePairingPayload.parse(qr)
+    store.scanned(qr, now: referenceTime)
+    XCTAssertEqual(store.phase, .confirming(payload))
+
+    store.scannerDismissed()
+    XCTAssertEqual(store.phase, .confirming(payload))
+    let pairCountBeforeConfirm = await transport.pairs
+    let pendingBeforeConfirm = await vault.pending
+    XCTAssertEqual(pairCountBeforeConfirm, 0)
+    XCTAssertNil(pendingBeforeConfirm)
+
+    store.confirm()
+    await eventually { if case .enrolled = store.phase { true } else { false } }
+    let pairCountAfterConfirm = await transport.pairs
+    XCTAssertEqual(pairCountAfterConfirm, 1)
+    let enrolled = store.phase
+    store.scannerDismissed()
+    XCTAssertEqual(store.phase, enrolled)
+  }
+
+  @MainActor
+  func testScannerDismissalWhileScanningReturnsIdleWithoutPairing() async {
+    let vault = MemoryVault()
+    let transport = FakeTransport()
+    let store = NativeEnrollmentStore(vault: vault, transport: transport)
+    store.startScanning()
+    await eventually { if case .scanning = store.phase { true } else { false } }
+
+    store.scannerDismissed()
+    XCTAssertEqual(store.phase, .idle)
+    let pairs = await transport.pairs
+    let pending = await vault.pending
+    XCTAssertEqual(pairs, 0)
+    XCTAssertNil(pending)
+  }
+
+  @MainActor
+  func testScannerDismissalPreservesInvalidQRFailure() async {
+    let store = NativeEnrollmentStore(vault: MemoryVault(), transport: FakeTransport())
+    store.startScanning()
+    await eventually { if case .scanning = store.phase { true } else { false } }
+    store.scanned("not an enrollment code", now: referenceTime)
+    guard case .failed(let message) = store.phase else {
+      return XCTFail("Expected invalid QR failure")
+    }
+
+    store.scannerDismissed()
+    XCTAssertEqual(store.phase, .failed(message))
   }
 
   @MainActor
