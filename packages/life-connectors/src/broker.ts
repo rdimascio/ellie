@@ -39,7 +39,7 @@ export interface ConnectedOAuth {
     signal?: AbortSignal,
   ): Promise<GoogleOAuthCredential>;
 }
-type StoredCredential = ProviderCredential & { refreshToken?: string; expiresAt?: number };
+type StoredCredential = ProviderCredential & { refreshToken?: string; expiresAt?: number; grantedScopes?: string[] };
 const DAY = 86_400_000;
 const LABELS: Record<ProviderId, string> = {
   "google-calendar": "Google Calendar",
@@ -192,7 +192,7 @@ export class ConnectorBroker {
     return {
       connections: this.store
         .list(actorId)
-        .map(({ id, provider, label, state, mode, lastSyncAt, error }) => ({
+        .map(({ id, provider, label, state, mode, lastSyncAt, error, selectedCalendarId }) => ({
           id,
           provider,
           label,
@@ -200,6 +200,9 @@ export class ConnectorBroker {
           mode,
           lastSyncAt,
           error,
+          ...(provider === "google-calendar"
+            ? { selectedCalendarId: selectedCalendarId ?? "primary" }
+            : {}),
         })),
       providers: [...this.providers.keys()].map((id) => ({
         id,
@@ -365,6 +368,87 @@ export class ConnectorBroker {
     if (c.state !== "connected") throw new Error("Reconnect this account before refreshing.");
     await this.research.refresh(actorId, id);
   }
+  private async currentCredential(actorId: string, c: Connection, signal: AbortSignal) {
+    let credential = this.vault.get<StoredCredential>(credentialId(c.id));
+    if (!credential) throw new ProviderError("revoked", "Reconnect this account.");
+    if (credential.expiresAt !== undefined && credential.expiresAt <= this.now() + 60_000) {
+      if (
+        !this.oauth ||
+        !isGoogleOAuthProvider(c.provider) ||
+        !credential.refreshToken ||
+        !credential.clientId ||
+        !Array.isArray((credential as GoogleOAuthCredential).grantedScopes)
+      )
+        throw new ProviderError("revoked", "Reconnect this account.");
+      credential = await this.oauth.refreshCredential(credential as GoogleOAuthCredential, signal);
+      signal.throwIfAborted();
+      this.current(actorId, c.id, c.generation);
+      this.vault.put(credentialId(c.id), { ...credential });
+    }
+    signal.throwIfAborted();
+    this.current(actorId, c.id, c.generation);
+    return credential;
+  }
+  async calendars(actorId: string, id: string) {
+    const c = this.current(actorId, id),
+      adapter = this.providers.get(c.provider);
+    if (c.state !== "connected" || c.provider !== "google-calendar" || !adapter?.calendars)
+      throw new Error("Calendar connection is unavailable.");
+    const signal = AbortSignal.timeout(30_000);
+    const credential = await this.currentCredential(actorId, c, signal);
+    const calendars = await adapter.calendars(credential, signal);
+    signal.throwIfAborted();
+    this.current(actorId, id, c.generation);
+    return {
+      calendars,
+      selectedCalendarId:
+        c.selectedCalendarId ?? calendars.find((item) => item.primary)?.id ?? "primary",
+    };
+  }
+  async selectCalendar(actorId: string, id: string, calendarId: string): Promise<void> {
+    if (!calendarId || calendarId.length > 1_024) throw new Error("Calendar selection is invalid.");
+    const c = this.current(actorId, id);
+    const available = await this.calendars(actorId, id);
+    if (!available.calendars.some((item) => item.id === calendarId))
+      throw new Error("Calendar selection is unavailable.");
+    this.current(actorId, id, c.generation);
+    if ((c.selectedCalendarId ?? "primary") === calendarId) return;
+    this.active.get(id)?.controller.abort();
+    await this.active.get(id)?.promise.catch(() => {});
+    this.current(actorId, id, c.generation);
+    this.store.selectCalendar(actorId, id, c.generation, calendarId);
+    this.invalidateDerived(actorId, id, true);
+    await this.refresh(actorId, id);
+  }
+  preview(actorId: string, id: string) {
+    const c = this.current(actorId, id);
+    if (c.state === "revoked") throw new Error("Connection is unavailable.");
+    const items = this.store
+      .observations(actorId, id)
+      .filter((item) => !item.deleted && item.kind !== "deleted")
+      .sort((a, b) => b.observedAt - a.observedAt)
+      .slice(0, 10)
+      .map((item) =>
+        item.kind === "event"
+          ? {
+              kind: "event" as const,
+              title: item.title.slice(0, 200),
+              startAt: item.data.startAt,
+              startDate: item.data.startDate,
+            }
+          : item.kind === "message"
+            ? {
+                kind: "message" as const,
+                subject: item.data.subject.slice(0, 200),
+                from: item.data.from.slice(0, 320),
+                snippet: item.data.snippet?.slice(0, 500),
+                sentAt: item.data.sentAt,
+              }
+            : null,
+      )
+      .filter((item) => item !== null);
+    return { items, lastSyncAt: c.lastSyncAt, error: c.error, state: c.state };
+  }
   async setMode(actorId: string, id: string, mode: ConnectionMode): Promise<void> {
     if (!["observe", "prepare"].includes(mode)) throw new TypeError("Connection mode is invalid.");
     const c = this.current(actorId, id);
@@ -397,25 +481,7 @@ export class ConnectorBroker {
       adapter = this.providers.get(c.provider);
     if (c.state !== "connected" || !adapter) throw new Error("Connection is unavailable.");
     try {
-      let credential = this.vault.get<StoredCredential>(credentialId(id));
-      if (!credential) throw new ProviderError("revoked", "Reconnect this account.");
-      if (credential.expiresAt !== undefined && credential.expiresAt <= this.now() + 60_000) {
-        if (!this.oauth || !isGoogleOAuthProvider(c.provider))
-          throw new ProviderError("revoked", "Reconnect this account.");
-        if (
-          !credential.refreshToken ||
-          !credential.clientId ||
-          !Array.isArray((credential as GoogleOAuthCredential).grantedScopes)
-        )
-          throw new ProviderError("revoked", "Reconnect this account.");
-        credential = await this.oauth.refreshCredential(
-          credential as GoogleOAuthCredential,
-          signal,
-        );
-        signal.throwIfAborted();
-        this.current(actorId, id, generation);
-        this.vault.put(credentialId(id), { ...credential });
-      }
+      const credential = await this.currentCredential(actorId, c, signal);
       let resetCursor = false,
         restartedBatch = false;
       for (let page = 0; page < 20; page++) {
@@ -425,6 +491,9 @@ export class ConnectorBroker {
         try {
           result = await adapter.pull({
             credential,
+            ...(c.provider === "google-calendar"
+              ? { resourceId: current.selectedCalendarId ?? "primary" }
+              : {}),
             cursor: current.cursor,
             continuation: current.continuation,
             window: { from: this.now() - 366 * DAY, to: this.now() + 366 * DAY },
