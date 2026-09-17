@@ -23,37 +23,35 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [oneRead], timeout: 5), .completed)
         app.buttons["ios-gmail-cancel"].tap()
         app.buttons["Release held body"].tap()
-        let form = app.scrollViews.firstMatch
-        XCTAssertTrue(form.waitForExistence(timeout: 5))
         let bodies = app.descendants(matching: .any).matching(identifier: "ios-gmail-body")
-        for _ in 0..<4 { form.swipeUp() }
+        for _ in 0..<4 { app.swipeUp() }
         let cancelledBody = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == true"), object: bodies.firstMatch)
         cancelledBody.isInverted = true
         XCTAssertEqual(XCTWaiter.wait(for: [cancelledBody], timeout: 1), .completed,
             "cancelled response must not restore private body")
         XCTAssertEqual(bodies.count, 0)
-        for _ in 0..<4 where !message.isHittable { form.swipeDown() }
+        for _ in 0..<4 where !message.isHittable { app.swipeDown() }
         XCTAssertTrue(message.isHittable)
         message.tap()
-        for _ in 0..<4 where bodies.count == 0 { form.swipeUp() }
+        for _ in 0..<4 where bodies.count == 0 { app.swipeUp() }
         XCTAssertTrue(bodies.firstMatch.waitForExistence(timeout: 5),
             "An explicit second read must expose the body in the lazy Gmail Form")
         XCTAssertEqual(bodies.count, 1)
         XCTAssertEqual(bodies.firstMatch.label, "Transient fixture message body")
         app.buttons["Hold next body"].tap()
-        for _ in 0..<4 where !message.isHittable { form.swipeDown() }
+        for _ in 0..<4 where !message.isHittable { app.swipeDown() }
         XCTAssertTrue(message.isHittable)
         message.tap()
         let thirdRead = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label == %@", "Fixture body reads: 3"), object: reads)
         XCTAssertEqual(XCTWaiter.wait(for: [thirdRead], timeout: 5), .completed)
         app.buttons["Revoke fixture"].tap()
-        for _ in 0..<4 { form.swipeDown() }
+        for _ in 0..<4 { app.swipeDown() }
         let notice = app.staticTexts["ios-gmail-notice"]
         XCTAssertTrue(notice.waitForExistence(timeout: 5))
         XCTAssertTrue(notice.label.contains("access was removed"))
-        for _ in 0..<4 { form.swipeUp() }
+        for _ in 0..<4 { app.swipeUp() }
         XCTAssertFalse(bodies.firstMatch.exists)
         XCTAssertFalse(message.exists)
     }
