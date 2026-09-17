@@ -1646,6 +1646,40 @@
             "additionalProperties": false,
             "required": [
               "tool",
+              "direction",
+              "rowId",
+              "revision"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.scrollRow"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "left",
+                  "right"
+                ]
+              },
+              "rowId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
               "query",
               "revision"
             ],

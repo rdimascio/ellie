@@ -52,6 +52,13 @@ export type BrowserCompanionCommand =
       candidateId: string;
       direction: "left" | "right";
     }
+  | {
+      type: "scrollSelectedRow";
+      actionId: string;
+      snapshotId: string;
+      rowId: string;
+      direction: "left" | "right";
+    }
   | { type: "open"; actionId: string; snapshotId: string; candidateId: string }
   | { type: "play" | "pause"; actionId: string };
 export type BrowserWebMCPRequest =
@@ -142,13 +149,31 @@ function companionCommand(value: unknown): BrowserCompanionCommand {
         : ["type", "actionId", "snapshotId", "candidateId", "direction"],
     );
     const snapshotId = identifier(body.snapshotId);
-    const candidateId = identifier(body.candidateId);
-    if (!uuidPattern.test(snapshotId) || !uuidPattern.test(candidateId))
+    const targetId = identifier(body.candidateId);
+    if (!uuidPattern.test(snapshotId) || !uuidPattern.test(targetId))
       throw new Error("Invalid message.");
-    if (body.type === "open") return { type: "open", actionId, snapshotId, candidateId };
+    if (body.type === "open") return { type: "open", actionId, snapshotId, candidateId: targetId };
     if (body.direction !== "left" && body.direction !== "right")
       throw new Error("Invalid message.");
-    return { type: "scrollRow", actionId, snapshotId, candidateId, direction: body.direction };
+    return {
+      type: "scrollRow",
+      actionId,
+      snapshotId,
+      candidateId: targetId,
+      direction: body.direction,
+    };
+  }
+  if (body.type === "scrollSelectedRow") {
+    exactKeys(body, ["type", "actionId", "snapshotId", "rowId", "direction"]);
+    const snapshotId = identifier(body.snapshotId);
+    const rowId = identifier(body.rowId);
+    if (
+      !uuidPattern.test(snapshotId) ||
+      !uuidPattern.test(rowId) ||
+      (body.direction !== "left" && body.direction !== "right")
+    )
+      throw new Error("Invalid message.");
+    return { type: "scrollSelectedRow", actionId, snapshotId, rowId, direction: body.direction };
   }
   throw new Error("Invalid message.");
 }

@@ -563,6 +563,58 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Play"].isEnabled)
     }
 
+    func testReviewedNetflixVoiceScrollRequiresExplicitRowChoiceAndRun() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-netflix-voice-rows"
+        ]
+        app.launch()
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        func reviewScroll() {
+            let check = app.buttons["speech-check"]
+            if check.exists { check.tap() }
+            let record = app.buttons["speech-record"]
+            XCTAssertTrue(record.waitForExistence(timeout: 5))
+            record.tap()
+            let stop = app.buttons["speech-stop"]
+            XCTAssertTrue(stop.waitForExistence(timeout: 5))
+            stop.tap()
+            let transcript = app.textViews["speech-transcript"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+            XCTAssertEqual(transcript.value as? String, "Scroll right")
+        }
+        func row(_ index: Int) -> XCUIElement {
+            let target = app.buttons["speech-netflix-row-\(index)"]
+            for _ in 0..<4 where !target.exists { app.swipeUp() }
+            XCTAssertTrue(target.waitForExistence(timeout: 5))
+            return target
+        }
+        reviewScroll()
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        app.buttons["speech-browser-read"].tap()
+        XCTAssertTrue(row(2).waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled)
+        row(2).tap()
+        XCTAssertTrue(app.staticTexts["speech-netflix-row-review"].label.contains(
+            "Row 2: New on Fixture Mac A"))
+        XCTAssertTrue(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        run.tap()
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["speech-netflix-row-2"].exists)
+
+        reviewScroll()
+        XCTAssertFalse(run.isEnabled, "the old row choice cannot authorize a later turn")
+        app.buttons["speech-browser-read"].tap()
+        XCTAssertTrue(row(1).waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled, "a fresh read still needs an explicit row choice")
+        XCTAssertEqual(count.label, "Fixture mutations: 1")
+    }
+
     func testReviewedVoiceRequiresFreshPageBetweenSearchSelectionAndPlayback() {
         let app = XCUIApplication()
         app.launchArguments = [
@@ -705,6 +757,31 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
         XCTAssertEqual(
             app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+    }
+
+    func testNetflixRowsRequireExplicitChoiceBeforeHorizontalScroll() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-netflix-rows-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let enabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
+        browser.tap()
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertFalse(revealBrowserButton("Right", in: app).isEnabled)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        let row = revealBrowserButton("browser-netflix-row-2", in: app, forTap: true)
+        XCTAssertTrue(row.label.contains("Row 2: New"))
+        row.tap()
+        let right = revealBrowserButton("Right", in: app, forTap: true)
+        XCTAssertTrue(right.isEnabled)
+        right.tap()
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["Right"].exists)
+        XCTAssertFalse(app.buttons["browser-netflix-row-2"].exists)
     }
 
     private func waitForFixtureMutations(_ expected: Int, in app: XCUIApplication) {

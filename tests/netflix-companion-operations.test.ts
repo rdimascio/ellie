@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import {
+  browserWebMCPAction,
   browserWebMCPRequest,
   browserWebMCPOperationResult,
   browserWebMCPResultFor,
@@ -24,6 +25,24 @@ const binding = (suffix: string, url = "https://www.netflix.com/browse"): Browse
 });
 
 test("companion wire admits only fixed commands and rejects arbitrary input", () => {
+  const rowId = randomUUID();
+  assert.deepEqual(
+    browserWebMCPAction({
+      tool: "browser.scrollRow",
+      direction: "right",
+      rowId,
+      revision: "a".repeat(64),
+    }),
+    { tool: "browser.scrollRow", direction: "right", rowId, revision: "a".repeat(64) },
+  );
+  assert.throws(() =>
+    browserWebMCPAction({
+      tool: "browser.scrollRow",
+      direction: "right",
+      rowId: "a[href]",
+      revision: "a".repeat(64),
+    }),
+  );
   const base = {
     protocol: "ellie.browser-webmcp.v1",
     id: "request-1",
@@ -38,12 +57,119 @@ test("companion wire admits only fixed commands and rejects arbitrary input", ()
     candidateId: randomUUID(),
   };
   assert.equal(browserWebMCPRequest({ ...base, command }).type, "media.execute");
+  assert.equal(
+    browserWebMCPRequest({
+      ...base,
+      command: {
+        type: "scrollSelectedRow",
+        actionId: randomUUID(),
+        snapshotId: randomUUID(),
+        rowId: randomUUID(),
+        direction: "right",
+      },
+    }).type,
+    "media.execute",
+  );
   for (const invalid of [
     { ...command, url: "https://www.netflix.com/account" },
     { type: "search", actionId: randomUUID(), query: "anything" },
     { type: "play", actionId: randomUUID(), script: "alert(1)" },
+    {
+      type: "scrollSelectedRow",
+      actionId: randomUUID(),
+      snapshotId: randomUUID(),
+      rowId: "a[href]",
+      direction: "right",
+    },
   ])
     assert.throws(() => browserWebMCPRequest({ ...base, command: invalid }));
+});
+
+test("Netflix row observations require bounded distinct opaque IDs and closed labels", () => {
+  const duplicateId = randomUUID();
+  const base = {
+    ok: true,
+    message: "Observed.",
+    browser: {
+      source: "companion",
+      operation: "read",
+      status: "completed",
+      revision: "a".repeat(64),
+      view: {
+        items: [],
+        site: {
+          provider: "netflix",
+          page: "browse",
+          playback: "unavailable",
+          rows: [{ id: duplicateId, label: "Row 1: Featured" }],
+        },
+      },
+    },
+  };
+  assert.equal(browserWebMCPOperationResult(base).browser.operation, "read");
+  for (const rows of [
+    [{ id: "a[href]", label: "Row" }],
+    Array.from({ length: 9 }, () => ({ id: randomUUID(), label: "Row" })),
+    [{ id: randomUUID(), label: "\u0000" }],
+    [
+      { id: duplicateId, label: "First" },
+      { id: duplicateId, label: "Second" },
+    ],
+  ])
+    assert.throws(() =>
+      browserWebMCPOperationResult({
+        ...base,
+        browser: {
+          ...base.browser,
+          view: { ...base.browser.view, site: { ...base.browser.view.site, rows } },
+        },
+      }),
+    );
+  assert.throws(() =>
+    browserWebMCPOperationResult({
+      ...base,
+      browser: {
+        ...base.browser,
+        view: { ...base.browser.view, site: { ...base.browser.view.site, provider: "youtube" } },
+      },
+    }),
+  );
+});
+
+test("observed row actions never fall through to WebMCP or accessibility", async () => {
+  for (const availability of ["webmcp", "accessibility"] as const) {
+    let dispatches = 0;
+    const current: BrowserBinding = { ...binding(availability), availability };
+    const selector = new BrowserOperationSelector(
+      async () => current,
+      {
+        execute: async () => {
+          dispatches += 1;
+          throw new Error("unexpected WebMCP dispatch");
+        },
+      },
+      {
+        execute: async () => {
+          dispatches += 1;
+          throw new Error("unexpected AX dispatch");
+        },
+      } as never,
+    );
+    await assert.rejects(
+      () =>
+        selector.execute(
+          {
+            tool: "browser.scrollRow",
+            direction: "right",
+            rowId: randomUUID(),
+            revision: browserBindingRevision(current),
+          },
+          new AbortController().signal,
+        ),
+      /only for the selected Netflix companion/,
+    );
+    assert.equal(dispatches, 0);
+  }
 });
 
 test("Netflix selector consumes read authority after one unknown and never enters WebMCP or AX", async () => {
@@ -54,7 +180,8 @@ test("Netflix selector consumes read authority after one unknown and never enter
   const commands: string[] = [];
   const snapshotId = randomUUID(),
     first = randomUUID(),
-    second = randomUUID();
+    second = randomUUID(),
+    rowId = randomUUID();
   const bridge = {
     async request(request: Exclude<BrowserWebMCPRequest, { type: "cancel" }>) {
       bridgeCalls += 1;
@@ -88,6 +215,7 @@ test("Netflix selector consumes read authority after one unknown and never enter
                   page: "browse",
                   playback: "unavailable",
                   horizontalScrollAvailable: true,
+                  rows: [{ id: rowId, label: "Row 1: Synthetic titles" }],
                 },
               }
           : { outcome: "scrolled" };
@@ -133,14 +261,23 @@ test("Netflix selector consumes read authority after one unknown and never enter
     [first, second],
   );
   assert.equal(read.browser.view.site?.horizontalScrollAvailable, true);
+  assert.deepEqual(read.browser.view.site?.rows, [{ id: rowId, label: "Row 1: Synthetic titles" }]);
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.scroll", direction: "right", revision }, signal),
+    /Choose an observed Netflix row/,
+  );
   const scroll = browserWebMCPOperationResult(
-    await selector.execute({ tool: "browser.scroll", direction: "right", revision }, signal),
+    await selector.execute(
+      { tool: "browser.scrollRow", direction: "right", rowId, revision },
+      signal,
+    ),
   );
   assert.equal(scroll.browser.operation, "command");
   assert.equal(scroll.browser.status, "unknown");
-  assert.deepEqual(commands, ["inspect", "scrollRow"]);
+  assert.deepEqual(commands, ["inspect", "scrollSelectedRow"]);
   await assert.rejects(
-    () => selector.execute({ tool: "browser.scroll", direction: "right", revision }, signal),
+    () =>
+      selector.execute({ tool: "browser.scrollRow", direction: "right", rowId, revision }, signal),
     /Read the Netflix page/,
   );
   await assert.rejects(
@@ -182,7 +319,7 @@ test("Netflix selector consumes read authority after one unknown and never enter
     ),
   );
   assert.equal(play.browser.status, "unknown");
-  assert.deepEqual(commands, ["inspect", "scrollRow", "inspect", "play"]);
+  assert.deepEqual(commands, ["inspect", "scrollSelectedRow", "inspect", "play"]);
   await assert.rejects(
     () =>
       selector.execute(

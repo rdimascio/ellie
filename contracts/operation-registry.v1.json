@@ -489,6 +489,68 @@
       }
     },
     {
+      "id": "browser.scrollRow",
+      "requiredCapability": "browser.control",
+      "description": "Scroll one explicitly chosen row from the current browser observation.",
+      "localPolicy": {
+        "appFields": [],
+        "urlFields": []
+      },
+      "input": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tool",
+          "direction",
+          "rowId",
+          "revision"
+        ],
+        "properties": {
+          "tool": {
+            "const": "browser.scrollRow"
+          },
+          "direction": {
+            "type": "string",
+            "enum": [
+              "left",
+              "right"
+            ]
+          },
+          "rowId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          },
+          "revision": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+          }
+        }
+      },
+      "output": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": [
+          "ok",
+          "message"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "pattern": "\\S"
+          }
+        }
+      }
+    },
+    {
       "id": "browser.search",
       "requiredCapability": "browser.control",
       "description": "Submit a bounded search to the authorized browser page.",

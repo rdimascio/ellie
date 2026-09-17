@@ -88,6 +88,10 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(page.source, .companion)
     XCTAssertEqual(page.site?.provider, .netflix)
     XCTAssertEqual(page.site?.horizontalScrollAvailable, true)
+    guard case .page(let withRows) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row 1: Featured"},{"id":"10000000-0000-4000-8000-000000000002","label":"Row 2"}]}"#), nodeID: "mac")
+    else { return XCTFail("Expected Netflix rows") }
+    XCTAssertEqual(withRows.site?.rows?.map(\.label), ["Row 1: Featured", "Row 2"])
     let missingSite = Data(
       #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]}}}}"#.utf8)
     XCTAssertThrowsError(try decodeBrowserPhoneResponse(missingSite, nodeID: "mac"))
@@ -98,6 +102,10 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"youtube","page":"results","playback":"unavailable"}"#,
       #"{"provider":"netflix","page":"watch","playback":"paused","horizontalScrollAvailable":true}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","horizontalScrollAvailable":1}"#,
+      #"{"provider":"netflix","page":"watch","playback":"paused","rows":[]}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"not-an-id","label":"Row"}]}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-1000-8000-000000000001","label":"Row"}]}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row"},{"id":"10000000-0000-4000-8000-000000000001","label":"Other"}]}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
@@ -108,7 +116,9 @@ final class BrowserPhoneControlTests: XCTestCase {
       capabilities: ["browser.read", "browser.control"])
     let cases: [(BrowserPhoneSite, BrowserVoiceIntent, Bool)] = [
       (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
-        currentTimeSeconds: nil, horizontalScrollAvailable: true), .scroll(.right), true),
+        currentTimeSeconds: nil, horizontalScrollAvailable: true,
+        rows: [BrowserPhoneRow(id: "10000000-0000-4000-8000-000000000001", label: "Row 1")]),
+        .scroll(.right), false),
       (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil, horizontalScrollAvailable: false), .scroll(.right), false),
       (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
@@ -132,6 +142,37 @@ final class BrowserPhoneControlTests: XCTestCase {
         XCTAssertEqual(actions.count, 2)
       }
     }
+  }
+
+  @MainActor
+  func testNetflixRowChoiceIsExplicitAndConsumedBeforeTransport() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let first = "10000000-0000-4000-8000-000000000001"
+    let second = "10000000-0000-4000-8000-000000000002"
+    let site = BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+      currentTimeSeconds: nil, rows: [
+        BrowserPhoneRow(id: first, label: "Row 1: Featured"),
+        BrowserPhoneRow(id: second, label: "Row 2: New"),
+      ])
+    let transport = BrowserPhoneFakeTransport(source: .companion, site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertFalse(store.canPerform(.scroll(.right), on: node))
+    XCTAssertFalse(store.selectObservedRow("10000000-0000-4000-8000-000000000099", on: node))
+    XCTAssertTrue(store.selectObservedRow(second, on: node))
+    XCTAssertEqual(store.selectedRowID, second)
+    XCTAssertTrue(store.canPerform(.scroll(.right), on: node))
+    XCTAssertTrue(store.perform(.scroll(.right), on: node))
+    XCTAssertNil(store.selectedRowID)
+    XCTAssertFalse(store.canPerform(.scroll(.right), on: node))
+    await eventually { await transport.actions.count == 3 }
+    let actions = await transport.actions
+    XCTAssertEqual(actions[2], .scrollRow(second, .right, revision: String(repeating: "a", count: 64)))
+    await transport.finishCommand()
+    await eventually { !store.isBusy }
   }
 
   @MainActor

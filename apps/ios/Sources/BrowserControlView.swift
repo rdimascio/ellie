@@ -41,9 +41,29 @@ struct BrowserControlView: View {
               Text("Netflix search is not supported yet.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
-            if site.provider == .netflix && site.page == .browse && site.horizontalScrollAvailable != true {
-              Text("Horizontal browsing needs one unambiguous visible row.")
+            if site.provider == .netflix && site.page == .browse && site.rows?.isEmpty != false {
+              Text("No safely identified horizontal rows are available on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
+            }
+          }
+          if site.provider == .netflix && site.page == .browse, let rows = site.rows,
+            !rows.isEmpty {
+            Section("Netflix rows") {
+              Text("Choose a row, then use Left or Right. Read again after scrolling.")
+                .font(.footnote).foregroundStyle(.secondary)
+              ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                Button {
+                  browser.selectObservedRow(row.id, on: controls.selectedNode)
+                } label: {
+                  HStack {
+                    Text(row.label)
+                    Spacer()
+                    if browser.selectedRowID == row.id { Image(systemName: "checkmark") }
+                  }
+                }
+                .accessibilityIdentifier("browser-netflix-row-\(index + 1)")
+                .disabled(browser.isBusy || controls.selectedNode?.capabilities.contains("browser.control") != true)
+              }
             }
           }
         }

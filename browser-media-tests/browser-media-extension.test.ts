@@ -1015,7 +1015,7 @@ test(
       await launched.page.setContent(`<!doctype html><style>
       body{margin:0;min-height:1800px}.row{display:flex;overflow-x:auto;width:320px;height:150px}
       .card{display:block;flex:0 0 260px;height:120px;background:#ddd}
-      </style><div class="row"><a class="card" href="/watch/123" aria-label="Synthetic first title">One</a>
+      </style><h2>Featured titles</h2><div class="row"><a class="card" href="/watch/123" aria-label="Synthetic first title">One</a>
       <a class="card" href="/watch/456" aria-label="Synthetic second title">Two</a></div>`);
       await launched.page.evaluate(() => {
         const credentialBearing = document.createElement("a");
@@ -1036,7 +1036,7 @@ test(
         tab.id,
       );
       assert.equal(binding.availability, "companion");
-      const status = await launched.worker.evaluate(() =>
+      let status = await launched.worker.evaluate(() =>
         globalThis.__ellieTestWebMCP.request({
           protocol: "ellie.browser-webmcp.v1",
           id: crypto.randomUUID(),
@@ -1046,7 +1046,7 @@ test(
       assert.equal(status.availability, "companion");
       const native = (request: Record<string, unknown>) =>
         launched.worker.evaluate((value) => globalThis.__ellieTestWebMCP.request(value), request);
-      const inspect = await native({
+      let inspect = await native({
         protocol: "ellie.browser-webmcp.v1",
         id: crypto.randomUUID(),
         type: "media.execute",
@@ -1060,9 +1060,11 @@ test(
       assert.equal(inspect.value.site.horizontalScrollAvailable, true);
       assert.equal(inspect.value.candidates.length, 2);
       assert.equal(inspect.value.rowCandidateId, inspect.value.candidates[0].id);
+      assert.equal(inspect.value.site.rows.length, 1);
+      assert.equal(inspect.value.site.rows[0].label, "Row 1: Featured titles");
       const rowBefore = await launched.page.locator(".row").evaluate((row) => row.scrollLeft);
       const denied = await launched.worker.evaluate(
-        async ({ bindingId, documentId, candidateId, snapshotId }) => {
+        async ({ bindingId, documentId, rowId, snapshotId }) => {
           try {
             await globalThis.__ellieTestWebMCP.request({
               protocol: "ellie.browser-webmcp.v1",
@@ -1071,10 +1073,10 @@ test(
               bindingId,
               documentId: `${documentId}-stale`,
               command: {
-                type: "scrollRow",
+                type: "scrollSelectedRow",
                 actionId: crypto.randomUUID(),
                 snapshotId,
-                candidateId,
+                rowId,
                 direction: "right",
               },
             });
@@ -1086,7 +1088,7 @@ test(
         {
           bindingId: status.bindingId,
           documentId: status.documentId,
-          candidateId: inspect.value.rowCandidateId,
+          rowId: inspect.value.site.rows[0].id,
           snapshotId: inspect.value.snapshotId,
         },
       );
@@ -1095,6 +1097,33 @@ test(
         await launched.page.locator(".row").evaluate((row) => row.scrollLeft),
         rowBefore,
       );
+      const popupScroll = await command(launched.harness, tab.id, {
+        type: "scrollRow",
+        snapshotId: inspect.value.snapshotId,
+        candidateId: inspect.value.rowCandidateId,
+        direction: "right",
+      });
+      assert.equal(
+        popupScroll.value.outcome,
+        "scrolled",
+        "the existing popup row control remains usable",
+      );
+      status = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.refresh",
+        }),
+      );
+      inspect = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: status.bindingId,
+        documentId: status.documentId,
+        command: { type: "inspect", actionId: crypto.randomUUID() },
+      });
+      const explicitBefore = await launched.page.locator(".row").evaluate((row) => row.scrollLeft);
       const scrolled = await native({
         protocol: "ellie.browser-webmcp.v1",
         id: crypto.randomUUID(),
@@ -1102,16 +1131,16 @@ test(
         bindingId: status.bindingId,
         documentId: status.documentId,
         command: {
-          type: "scrollRow",
+          type: "scrollSelectedRow",
           actionId: crypto.randomUUID(),
           snapshotId: inspect.value.snapshotId,
-          candidateId: inspect.value.rowCandidateId,
+          rowId: inspect.value.site.rows[0].id,
           direction: "right",
         },
       });
       assert.equal(scrolled.value.outcome, "scrolled");
       assert.ok(
-        (await launched.page.locator(".row").evaluate((row) => row.scrollLeft)) > rowBefore,
+        (await launched.page.locator(".row").evaluate((row) => row.scrollLeft)) > explicitBefore,
       );
       const stale = await launched.worker.evaluate(async () => {
         try {
@@ -1142,6 +1171,60 @@ test(
         command: { type: "inspect", actionId: crypto.randomUUID() },
       });
       assert.ok(beforeAddedRow.value.rowCandidateId);
+      await launched.page.locator("h2").evaluate((heading) => {
+        heading.textContent = "Changed titles";
+      });
+      const headingBefore = await launched.page.locator(".row").evaluate((row) => row.scrollLeft);
+      const staleHeading = await launched.worker.evaluate(
+        async ({ bindingId, documentId, snapshotId, rowId }) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request({
+              protocol: "ellie.browser-webmcp.v1",
+              id: crypto.randomUUID(),
+              type: "media.execute",
+              bindingId,
+              documentId,
+              command: {
+                type: "scrollSelectedRow",
+                actionId: crypto.randomUUID(),
+                snapshotId,
+                rowId,
+                direction: "left",
+              },
+            });
+            return "scrolled";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          bindingId: renewed.bindingId,
+          documentId: renewed.documentId,
+          snapshotId: beforeAddedRow.value.snapshotId,
+          rowId: beforeAddedRow.value.site.rows[0].id,
+        },
+      );
+      assert.equal(staleHeading, "unknown");
+      assert.equal(
+        await launched.page.locator(".row").evaluate((row) => row.scrollLeft),
+        headingBefore,
+      );
+      const renewedAfterHeading = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.refresh",
+        }),
+      );
+      const beforeAddedRowAgain = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: renewedAfterHeading.bindingId,
+        documentId: renewedAfterHeading.documentId,
+        command: { type: "inspect", actionId: crypto.randomUUID() },
+      });
+      assert.equal(beforeAddedRowAgain.value.site.rows[0].label, "Row 1: Changed titles");
       await launched.page.evaluate(() => {
         const second = document.querySelector(".row")!.cloneNode(true) as HTMLElement;
         second.classList.add("second-row");
@@ -1156,7 +1239,7 @@ test(
         .first()
         .evaluate((row) => row.scrollLeft);
       const lateRowResult = await launched.worker.evaluate(
-        async ({ bindingId, documentId, snapshotId, candidateId }) => {
+        async ({ bindingId, documentId, snapshotId, rowId }) => {
           try {
             await globalThis.__ellieTestWebMCP.request({
               protocol: "ellie.browser-webmcp.v1",
@@ -1165,10 +1248,10 @@ test(
               bindingId,
               documentId,
               command: {
-                type: "scrollRow",
+                type: "scrollSelectedRow",
                 actionId: crypto.randomUUID(),
                 snapshotId,
-                candidateId,
+                rowId,
                 direction: "left",
               },
             });
@@ -1178,10 +1261,10 @@ test(
           }
         },
         {
-          bindingId: renewed.bindingId,
-          documentId: renewed.documentId,
-          snapshotId: beforeAddedRow.value.snapshotId,
-          candidateId: beforeAddedRow.value.rowCandidateId,
+          bindingId: renewedAfterHeading.bindingId,
+          documentId: renewedAfterHeading.documentId,
+          snapshotId: beforeAddedRowAgain.value.snapshotId,
+          rowId: beforeAddedRowAgain.value.site.rows[0].id,
         },
       );
       assert.equal(lateRowResult, "unknown");
@@ -1209,11 +1292,16 @@ test(
       });
       assert.equal(multiple.value.site.horizontalScrollAvailable, false);
       assert.equal(multiple.value.rowCandidateId, undefined);
+      assert.equal(multiple.value.site.rows.length, 2);
+      assert.deepEqual(
+        multiple.value.site.rows.map((row: any) => row.label),
+        ["Row 1: Changed titles", "Row 2"],
+      );
       const secondBefore = await launched.page
         .locator(".second-row")
         .evaluate((row) => row.scrollLeft);
-      const ambiguous = await launched.worker.evaluate(
-        async ({ bindingId, documentId, snapshotId, candidateId }) => {
+      const selectedSecond = await launched.worker.evaluate(
+        async ({ bindingId, documentId, snapshotId, rowId }) => {
           try {
             await globalThis.__ellieTestWebMCP.request({
               protocol: "ellie.browser-webmcp.v1",
@@ -1222,10 +1310,10 @@ test(
               bindingId,
               documentId,
               command: {
-                type: "scrollRow",
+                type: "scrollSelectedRow",
                 actionId: crypto.randomUUID(),
                 snapshotId,
-                candidateId,
+                rowId,
                 direction: "right",
               },
             });
@@ -1238,13 +1326,13 @@ test(
           bindingId: renewedAfterLateRow.bindingId,
           documentId: renewedAfterLateRow.documentId,
           snapshotId: multiple.value.snapshotId,
-          candidateId: multiple.value.candidates[0].id,
+          rowId: multiple.value.site.rows[1].id,
         },
       );
-      assert.equal(ambiguous, "unknown");
-      assert.equal(
-        await launched.page.locator(".second-row").evaluate((row) => row.scrollLeft),
-        secondBefore,
+      assert.equal(selectedSecond, "scrolled");
+      assert.ok(
+        (await launched.page.locator(".second-row").evaluate((row) => row.scrollLeft)) >
+          secondBefore,
       );
       await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.drop());
       const disconnected = await launched.worker.evaluate(async () => {
@@ -1404,6 +1492,46 @@ test(
       assert.equal(read.value.candidates.length, 40);
       assert.equal(read.value.site.horizontalScrollAvailable, false);
       assert.equal(read.value.rowCandidateId, undefined);
+      assert.equal(read.value.site.rows.length, 2, "row choice is independent of the title cap");
+      const firstBefore = await launched.page.locator(".first").evaluate((row) => row.scrollLeft);
+      const oldPopupChoice = await command(launched.harness, tab.id, {
+        type: "scrollRow",
+        snapshotId: read.value.snapshotId,
+        candidateId: read.value.candidates[0].id,
+        direction: "right",
+      });
+      assert.equal(oldPopupChoice.error, "row_scroll_unavailable");
+      assert.equal(
+        await launched.page.locator(".first").evaluate((row) => row.scrollLeft),
+        firstBefore,
+      );
+      await launched.page.evaluate(() => {
+        for (const row of document.querySelectorAll(".row"))
+          (row as HTMLElement).style.height = "55px";
+        for (let index = 0; index < 7; index += 1) {
+          const row = document.createElement("div");
+          row.className = "row";
+          row.style.height = "55px";
+          row.innerHTML = `<a class="large" href="/watch/${1000 + index}" aria-label="Extra title ${index}">Extra</a><span style="flex:0 0 500px"></span>`;
+          document.body.append(row);
+        }
+      });
+      const capped = await launched.worker.evaluate(
+        (value) => globalThis.__ellieTestWebMCP.request(value),
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        },
+      );
+      assert.deepEqual(
+        capped.value.site.rows,
+        [],
+        "an over-cap row scan must expose no partial choice",
+      );
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
