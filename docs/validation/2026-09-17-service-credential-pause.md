@@ -10,7 +10,11 @@ The log must record `starting` before either credential read. If the later failu
 
 ## Automated evidence
 
-Current-source review and checks are in progress. The integration fixture uses private temporary state and a synthetic rejecting helper; it must never read the household Keychain, register a LaunchAgent, or dispatch a desktop action. These checks cannot establish macOS consent, installed-service recovery or physical phone-to-website acceptance.
+Product source `b3cdea9` passed independent review. The integrated candidate combines that source with the process fixture from `9594def`, preserving both histories. On macOS with Node 24.21.0 and Bun 1.4.2, 41 focused config, service, diagnostics, attention and process tests passed, with no failures or skips. Lint, formatting, generated contracts and all TypeScript projects passed. Current integrated CI remains the full merge gate.
+
+The actual CLI process fixture runs both service roles under private temporary homes with synthetic certificates and a rejecting helper. Each role remains alive after one rejection, records the fixed attention sequence, closes after SIGTERM, and makes one fresh helper attempt after an explicitly launched second process. Foreground commands still exit with failure. The unchanged production baseline exited before attention was recorded; that negative result is retained. The process fixture directly observes child lifetime, event logs and helper calls. Absence of network or desktop activity follows the reviewed pre-listener control flow, rather than a separate network or desktop probe.
+
+No household Keychain, LaunchAgent, service, phone or website was exercised. These checks do not establish macOS consent, installed-service recovery or physical phone-to-website acceptance. No package was deployed for this change.
 
 ## Installed acceptance — not ready
 
