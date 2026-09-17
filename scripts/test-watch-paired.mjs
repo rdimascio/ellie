@@ -71,7 +71,9 @@ function ownedIDsPresent(inventory, ids) {
       !Object.values(inventory.devices).every(Array.isArray)) {
     throw new Error("Final Simulator inventory is malformed.");
   }
-  return Object.values(inventory.devices).flat().some((device) => ids.includes(device.udid));
+  const owned = new Set(ids.map((id) => id.toLowerCase()));
+  return Object.values(inventory.devices).flat().some((device) =>
+    typeof device.udid === "string" && owned.has(device.udid.toLowerCase()));
 }
 function requireEvents(path, target, playCount) {
   const rows = readFileSync(path, "utf8").trim().split("\n").map((line) => JSON.parse(line));
