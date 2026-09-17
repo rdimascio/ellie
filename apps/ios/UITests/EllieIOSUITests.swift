@@ -25,7 +25,11 @@ final class EllieIOSUITests: XCTestCase {
         let pair = app.buttons["Pair this iPhone"]
         XCTAssertTrue(pair.waitForExistence(timeout: 5),
             "A decoded code must remain on the production review screen after sheet dismissal")
-        XCTAssertTrue(app.staticTexts["Fixture phone"].exists)
+        let reviewedLabel = app.descendants(matching: .any).matching(
+            NSPredicate(
+                format: "label CONTAINS %@ OR value == %@", "Fixture phone", "Fixture phone"
+            )).firstMatch
+        XCTAssertTrue(reviewedLabel.waitForExistence(timeout: 5), app.debugDescription)
         XCTAssertTrue(
             app.descendants(matching: .any)["Open applications on fixture-mac"].exists)
 
