@@ -238,6 +238,7 @@ const update = () => { result.textContent = 'Scroll offset: ' + Math.round(viewp
 viewport.addEventListener('scroll', update);
 let phase = 'home'; let query = ''; let playback = 'paused'; let mutationCount = 0;
 let scrollInvocations = 0; document.body.dataset.scrollInvocations = '0';
+let scrollAbortObserved = 0; document.body.dataset.scrollAbortObserved = '0';
 const media = () => {
   document.querySelector('#phase').textContent = phase;
   document.querySelector('#query').textContent = query;
@@ -270,8 +271,20 @@ Promise.all([
       context.signal?.throwIfAborted();
       if (${composed} && direction === 'down') {
         scrollInvocations++; document.body.dataset.scrollInvocations = String(scrollInvocations);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        context.signal?.throwIfAborted();
+        await new Promise((_, reject) => {
+          const signal = context.signal;
+          const onAbort = () => {
+            clearTimeout(deadline);
+            scrollAbortObserved++; document.body.dataset.scrollAbortObserved = String(scrollAbortObserved);
+            reject(new Error('scroll_cancelled'));
+          };
+          const deadline = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            reject(new Error('scroll_cancel_not_observed'));
+          }, 12000);
+          if (signal?.aborted) onAbort();
+          else signal?.addEventListener('abort', onAbort, {once: true});
+        });
       }
       const before = viewport.scrollTop;
       viewport.scrollTop = before + (direction === 'down' ? 120 : -120);
@@ -1086,7 +1099,7 @@ async function main() {
       await agent(["tab", fixtureTab.tabId]);
       const observed = await agentJson<{ result: unknown }>([
         "eval",
-        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollInvocations:Number(document.body.dataset.scrollInvocations)})",
+        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved)})",
       ]);
       const media = record(observed.result);
       assert.equal(media.phase, "watch");
@@ -1094,7 +1107,12 @@ async function main() {
       assert.equal(media.selection, "Owned synthetic video");
       assert.equal(media.playback, "playing");
       assert.equal(media.scrollInvocations, 1, "The delayed command must reach the page once.");
-      assert.ok(media.mutations === 3 || media.mutations === 4);
+      assert.equal(
+        media.scrollAbortObserved,
+        1,
+        "The user's cancellation must reach the page tool.",
+      );
+      assert.equal(media.mutations, 3, "The cancelled scroll must not mutate the page.");
       const jobs = native.coordinator.jobStore.list(native.target, 100).slice(beforeJobs);
       assert.equal(
         jobs.length,

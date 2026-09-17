@@ -732,9 +732,9 @@ final class EllieIOSUITests: XCTestCase {
             predicate: NSPredicate(format: "isEnabled == true"), object: down)], timeout: 15),
             .completed)
         down.tap()
-        let cancel = app.buttons["browser-stop-waiting"]
-        guard cancel.waitForExistence(timeout: 5) else {
-            XCTFail("The visible in-flight browser cancel button was not accessible")
+        let cancel = revealBrowserButton("browser-stop-waiting", in: app, forTap: true)
+        guard cancel.exists && cancel.isHittable else {
+            XCTFail("The in-flight browser cancel button was not reachable in the bounded form")
             return
         }
         cancel.tap()
