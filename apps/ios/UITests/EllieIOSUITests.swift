@@ -542,14 +542,13 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["speech-browser-continue"].waitForExistence(timeout: 5))
         app.buttons["speech-browser-continue"].tap()
         XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
-        let observedSite = app.descendants(matching: .any)["browser-observed-site"]
-        let observedPlayback = app.descendants(matching: .any)["browser-observed-playback"]
+        let observedSite = app.staticTexts["browser-observed-site"]
+        let observedPlayback = app.staticTexts["browser-observed-playback"]
         XCTAssertEqual(observedSite.label, "Observed YouTube results page")
         XCTAssertFalse(observedPlayback.exists)
-        XCTAssertFalse(app.buttons["Play"].isEnabled)
-        XCTAssertFalse(app.buttons["Pause"].isEnabled)
-        let result = app.buttons["browser-result-1"]
-        XCTAssertTrue(result.waitForExistence(timeout: 5))
+        XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
+        XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
+        let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
         XCTAssertTrue(result.isEnabled)
         result.tap()
         waitForFixturePageToClear(in: app)
@@ -557,32 +556,30 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(app.buttons["Play"].exists)
         XCTAssertFalse(observedSite.exists)
 
-        app.buttons["Read current page"].tap()
-        let play = app.buttons["Play"]
-        XCTAssertTrue(play.waitForExistence(timeout: 5))
-        XCTAssertTrue(play.isEnabled)
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
         XCTAssertEqual(observedSite.label, "Observed YouTube watch page")
         XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
-        XCTAssertFalse(app.buttons["Pause"].isEnabled)
+        let play = revealBrowserButton("Play", in: app, forTap: true)
+        XCTAssertTrue(play.isEnabled)
+        XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
         play.tap()
         waitForFixturePageToClear(in: app)
         waitForFixtureMutations(3, in: app)
         XCTAssertFalse(app.buttons["Pause"].exists)
 
-        app.buttons["Read current page"].tap()
-        let pause = app.buttons["Pause"]
-        XCTAssertTrue(pause.waitForExistence(timeout: 5))
-        XCTAssertTrue(pause.isEnabled)
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
         XCTAssertEqual(observedPlayback.label, "Observed playback: playing")
-        XCTAssertFalse(app.buttons["Play"].isEnabled)
+        let pause = revealBrowserButton("Pause", in: app, forTap: true)
+        XCTAssertTrue(pause.isEnabled)
+        XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
         pause.tap()
         waitForFixturePageToClear(in: app)
         waitForFixtureMutations(4, in: app)
         XCTAssertFalse(observedPlayback.exists)
-        app.buttons["Read current page"].tap()
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
         XCTAssertTrue(observedPlayback.waitForExistence(timeout: 5))
         XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
-        XCTAssertTrue(app.buttons["Play"].isEnabled)
+        XCTAssertTrue(revealBrowserButton("Play", in: app).isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 4")
     }
 
@@ -602,9 +599,10 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["browser-read-only-grant-warning"].exists)
         for label in ["Search", "Up", "Down", "Left", "Right", "Play", "Pause"] {
-            XCTAssertFalse(app.buttons[label].isEnabled, "\(label) requires browser.control")
+            XCTAssertFalse(revealBrowserButton(label, in: app).isEnabled,
+                "\(label) requires browser.control")
         }
-        XCTAssertFalse(app.buttons["browser-result-1"].isEnabled)
+        XCTAssertFalse(revealBrowserButton("browser-result-1", in: app).isEnabled)
         XCTAssertEqual(
             app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
     }
@@ -620,11 +618,11 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
         browser.tap()
         app.buttons["Read current page"].tap()
-        let observed = app.descendants(matching: .any)["browser-observed-playback"]
+        let observed = app.staticTexts["browser-observed-playback"]
         XCTAssertTrue(observed.waitForExistence(timeout: 5))
         XCTAssertEqual(observed.label, "Playback state is unavailable")
-        XCTAssertFalse(app.buttons["Play"].isEnabled)
-        XCTAssertFalse(app.buttons["Pause"].isEnabled)
+        XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
+        XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
         XCTAssertEqual(
             app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
     }
@@ -638,7 +636,30 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [observed], timeout: 5), .completed)
     }
 
+    private func revealBrowserButton(_ identifier: String, in app: XCUIApplication,
+                                     forTap: Bool = false) -> XCUIElement {
+        let button = app.buttons[identifier]
+        let list = app.collectionViews.firstMatch
+        let visible = { button.exists && (!forTap || button.isHittable) }
+        if !visible() {
+            XCTAssertTrue(list.exists, "Expected the browser form's scrollable list")
+            for _ in 0..<4 {
+                if visible() { break }
+                list.swipeUp()
+            }
+            for _ in 0..<4 {
+                if visible() { break }
+                list.swipeDown()
+            }
+        }
+        XCTAssertTrue(visible(), "Expected browser control \(identifier) in the bounded form")
+        return button
+    }
+
     private func waitForFixturePageToClear(in app: XCUIApplication) {
+        // Return to the top of the lazy form so absence is about page invalidation,
+        // not merely an off-screen row that UIKit has not materialized.
+        _ = revealBrowserButton("Read current page", in: app, forTap: true)
         let page = app.staticTexts["Mac A page"]
         let cleared = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"), object: page)
