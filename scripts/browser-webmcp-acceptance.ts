@@ -239,6 +239,9 @@ viewport.addEventListener('scroll', update);
 let phase = 'home'; let query = ''; let playback = 'paused'; let mutationCount = 0;
 let scrollInvocations = 0; document.body.dataset.scrollInvocations = '0';
 let scrollAbortObserved = 0; document.body.dataset.scrollAbortObserved = '0';
+let scrollEntries = 0; document.body.dataset.scrollEntries = '0';
+document.body.dataset.scrollStage = 'none';
+document.body.dataset.scrollHasSignal = 'false';
 const media = () => {
   document.querySelector('#phase').textContent = phase;
   document.querySelector('#query').textContent = query;
@@ -268,18 +271,26 @@ Promise.all([
     inputSchema: ${JSON.stringify(scrollSchema)},
     annotations: ${JSON.stringify(annotations)},
     execute: async ({direction}, context = {}) => {
+      if (${composed} && direction === 'down') {
+        scrollEntries++; document.body.dataset.scrollEntries = String(scrollEntries);
+        document.body.dataset.scrollStage = 'entered';
+        document.body.dataset.scrollHasSignal = String(context.signal !== undefined);
+      }
       context.signal?.throwIfAborted();
       if (${composed} && direction === 'down') {
         scrollInvocations++; document.body.dataset.scrollInvocations = String(scrollInvocations);
+        document.body.dataset.scrollStage = 'holding';
         await new Promise((_, reject) => {
           const signal = context.signal;
           const onAbort = () => {
             clearTimeout(deadline);
             scrollAbortObserved++; document.body.dataset.scrollAbortObserved = String(scrollAbortObserved);
+            document.body.dataset.scrollStage = 'aborted';
             reject(new Error('scroll_cancelled'));
           };
           const deadline = setTimeout(() => {
             signal?.removeEventListener('abort', onAbort);
+            document.body.dataset.scrollStage = 'deadline';
             reject(new Error('scroll_cancel_not_observed'));
           }, 12000);
           if (signal?.aborted) onAbort();
@@ -292,7 +303,7 @@ Promise.all([
       const after = viewport.scrollTop;
       if (direction === 'down' ? after <= before : after >= before) throw new Error('scroll_not_observed');
       update();
-      if (${composed}) { mutationCount++; media(); }
+      if (${composed}) { mutationCount++; media(); document.body.dataset.scrollStage = 'mutated'; }
       return ${JSON.stringify(completedValue)};
     }
   }),
@@ -928,7 +939,7 @@ async function main() {
           trace.status = response.status;
           return response;
         } catch (error) {
-          trace.threw = error instanceof Error ? error.name : "unknown";
+          trace.errorKind = signal.aborted ? "cancelled" : "request_failed";
           throw error;
         } finally {
           signal.removeEventListener("abort", onAbort);
@@ -1175,13 +1186,14 @@ async function main() {
       await agent(["tab", fixtureTab.tabId]);
       const observed = await agentJson<{ result: unknown }>([
         "eval",
-        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved)})",
+        "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal})",
       ]);
       const media = record(observed.result);
       assert.equal(media.phase, "watch");
       assert.equal(media.query, "owned synthetic video");
       assert.equal(media.selection, "Owned synthetic video");
       assert.equal(media.playback, "playing");
+      assert.equal(media.scrollEntries, 1, "The delayed page tool must be entered once.");
       assert.equal(media.scrollInvocations, 1, "The delayed command must reach the page once.");
       assert.equal(
         media.scrollAbortObserved,
@@ -1189,6 +1201,12 @@ async function main() {
         "The user's cancellation must reach the page tool.",
       );
       assert.equal(media.mutations, 3, "The cancelled scroll must not mutate the page.");
+      assert.equal(media.scrollStage, "aborted", "The page tool must stop on cancellation.");
+      assert.equal(
+        media.scrollHasSignal,
+        "true",
+        "The page tool must receive a cancellation signal.",
+      );
       const jobs = native.coordinator.jobStore.list(native.target, 100).slice(beforeJobs);
       assert.equal(
         jobs.length,
@@ -1543,21 +1561,21 @@ async function main() {
     }
   } catch (error) {
     failure = error;
-    if (composed && ownedFixtureTabId !== undefined && browserStarted) {
+    if (error instanceof NativeJourneySetupCleanupError)
+      cleanupError = "Owned native journey setup cleanup is uncertain.";
+    if (error instanceof ComposedIOSCleanupError)
+      cleanupError = "Owned iOS Simulator cleanup is uncertain.";
+    if (composed && ownedFixtureTabId !== undefined && browserStarted && !cleanupError) {
       try {
         const inspection = await agentJson<{ result: unknown }>([
           "eval",
-          `(async()=>{const rows=await chrome.scripting.executeScript({target:{tabId:${ownedFixtureTabId}},world:'MAIN',func:()=>({scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),mutations:Number(document.body.dataset.mutations),scrollTop:Math.round(document.querySelector('#viewport')?.scrollTop??-1)})});return rows[0]?.result??null})()`,
+          `(async()=>{const rows=await chrome.scripting.executeScript({target:{tabId:${ownedFixtureTabId}},world:'MAIN',func:()=>({scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal,mutations:Number(document.body.dataset.mutations),scrollTop:Math.round(document.querySelector('#viewport')?.scrollTop??-1)})});return rows[0]?.result??null})()`,
         ]);
         fixtureAtFailure = inspection.result;
       } catch {
         fixtureAtFailure = "owned_page_observation_unavailable";
       }
     }
-    if (error instanceof NativeJourneySetupCleanupError)
-      cleanupError = "Owned native journey setup cleanup is uncertain.";
-    if (error instanceof ComposedIOSCleanupError)
-      cleanupError = "Owned iOS Simulator cleanup is uncertain.";
     report = {
       version: 1,
       status: "fail",
