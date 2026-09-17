@@ -584,6 +584,7 @@ async function startNativeJourney(
   const events: string[] = [];
   let node: Promise<void> | undefined;
   let listener: ReturnType<typeof createBrowserServer> | undefined;
+  const nativeHttpEvents: Array<Record<string, string | number | boolean>> = [];
   let accessibility: BrowserAccessibilityRuntime | undefined;
   let cleanupStarted = false;
   const close = async () => {
@@ -650,6 +651,31 @@ async function startNativeJourney(
         { id: target, label: "Owned browser node" },
       ]),
     });
+    if (composed) {
+      listener.server.on("request", (request, response) => {
+        if (request.method !== "POST" || request.url !== "/native/v1/commands") return;
+        if (nativeHttpEvents.length >= 32) return;
+        const event: Record<string, string | number | boolean> = {
+          receivedAtMonotonicMs: performance.now(),
+        };
+        nativeHttpEvents.push(event);
+        request.once("aborted", () => {
+          event.requestAbortedAtMonotonicMs = performance.now();
+        });
+        request.once("close", () => {
+          event.requestClosedAtMonotonicMs = performance.now();
+          event.requestCompleteOnClose = request.complete;
+        });
+        response.once("finish", () => {
+          event.responseFinishedAtMonotonicMs = performance.now();
+          event.statusCode = response.statusCode;
+        });
+        response.once("close", () => {
+          event.responseClosedAtMonotonicMs = performance.now();
+          event.responseWritableEndedOnClose = response.writableEnded;
+        });
+      });
+    }
     await new Promise<void>((resolveListen, reject) => {
       listener!.server.once("error", reject);
       listener!.server.listen(port, "127.0.0.1", resolveListen);
@@ -715,6 +741,7 @@ async function startNativeJourney(
       close,
       coordinator,
       events,
+      nativeHttpEvents,
       pair,
       request,
       target,
@@ -838,6 +865,7 @@ async function main() {
   const { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki } =
     await prepareAcceptanceEnvironment(ownedRoot, home, release, composed);
   const bridgeEvents: Array<{ type: string; status: string; value?: unknown }> = [];
+  const bridgeTrace: Array<Record<string, string | number | boolean>> = [];
   type OwnedWindowState = {
     tabMatches: boolean;
     windowMatches: boolean;
@@ -852,22 +880,66 @@ async function main() {
     focusAttempted: boolean;
   }> = [];
   let prepareOwnedWindowForRefresh: (() => Promise<void>) | undefined;
+  let inspectOwnedWindowForMutation: (() => Promise<OwnedWindowState>) | undefined;
   const operations = new BrowserWebMCPOperations(
     {
       async request(request, signal) {
-        if (composed && request.type === "binding.refresh") {
-          assert.ok(prepareOwnedWindowForRefresh, "The owned browser binding was not captured.");
-          if (signal.aborted) throw new Error("cancelled");
-          await prepareOwnedWindowForRefresh();
-          if (signal.aborted) throw new Error("cancelled");
-        }
-        const response = await bridge.request(request, signal);
-        bridgeEvents.push({
+        const before = bridge.connectionContext();
+        const trace: Record<string, string | number | boolean> = {
           type: request.type,
-          status: response.status,
-          ...(response.status === "ok" ? { value: response.value } : {}),
-        });
-        return response;
+          startedAtMonotonicMs: performance.now(),
+          signalAbortedBefore: signal.aborted,
+          connectedBefore: bridge.connected(),
+          contextBefore: before !== undefined,
+        };
+        if (composed && bridgeTrace.length < 64) bridgeTrace.push(trace);
+        const onAbort = () => {
+          trace.signalAbortedAtMonotonicMs = performance.now();
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        try {
+          if (composed && request.type === "binding.refresh") {
+            assert.ok(prepareOwnedWindowForRefresh, "The owned browser binding was not captured.");
+            if (signal.aborted) throw new Error("cancelled");
+            await prepareOwnedWindowForRefresh();
+            if (signal.aborted) throw new Error("cancelled");
+          }
+          if (composed && request.type === "tool.execute" && request.args.direction === "down") {
+            try {
+              const window = await inspectOwnedWindowForMutation?.();
+              if (window) {
+                trace.ownedTabMatches = window.tabMatches;
+                trace.ownedWindowMatches = window.windowMatches;
+                trace.ownedUrlMatches = window.urlMatches;
+                trace.ownedTabActive = window.active;
+                trace.ownedPageComplete = window.complete;
+                trace.ownedWindowFocused = window.focused;
+              }
+            } catch {
+              trace.ownedWindowObservation = "unavailable";
+            }
+          }
+          const response = await bridge.request(request, signal);
+          bridgeEvents.push({
+            type: request.type,
+            status: response.status,
+            ...(response.status === "ok" ? { value: response.value } : {}),
+          });
+          trace.status = response.status;
+          return response;
+        } catch (error) {
+          trace.threw = error instanceof Error ? error.name : "unknown";
+          throw error;
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+          const after = bridge.connectionContext();
+          trace.finishedAtMonotonicMs = performance.now();
+          trace.signalAbortedAfter = signal.aborted;
+          trace.connectedAfter = bridge.connected();
+          trace.contextAfter = after !== undefined;
+          trace.sameConnection =
+            before !== undefined && after?.connectionId === before.connectionId;
+        }
       },
     },
     registry.registry,
@@ -887,6 +959,8 @@ async function main() {
   let browserUserAgent = "";
   let nativeJourney: Awaited<ReturnType<typeof startNativeJourney>> | undefined;
   let nativeEvidence: Record<string, unknown> | undefined;
+  let ownedFixtureTabId: number | undefined;
+  let fixtureAtFailure: unknown;
   let retainedRoot = true;
   let cleanupError: string | undefined;
 
@@ -1044,6 +1118,7 @@ async function main() {
       assert.ok(Number.isInteger(anchor?.windowId) && Number(anchor?.windowId) > 0);
       assert.equal(anchor?.url, `${origin}/`);
       const tabId = Number(anchor.tabId);
+      ownedFixtureTabId = tabId;
       const windowId = Number(anchor.windowId);
       const inspectOwnedWindow = async () => {
         const inspected = await agentJson<{ result: OwnedWindowState }>([
@@ -1052,6 +1127,7 @@ async function main() {
         ]);
         return inspected.result;
       };
+      inspectOwnedWindowForMutation = inspectOwnedWindow;
       const assertOwnedWindow = (state: OwnedWindowState) => {
         assert.equal(state.tabMatches, true, "The selected browser tab changed.");
         assert.equal(state.windowMatches, true, "The selected browser window changed.");
@@ -1467,6 +1543,17 @@ async function main() {
     }
   } catch (error) {
     failure = error;
+    if (composed && ownedFixtureTabId !== undefined && browserStarted) {
+      try {
+        const inspection = await agentJson<{ result: unknown }>([
+          "eval",
+          `(async()=>{const rows=await chrome.scripting.executeScript({target:{tabId:${ownedFixtureTabId}},world:'MAIN',func:()=>({scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),mutations:Number(document.body.dataset.mutations),scrollTop:Math.round(document.querySelector('#viewport')?.scrollTop??-1)})});return rows[0]?.result??null})()`,
+        ]);
+        fixtureAtFailure = inspection.result;
+      } catch {
+        fixtureAtFailure = "owned_page_observation_unavailable";
+      }
+    }
     if (error instanceof NativeJourneySetupCleanupError)
       cleanupError = "Owned native journey setup cleanup is uncertain.";
     if (error instanceof ComposedIOSCleanupError)
@@ -1485,6 +1572,15 @@ async function main() {
       actionResult,
       rollbackResult,
       bridgeEvents,
+      ...(composed
+        ? {
+            diagnostics: {
+              bridgeTrace,
+              nativeHttpEvents: nativeJourney?.nativeHttpEvents ?? [],
+              fixtureAtFailure: fixtureAtFailure ?? "unavailable",
+            },
+          }
+        : {}),
       ownedWindowChecks,
       accessibilityFallbackAttempted: false,
       replayAttempted: false,
