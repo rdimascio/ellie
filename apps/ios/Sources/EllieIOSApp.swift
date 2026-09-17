@@ -22,6 +22,15 @@ struct EllieIOSApp: App {
                         "--ellie-ui-browser-netflix-voice-rows"),
                     netflixSearch: ProcessInfo.processInfo.arguments.contains(
                         "--ellie-ui-browser-netflix-voice-search"))
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-composed-fixture") {
+                if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
+                    from: ProcessInfo.processInfo.arguments,
+                    after: "--ellie-ui-browser-composed-fixture"),
+                   let fixture = BrowserComposedUITestFixture.load(identifier: identifier) {
+                    BrowserComposedUITestFixtureView(fixture: fixture, identifier: identifier)
+                } else {
+                    Text("Invalid composed browser fixture")
+                }
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-household-chores-fixture") {
                 HouseholdChoresUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(
@@ -31,6 +40,8 @@ struct EllieIOSApp: App {
                 BrowserTargetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-netflix-rows-fixture") {
                 BrowserTargetUITestFixtureView(netflixRows: true)
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-row-actions-fixture") {
+                BrowserTargetUITestFixtureView(rowActions: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-read-only-fixture") {
                 BrowserTargetUITestFixtureView(readOnly: true)
