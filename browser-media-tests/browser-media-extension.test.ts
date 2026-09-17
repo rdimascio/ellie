@@ -179,6 +179,66 @@ test("native host is connected only after a request and reports a later disconne
   );
 });
 
+test("unreviewed media origins cannot acquire a selected-page binding", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  for (const url of [
+    "https://www.netflix.com/",
+    "https://tv.youtube.com/",
+    "https://www.disneyplus.com/",
+  ]) {
+    let nativeConnections = 0;
+    let injections = 0;
+    const context: Record<string, any> = {
+      chrome: {
+        runtime: {
+          onMessage: extensionEvent(),
+          connectNative() {
+            nativeConnections += 1;
+            throw new Error("unreviewed origin reached native host");
+          },
+        },
+        tabs: {
+          get: async () => ({ id: 7, windowId: 3, active: true, status: "complete", url }),
+          onRemoved: extensionEvent(),
+          onReplaced: extensionEvent(),
+          onUpdated: extensionEvent(),
+        },
+        windows: { get: async () => ({ id: 3, focused: true }) },
+        scripting: {
+          executeScript() {
+            injections += 1;
+            throw new Error("unreviewed origin reached page injection");
+          },
+        },
+      },
+      AbortController,
+      URL,
+      Promise,
+      Set,
+      Map,
+      Date,
+      Error,
+      Object,
+      Array,
+      String,
+      Number,
+      RegExp,
+      crypto,
+      setTimeout,
+      clearTimeout,
+    };
+    runInNewContext(
+      `${background}\n;globalThis.__providerTest={bind:bindWebMCP,state:()=>({binding:webMCPBinding,selection:webMCPSelection})};`,
+      context,
+    );
+    await assert.rejects(context.__providerTest.bind(7), /unsupported_origin/);
+    assert.equal(nativeConnections, 0, `${url} connected a native host`);
+    assert.equal(injections, 0, `${url} injected a page controller`);
+    assert.equal(context.__providerTest.state().binding, undefined);
+    assert.equal(context.__providerTest.state().selection, undefined);
+  }
+});
+
 test("explicit refresh renews only the retained same-page selection authority", async () => {
   const background = await readFile(join(source, "background.js"), "utf8");
   const disconnect = extensionEvent();
