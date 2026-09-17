@@ -92,6 +92,12 @@ final class BrowserPhoneControlTests: XCTestCase {
       read(#"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row 1: Featured"},{"id":"10000000-0000-4000-8000-000000000002","label":"Row 2"}]}"#), nodeID: "mac")
     else { return XCTFail("Expected Netflix rows") }
     XCTAssertEqual(withRows.site?.rows?.map(\.label), ["Row 1: Featured", "Row 2"])
+    guard case .page(let withSearch) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"netflix","page":"results","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#),
+      nodeID: "mac")
+    else { return XCTFail("Expected Netflix search results") }
+    XCTAssertEqual(withSearch.site?.page, .results)
+    XCTAssertEqual(withSearch.site?.searchControl?.label, "Search")
     let missingSite = Data(
       #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]}}}}"#.utf8)
     XCTAssertThrowsError(try decodeBrowserPhoneResponse(missingSite, nodeID: "mac"))
@@ -105,6 +111,8 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"netflix","page":"watch","playback":"paused","rows":[]}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"not-an-id","label":"Row"}]}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-1000-8000-000000000001","label":"Row"}]}"#,
+      #"{"provider":"netflix","page":"watch","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","searchControl":{"id":"input[type=search]","label":"Search"}}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row"},{"id":"10000000-0000-4000-8000-000000000001","label":"Other"}]}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
@@ -123,6 +131,14 @@ final class BrowserPhoneControlTests: XCTestCase {
         currentTimeSeconds: nil, horizontalScrollAvailable: false), .scroll(.right), false),
       (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil), .search(query: "title"), false),
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, searchControl: BrowserPhoneSearchControl(
+          id: "10000000-0000-4000-8000-000000000003", label: "Search")),
+        .search(query: "title"), true),
+      (BrowserPhoneSite(provider: .netflix, page: .results, playback: .unavailable,
+        currentTimeSeconds: nil, searchControl: BrowserPhoneSearchControl(
+          id: "10000000-0000-4000-8000-000000000004", label: "Search")),
+        .openResult(index: 1), true),
       (BrowserPhoneSite(provider: .netflix, page: .login, playback: .unavailable,
         currentTimeSeconds: nil), .openResult(index: 1), false),
       (BrowserPhoneSite(provider: .netflix, page: .watch, playback: .paused,

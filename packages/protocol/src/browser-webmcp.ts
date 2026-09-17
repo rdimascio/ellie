@@ -59,6 +59,13 @@ export type BrowserCompanionCommand =
       rowId: string;
       direction: "left" | "right";
     }
+  | {
+      type: "searchObserved";
+      actionId: string;
+      snapshotId: string;
+      controlId: string;
+      query: string;
+    }
   | { type: "open"; actionId: string; snapshotId: string; candidateId: string }
   | { type: "play" | "pause"; actionId: string };
 export type BrowserWebMCPRequest =
@@ -174,6 +181,23 @@ function companionCommand(value: unknown): BrowserCompanionCommand {
     )
       throw new Error("Invalid message.");
     return { type: "scrollSelectedRow", actionId, snapshotId, rowId, direction: body.direction };
+  }
+  if (body.type === "searchObserved") {
+    exactKeys(body, ["type", "actionId", "snapshotId", "controlId", "query"]);
+    const snapshotId = identifier(body.snapshotId);
+    const controlId = identifier(body.controlId);
+    if (!uuidPattern.test(snapshotId) || !uuidPattern.test(controlId))
+      throw new Error("Invalid message.");
+    if (
+      typeof body.query !== "string" ||
+      !body.query ||
+      body.query !== body.query.trim() ||
+      body.query.length > 200 ||
+      Buffer.byteLength(body.query) > 512 ||
+      /\p{C}/u.test(body.query)
+    )
+      throw new Error("Invalid message.");
+    return { type: "searchObserved", actionId, snapshotId, controlId, query: body.query };
   }
   throw new Error("Invalid message.");
 }

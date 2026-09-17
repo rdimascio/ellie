@@ -143,6 +143,47 @@
       label: observedRowLabel(row, index),
     }));
   };
+  const observedSearchControl = () => {
+    const inputs = document.querySelectorAll("input");
+    if (inputs.length > 128) return undefined;
+    let selected;
+    for (const input of inputs) {
+      if (
+        (input.type !== "search" && input.getAttribute("role") !== "searchbox") ||
+        !visible(input) ||
+        input.disabled ||
+        input.readOnly ||
+        input.closest("[role='dialog'],[aria-modal='true']")
+      )
+        continue;
+      if (selected) return undefined;
+      const labelledBy = input.getAttribute("aria-labelledby");
+      const referenced =
+        labelledBy && /^[A-Za-z][A-Za-z0-9_-]{0,99}$/.test(labelledBy)
+          ? document.getElementById(labelledBy)?.textContent
+          : null;
+      const label =
+        input.getAttribute("aria-label") ||
+        referenced ||
+        (input.labels?.length === 1 ? input.labels[0].textContent : null);
+      const name = label?.replace(/\s+/g, " ").trim();
+      if (!name || /[\p{C}]/u.test(name) || new TextEncoder().encode(name).length > 100)
+        return undefined;
+      selected = {
+        input,
+        label: name,
+        type: input.type,
+        role: input.getAttribute("role"),
+        value: input.value,
+      };
+    }
+    return selected &&
+      ["search", "search netflix", "search titles", "search titles, people, genres"].includes(
+        selected.label.toLowerCase(),
+      )
+      ? selected
+      : undefined;
+  };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
     if (c.type === "inspect" || c.type === "observe" || c.type === "play" || c.type === "pause")
@@ -169,6 +210,18 @@
         uuid(c.rowId) &&
         ["left", "right"].includes(c.direction)
       );
+    if (c.type === "searchObserved")
+      return (
+        exact(c, ["type", "actionId", "snapshotId", "controlId", "query"]) &&
+        uuid(c.snapshotId) &&
+        uuid(c.controlId) &&
+        typeof c.query === "string" &&
+        c.query.length > 0 &&
+        c.query === c.query.trim() &&
+        c.query.length <= 200 &&
+        new TextEncoder().encode(c.query).length <= 512 &&
+        !/[\p{C}]/u.test(c.query)
+      );
     return (
       c.type === "scrollRow" &&
       exact(c, ["type", "actionId", "snapshotId", "candidateId", "direction"]) &&
@@ -194,17 +247,33 @@
       throw new Error("unsupported_page");
     const url = new URL(location.href);
     const youtube = youtubeOrigins.has(location.origin);
+    if (!youtube && (url.username || url.password))
+      return { provider: "netflix", page: "unsupported", playback: "unavailable" };
+    const netflixQuery =
+      url.pathname === "/search" && url.searchParams.getAll("q").length === 1
+        ? url.searchParams.get("q")
+        : null;
+    const netflixResults =
+      netflixQuery &&
+      url.searchParams.size === 1 &&
+      !url.hash &&
+      netflixQuery === netflixQuery.trim() &&
+      netflixQuery.length <= 200 &&
+      new TextEncoder().encode(netflixQuery).length <= 512 &&
+      !/[\p{C}]/u.test(netflixQuery);
     const page = !youtube
       ? /^\/login(?:\/|$)/.test(url.pathname)
         ? "login"
-        : url.pathname === "/browse" ||
-            /^\/browse\/genre\/[0-9]{1,20}$/.test(url.pathname) ||
-            url.pathname === "/search" ||
-            /^\/title\/[0-9]{1,20}$/.test(url.pathname)
-          ? "browse"
-          : /^\/watch\/[0-9]{1,20}$/.test(url.pathname)
-            ? "watch"
-            : "unsupported"
+        : netflixResults
+          ? "results"
+          : url.pathname === "/browse" ||
+              /^\/browse\/genre\/[0-9]{1,20}$/.test(url.pathname) ||
+              (url.pathname === "/search" && !url.search) ||
+              /^\/title\/[0-9]{1,20}$/.test(url.pathname)
+            ? "browse"
+            : /^\/watch\/[0-9]{1,20}$/.test(url.pathname)
+              ? "watch"
+              : "unsupported"
       : url.pathname === "/"
         ? "home"
         : url.pathname === "/results" &&
@@ -221,7 +290,7 @@
     const provider = youtube ? "youtube" : "netflix";
     if (
       !youtube &&
-      page === "browse" &&
+      (page === "browse" || page === "results") &&
       document.querySelector("[aria-modal='true'], [role='dialog'], input[type='password']")
     )
       return { provider, page: "unsupported", playback: "unavailable" };
@@ -286,7 +355,13 @@
     if (netflixOrigins.has(location.origin) && command.type !== "inspect") {
       const site = siteObservation();
       if (site.page === "login" || site.page === "unsupported") throw new Error("unsupported_page");
-      if ((command.type === "open" || command.type === "scrollRow") && site.page !== "browse")
+      if (
+        (command.type === "open" || command.type === "searchObserved") &&
+        site.page !== "browse" &&
+        site.page !== "results"
+      )
+        throw new Error("unsupported_page");
+      if (command.type === "scrollRow" && site.page !== "browse")
         throw new Error("unsupported_page");
       if (
         (command.type === "play" || command.type === "pause") &&
@@ -337,6 +412,13 @@
             ? observedRows()
             : undefined;
         const rows = currentRows?.map((entry) => ({ ...entry, id: crypto.randomUUID() })) || [];
+        const currentSearch =
+          netflixOrigins.has(location.origin) && (site.page === "browse" || site.page === "results")
+            ? observedSearchControl()
+            : undefined;
+        const searchControl = currentSearch
+          ? { ...currentSearch, id: crypto.randomUUID() }
+          : undefined;
         const uniqueRow = site.page === "browse" ? uniqueVisibleRow() : undefined;
         const rowCandidateId = uniqueRow
           ? entries.find((entry) => scrollableRowFor(entry.anchor) === uniqueRow)?.id
@@ -348,6 +430,7 @@
           entries,
           rowCandidateId,
           rows,
+          searchControl,
         });
         const allVideos = [...document.querySelectorAll("video")];
         const videos = allVideos.length <= 16 ? allVideos.filter(visible) : [];
@@ -365,11 +448,19 @@
           candidates: entries.map(({ id, title }) => ({ id, title })),
           playback,
           site:
-            netflixOrigins.has(location.origin) && site.page === "browse"
+            netflixOrigins.has(location.origin) &&
+            (site.page === "browse" || site.page === "results")
               ? {
                   ...site,
-                  horizontalScrollAvailable: Boolean(rowCandidateId),
-                  rows: rows.map(({ id, label }) => ({ id, label })),
+                  ...(site.page === "browse"
+                    ? {
+                        horizontalScrollAvailable: Boolean(rowCandidateId),
+                        rows: rows.map(({ id, label }) => ({ id, label })),
+                      }
+                    : {}),
+                  ...(searchControl
+                    ? { searchControl: { id: searchControl.id, label: searchControl.label } }
+                    : {}),
                 }
               : site,
           ...(rowCandidateId ? { rowCandidateId } : {}),
@@ -421,6 +512,42 @@
         active(command, expectedUrl, deadline);
         if (chosen.row.scrollLeft === before) throw new Error("row_scroll_unavailable");
         return { outcome: "scrolled" };
+      }
+      if (command.type === "searchObserved") {
+        if (!netflixOrigins.has(location.origin)) throw new Error("search_unavailable");
+        const snapshot = snapshots.get(command.snapshotId);
+        if (
+          !snapshot ||
+          snapshot.session !== session ||
+          snapshot.url !== location.href ||
+          Date.now() - snapshot.created >= 30_000
+        )
+          throw new Error("stale_snapshot");
+        const chosen = snapshot.searchControl;
+        const current = observedSearchControl();
+        if (
+          !chosen ||
+          chosen.id !== command.controlId ||
+          !chosen.input.isConnected ||
+          !current ||
+          current.input !== chosen.input ||
+          current.label !== chosen.label ||
+          current.type !== chosen.type ||
+          current.role !== chosen.role ||
+          current.value !== chosen.value
+        )
+          throw new Error("search_unavailable");
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        if (!setter) throw new Error("search_unavailable");
+        const event = new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: command.query,
+        });
+        active(command, expectedUrl, deadline);
+        setter.call(chosen.input, command.query);
+        chosen.input.dispatchEvent(event);
+        return { outcome: "search_dispatched" };
       }
       if (command.type === "scrollRow" || command.type === "open") {
         const snapshot = snapshots.get(command.snapshotId);
