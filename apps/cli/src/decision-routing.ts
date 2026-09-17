@@ -1,11 +1,16 @@
 import { decisionRoutingConfig } from "@ellie/config";
 import type { DecisionRoutingConfig, SecretStore } from "@ellie/config";
-import { LocalDecisionProvider, TypeSafeDecisionProvider } from "@ellie/decisions";
+import {
+  GatewayDecisionProvider,
+  LocalDecisionProvider,
+  TypeSafeDecisionProvider,
+} from "@ellie/decisions";
 import type { DecisionRoutingOptions } from "../../server/src/index.ts";
 
 export const decisionKeyAccount = "decision.typesafe";
+export const gatewayKeyAccount = "decision.gateway";
 const usage =
-  "Use: routing status|off|mode shadow|mode execute|typesafe --allow-cloud [--model ID]|local MODEL --endpoint URL";
+  "Use: routing status|off|mode shadow|mode execute|typesafe --allow-cloud [--model ID]|gateway --allow-cloud|local MODEL --endpoint URL";
 
 export function routingCommand(
   args: string[],
@@ -34,6 +39,18 @@ export function routingCommand(
       }),
     };
   }
+  if (args[0] === "gateway") {
+    if (args.length !== 2 || args[1] !== "--allow-cloud") throw new Error(usage);
+    return {
+      kind: "save",
+      needsKey: true,
+      config: decisionRoutingConfig({
+        provider: "gateway",
+        mode: "shadow",
+        cloudDisclosure: true,
+      }),
+    };
+  }
   if (args[0] === "local" && args.length === 4 && args[2] === "--endpoint")
     return {
       kind: "save",
@@ -59,11 +76,16 @@ export async function createDecisionRouting(
           model: config.model,
           timeoutMs: config.timeoutMs,
         })
-      : new LocalDecisionProvider({
-          endpoint: config.endpoint,
-          model: config.model,
-          timeoutMs: config.timeoutMs,
-        });
+      : config.provider === "gateway"
+        ? new GatewayDecisionProvider({
+            apiKey: await secrets.get(gatewayKeyAccount),
+            timeoutMs: config.timeoutMs,
+          })
+        : new LocalDecisionProvider({
+            endpoint: config.endpoint,
+            model: config.model,
+            timeoutMs: config.timeoutMs,
+          });
   return {
     provider,
     mode: config.mode,

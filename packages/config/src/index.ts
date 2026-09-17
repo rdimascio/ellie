@@ -37,6 +37,7 @@ export type DecisionRoutingConfig = {
   minMargin: number;
 } & (
   | { provider: "typesafe"; model: string; cloudDisclosure: true }
+  | { provider: "gateway"; model: "typesafe-ai/jev"; cloudDisclosure: true }
   | { provider: "local"; model: string; endpoint: string }
 );
 
@@ -74,6 +75,13 @@ export function decisionRoutingConfig(value: unknown): DecisionRoutingConfig {
       model: string(v.model ?? "jev-latest", 200),
       cloudDisclosure: true,
     };
+  }
+  if (v.provider === "gateway") {
+    if (v.cloudDisclosure !== true)
+      throw new Error("Gateway decision routing requires explicit cloud disclosure opt-in.");
+    if (v.model !== undefined && v.model !== "typesafe-ai/jev")
+      throw new Error("Gateway decision model must be typesafe-ai/jev.");
+    return { ...common, provider: "gateway", model: "typesafe-ai/jev", cloudDisclosure: true };
   }
   if (v.provider === "local") {
     const rawEndpoint = string(v.endpoint);

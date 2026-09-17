@@ -24,6 +24,7 @@ export interface DecisionResponse {
   model: string;
   answers: Record<string, DecisionAnswer>;
   usage?: { inputTokens: number; outputTokens: number };
+  rounding?: { probabilityDecimals?: number; scoreDecimals?: number };
   latencyMs: number;
 }
 
@@ -34,6 +35,7 @@ export interface DecisionProvider {
 }
 
 export { TypeSafeDecisionProvider, LocalDecisionProvider } from "./providers.ts";
+export { GatewayDecisionProvider } from "./gateway.ts";
 
 function invalid(): never {
   throw new Error("Invalid decision response");
@@ -54,14 +56,22 @@ function keysMatch(actual: Record<string, unknown>, expected: string[]): void {
   if (keys.length !== expected.length || keys.some((key) => !expected.includes(key))) invalid();
 }
 
-function distribution(value: unknown, expected: string[]): Record<string, number> {
+function distribution(
+  value: unknown,
+  expected: string[],
+  probabilityDecimals?: number,
+): Record<string, number> {
   const probabilities = record(value);
   keysMatch(probabilities, expected);
   const sum = Object.values(probabilities).reduce<number>(
     (total, probability) => total + finite(probability, 0, 1),
     0,
   );
-  if (Math.abs(sum - 1) > 0.001) invalid();
+  const roundingTolerance =
+    probabilityDecimals === undefined
+      ? 0.001
+      : Math.min(0.02, expected.length * 0.5 * 10 ** -probabilityDecimals + 0.000001);
+  if (Math.abs(sum - 1) > roundingTolerance) invalid();
   return probabilities as Record<string, number>;
 }
 
@@ -86,6 +96,26 @@ export function validateDecisionResponse(
   const response = record(value);
   if (typeof response.model !== "string" || !response.model.trim() || response.model.length > 200)
     invalid();
+  let rounding: DecisionResponse["rounding"];
+  if (response.rounding !== undefined) {
+    const value = record(response.rounding);
+    if (Object.keys(value).some((key) => key !== "probabilityDecimals" && key !== "scoreDecimals"))
+      invalid();
+    const probabilityDecimals = value.probabilityDecimals;
+    const scoreDecimals = value.scoreDecimals;
+    for (const decimals of [probabilityDecimals, scoreDecimals])
+      if (
+        decimals !== undefined &&
+        (!Number.isInteger(decimals) || (decimals as number) < 2 || (decimals as number) > 15)
+      )
+        invalid();
+    rounding = {
+      ...(probabilityDecimals !== undefined
+        ? { probabilityDecimals: probabilityDecimals as number }
+        : {}),
+      ...(scoreDecimals !== undefined ? { scoreDecimals: scoreDecimals as number } : {}),
+    };
+  }
   const answers = record(response.answers);
   keysMatch(answers, Object.keys(questions));
   const normalized: Record<string, DecisionAnswer> = {};
@@ -97,7 +127,11 @@ export function validateDecisionResponse(
       setAnswer(normalized, id, { type: "noul", noul: finite(answer.noul, 0, 1) });
     } else if (question.type === "choice") {
       record(question.criteria);
-      const probabilities = distribution(answer.probabilities, Object.keys(question.criteria));
+      const probabilities = distribution(
+        answer.probabilities,
+        Object.keys(question.criteria),
+        rounding?.probabilityDecimals,
+      );
       const choice = answer.choice;
       if (typeof choice !== "string" || !Object.hasOwn(probabilities, choice)) invalid();
       const max = Math.max(...Object.values(probabilities));
@@ -116,7 +150,11 @@ export function validateDecisionResponse(
       )
         invalid();
       const levels = question.criteria.map((_, index) => String(index));
-      const probabilities = distribution(answer.probabilities, levels);
+      const probabilities = distribution(
+        answer.probabilities,
+        levels,
+        rounding?.probabilityDecimals,
+      );
       const legend = record(answer.legend);
       keysMatch(legend, levels);
       for (const [index, description] of question.criteria.entries())
@@ -126,7 +164,23 @@ export function validateDecisionResponse(
         (total, level) => total + Number(level) * probabilities[level]!,
         0,
       );
-      if (Math.abs(score - weighted) > 0.05) invalid();
+      const weightedTolerance = rounding
+        ? Math.min(
+            0.05,
+            0.001 +
+              levels.reduce(
+                (total, level) =>
+                  total +
+                  Number(level) *
+                    (rounding.probabilityDecimals === undefined
+                      ? 0
+                      : 0.5 * 10 ** -rounding.probabilityDecimals),
+                0,
+              ) +
+              (rounding.scoreDecimals === undefined ? 0 : 0.5 * 10 ** -rounding.scoreDecimals),
+          )
+        : 0.05;
+      if (Math.abs(score - weighted) > weightedTolerance) invalid();
       setAnswer(normalized, id, {
         type: "score",
         score,
@@ -145,5 +199,11 @@ export function validateDecisionResponse(
     usage = { inputTokens, outputTokens };
   }
   const latencyMs = finite(response.latencyMs, 0, Number.MAX_SAFE_INTEGER);
-  return { model: response.model, answers: normalized, ...(usage ? { usage } : {}), latencyMs };
+  return {
+    model: response.model,
+    answers: normalized,
+    ...(usage ? { usage } : {}),
+    ...(rounding ? { rounding } : {}),
+    latencyMs,
+  };
 }

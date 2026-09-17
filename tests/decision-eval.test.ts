@@ -174,6 +174,33 @@ test("timeout range is rejected before any cloud provider request", () => {
   }
 });
 
+test("Gateway evaluator requires disclosure and its own explicit process key", () => {
+  const script = fileURLToPath(new URL("../scripts/evaluate-routing.ts", import.meta.url));
+  const env = { ...process.env, AI_GATEWAY_API_KEY: "" };
+  const noDisclosure = spawnSync(
+    process.execPath,
+    [script, "--provider", "gateway", "--limit", "1"],
+    { encoding: "utf8", env },
+  );
+  assert.equal(noDisclosure.status, 1);
+  assert.match(noDisclosure.stderr, /--allow-cloud/);
+  const noKey = spawnSync(
+    process.execPath,
+    [script, "--provider", "gateway", "--allow-cloud", "--limit", "1"],
+    { encoding: "utf8", env },
+  );
+  assert.equal(noKey.status, 1);
+  assert.match(noKey.stderr, /AI_GATEWAY_API_KEY/);
+  assert.equal(noKey.stdout, "");
+  const wrongModel = spawnSync(
+    process.execPath,
+    [script, "--provider", "gateway", "--allow-cloud", "--model", "jev-1.13.0"],
+    { encoding: "utf8", env },
+  );
+  assert.equal(wrongModel.status, 1);
+  assert.match(wrongModel.stderr, /fixed typesafe-ai\/jev alias/);
+});
+
 test("bad labels and malformed predictions fail closed", () => {
   assert.throws(() =>
     parseRoutingCases([

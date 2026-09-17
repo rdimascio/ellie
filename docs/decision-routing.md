@@ -29,6 +29,20 @@ bun run ellie say "Bring up Notes"
 
 `routing status` shows saved configuration, not a live health probe. Missing credentials or an unavailable provider do not disable ordinary deterministic commands. A provider error on an unmatched command returns an unexecuted result and is not retried automatically.
 
+## Vercel AI Gateway setup
+
+AI Gateway is a separate hosted Jev lane. On the coordinator Mac, run:
+
+```sh
+bun run ellie routing gateway --allow-cloud
+```
+
+The command explains cloud disclosure and prompts for an AI Gateway API key without echoing it. Ellie saves this credential in macOS Keychain under `decision.gateway`, separate from the direct TypeSafe credential. Setup starts in shadow mode. No shell environment key is used by the coordinator. Restart the coordinator to apply the change. `routing off` removes the setting while preserving the Keychain item.
+
+This lane uses AI SDK 7 `experimental_evaluate` with an explicit Gateway provider instance and the fixed `typesafe-ai/jev` model alias. It maps Ellie's Noul question to the SDK's Boolean question, preserves Choice and Score distributions, and reads their separate per-question confidence from `providerMetadata.typesafe.confidence`. Missing distributions, confidence metadata, malformed usage or response data, redirects, oversized responses, and timeouts fail closed. Two-decimal distributions may total slightly above or below one; Ellie accepts declared SDK rounding only within a 2% sum bound and keeps the raw values for every routing threshold. The SDK client retries zero times. Gateway is restricted to the verified `typesafe-ai` provider; upstream service behavior remains outside Ellie's control.
+
+The model ID in Ellie responses and evaluation reports is the requested Gateway alias, **not a resolved Jev version**. The SDK's evaluation response does not expose the underlying version, so reports mark `resolvedVersion` as unknown. No version such as `jev-1.13.0` is inferred from the alias.
+
 ## Local setup
 
 An already installed, operator-managed local model can provide the same decisions using an OpenAI-compatible chat-completions endpoint on the coordinator Mac:
@@ -78,12 +92,18 @@ The standalone evaluator deliberately uses an explicit process environment key i
 bun run eval:routing --provider typesafe --allow-cloud --split development --limit 20
 ```
 
+For the Gateway lane, only the evaluator reads `AI_GATEWAY_API_KEY` from its process environment:
+
+```sh
+bun run eval:routing --provider gateway --allow-cloud --split development --limit 20
+```
+
 No external evaluation runs by default. A semantic run first uses the grammar, then evaluates unmatched requests, matching production routing. It never dispatches desktop actions. `--limit` bounds the number of examples and `--output PATH` writes an aggregate JSON report. Reports include a dataset hash, selected split/model, exact action accuracy, wrong plans, false executions on abstention cases, missed plans, coverage, fallback rate, latency percentiles, and reported token usage. Optional `--price-input` and `--price-output` accept explicit USD rates per million tokens for a labeled estimate; an estimate is omitted when provider usage is incomplete.
 
-Use `--min-probability` and `--min-margin` to explore thresholds on the development split, then assess the chosen policy on held-out cases. `--timeout-ms` defaults to 3000 and accepts 100–10000, matching the production configuration bounds. Semantic reports record these settings and the actual observed model IDs. Evaluate incorrect actions and false executions separately from overall accuracy; a high score from correctly declining unsupported requests can hide poor command coverage. The synthetic split is a regression aid, not a substitute for independently labeled real requests, larger samples, or observed native outcomes. Actual Jev quality and latency have not been established by the offline tests.
+Use `--min-probability` and `--min-margin` to explore thresholds on the development split, then assess the chosen policy on held-out cases. `--timeout-ms` defaults to 3000 and accepts 100–10000, matching the production configuration bounds. Semantic reports record these settings and the model identity exposed by each provider; Gateway exposes the requested alias only. Evaluate incorrect actions and false executions separately from overall accuracy; a high score from correctly declining unsupported requests can hide poor command coverage. The synthetic split is a regression aid, not a substitute for independently labeled real requests, larger samples, or observed native outcomes. Actual Jev quality and latency have not been established by the offline tests.
 
 ## Extension boundary
 
 `@ellie/decisions` defines Choice, Score, and Noul questions with validated responses. `@ellie/router/decision` converts these judgments into a bounded desktop action. Life memory retrieval, source ranking, notification relevance, and plugin selection remain separate workflows. Any future reuse of the provider boundary there needs a narrow question set, code-owned policy, existing store and permission checks, and its own labeled evaluation before activation.
 
-Sources: [TypeSafe API](https://docs.typesafe.ai/api), [confidence semantics](https://docs.typesafe.ai/confidence), and [function-calling pattern](https://docs.typesafe.ai/cookbooks/function_calling).
+Sources: [TypeSafe API](https://docs.typesafe.ai/api), [confidence semantics](https://docs.typesafe.ai/confidence), [function-calling pattern](https://docs.typesafe.ai/cookbooks/function_calling), [Vercel evaluation documentation](https://vercel.com/docs/ai-gateway/modalities/evaluation), and [Gateway Jev announcement](https://vercel.com/changelog/typesafe-ai-jev-now-available-on-ai-gateway).

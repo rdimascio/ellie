@@ -10,11 +10,15 @@ import {
   summarizeRoutingEvaluation,
 } from "../packages/router/src/evaluation.ts";
 import type { RoutingPrediction } from "../packages/router/src/evaluation.ts";
-import { LocalDecisionProvider, TypeSafeDecisionProvider } from "@ellie/decisions";
+import {
+  GatewayDecisionProvider,
+  LocalDecisionProvider,
+  TypeSafeDecisionProvider,
+} from "@ellie/decisions";
 import type { DecisionProvider } from "@ellie/decisions";
 
 interface Flags {
-  provider: "baseline" | "typesafe" | "local";
+  provider: "baseline" | "typesafe" | "gateway" | "local";
   split: "all" | "development" | "heldout";
   limit?: number;
   model?: string;
@@ -54,8 +58,8 @@ function parseFlags(args: string[]): Flags {
     if (!value || value.startsWith("--")) throw new Error(`Missing value for ${flag}`);
     switch (flag) {
       case "--provider":
-        if (!["baseline", "typesafe", "local"].includes(value))
-          throw new Error("Provider must be baseline, typesafe, or local.");
+        if (!["baseline", "typesafe", "gateway", "local"].includes(value))
+          throw new Error("Provider must be baseline, typesafe, gateway, or local.");
         flags.provider = value as Flags["provider"];
         break;
       case "--split":
@@ -94,7 +98,7 @@ function parseFlags(args: string[]): Flags {
         break;
     }
   }
-  if (flags.provider === "typesafe" && !flags.allowCloud)
+  if ((flags.provider === "typesafe" || flags.provider === "gateway") && !flags.allowCloud)
     throw new Error("Cloud evaluation requires --allow-cloud.");
   if (flags.provider === "local" && (!flags.endpoint || !flags.model))
     throw new Error("Local evaluation requires --endpoint and --model.");
@@ -102,6 +106,8 @@ function parseFlags(args: string[]): Flags {
     throw new Error("--endpoint is only valid with --provider local.");
   if (flags.provider === "baseline" && flags.model)
     throw new Error("--model is only valid with a semantic provider.");
+  if (flags.provider === "gateway" && flags.model)
+    throw new Error("Gateway evaluation uses the fixed typesafe-ai/jev alias.");
   if (
     flags.provider === "baseline" &&
     (flags.minProbability !== undefined ||
@@ -147,6 +153,10 @@ async function main(): Promise<void> {
       ...(flags.model ? { model: flags.model } : {}),
       timeoutMs,
     });
+  } else if (flags.provider === "gateway") {
+    const apiKey = process.env.AI_GATEWAY_API_KEY;
+    if (!apiKey) throw new Error("AI_GATEWAY_API_KEY is required for Gateway evaluation.");
+    provider = new GatewayDecisionProvider({ apiKey, timeoutMs });
   } else if (flags.provider === "local") {
     provider = new LocalDecisionProvider({
       endpoint: flags.endpoint!,
@@ -220,7 +230,13 @@ async function main(): Promise<void> {
     const summary = summarizeRoutingEvaluation(scores, {
       dataset,
       split: flags.split,
-      model: flags.model ?? (flags.provider === "typesafe" ? "jev-latest" : flags.provider),
+      model:
+        flags.model ??
+        (flags.provider === "typesafe"
+          ? "jev-latest"
+          : flags.provider === "gateway"
+            ? "typesafe-ai/jev"
+            : flags.provider),
       ...(provider
         ? {
             thresholds: {
@@ -237,7 +253,18 @@ async function main(): Promise<void> {
             pricePerMillionOutputTokensUsd: flags.priceOutput,
           }),
     });
-    const output = JSON.stringify(summary, null, 2) + "\n";
+    const report =
+      flags.provider === "gateway"
+        ? {
+            ...summary,
+            modelProvenance: {
+              kind: "gateway-alias",
+              requestedModel: "typesafe-ai/jev",
+              resolvedVersion: null,
+            },
+          }
+        : summary;
+    const output = JSON.stringify(report, null, 2) + "\n";
     if (controller.signal.aborted) throw new Error("Evaluation cancelled.");
     if (flags.output) await writeFile(flags.output, output, { flag: "w" });
     else process.stdout.write(output);

@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { decisionRoutingConfig, defaults, serverConfig } from "@ellie/config";
-import { createDecisionRouting, routingCommand } from "../apps/cli/src/decision-routing.ts";
+import {
+  createDecisionRouting,
+  decisionKeyAccount,
+  gatewayKeyAccount,
+  routingCommand,
+} from "../apps/cli/src/decision-routing.ts";
 
 test("decision routing stays absent by default and hosted routing needs explicit disclosure", () => {
   assert.equal(
@@ -100,4 +105,53 @@ test("disabled and local providers never read cloud credentials", async () => {
     secrets,
   );
   assert.equal(local?.provider.locality, "local");
+});
+
+test("Gateway is a distinct opt-in shadow provider with a separate credential account", async () => {
+  for (const cloudDisclosure of [undefined, false, "true"])
+    assert.throws(
+      () => decisionRoutingConfig({ provider: "gateway", mode: "shadow", cloudDisclosure }),
+      /disclosure/,
+    );
+  assert.throws(
+    () =>
+      decisionRoutingConfig({
+        provider: "gateway",
+        mode: "shadow",
+        cloudDisclosure: true,
+        model: "jev-1.13.0",
+      }),
+    /model/,
+  );
+  assert.throws(() => routingCommand(["gateway"]));
+  assert.throws(() => routingCommand(["gateway", "--allow-cloud", "--model", "other"]));
+  const command = routingCommand(["gateway", "--allow-cloud"]);
+  assert.deepEqual(command, {
+    kind: "save",
+    needsKey: true,
+    config: {
+      provider: "gateway",
+      model: "typesafe-ai/jev",
+      cloudDisclosure: true,
+      mode: "shadow",
+      timeoutMs: 3000,
+      minProbability: 0.98,
+      minMargin: 0.2,
+    },
+  });
+  assert.notEqual(gatewayKeyAccount, decisionKeyAccount);
+  const reads: string[] = [];
+  const options = await createDecisionRouting(
+    command.kind === "save" ? command.config : undefined,
+    {
+      get: async (account) => {
+        reads.push(account);
+        return "fake-key";
+      },
+      set: async () => {},
+    },
+  );
+  assert.deepEqual(reads, [gatewayKeyAccount]);
+  assert.equal(options?.provider.id, "gateway");
+  assert.equal(options?.mode, "shadow");
 });
