@@ -88,10 +88,14 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(page.source, .companion)
     XCTAssertEqual(page.site?.provider, .netflix)
     XCTAssertEqual(page.site?.horizontalScrollAvailable, true)
+    let missingSite = Data(
+      #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]}}}}"#.utf8)
+    XCTAssertThrowsError(try decodeBrowserPhoneResponse(missingSite, nodeID: "mac"))
     for invalid in [
       #"{"provider":"netflix","page":"home","playback":"unavailable"}"#,
       #"{"provider":"netflix","page":"login","playback":"playing"}"#,
       #"{"provider":"youtube","page":"results","playback":"unavailable","horizontalScrollAvailable":true}"#,
+      #"{"provider":"youtube","page":"results","playback":"unavailable"}"#,
       #"{"provider":"netflix","page":"watch","playback":"paused","horizontalScrollAvailable":true}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","horizontalScrollAvailable":1}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }

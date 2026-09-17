@@ -78,7 +78,7 @@ function allowedOrigin(url) {
   }
 }
 
-async function dispatch(tabId, command, expectedBinding) {
+async function dispatch(tabId, command, expectedBinding, authorizeEffect, effectStarted) {
   const deadline = Date.now() + 2000;
   if (mutationTypes.has(command?.type)) {
     if (!actionPattern.test(command?.actionId)) throw new Error("invalid_command");
@@ -117,6 +117,10 @@ async function dispatch(tabId, command, expectedBinding) {
     )
       throw new Error("page_changed");
   }
+  // All arming awaits are complete. No asynchronous work may separate this check
+  // from the effect request: cancellation or replacement must stop pre-dispatch.
+  authorizeEffect?.();
+  effectStarted?.();
   const execution = chrome.scripting.executeScript({
     target: { tabId, documentIds: [documentId] },
     func: async (value, expectedUrl, deadline) => {
@@ -497,6 +501,7 @@ async function executeCompanion(request, controller) {
   )
     throw new Error("page_changed");
   const navigationGeneration = selection.navigationGeneration;
+  const nativeGeneration = nativePortGeneration;
   if (controller.signal.aborted) throw new Error("cancelled");
   const before = await selectedAnchorTab(selection);
   await currentWebMCPDocument(binding);
@@ -511,11 +516,27 @@ async function executeCompanion(request, controller) {
   const mutates = request.command.type !== "inspect";
   // Once a mutation is admitted, the old binding cannot authorize another operation.
   if (mutates) webMCPBinding = undefined;
+  let effectStarted = false;
+  const authorizeEffect = () => {
+    if (controller.signal.aborted) throw new Error("cancelled");
+    if (
+      !nativePort ||
+      nativePortGeneration !== nativeGeneration ||
+      webMCPSelection !== selection ||
+      selection.navigationGeneration !== navigationGeneration ||
+      (mutates ? webMCPBinding !== undefined : webMCPBinding !== binding) ||
+      activeWebMCP?.controller !== controller ||
+      Date.now() >= binding.expiresAt
+    )
+      throw new Error("page_changed");
+  };
   let value;
   try {
-    value = await dispatch(binding.tabId, request.command, binding);
+    value = await dispatch(binding.tabId, request.command, binding, authorizeEffect, () => {
+      effectStarted = true;
+    });
   } catch (error) {
-    if (mutates) throw new Error("unknown");
+    if (mutates && effectStarted) throw new Error("unknown");
     throw error;
   }
   if (controller.signal.aborted) throw new Error(mutates ? "unknown" : "cancelled");

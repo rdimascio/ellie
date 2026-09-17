@@ -245,6 +245,9 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     } else {
       site = nil
     }
+    if source == .companion && site?.provider != .netflix {
+      throw PhoneControlFailure.invalidResponse
+    }
     return .page(
       BrowserPhonePage(
         nodeID: nodeID, source: source, revision: revision, title: title, summary: summary,

@@ -193,3 +193,57 @@ test("Netflix selector consumes read authority after one unknown and never enter
   );
   assert.equal(bridgeCalls, 4);
 });
+
+test("a confirmed pre-effect companion rejection is failed or cancelled, never an unknown replay", async () => {
+  for (const [bridgeStatus, expected] of [
+    ["page_changed", "failed"],
+    ["cancelled", "cancelled"],
+  ] as const) {
+    const current = binding(bridgeStatus);
+    const revision = browserBindingRevision(current);
+    let calls = 0;
+    const companion = new BrowserCompanionOperations({
+      async request(request) {
+        if (request.type !== "media.execute") throw new Error("unexpected request");
+        calls += 1;
+        return request.command.type === "inspect"
+          ? browserWebMCPResultFor(request.id, "ok", {
+              bindingId: current.bindingId,
+              documentId: current.documentId,
+              url: current.url,
+              value: {
+                snapshotId: randomUUID(),
+                candidates: [],
+                playback: { available: false },
+                site: { provider: "netflix", page: "browse", playback: "unavailable" },
+              },
+            })
+          : browserWebMCPResultFor(request.id, bridgeStatus);
+      },
+    });
+    await companion.execute(
+      { tool: "browser.read", view: "summary", revision },
+      current,
+      new AbortController().signal,
+    );
+    const result = browserWebMCPOperationResult(
+      await companion.execute(
+        { tool: "browser.scroll", direction: "down", revision },
+        current,
+        new AbortController().signal,
+      ),
+    );
+    assert.equal(result.browser.operation, "command");
+    assert.equal(result.browser.status, expected);
+    await assert.rejects(
+      () =>
+        companion.execute(
+          { tool: "browser.scroll", direction: "down", revision },
+          current,
+          new AbortController().signal,
+        ),
+      /Read the Netflix page/,
+    );
+    assert.equal(calls, 2);
+  }
+});

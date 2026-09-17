@@ -603,6 +603,7 @@ async function fixture(
     argumentEncoding?: "object" | "json-string";
     stableNativePort?: boolean;
     companionOnly?: boolean;
+    companionArming?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "ellie-media-test-"));
@@ -627,6 +628,8 @@ async function fixture(
   const binding = liveBinding();
   const before = await chrome.tabs.get(binding.tabId);`;
   assert.equal(background.split(tabGetNeedle).length - 1, 1);
+  const effectNeedle = "  authorizeEffect?.();";
+  assert.equal(background.split(effectNeedle).length - 1, 1);
   await writeFile(
     backgroundPath,
     background
@@ -665,6 +668,16 @@ async function fixture(
         `${tabGetNeedle.split("\n  const before")[0]}
   if (globalThis.__ellieTestBeforeTabGet) await globalThis.__ellieTestBeforeTabGet;
   const before = await chrome.tabs.get(binding.tabId);`,
+      )
+      .replace(
+        effectNeedle,
+        options.companionArming
+          ? `  if (globalThis.__ellieTestCompanionArming) {
+    globalThis.__ellieTestCompanionArming.enter();
+    await globalThis.__ellieTestCompanionArming.gate;
+  }
+${effectNeedle}`
+          : effectNeedle,
       ) +
       (options.stableNativePort
         ? `
@@ -679,7 +692,23 @@ connectNativeHost = () => {
 };
 `
         : "") +
-      "\nglobalThis.__ellieTestWebMCP = { bind: bindWebMCP, request: handleNativeRequest, nativeStatus: () => nativeConnectionStatus, drop: () => { nativePort = undefined; nativePortGeneration += 1; clearWebMCPSelection(); } };\n",
+      `
+globalThis.__ellieTestWebMCP = {
+  bind: bindWebMCP, request: handleNativeRequest,
+  nativeStatus: () => nativeConnectionStatus,
+  drop: () => { nativePort = undefined; nativePortGeneration += 1; clearWebMCPSelection(); },
+  abortActive: () => activeWebMCP?.controller.abort(),
+  replaceSelection: () => { webMCPSelection = undefined; },
+  arm: () => {
+    let enter, release;
+    const entered = new Promise((resolve) => { enter = resolve; });
+    const gate = new Promise((resolve) => { release = resolve; });
+    globalThis.__ellieTestCompanionArming = { enter, release, gate, entered };
+  },
+  entered: () => globalThis.__ellieTestCompanionArming.entered,
+  release: () => globalThis.__ellieTestCompanionArming.release(),
+};
+`,
   );
   const controllerPath = join(extension, "media-controller.js");
   const controller = await readFile(controllerPath, "utf8");
@@ -988,6 +1017,13 @@ test(
       .card{display:block;flex:0 0 260px;height:120px;background:#ddd}
       </style><div class="row"><a class="card" href="/watch/123" aria-label="Synthetic first title">One</a>
       <a class="card" href="/watch/456" aria-label="Synthetic second title">Two</a></div>`);
+      await launched.page.evaluate(() => {
+        const credentialBearing = document.createElement("a");
+        credentialBearing.href = `${location.protocol}//user:pass@${location.host}/watch/789`;
+        credentialBearing.setAttribute("aria-label", "Credential-bearing title");
+        credentialBearing.className = "card";
+        document.querySelector(".row")!.append(credentialBearing);
+      });
       await launched.page.bringToFront();
       const tab = await launched.worker.evaluate(
         async (url) =>
@@ -1097,6 +1133,15 @@ test(
           type: "binding.refresh",
         }),
       );
+      const beforeAddedRow = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: renewed.bindingId,
+        documentId: renewed.documentId,
+        command: { type: "inspect", actionId: crypto.randomUUID() },
+      });
+      assert.ok(beforeAddedRow.value.rowCandidateId);
       await launched.page.evaluate(() => {
         const second = document.querySelector(".row")!.cloneNode(true) as HTMLElement;
         second.classList.add("second-row");
@@ -1106,12 +1151,60 @@ test(
         }
         document.querySelector(".row")!.after(second);
       });
+      const lateRowBefore = await launched.page
+        .locator(".row")
+        .first()
+        .evaluate((row) => row.scrollLeft);
+      const lateRowResult = await launched.worker.evaluate(
+        async ({ bindingId, documentId, snapshotId, candidateId }) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request({
+              protocol: "ellie.browser-webmcp.v1",
+              id: crypto.randomUUID(),
+              type: "media.execute",
+              bindingId,
+              documentId,
+              command: {
+                type: "scrollRow",
+                actionId: crypto.randomUUID(),
+                snapshotId,
+                candidateId,
+                direction: "left",
+              },
+            });
+            return "scrolled";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          bindingId: renewed.bindingId,
+          documentId: renewed.documentId,
+          snapshotId: beforeAddedRow.value.snapshotId,
+          candidateId: beforeAddedRow.value.rowCandidateId,
+        },
+      );
+      assert.equal(lateRowResult, "unknown");
+      assert.equal(
+        await launched.page
+          .locator(".row")
+          .first()
+          .evaluate((row) => row.scrollLeft),
+        lateRowBefore,
+      );
+      const renewedAfterLateRow = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.refresh",
+        }),
+      );
       const multiple = await native({
         protocol: "ellie.browser-webmcp.v1",
         id: crypto.randomUUID(),
         type: "media.execute",
-        bindingId: renewed.bindingId,
-        documentId: renewed.documentId,
+        bindingId: renewedAfterLateRow.bindingId,
+        documentId: renewedAfterLateRow.documentId,
         command: { type: "inspect", actionId: crypto.randomUUID() },
       });
       assert.equal(multiple.value.site.horizontalScrollAvailable, false);
@@ -1142,8 +1235,8 @@ test(
           }
         },
         {
-          bindingId: renewed.bindingId,
-          documentId: renewed.documentId,
+          bindingId: renewedAfterLateRow.bindingId,
+          documentId: renewedAfterLateRow.documentId,
           snapshotId: multiple.value.snapshotId,
           candidateId: multiple.value.candidates[0].id,
         },
@@ -1167,6 +1260,150 @@ test(
         }
       });
       assert.equal(disconnected, "unbound");
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Netflix companion arming rechecks cancellation, selection, and native generation before effect",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({
+      companionOnly: true,
+      stableNativePort: true,
+      companionArming: true,
+    });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(`http://127.0.0.1:${port}/browse`);
+      await launched.page.setContent("<body style='height:2000px'><p>synthetic catalog</p></body>");
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      for (const replacement of ["cancel", "selection", "native"] as const) {
+        await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+        const binding = await launched.worker.evaluate(() =>
+          globalThis.__ellieTestWebMCP.request({
+            protocol: "ellie.browser-webmcp.v1",
+            id: crypto.randomUUID(),
+            type: "binding.status",
+          }),
+        );
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.arm());
+        const request = {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+        };
+        const pending = launched.worker.evaluate(async (value) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(value);
+            return "effect";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        }, request);
+        try {
+          await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.entered());
+          await launched.worker.evaluate((kind) => {
+            if (kind === "cancel") globalThis.__ellieTestWebMCP.abortActive();
+            else if (kind === "selection") globalThis.__ellieTestWebMCP.replaceSelection();
+            else globalThis.__ellieTestWebMCP.drop();
+          }, replacement);
+        } finally {
+          await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.release());
+        }
+        assert.equal(await pending, replacement === "cancel" ? "cancelled" : "page_changed");
+        assert.equal(
+          await launched.page.evaluate(() => scrollY),
+          0,
+          `${replacement} must dispatch no effect`,
+        );
+      }
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "Netflix row uniqueness scans beyond the 40 returned titles",
+  { timeout: 20_000 },
+  async () => {
+    const owned = await fixture({ companionOnly: true, stableNativePort: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(`http://127.0.0.1:${port}/browse`);
+      await launched.page.setContent(`<!doctype html><style>
+      .row{display:flex;overflow-x:auto;width:320px;height:100px}
+      .small{flex:0 0 5px;height:80px;background:#ddd}
+      .large{display:block;flex:0 0 260px;height:80px;background:#ccc}
+      </style><div class="row first"></div><div class="row second">
+      <a class="large" href="/watch/999" aria-label="Second row title">Second</a>
+      <span style="flex:0 0 500px"></span></div>`);
+      await launched.page.evaluate(() => {
+        const row = document.querySelector(".first")!;
+        for (let index = 0; index < 40; index += 1) {
+          const anchor = document.createElement("a");
+          anchor.className = "small";
+          anchor.href = `/watch/${index + 1}`;
+          anchor.setAttribute("aria-label", `Title ${index + 1}`);
+          row.append(anchor);
+        }
+        const spacer = document.createElement("span");
+        spacer.style.flex = "0 0 500px";
+        row.append(spacer);
+      });
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const binding = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      const read = await launched.worker.evaluate(
+        (value) => globalThis.__ellieTestWebMCP.request(value),
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        },
+      );
+      assert.equal(read.value.candidates.length, 40);
+      assert.equal(read.value.site.horizontalScrollAvailable, false);
+      assert.equal(read.value.rowCandidateId, undefined);
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));

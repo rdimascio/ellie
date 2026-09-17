@@ -220,15 +220,23 @@ export class BrowserCompanionOperations {
     // Once admitted, the mutation consumes the observation even if its result is lost.
     this.observed = undefined;
     if (signal.aborted) throw new Error("Browser request was cancelled.");
+    let status: "unknown" | "failed" | "cancelled" = "unknown";
     try {
-      await this.call(binding, command, signal);
+      const response = await this.call(binding, command, signal);
+      // The extension emits these statuses only before its effect request.
+      // Transport loss or any post-effect error remains unverified.
+      if (response.status === "cancelled") status = "cancelled";
+      else if (!["ok", "unknown", "timed_out"].includes(response.status)) status = "failed";
     } catch {
       /* dispatch may have happened */
     }
     return browserWebMCPOperationResult({
       ok: false,
-      message: "Netflix action outcome is unknown; read the page again.",
-      browser: { source: "companion", operation: "command", status: "unknown", revision },
+      message:
+        status === "unknown"
+          ? "Netflix action outcome is unknown; read the page again."
+          : "Netflix action was stopped before dispatch; read the page again.",
+      browser: { source: "companion", operation: "command", status, revision },
     });
   }
 }

@@ -77,6 +77,8 @@
     return youtubeOrigins.has(location.origin)
       ? url.pathname === "/watch" || url.pathname.startsWith("/shorts/")
       : netflixOrigins.has(location.origin) &&
+          !url.username &&
+          !url.password &&
           /^\/(?:watch|title)\/[0-9]{1,20}$/.test(url.pathname) &&
           !url.hash &&
           url.href.length <= 2048;
@@ -92,6 +94,21 @@
       row = row.parentElement;
     }
     return null;
+  };
+  // Scan the current eligible DOM, not the capped title list in a prior read.
+  // More than 500 anchors cannot establish a unique row within this budget.
+  const uniqueVisibleRow = () => {
+    const anchors = document.querySelectorAll("a[href]");
+    if (anchors.length > 500) return undefined;
+    let selected;
+    for (const anchor of anchors) {
+      if (!visible(anchor) || !supportedAnchor(anchor)) continue;
+      const row = scrollableRowFor(anchor);
+      if (!row) continue;
+      if (selected && selected !== row) return undefined;
+      selected = row;
+    }
+    return selected;
   };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
@@ -275,12 +292,10 @@
           }
         }
         snapshots.clear();
-        const rows = new Map();
-        for (const entry of entries) {
-          const row = scrollableRowFor(entry.anchor);
-          if (row && !rows.has(row)) rows.set(row, entry.id);
-        }
-        const rowCandidateId = rows.size === 1 ? rows.values().next().value : undefined;
+        const uniqueRow = site.page === "browse" ? uniqueVisibleRow() : undefined;
+        const rowCandidateId = uniqueRow
+          ? entries.find((entry) => scrollableRowFor(entry.anchor) === uniqueRow)?.id
+          : undefined;
         snapshots.set(snapshotId, {
           session,
           url: location.href,
@@ -305,7 +320,7 @@
           playback,
           site:
             netflixOrigins.has(location.origin) && site.page === "browse"
-              ? { ...site, horizontalScrollAvailable: rows.size === 1 }
+              ? { ...site, horizontalScrollAvailable: Boolean(rowCandidateId) }
               : site,
           ...(rowCandidateId ? { rowCandidateId } : {}),
         };
@@ -357,13 +372,7 @@
         const row = scrollableRowFor(entry.anchor);
         if (!row) throw new Error("row_scroll_unavailable");
         if (netflixOrigins.has(location.origin)) {
-          const liveRows = new Set(
-            snapshot.entries
-              .filter((item) => item.anchor.isConnected && visible(item.anchor))
-              .map((item) => scrollableRowFor(item.anchor))
-              .filter(Boolean),
-          );
-          if (snapshot.rowCandidateId !== entry.id || liveRows.size !== 1 || !liveRows.has(row))
+          if (snapshot.rowCandidateId !== entry.id || uniqueVisibleRow() !== row)
             throw new Error("row_scroll_unavailable");
         }
         active(command, expectedUrl, deadline);
