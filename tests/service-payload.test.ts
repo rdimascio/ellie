@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -238,6 +239,151 @@ test("materializes the finite production workspace closure and complete license 
   );
   await symlink(join(directory, "ellie-license"), join(source, "packages/protocol/linked.ts"));
   await assert.rejects(stageApplication(source, join(directory, "linked")), /symbolic link/);
+});
+
+test("supplies only the pinned provider-utils upstream license when its npm package omits one", async (t) => {
+  const directory = await temporary(t, "ellie-provider-utils-license-");
+  const source = join(directory, "source");
+  const packageDirectory = join(source, "node_modules/@ai-sdk/provider-utils");
+  const license = join(source, "scripts/licenses/provider-utils-5.0.43.LICENSE");
+  const packageJson = join(packageDirectory, "package.json");
+  const lock = join(source, "bun.lock");
+  const integrity =
+    "sha512-gw/bcNseOGSs59TMtV4H1KwqXXe24NHgx+uBYr98pa4Fg6Uvp8hPPxjuckVnfFFyIxHCDew8so0ujpvcSuyMZA==";
+  const lockText = (value: string) =>
+    `{\n  "packages": {\n    "@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@5.0.43", "", {}, "${value}"],\n  },\n}\n`;
+  const packageValue = {
+    name: "@ai-sdk/provider-utils",
+    version: "5.0.43",
+    license: "Apache-2.0",
+  };
+  for (const name of ["cli", "node", "server"]) {
+    const root = join(source, "apps", name);
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "index.ts"), "export {};\n");
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        name: `@ellie/${name}`,
+        exports: "./index.ts",
+        dependencies: name === "cli" ? { "@ai-sdk/provider-utils": "5.0.43" } : {},
+      }),
+    );
+  }
+  await mkdir(join(source, "packages"));
+  for (const area of [
+    "apps/command-center/dist",
+    "apps/life-ui/dist",
+    "scripts/licenses",
+    "node_modules/@ai-sdk/provider-utils",
+  ])
+    await mkdir(join(source, area), { recursive: true });
+  await writeFile(join(source, "apps/command-center/dist/index.html"), "fixture\n");
+  await writeFile(join(source, "apps/life-ui/dist/index.html"), "fixture\n");
+  await writeFile(join(source, "LICENSE"), "Ellie fixture license\n");
+  await writeFile(join(source, "package.json"), '{"name":"fixture"}\n');
+  await writeFile(lock, lockText(integrity));
+  await writeFile(packageJson, JSON.stringify(packageValue));
+  await writeFile(join(packageDirectory, "index.js"), "export {};\n");
+  const upstream = await readFile(
+    new URL("../scripts/licenses/provider-utils-5.0.43.LICENSE", import.meta.url),
+  );
+  await writeFile(license, upstream);
+  const stage = async (name: string) => {
+    const payload = join(directory, name);
+    await mkdir(join(payload, "LICENSES"), { recursive: true });
+    return { payload, components: await stageApplication(source, payload) };
+  };
+
+  const { payload, components } = await stage("exact");
+  assert.deepEqual(components, [
+    {
+      name: "@ai-sdk/provider-utils",
+      version: "5.0.43",
+      license: "Apache-2.0",
+      files: ["LICENSE"],
+    },
+  ]);
+  assert.deepEqual(
+    await readFile(join(payload, "lib/ellie/node_modules/@ai-sdk/provider-utils/LICENSE")),
+    upstream,
+  );
+  assert.match(
+    await readFile(join(payload, "LICENSES/THIRD-PARTY-NOTICES.txt"), "utf8"),
+    /@ai-sdk\/provider-utils@5\.0\.43 \(Apache-2\.0\)/,
+  );
+  assert.match(
+    await readFile(join(payload, "LICENSES/components.spdx.json"), "utf8"),
+    /"name": "@ai-sdk\/provider-utils"/,
+  );
+
+  for (const [field, value] of [
+    ["name", "@ai-sdk/other"],
+    ["version", "5.0.44"],
+    ["license", "MIT"],
+  ] as const) {
+    await writeFile(packageJson, JSON.stringify({ ...packageValue, [field]: value }));
+    await assert.rejects(stage(`wrong-${field}`), /incomplete license metadata/);
+  }
+  await writeFile(packageJson, JSON.stringify(packageValue));
+  await writeFile(lock, lockText(`sha512-${"A".repeat(88)}`));
+  await assert.rejects(stage("wrong-integrity"), /incomplete license metadata/);
+  await writeFile(
+    lock,
+    lockText(integrity).replace("@ai-sdk/provider-utils@5.0.43", "@ai-sdk/provider-utils@5.0.44"),
+  );
+  await assert.rejects(stage("wrong-lock-version"), /incomplete license metadata/);
+  await writeFile(lock, lockText(integrity));
+  const tampered = Buffer.from(upstream);
+  tampered[0] ^= 1;
+  await writeFile(license, tampered);
+  await assert.rejects(stage("tampered-notice"), /does not match its upstream source/);
+  await rm(license);
+  await assert.rejects(stage("missing-notice"), { code: "ENOENT" });
+  await symlink(join(source, "LICENSE"), license);
+  await assert.rejects(stage("linked-notice"), { code: "ELOOP" });
+  await rm(license);
+  await mkdir(license);
+  await assert.rejects(stage("nonregular-notice"), /bounded regular file/);
+  await rm(license, { recursive: true });
+  await writeFile(license, upstream);
+  await link(license, join(source, "second-license-link"));
+  await assert.rejects(stage("hardlinked-notice"), /bounded regular file/);
+  await rm(join(source, "second-license-link"));
+  await rm(license);
+
+  await writeFile(join(packageDirectory, "LICENSE"), "Package supplied license\n");
+  const preferred = await stage("package-license-preferred");
+  assert.equal(
+    await readFile(
+      join(preferred.payload, "lib/ellie/node_modules/@ai-sdk/provider-utils/LICENSE"),
+      "utf8",
+    ),
+    "Package supplied license\n",
+  );
+  await rm(join(packageDirectory, "LICENSE"));
+  await writeFile(license, upstream);
+  await writeFile(
+    join(source, "apps/cli/package.json"),
+    JSON.stringify({
+      name: "@ellie/cli",
+      exports: "./index.ts",
+      dependencies: { "@ai-sdk/provider-utils": "5.0.43", unlicensed: "1.0.0" },
+    }),
+  );
+  await mkdir(join(source, "node_modules/unlicensed"));
+  await writeFile(
+    join(source, "node_modules/unlicensed/package.json"),
+    JSON.stringify({
+      name: "unlicensed",
+      version: "1.0.0",
+      license: "MIT",
+    }),
+  );
+  await assert.rejects(
+    stage("other-missing-license"),
+    /Production dependency unlicensed has incomplete license metadata/,
+  );
 });
 
 test("restricts payload architecture to the current supported Mac host", () => {
