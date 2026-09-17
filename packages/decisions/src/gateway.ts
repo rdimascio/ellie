@@ -222,6 +222,12 @@ export class GatewayDecisionProvider implements DecisionProvider {
   async evaluate(request: DecisionRequest): Promise<DecisionResponse> {
     validateRequest(request);
     if (
+      Object.values(request.questions).some(
+        (question) => question.type === "score" && question.criteria.length > 10,
+      )
+    )
+      throw new Error("Invalid Gateway decision request");
+    if (
       request.state === null ||
       (typeof request.state !== "string" &&
         (typeof request.state !== "object" || request.state === null))

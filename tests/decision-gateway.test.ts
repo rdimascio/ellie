@@ -271,6 +271,31 @@ test("large inputs are rejected before any Gateway transport", async () => {
   assert.equal(calls, 0);
 });
 
+test("Gateway rejects Score questions above Jev's ten-level limit before transport", async () => {
+  let calls = 0;
+  const provider = new GatewayDecisionProvider({
+    apiKey: "test",
+    fetch: async () => {
+      calls++;
+      return wire();
+    },
+  });
+  await assert.rejects(
+    provider.evaluate({
+      ...request(),
+      questions: {
+        priority: {
+          type: "score",
+          instructions: "Rate",
+          criteria: Array.from({ length: 11 }, (_, index) => `level-${index}`),
+        },
+      },
+    }),
+    /Invalid Gateway decision request/,
+  );
+  assert.equal(calls, 0);
+});
+
 test("Gateway deadline covers a fetch that ignores abort and an unread body", async () => {
   const never = async (): Promise<Response> => new Promise(() => {});
   const provider = new GatewayDecisionProvider({ apiKey: "test", timeoutMs: 5, fetch: never });
