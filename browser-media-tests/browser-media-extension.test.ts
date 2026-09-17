@@ -605,20 +605,28 @@ async function fixture(
     companionOnly?: boolean;
     companionArming?: boolean;
     youtubeTVOnly?: boolean;
+    disneyOnly?: boolean;
   } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "ellie-media-test-"));
   const extension = join(root, "extension");
   await cp(source, extension, { recursive: true });
-  for (const name of ["background.js", "media-controller.js", "youtube-tv-controller.js"]) {
+  for (const name of [
+    "background.js",
+    "media-controller.js",
+    "youtube-tv-controller.js",
+    "disneyplus-controller.js",
+  ]) {
     const path = join(extension, name);
     const value = await readFile(path, "utf8");
     const needle =
       name === "background.js"
-        ? `"https://www.netflix.com",\n  "https://www.youtube.com",\n  "https://tv.youtube.com"`
+        ? `"https://www.netflix.com",\n  "https://www.youtube.com",\n  "https://tv.youtube.com",\n  "https://www.disneyplus.com"`
         : name === "media-controller.js"
           ? '"https://www.netflix.com", "https://www.youtube.com"'
-          : '"https://tv.youtube.com"';
+          : name === "youtube-tv-controller.js"
+            ? '"https://tv.youtube.com"'
+            : '"https://www.disneyplus.com"';
     assert.equal(value.split(needle).length - 1, 1);
     await writeFile(path, value.replace(needle, '"http://127.0.0.1:PORT"'));
   }
@@ -628,8 +636,11 @@ async function fixture(
   assert.equal(background.split(reviewedNeedle).length - 1, 1);
   const accessibilityNeedle =
     'const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);';
-  const companionNeedle =
-    'const companionBindingOrigins = new Set(["https://www.netflix.com", "https://tv.youtube.com"]);';
+  const companionNeedle = `const companionBindingOrigins = new Set([
+  "https://www.netflix.com",
+  "https://tv.youtube.com",
+  "https://www.disneyplus.com",
+]);`;
   assert.equal(background.split(accessibilityNeedle).length - 1, 1);
   const tabGetNeedle = `async function executeWebMCP(request, controller) {
   const binding = liveBinding();
@@ -642,7 +653,10 @@ async function fixture(
     background
       .replace(
         reviewedNeedle,
-        options.accessibilityOnly || options.companionOnly || options.youtubeTVOnly
+        options.accessibilityOnly ||
+          options.companionOnly ||
+          options.youtubeTVOnly ||
+          options.disneyOnly
           ? reviewedNeedle
           : `const reviewedWebMCPBindings = Object.freeze({"http://127.0.0.1:PORT":[{name:"ellie_fixture_action",inputSchema:{type:"object",additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false,consequentialHint:false},argumentEncoding:${JSON.stringify(options.argumentEncoding ?? "object")}}]});`,
       )
@@ -654,7 +668,7 @@ async function fixture(
       )
       .replace(
         companionNeedle,
-        options.companionOnly || options.youtubeTVOnly
+        options.companionOnly || options.youtubeTVOnly || options.disneyOnly
           ? 'const companionBindingOrigins = new Set(["http://127.0.0.1:PORT"]);'
           : companionNeedle,
       )
@@ -663,6 +677,12 @@ async function fixture(
         options.youtubeTVOnly
           ? 'new URL(before.url).origin === "http://127.0.0.1:PORT"'
           : 'new URL(before.url).origin === "https://tv.youtube.com"',
+      )
+      .replace(
+        'new URL(before.url).origin === "https://www.disneyplus.com"',
+        options.disneyOnly
+          ? 'new URL(before.url).origin === "http://127.0.0.1:PORT"'
+          : 'new URL(before.url).origin === "https://www.disneyplus.com"',
       )
       .replace(
         'binding.origin !== "https://www.youtube.com"',
@@ -900,6 +920,41 @@ test(
         playback: "paused",
         currentTimeSeconds: 0,
       });
+      await launched.page.evaluate(() => {
+        for (const [id, style] of [
+          ["display-hidden-dialog", "display:none"],
+          ["visibility-hidden-dialog", "visibility:hidden"],
+          ["offscreen-dialog", "position:fixed;left:-500px;top:20px;width:200px;height:100px"],
+        ]) {
+          const dialog = document.createElement("div");
+          dialog.id = id;
+          dialog.setAttribute("role", "dialog");
+          dialog.setAttribute("aria-modal", "true");
+          dialog.style.cssText = style;
+          document.body.append(dialog);
+        }
+      });
+      assert.equal((await observe(watch)).site.playback, "paused");
+      await launched.page.evaluate(() => {
+        const dialog = document.createElement("div");
+        dialog.id = "visible-dialog";
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+        dialog.style.cssText =
+          "position:fixed;left:20px;top:20px;width:200px;height:100px;background:white;z-index:99";
+        document.body.append(dialog);
+      });
+      assert.equal((await observe(watch)).site.playback, "ambiguous");
+      await launched.page.evaluate(() => {
+        document.querySelector("#visible-dialog")?.remove();
+        const ad = document.createElement("div");
+        ad.id = "ad-showing";
+        ad.className = "html5-video-player ad-showing";
+        document.body.append(ad);
+      });
+      assert.equal((await observe(watch)).site.playback, "ambiguous");
+      await launched.page.evaluate(() => document.querySelector("#ad-showing")?.remove());
+      assert.equal((await observe(watch)).site.playback, "paused");
       await launched.page.locator("video").evaluate((video: HTMLVideoElement) => video.play());
       const playing = (await observe(watch)).site;
       assert.equal(playing.playback, "playing");
@@ -963,7 +1018,12 @@ async function launch(extension: string, root: string) {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("fixture_server_failed");
-  for (const name of ["background.js", "media-controller.js", "youtube-tv-controller.js"]) {
+  for (const name of [
+    "background.js",
+    "media-controller.js",
+    "youtube-tv-controller.js",
+    "disneyplus-controller.js",
+  ]) {
     const path = join(extension, name);
     const value = await readFile(path, "utf8");
     await writeFile(
@@ -1017,6 +1077,247 @@ async function command(harness: Page, tabId: number, value: Record<string, unkno
     { tabId, value },
   );
 }
+
+test(
+  "companion inspects visible results when body scrolling is propagated to the viewport",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture();
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      await launched.page.setContent(`<!doctype html><style>
+        html { overflow: visible }
+        body { margin: 0; height: 0; overflow-y: scroll }
+        a { display: block; width: 240px; height: 40px }
+        #visible { position: absolute; left: 20px; top: 80px }
+        #clip { position: absolute; left: 20px; top: 160px; width: 250px; height: 20px; overflow: hidden }
+        #clipped { position: absolute; top: 50px }
+        #covered { position: absolute; left: 20px; top: 280px }
+        #cover { position: absolute; left: 20px; top: 280px; width: 240px; height: 40px; background: black; z-index: 2 }
+        #hidden { position: absolute; left: 20px; top: 360px; visibility: hidden }
+        #zero { position: absolute; left: 20px; top: 420px; width: 0; height: 0 }
+      </style>
+      <a id="visible" href="/watch?v=aaaaaaaaaaa">Visible public title</a>
+      <div id="clip"><a id="clipped" href="/watch?v=bbbbbbbbbbb">Clipped title</a></div>
+      <a id="covered" href="/watch?v=ccccccccccc">Covered title</a><div id="cover"></div>
+      <a id="hidden" href="/watch?v=ddddddddddd">Hidden title</a>
+      <a id="zero" href="/watch?v=eeeeeeeeeee">Zero-size title</a>`);
+      const geometry = await launched.page.evaluate(() => ({
+        bodyHeight: document.body.getBoundingClientRect().height,
+        bodyOverflowY: getComputedStyle(document.body).overflowY,
+        rootOverflowY: getComputedStyle(document.documentElement).overflowY,
+      }));
+      assert.deepEqual(geometry, {
+        bodyHeight: 0,
+        bodyOverflowY: "scroll",
+        rootOverflowY: "visible",
+      });
+      const tab = await launched.worker.evaluate(async (url) => {
+        const tabs = await globalThis["chrome"].tabs.query({});
+        return tabs.find((item: any) => item.url === url)?.id;
+      }, launched.page.url());
+      assert.ok(tab);
+      const inspected = await command(launched.harness, tab, { type: "inspect" });
+      assert.equal(inspected.ok, true);
+      assert.deepEqual(
+        inspected.value.candidates.map((candidate: any) => candidate.title),
+        ["Visible public title"],
+      );
+      await launched.page.setContent(`<!doctype html><style>
+        html { overflow: hidden }
+        body { position: relative; margin: 0; height: 20px; overflow: hidden }
+        a { position: absolute; left: 20px; top: 80px; display: block; width: 240px; height: 40px }
+      </style><a href="/watch?v=fffffffffff">Body-clipped title</a>`);
+      const bodyClipped = await command(launched.harness, tab, { type: "inspect" });
+      assert.equal(bodyClipped.ok, true);
+      assert.deepEqual(bodyClipped.value.candidates, []);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "selected Disney+ companion opens one observed synthetic entity without replay or playback",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ disneyOnly: true, stableNativePort: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      const first = "2fa6a394-c272-41ef-afaa-714116cb16f2";
+      const second = "76ff81fe-447b-4d3b-8a5e-f07db1b6be27";
+      await launched.page.goto(`http://127.0.0.1:${port}/browse/entity-${first}`);
+      await launched.page
+        .setContent(`<a id="title" href="/browse/entity-${second}" aria-label="Observed title" style="display:block;width:260px;height:80px">Title</a>
+        <a href="/identity/login" style="display:block;width:260px;height:80px">Sign in</a>
+        <script>window.clicks=0;document.addEventListener('click',event=>{const anchor=event.target.closest('a');if(anchor?.id==='title'){event.preventDefault();window.clicks++;history.pushState({},'',anchor.href)}})</script>`);
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const request = (body: Record<string, unknown>) =>
+        launched.worker.evaluate((value) => globalThis.__ellieTestWebMCP.request(value), body);
+      const binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.status",
+      });
+      assert.equal(binding.availability, "companion");
+      const read = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        command: { type: "inspect", actionId: crypto.randomUUID() },
+      });
+      assert.equal(read.value.site.provider, "disneyplus");
+      assert.equal(read.value.site.page, "browse");
+      assert.equal(read.value.site.playback, "unavailable");
+      assert.deepEqual(read.value.playback, { available: false });
+      assert.equal(read.value.candidates.length, 1);
+      const open = {
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        command: {
+          type: "open",
+          actionId: crypto.randomUUID(),
+          snapshotId: read.value.snapshotId,
+          candidateId: read.value.candidates[0].id,
+        },
+      };
+      const outcome = await launched.worker.evaluate(async (value) => {
+        try {
+          await globalThis.__ellieTestWebMCP.request(value);
+          return "verified";
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
+      }, open);
+      assert.equal(outcome, "unknown");
+      await launched.page.waitForURL(`http://127.0.0.1:${port}/browse/entity-${second}`);
+      assert.equal(await launched.page.evaluate(() => globalThis["clicks"]), 1);
+      const replay = await launched.worker.evaluate(async (value) => {
+        try {
+          await globalThis.__ellieTestWebMCP.request(value);
+          return "replayed";
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
+      }, open);
+      assert.notEqual(replay, "replayed");
+      assert.equal(await launched.page.evaluate(() => globalThis["clicks"]), 1);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "cancelled Disney+ arming leaves the selected entity untouched",
+  { timeout: 20_000 },
+  async () => {
+    const owned = await fixture({
+      disneyOnly: true,
+      stableNativePort: true,
+      companionArming: true,
+    });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(
+        `http://127.0.0.1:${port}/browse/entity-2fa6a394-c272-41ef-afaa-714116cb16f2`,
+      );
+      await launched.page.setContent(`<a href="/browse/entity-76ff81fe-447b-4d3b-8a5e-f07db1b6be27"
+        aria-label="Observed title" style="display:block;width:260px;height:80px">Title</a>
+        <script>window.clicks=0;document.addEventListener('click',event=>{event.preventDefault();window.clicks++})</script>`);
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const binding = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      const read = await launched.worker.evaluate(
+        (value) => globalThis.__ellieTestWebMCP.request(value),
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        },
+      );
+      assert.equal(read.value.candidates.length, 1);
+      await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.arm());
+      const pending = launched.worker.evaluate(
+        async (value) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(value);
+            return "effect";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "open",
+            actionId: crypto.randomUUID(),
+            snapshotId: read.value.snapshotId,
+            candidateId: read.value.candidates[0].id,
+          },
+        },
+      );
+      try {
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.entered());
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.abortActive());
+      } finally {
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.release());
+      }
+      assert.equal(await pending, "cancelled");
+      assert.equal(await launched.page.evaluate(() => globalThis["clicks"]), 0);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "selected YouTube TV companion observes gates and dispatches only fresh synthetic player controls",

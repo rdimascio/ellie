@@ -136,6 +136,26 @@ final class BrowserPhoneControlTests: XCTestCase {
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
+  func testDisneyPlusCompanionObservationExcludesPlaybackAndSearchControls() throws {
+    let revision = String(repeating: "e", count: 64)
+    func read(_ site: String) -> Data {
+      Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    }
+    guard case .page(let page) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"disneyplus","page":"browse","playback":"unavailable"}"#), nodeID: "mac")
+    else { return XCTFail("Expected selected Disney+ title page") }
+    XCTAssertEqual(page.site?.provider, .disneyplus)
+    XCTAssertEqual(page.site?.page, .browse)
+    for invalid in [
+      #"{"provider":"disneyplus","page":"watch","playback":"paused"}"#,
+      #"{"provider":"disneyplus","page":"results","playback":"unavailable"}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"playing"}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
+    ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
+  }
+
   @MainActor
   func testNetflixObservedControlsFailClosedBeforeDispatch() async {
     let node = PhoneControlNode(
@@ -170,6 +190,14 @@ final class BrowserPhoneControlTests: XCTestCase {
         currentTimeSeconds: nil), .scroll(.down), true),
       (BrowserPhoneSite(provider: .youtubeTV, page: .watch, playback: .paused,
         currentTimeSeconds: 1), .play, true),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .openResult(index: 1), true),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .search(query: "title"), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.down), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
+        currentTimeSeconds: nil), .openResult(index: 1), false),
     ]
     for (site, intent, allowed) in cases {
       let transport = BrowserPhoneFakeTransport(source: .companion, site: site)

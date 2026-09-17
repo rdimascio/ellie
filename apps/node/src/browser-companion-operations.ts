@@ -86,7 +86,8 @@ export class BrowserCompanionOperations {
     if (
       binding.availability !== "companion" ||
       (binding.origin !== "https://www.netflix.com" &&
-        binding.origin !== "https://tv.youtube.com") ||
+        binding.origin !== "https://tv.youtube.com" &&
+        binding.origin !== "https://www.disneyplus.com") ||
       new URL(binding.url).origin !== binding.origin ||
       binding.expiresAt <= Date.now()
     )
@@ -172,7 +173,11 @@ export class BrowserCompanionOperations {
       if (
         checked.browser.operation !== "read" ||
         checked.browser.view.site?.provider !==
-          (binding.origin === "https://www.netflix.com" ? "netflix" : "youtube_tv")
+          (binding.origin === "https://www.netflix.com"
+            ? "netflix"
+            : binding.origin === "https://tv.youtube.com"
+              ? "youtube_tv"
+              : "disneyplus")
       )
         throw new Error("Browser companion observation is invalid.");
       this.observed = {
@@ -196,11 +201,16 @@ export class BrowserCompanionOperations {
       throw new Error(
         binding.origin === "https://www.netflix.com"
           ? "Read the Netflix page before an action."
-          : "Read the YouTube TV page before an action.",
+          : binding.origin === "https://tv.youtube.com"
+            ? "Read the YouTube TV page before an action."
+            : "Read the Disney+ page before an action.",
       );
     if (observed.site.page === "login" || observed.site.page === "unsupported")
       throw new Error("Selected browser page needs attention before an action.");
     const youtubeTV = binding.origin === "https://tv.youtube.com";
+    const disneyplus = binding.origin === "https://www.disneyplus.com";
+    if (disneyplus && (action.tool !== "browser.select" || observed.site.page !== "browse"))
+      throw new Error("Disney+ exposes only observed title links on this page.");
     if (
       youtubeTV &&
       (action.tool === "browser.search" ||

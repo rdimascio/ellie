@@ -176,6 +176,66 @@ async function copyTree(source, destination) {
   await chmod(destination, info.mode & 0o111 ? 0o755 : 0o644);
 }
 
+/** Verify every literal relative extension script transitively from its manifest entrypoints. */
+export async function verifyBrowserCompanionClosure(directory) {
+  const manifestPath = join(directory, "manifest.json");
+  const manifestInfo = await lstat(manifestPath);
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.size > 64 * 1024)
+    throw new Error("Browser companion manifest is unavailable.");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const entrypoints = [manifest?.background?.service_worker, manifest?.action?.default_popup];
+  if (!entrypoints.every((value) => typeof value === "string"))
+    throw new Error("Browser companion manifest has incomplete entrypoints.");
+  const pending = [...entrypoints];
+  const collect = (value) => {
+    if (typeof value === "string" && /\.(?:js|mjs|html)$/.test(value)) pending.push(value);
+    else if (Array.isArray(value)) value.forEach(collect);
+    else if (value && typeof value === "object") Object.values(value).forEach(collect);
+  };
+  collect(manifest);
+  const seen = new Set();
+  const validRelative = (value) =>
+    typeof value === "string" &&
+    /^(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:js|mjs|html)$/.test(value) &&
+    value.split("/").every((part) => part !== "." && part !== "..");
+  while (pending.length) {
+    const relative = pending.pop();
+    if (!validRelative(relative)) throw new Error("Browser companion script path is unsafe.");
+    if (seen.has(relative)) continue;
+    if (seen.size >= 64) throw new Error("Browser companion script closure is too large.");
+    seen.add(relative);
+    const path = join(directory, relative);
+    let info;
+    try {
+      info = await lstat(path);
+    } catch {
+      throw new Error(`Browser companion script is missing: ${relative}`);
+    }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 1024 * 1024)
+      throw new Error(`Browser companion script is unsafe: ${relative}`);
+    const source = await readFile(path, "utf8");
+    for (const match of source.matchAll(/["'`]((?:\.\/)?[A-Za-z0-9._/-]+\.(?:js|mjs))["'`]/g)) {
+      const referenced = match[1].startsWith("./")
+        ? join(dirname(relative), match[1].slice(2))
+        : match[1];
+      if (!validRelative(referenced)) throw new Error("Browser companion script path is unsafe.");
+      pending.push(referenced);
+    }
+  }
+  return [...seen].sort();
+}
+
+export async function stageBrowserCompanion(source, destination) {
+  const input = join(source, "apps/browser-media-extension");
+  const output = join(destination, "lib/ellie/apps/browser-media-extension");
+  const expected = await verifyBrowserCompanionClosure(input);
+  await copyTree(input, output);
+  const actual = await verifyBrowserCompanionClosure(output);
+  if (JSON.stringify(actual) !== JSON.stringify(expected))
+    throw new Error("Browser companion script closure changed during staging.");
+  return output;
+}
+
 async function extractNodeMember(archive, member, destination, maximum, mode) {
   const bytes = command("/usr/bin/tar", ["-xOf", archive, member], {
     encoding: "buffer",
@@ -690,6 +750,7 @@ export async function stageApplication(source, destination, metadata = {}) {
     if (area === "packages") continue;
     await copyTree(join(source, area), join(root, area));
   }
+  await stageBrowserCompanion(source, destination);
   await copyTree(join(source, "apps/command-center/dist"), join(root, "apps/command-center/dist"));
   await copyTree(join(source, "apps/life-ui/dist"), join(root, "apps/life-ui/dist"));
   await copyTree(join(source, "package.json"), join(root, "package.json"));
@@ -983,6 +1044,16 @@ export async function verifyManifest(release) {
   if (actual.length === 0) throw new Error("Payload manifest has an unsupported shape.");
   if (JSON.stringify(actual) !== JSON.stringify(manifest.files))
     throw new Error("Payload manifest does not match its files.");
+  // Earlier releases predate the companion bundle. New releases carry a closed
+  // extension tree whose relative scripts must all be present before selection.
+  const companion = join(payload, "lib/ellie/apps/browser-media-extension");
+  try {
+    await lstat(companion);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    return manifest;
+  }
+  await verifyBrowserCompanionClosure(companion);
   return manifest;
 }
 
