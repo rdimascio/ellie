@@ -52,6 +52,9 @@ struct NativeEnrollmentView: View {
           NavigationLink("Sync Dashboards") {
             DashboardSyncView(credential: credential, dashboards: dashboards)
           }
+          NavigationLink("Household Chores") {
+            HouseholdChoresView(credential: credential)
+          }
           NavigationLink("Open Ellie Life") {
             LifeWebView(credential: LifeWebCredential(enrollment: credential))
               .id(credential.client.id)
@@ -142,14 +145,17 @@ struct NativeEnrollmentView: View {
     }
     .onChange(of: scenePhase) { _, phase in if phase == .background { store.cancelTransient() } }
     .onDisappear { store.cancelTransient() }
-    .alert("Couldn’t Clear Pending Dashboard Sync", isPresented: $syncCleanupError) {
+    .alert("Couldn’t Clear Pending Household Sync", isPresented: $syncCleanupError) {
       Button("OK", role: .cancel) {}
     } message: {
-      Text("Logout is blocked until Ellie can clear its private pending dashboard copy.")
+      Text("Logout is blocked until Ellie can clear its private pending dashboard and chore changes.")
     }
   }
   private func clearPendingSync(_ action: () -> Void) {
-    do { try clearPendingDashboardSync(action: action) }
+    do {
+      try clearPendingDashboardSync(action: {})
+      try clearPendingChoresSync(action: action)
+    }
     catch { syncCleanupError = true }
   }
   private func shortPin(_ pin: String) -> String { "\(pin.prefix(12))…\(pin.suffix(12))" }
