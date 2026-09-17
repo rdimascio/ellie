@@ -3,11 +3,11 @@ import SwiftUI
 @preconcurrency import WebKit
 
 @MainActor
-final class PlaylistPlayerModel: ObservableObject {
+private final class IOSPlaylistPlayerModel: ObservableObject {
     @Published var state: PlaylistPlayerState = .loading
 }
 
-struct NativePlaylist: View {
+struct IOSPlaylistWidget: View {
     let widget: DashboardWidget
     let configure: () -> Void
     @State private var showingPlayer = false
@@ -17,65 +17,71 @@ struct NativePlaylist: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            Image(systemName: playlistID == nil ? "rectangle.stack.badge.plus" : "play.rectangle.fill")
-                .font(.system(size: 36, weight: .light)).foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+        VStack(alignment: .leading, spacing: 8) {
             if let playlistID {
-                Text("Ready to play").font(.system(size: 19, weight: .semibold))
-                Text("YouTube is contacted only after you press Play.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                Button { showingPlayer = true } label: { Label("Play Playlist", systemImage: "play.fill") }
-                    .buttonStyle(.borderedProminent)
+                Text("YouTube playlist is ready").font(.subheadline)
+                Text("Playback starts only when you open the player.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Play Playlist") { showingPlayer = true }
+                    .accessibilityIdentifier("playlist-play-\(widget.id)")
                     .sheet(isPresented: $showingPlayer) {
-                        PlaylistPlayerSheet(playlistID: playlistID, title: widget.title)
+                        IOSPlaylistPlayerSheet(playlistID: playlistID, title: widget.title)
                     }
             } else {
-                Text("Choose a playlist").font(.system(size: 19, weight: .semibold))
-                Text("Add a public YouTube playlist. Playback never starts automatically.")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                Button("Set Up Playlist…", action: configure).buttonStyle(.bordered)
+                Text("Choose a YouTube playlist to play here.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Button("Set Up Playlist", action: configure)
+                    .accessibilityIdentifier("playlist-setup-\(widget.id)")
             }
         }
-        .frame(maxWidth: .infinity, minHeight: 155, alignment: .leading)
         .onChange(of: widget.config["youtubePlaylistID"]) { _, _ in showingPlayer = false }
     }
 }
 
-private struct PlaylistPlayerSheet: View {
+private struct IOSPlaylistPlayerSheet: View {
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var model = PlaylistPlayerModel()
+    @Environment(\.scenePhase) private var scenePhase
+    @StateObject private var model = IOSPlaylistPlayerModel()
     let playlistID: String
     let title: String
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Label(title, systemImage: "play.rectangle.fill").font(.headline).lineLimit(1)
-                Spacer()
-                Button("Close") { dismiss() }.keyboardShortcut(.cancelAction)
-            }.padding(16)
-            Divider()
+        NavigationStack {
             ZStack {
-                PlaylistWebView(playlistID: playlistID, model: model)
-                if model.state == .loading { ProgressView("Connecting to YouTube…").padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
+                if model.state.message == nil {
+                    IOSPlaylistWebView(playlistID: playlistID, model: model)
+                }
+                if model.state == .loading {
+                    ProgressView("Connecting to YouTube…")
+                        .padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+                }
                 if let message = model.state.message {
-                    ContentUnavailableView("Playback unavailable", systemImage: "exclamationmark.triangle", description: Text(message))
-                        .background(Color(nsColor: .windowBackgroundColor))
+                    VStack(spacing: 12) {
+                        ContentUnavailableView("Playback unavailable", systemImage: "exclamationmark.triangle",
+                            description: Text(message))
+                        if let url = YouTubePlaylist.publicURL(for: playlistID) {
+                            Link("Open in YouTube", destination: url)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(.systemBackground))
                 }
             }
+            .navigationTitle(title)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Close") { dismiss() } } }
         }
-        .frame(minWidth: 720, minHeight: 460)
+        .onChange(of: scenePhase) { _, phase in if phase == .background { dismiss() } }
     }
 }
 
-private struct PlaylistWebView: NSViewRepresentable {
+private struct IOSPlaylistWebView: UIViewRepresentable {
     let playlistID: String
-    @ObservedObject var model: PlaylistPlayerModel
+    @ObservedObject var model: IOSPlaylistPlayerModel
 
     func makeCoordinator() -> Coordinator { Coordinator(model: model) }
 
-    func makeNSView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
@@ -83,58 +89,50 @@ private struct PlaylistWebView: NSViewRepresentable {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         configuration.userContentController.addUserScript(WKUserScript(
             source: "Object.defineProperty(navigator,'geolocation',{value:{getCurrentPosition:function(_,e){if(e)e({code:1,message:'Permission denied'})},watchPosition:function(_,e){if(e)e({code:1,message:'Permission denied'});return 0},clearWatch:function(){}},configurable:false});",
-            injectionTime: .atDocumentStart,
-            forMainFrameOnly: false
-        ))
+            injectionTime: .atDocumentStart, forMainFrameOnly: false))
         configuration.userContentController.add(context.coordinator, name: "elliePlayer")
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
-        view.allowsMagnification = false
-        Self.installContentRules(on: view, playlistID: playlistID, coordinator: context.coordinator)
+        WKContentRuleListStore.default().compileContentRuleList(
+            forIdentifier: "ElliePlaylistMediaAllowlistV1",
+            encodedContentRuleList: PlaylistNavigationPolicy.contentRuleListJSON
+        ) { list, _ in
+            Task { @MainActor in
+                guard context.coordinator.isActive else { return }
+                guard let list, let html = PlaylistNavigationPolicy.playerHTML(playlistID: playlistID)
+                else { context.coordinator.failSetup(); return }
+                view.configuration.userContentController.add(list)
+                context.coordinator.startTimeout()
+                view.loadHTMLString(html, baseURL: PlaylistNavigationPolicy.documentOrigin)
+            }
+        }
         return view
     }
 
-    func updateNSView(_ view: WKWebView, context: Context) { }
+    func updateUIView(_ view: WKWebView, context: Context) {}
 
-    static func dismantleNSView(_ view: WKWebView, coordinator: Coordinator) {
-        view.stopLoading()
+    static func dismantleUIView(_ view: WKWebView, coordinator: Coordinator) {
         coordinator.stop()
+        view.stopLoading()
         view.configuration.userContentController.removeScriptMessageHandler(forName: "elliePlayer")
         view.navigationDelegate = nil
         view.uiDelegate = nil
         view.loadHTMLString("", baseURL: nil)
     }
 
-    private static func installContentRules(on view: WKWebView, playlistID: String, coordinator: Coordinator) {
-        WKContentRuleListStore.default().compileContentRuleList(
-            forIdentifier: "ElliePlaylistMediaAllowlistV1", encodedContentRuleList: PlaylistNavigationPolicy.contentRuleListJSON
-        ) { list, _ in
-            Task { @MainActor in
-                guard let list, coordinator.isActive else { coordinator.failSetup(); return }
-                view.configuration.userContentController.add(list)
-                coordinator.startTimeout()
-                guard let html = PlaylistNavigationPolicy.playerHTML(playlistID: playlistID) else {
-                    coordinator.failSetup()
-                    return
-                }
-                view.loadHTMLString(html, baseURL: PlaylistNavigationPolicy.documentOrigin)
-            }
-        }
-    }
-
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
-        private let model: PlaylistPlayerModel
+        private let model: IOSPlaylistPlayerModel
         private var timeoutTask: Task<Void, Never>?
         private(set) var isActive = true
-        init(model: PlaylistPlayerModel) { self.model = model }
 
+        init(model: IOSPlaylistPlayerModel) { self.model = model }
         func startTimeout() {
             timeoutTask?.cancel()
             timeoutTask = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(15))
-                guard !Task.isCancelled, let self, self.model.state == .loading else { return }
+                guard !Task.isCancelled, let self, self.isActive, self.model.state == .loading else { return }
                 self.model.state = .networkUnavailable
             }
         }
@@ -156,15 +154,13 @@ private struct PlaylistWebView: NSViewRepresentable {
                 model.state = .playerError(code)
             }
         }
-
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.shouldPerformDownload { decisionHandler(.cancel); return }
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            let allowed = PlaylistNavigationPolicy.allows(url, mainFrame: navigationAction.targetFrame?.isMainFrame == true)
-            decisionHandler(allowed ? .allow : .cancel)
+            decisionHandler(PlaylistNavigationPolicy.allows(url,
+                mainFrame: navigationAction.targetFrame?.isMainFrame == true) ? .allow : .cancel)
         }
-
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
             guard let url = navigationResponse.response.url,
@@ -172,12 +168,17 @@ private struct PlaylistWebView: NSViewRepresentable {
                   navigationResponse.canShowMIMEType else { decisionHandler(.cancel); return }
             decisionHandler(.allow)
         }
-
-        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { model.state = .networkUnavailable }
-        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { model.state = .networkUnavailable }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+            if isActive { model.state = .networkUnavailable }
+        }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            if isActive { model.state = .networkUnavailable }
+        }
         func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                      for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
-        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { timeoutTask?.cancel(); model.state = .playerStopped }
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            if isActive { timeoutTask?.cancel(); model.state = .playerStopped }
+        }
         func webView(_ webView: WKWebView, requestMediaCapturePermissionFor origin: WKSecurityOrigin,
                      initiatedByFrame frame: WKFrameInfo, type: WKMediaCaptureType,
                      decisionHandler: @escaping (WKPermissionDecision) -> Void) { decisionHandler(.deny) }

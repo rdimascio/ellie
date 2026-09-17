@@ -655,6 +655,41 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Kitchen Notes"].exists)
     }
 
+    func testPlaylistSetupPersistsAndKeepsPlaybackAttended() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let name = "Playlist \(UUID().uuidString.prefix(8))"
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(name, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: name, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Playlist"].tap()
+        let setup = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "playlist-setup-")).firstMatch
+        XCTAssertTrue(setup.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Play Playlist"].exists, "An unconfigured widget must not open media")
+        setup.tap()
+        let playlist = app.textFields["playlist-input"]
+        let identifier = "PLC77007E23FF423C6"
+        try typeTextReliably("https://www.youtube.com/playlist?list=\(identifier)",
+            into: playlist, in: app)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons["Play Playlist"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Close"].exists, "Saving must not start the player")
+
+        app.terminate()
+        app.launch()
+        openDashboard(named: name, in: app)
+        XCTAssertTrue(app.buttons["Play Playlist"].waitForExistence(timeout: 5))
+        returnToDashboardList(from: name, in: app)
+        openDashboard(named: name, in: app)
+        app.buttons["dashboard-options"].tap()
+        app.buttons["Delete Dashboard"].tap()
+        app.buttons["Delete dashboard"].tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
+    }
+
     private func openDashboard(named name: String, identifiedBy identifier: String? = nil, in app: XCUIApplication) {
         let link = identifier.map { app.buttons[$0] }
             ?? app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch

@@ -27,6 +27,36 @@ final class DashboardModelTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testIOSPlaylistEditPersistsCanonicalIDAndRejectsUnsafeInput() async throws {
+        let location = temporaryLocation()
+        let store = DashboardStore(fileURL: location)
+        store.addWidget(kind: .playlist)
+        let widget = try XCTUnwrap(store.selectedDashboard?.widgets.last)
+        let identifier = "PLC77007E23FF423C6"
+        let url = "https://www.youtube.com/playlist?list=\(identifier)"
+        let config = try DashboardModel.configAfterEditing(
+            widget, note: "", timeZone: "", playlist: url)
+        XCTAssertEqual(config, ["youtubePlaylistID": identifier])
+        store.updateWidget(id: widget.id, title: "Family videos", size: .wide, config: config)
+        XCTAssertNil(store.error)
+
+        let reloaded = DashboardStore(fileURL: location)
+        let saved = try XCTUnwrap(reloaded.selectedDashboard?.widgets.first { $0.id == widget.id })
+        XCTAssertEqual(saved.title, "Family videos")
+        XCTAssertEqual(saved.size, .wide)
+        XCTAssertEqual(saved.config, ["youtubePlaylistID": identifier])
+        XCTAssertEqual(YouTubePlaylist.publicURL(for: identifier)?.absoluteString, url)
+        XCTAssertNil(YouTubePlaylist.publicURL(for: "https://example.invalid/playlist"))
+        for unsafe in ["https://example.invalid/playlist?list=\(identifier)",
+                       "https://www.youtube.com:443/playlist?list=\(identifier)",
+                       "https://user@www.youtube.com/playlist?list=\(identifier)"] {
+            XCTAssertThrowsError(try DashboardModel.configAfterEditing(
+                saved, note: "", timeZone: "", playlist: unsafe))
+        }
+        XCTAssertEqual(try DashboardModel.decode(Data(contentsOf: location)), reloaded.state)
+    }
+
     func testIOSEditClearsAnExplicitlyBlankClockTimeZone() throws {
         let clock = DashboardWidget(
             id: "clock", type: .clock, title: "Clock", size: .small,
