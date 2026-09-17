@@ -38,6 +38,12 @@ const MAX_COMMAND_OUTPUT = 1024 * 1024;
 const MAX_NODE_BINARY = 128 * 1024 * 1024;
 const MAX_NODE_LICENSE = 2 * 1024 * 1024;
 const MAX_NODE_ARCHIVE = 64 * 1024 * 1024;
+export const MAXIMUM_PAYLOAD_FILES = 3_072;
+const MAXIMUM_PAYLOAD_ENTRIES = 4_096;
+const MAXIMUM_PAYLOAD_DEPTH = 16;
+const MAXIMUM_PAYLOAD_FILE_BYTES = 128 * 1024 * 1024;
+const MAXIMUM_PAYLOAD_BYTES = 512 * 1024 * 1024;
+const MAXIMUM_MANIFEST_BYTES = 4 * 1024 * 1024;
 const SOURCE_AREAS = ["apps/cli", "apps/node", "apps/server", "packages"];
 const RELEASE = /^node-(v24\.\d+\.\d+)-darwin-(arm64|x64)\.tar\.xz$/;
 const PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
@@ -765,20 +771,34 @@ export async function stageApplication(source, destination, metadata = {}) {
   return components;
 }
 
-async function entries(root, current = root) {
+async function entries(root, current = root, budget = { entries: 0, files: 0, bytes: 0 }) {
   const result = [];
   for (const name of (await readdir(current)).sort()) {
     const path = join(current, name);
     const relativePath = relative(root, path).split(sep).join("/");
     if (!safePayloadRelative(relativePath)) throw new Error("Unsafe payload path.");
+    budget.entries += 1;
+    if (
+      budget.entries > MAXIMUM_PAYLOAD_ENTRIES ||
+      relativePath.split("/").length > MAXIMUM_PAYLOAD_DEPTH
+    )
+      throw new Error("Payload inventory exceeds the native inspector entry or depth limit.");
     const info = await lstat(path);
     if (info.isSymbolicLink()) throw new Error("Payload contains a symbolic link.");
     if (info.isDirectory()) {
       if ((info.mode & 0o7777) !== 0o755) throw new Error("Payload directory has an unsafe mode.");
-      result.push(...(await entries(root, path)));
+      result.push(...(await entries(root, path, budget)));
     } else if (info.isFile() && info.nlink === 1) {
       const mode = info.mode & 0o7777;
       if (mode !== 0o644 && mode !== 0o755) throw new Error("Payload file has an unsafe mode.");
+      budget.files += 1;
+      budget.bytes += info.size;
+      if (
+        budget.files > MAXIMUM_PAYLOAD_FILES ||
+        info.size > MAXIMUM_PAYLOAD_FILE_BYTES ||
+        budget.bytes > MAXIMUM_PAYLOAD_BYTES
+      )
+        throw new Error("Payload inventory exceeds the native inspector file or byte limit.");
       result.push({
         path: relativePath,
         mode,
@@ -928,7 +948,11 @@ export async function verifyManifest(release) {
     (payloadInfo.mode & 0o7777) !== 0o755
   )
     throw new Error("Payload root must be a safe directory.");
-  const manifestBytes = await regularFile(join(release, "manifest.json"), 0o644, 4 * 1024 * 1024);
+  const manifestBytes = await regularFile(
+    join(release, "manifest.json"),
+    0o644,
+    MAXIMUM_MANIFEST_BYTES,
+  );
   const sourceBytes = await regularFile(join(release, "SOURCE.txt"), 0o644, 16 * 1024);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
   if (
@@ -949,12 +973,14 @@ export async function verifyManifest(release) {
           minimumOS: MINIMUM_MACOS,
         })),
       ) ||
-    !Array.isArray(manifest.files)
+    !Array.isArray(manifest.files) ||
+    manifest.files.length > MAXIMUM_PAYLOAD_FILES
   )
     throw new Error("Payload manifest has an unsupported shape.");
   if (sourceBytes.toString("utf8") !== sourceRecord(manifest))
     throw new Error("SOURCE.txt does not match the payload manifest.");
   const actual = await entries(payload);
+  if (actual.length === 0) throw new Error("Payload manifest has an unsupported shape.");
   if (JSON.stringify(actual) !== JSON.stringify(manifest.files))
     throw new Error("Payload manifest does not match its files.");
   return manifest;
@@ -1266,6 +1292,7 @@ export async function buildServicePayload(options) {
     if (!/platform MACOS/.test(installerBuild) || !minimumPattern.test(installerBuild))
       throw new Error("Native installer minimum macOS version does not match the payload.");
     const lockSha256 = await fileSha256(join(buildSource, "bun.lock"));
+    const payloadFiles = await entries(payload);
     const manifest = {
       version: 1,
       productVersion: "0.1.0",
@@ -1285,9 +1312,12 @@ export async function buildServicePayload(options) {
       },
       launchers,
       components,
-      files: await entries(payload),
+      files: payloadFiles,
     };
-    await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
+    const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
+    if (Buffer.byteLength(manifestBytes) > MAXIMUM_MANIFEST_BYTES)
+      throw new Error("Payload manifest exceeds the native inspector byte limit.");
+    await writeFile(join(release, "manifest.json"), manifestBytes, {
       mode: 0o644,
     });
     await writeFile(join(release, "SOURCE.txt"), sourceRecord(manifest), {

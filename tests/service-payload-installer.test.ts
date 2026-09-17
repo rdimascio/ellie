@@ -824,6 +824,35 @@ async function withFixture(
 
 const options = { skip: !mac };
 test(
+  "native inspector accepts its test file boundary and rejects one more declared file",
+  options,
+  async (t) => {
+    await withFixture(t, async ({ release, installer, id }) => {
+      const manifestPath = join(release, "manifest.json");
+      const initial = JSON.parse(await readFile(manifestPath, "utf8"));
+      const extra = join(release, "payload/lib/ellie/limit-fixture");
+      await mkdir(extra);
+      for (let index = initial.files.length; index < 100; index++)
+        await writeFile(join(extra, `f${String(index).padStart(3, "0")}`), "x", { mode: 0o644 });
+      await refreshManifestFiles(release);
+      const atBoundary = JSON.parse(await readFile(manifestPath, "utf8"));
+      assert.equal(atBoundary.files.length, 100);
+      const accepted = run(installer, ["inspect", release]);
+      assert.equal(accepted.error, undefined);
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.equal(accepted.stdout, `${id}\n`);
+
+      await writeFile(join(extra, "f101"), "x", { mode: 0o644 });
+      await refreshManifestFiles(release);
+      const overBoundary = JSON.parse(await readFile(manifestPath, "utf8"));
+      assert.equal(overBoundary.files.length, 101);
+      const rejected = run(installer, ["inspect", release]);
+      assert.equal(rejected.error, undefined);
+      assert.equal(rejected.status, 1);
+    });
+  },
+);
+test(
   "compiled installer templates copy into isolated mutable fixture roots",
   options,
   async (t) => {
@@ -1041,13 +1070,13 @@ test("installer stage diagnostics are compiled into test builds only", options, 
   for (const [architecture, payloadDigest, trustedDigest] of [
     [
       "arm64",
-      "8018ebd7d746542ef0a42cb70a0a0fad41f8218189c8b44592f0b23029571783",
-      "3497bc3e451d746bdbc0241fdef8cd93e262448811a96dacd41d8c6b3ddae064",
+      "0dff1b03a67c5213ead9dcc4b8c05a0327847f99ef6f7202ceb466401dcf3eae",
+      "8c87fc9f9b6dc2439e9fab1fea8dc951472155fb93a2c2db80a79000df402582",
     ],
     [
       "x64",
-      "1e70693bf0d7d7ec7193903287ed19e6dcbcd2499cf9fb57d85f8e3c2a9008dd",
-      "d4f01560545cdf7d2f41a008965a8e4c911d0bf67af2ee9ecf9f065171966d9c",
+      "41abb344d41dd8d08232dcee11810488171ffb8beac16c329b57e0c2ac4f17ef",
+      "d2ac2dcef599662315aac9a4ca9bddc1cdec44b98b4b67a3039a1de11ee1e753",
     ],
   ] as const) {
     const policy = run(policyTesting, [
@@ -1064,6 +1093,69 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     assert.equal((JSON.parse(json) as Record<string, unknown>).payloadPolicyDigest, payloadDigest);
     assert.equal(policyDigest, trustedDigest);
   }
+});
+
+test("production inspector accepts 3072 declared files and rejects 3073", options, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-production-file-limit-")));
+  let completed = false;
+  t.after(async () => {
+    if (completed) await removeOwned(root);
+  });
+  const installer = join(root, "installer");
+  const tiny = join(root, "tiny");
+  const coordinator = join(root, "coordinator-launcher");
+  const node = join(root, "node-launcher");
+  execFileSync(
+    "/usr/bin/xcrun",
+    [
+      "swiftc",
+      "-swift-version",
+      "5",
+      "-parse-as-library",
+      authorizationSource,
+      authenticatedPayloadSource,
+      activationPolicySource,
+      candidateVerifierSource,
+      captureSource,
+      selectionSource,
+      lifecycleSource,
+      migrationSource,
+      source,
+      "-o",
+      installer,
+    ],
+    boundedCommand,
+  );
+  execFileSync(
+    "/usr/bin/codesign",
+    ["--force", "--sign", "-", "--identifier", "org.ellie.installer", installer],
+    boundedCommand,
+  );
+  await copyTemplateArtifact("tiny", tiny);
+  await copyTemplateArtifact("coordinator-launcher", coordinator);
+  await copyTemplateArtifact("node-launcher", node);
+  const { release, id } = await fixture(root, installer, tiny, { coordinator, node });
+  const extra = join(release, "payload/lib/ellie/limit-fixture");
+  await mkdir(extra);
+  const original = JSON.parse(await readFile(join(release, "manifest.json"), "utf8"));
+  for (let index = original.files.length; index < 3_072; index++)
+    await writeFile(join(extra, `f${String(index).padStart(4, "0")}`), "x", { mode: 0o644 });
+  await refreshManifestFiles(release);
+  const atBoundary = JSON.parse(await readFile(join(release, "manifest.json"), "utf8"));
+  assert.equal(atBoundary.files.length, 3_072);
+  const accepted = run(installer, ["inspect", release]);
+  assert.equal(accepted.error, undefined);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, `${id}\n`);
+
+  await writeFile(join(extra, "f3073"), "x", { mode: 0o644 });
+  await refreshManifestFiles(release);
+  const overBoundary = JSON.parse(await readFile(join(release, "manifest.json"), "utf8"));
+  assert.equal(overBoundary.files.length, 3_073);
+  const rejected = run(installer, ["inspect", release]);
+  assert.equal(rejected.error, undefined);
+  assert.equal(rejected.status, 1);
+  completed = true;
 });
 
 test(

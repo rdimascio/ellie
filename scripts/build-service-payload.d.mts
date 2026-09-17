@@ -15,6 +15,8 @@ export interface DependencyComponent {
   files: string[];
 }
 
+export const MAXIMUM_PAYLOAD_FILES: 3072;
+
 export function extractVerifiedNode(options: {
   archive: string;
   expectedSha256: string;

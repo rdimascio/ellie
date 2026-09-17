@@ -24,6 +24,13 @@ payload manifest, round-trips manifest verification, and creates a ZIP plus `SHA
 runtime caches belong outside the repository and remain ignored. Populate and review the Bun cache
 as a separate release-input step; a missing cached package fails the build.
 
+The development payload has a finite inventory budget shared by the builder, native inspector,
+and bundled launchers: at most 3,072 files and 4,096 total file/directory entries, depth 16,
+128 MiB per file, 512 MiB of files in total, and a 4 MiB manifest. The builder rejects an
+over-budget payload before publication. This bound accommodates the current pinned AI SDK while
+retaining the other native inspection checks. Changing it also changes the authenticated v2
+inspection-policy digest; it does not make a development payload eligible for production activation.
+
 This builder targets only its current Mac architecture. It verifies both the archive name and the
 extracted runtime's reported architecture; cross-building the native helper is outside this slice.
 The helper explicitly targets macOS 14.0, and the builder checks its Mach-O architecture and build
@@ -52,6 +59,10 @@ immediately seals the renamed root to 0555 and syncs the root and releases direc
 requires a 0555 release root, so an incomplete 0700 publication cannot run. The published name is
 derived from the product version, full source revision, and architecture. Staging requires no
 installed Node, Bun, checkout, or build tools.
+
+An older installed launcher retains its compiled file limit. A stopped upgrade must select the new
+release through the supported installer transaction so the selected application and launcher come
+from that release; pointing an old launcher directly at a larger new payload is unsupported.
 
 Staging does not select the release: it does not create or update a receipt, application,
 LaunchAgent, service state, private Ellie identity, or Keychain item. Installer-controlled ad-hoc
