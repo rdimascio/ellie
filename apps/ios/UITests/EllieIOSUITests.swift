@@ -732,8 +732,11 @@ final class EllieIOSUITests: XCTestCase {
             predicate: NSPredicate(format: "isEnabled == true"), object: down)], timeout: 15),
             .completed)
         down.tap()
-        let cancel = app.buttons["Stop waiting"]
-        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        let cancel = app.buttons["browser-stop-waiting"]
+        guard cancel.waitForExistence(timeout: 5) else {
+            XCTFail("The visible in-flight browser cancel button was not accessible")
+            return
+        }
         cancel.tap()
         XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
             .waitForExistence(timeout: 15))

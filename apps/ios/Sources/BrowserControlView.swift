@@ -109,7 +109,10 @@ struct BrowserControlView: View {
         }
       }
       if browser.isBusy {
-        Section { Button("Stop waiting", role: .cancel) { browser.cancel() } }
+        Section {
+          Button("Stop waiting", role: .cancel) { browser.cancel() }
+            .accessibilityIdentifier("browser-stop-waiting")
+        }
       }
     }
     .ellieScreen()
