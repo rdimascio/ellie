@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct WatchMediaView: View {
+  @Environment(\.scenePhase) private var scenePhase
   @ObservedObject var media: WatchMediaWatchStore
 
   var body: some View {
@@ -25,6 +26,14 @@ struct WatchMediaView: View {
         .labelStyle(.iconOnly)
       }
       .padding()
+    }
+    .onAppear {
+      if scenePhase == .active { media.activate() }
+      else { media.suspend() }
+    }
+    .onChange(of: scenePhase) { _, phase in
+      if phase == .active { media.activate() }
+      else { media.suspend() }
     }
   }
 }

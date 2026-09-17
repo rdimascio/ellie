@@ -10,7 +10,7 @@ final class WatchMediaPhoneController {
   private var targetID: String?
   private var epoch: String?
   private var browser: BrowserPhoneControlStore?
-  private var seenRequests = Set<String>()
+  private var seenRequests = [String: Int64]()
   private var requestInFlight = false
   private var activation = 0
 
@@ -58,12 +58,7 @@ final class WatchMediaPhoneController {
   }
 
   func retainOnly(_ credential: NativeEnrollmentCredential?) {
-    guard let credential, credential.client.id == self.credential?.client.id,
-      credential.origin == self.credential?.origin,
-      credential.certificateSha256 == self.credential?.certificateSha256,
-      credential.token == self.credential?.token,
-      credential.client.grants == self.credential?.client.grants
-    else { disable(); return }
+    guard credential == self.credential else { disable(); return }
   }
 
   func handle(
@@ -73,11 +68,16 @@ final class WatchMediaPhoneController {
     func reply(_ state: WatchMediaState) -> WatchMediaReply {
       WatchMediaReply(id: request.id, state: state, observation: nil)
     }
-    guard request.expiresAt > now(), reachable(), !requestInFlight,
-      seenRequests.count < 128, seenRequests.insert(request.id).inserted,
+    let receivedAt = now()
+    // Expired packets cannot run, so their IDs need no longer occupy the bounded replay cache.
+    // Never evict a still-live accepted ID merely to make room for another request.
+    seenRequests = seenRequests.filter { $0.value > receivedAt }
+    guard request.expiresAt > receivedAt, reachable(), !requestInFlight,
+      seenRequests.count < 128, seenRequests[request.id] == nil,
       let credential, let targetID, let epoch, let browser,
       credential.client.expiresAt > now()
     else { return reply(.blocked) }
+    seenRequests[request.id] = request.expiresAt
     let currentActivation = activation
     requestInFlight = true
     defer { requestInFlight = false }

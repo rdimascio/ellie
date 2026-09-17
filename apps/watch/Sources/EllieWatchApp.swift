@@ -8,7 +8,6 @@ struct EllieWatchApp: App {
   var body: some Scene {
     WindowGroup {
       WatchMediaView(media: media)
-        .onAppear { media.activate() }
     }
   }
 }

@@ -46,7 +46,8 @@ final class WatchMediaPhoneTests: XCTestCase {
         BrowserPhoneControlStore(credential: credential, transport: browser,
           uncertainty: WatchTestUncertainty())
       })
-    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let authorization = credential()
+    XCTAssertTrue(controller.enable(credential: authorization, node: node))
     let read = WatchMediaRequest.make(.read)
     let observed = await controller.handle(read)
     XCTAssertEqual(observed.state, .observed)
@@ -68,7 +69,7 @@ final class WatchMediaPhoneTests: XCTestCase {
     let firstCount = await browser.playCount
     XCTAssertEqual(firstCount, 1)
     controller.disable()
-    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    XCTAssertTrue(controller.enable(credential: authorization, node: node))
     let afterReenable = await controller.handle(stale)
     XCTAssertEqual(afterReenable.state, .stale,
                    "A previous phone activation cannot regain authority")
@@ -87,7 +88,8 @@ final class WatchMediaPhoneTests: XCTestCase {
         BrowserPhoneControlStore(credential: credential, transport: browser,
           uncertainty: WatchTestUncertainty())
       })
-    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let authorization = credential()
+    XCTAssertTrue(controller.enable(credential: authorization, node: node))
     let read = WatchMediaRequest.make(.read)
     let observed = await controller.handle(read)
     guard let page = observed.observation else { return XCTFail("Missing observation") }
@@ -99,13 +101,51 @@ final class WatchMediaPhoneTests: XCTestCase {
     XCTAssertEqual(blocked.state, .blocked)
     let count = await browser.playCount
     XCTAssertEqual(count, 0)
+    let changedClient = NativeClient(id: authorization.client.id, role: authorization.client.role,
+      label: authorization.client.label,
+      grants: [NativeGrant(target: "mac", capabilities: ["browser.read"])],
+      createdAt: authorization.client.createdAt, expiresAt: authorization.client.expiresAt)
+    controller.retainOnly(NativeEnrollmentCredential(origin: authorization.origin,
+      certificateSha256: authorization.certificateSha256, client: changedClient,
+      token: authorization.token))
+    XCTAssertNil(controller.enabledTargetID)
+    XCTAssertTrue(controller.enable(credential: authorization, node: node))
     let unavailableNode = PhoneControlNode(id: "other", label: "Other", online: false,
       capabilities: ["browser.read", "browser.control"])
-    XCTAssertFalse(controller.enable(credential: credential(), node: unavailableNode))
+    XCTAssertFalse(controller.enable(credential: authorization, node: unavailableNode))
     XCTAssertNil(controller.enabledTargetID)
     controller.retainOnly(nil)
     let afterRevocation = await controller.handle(WatchMediaRequest.make(.read))
     XCTAssertEqual(afterRevocation.state, .blocked)
+  }
+
+  @MainActor
+  func testReplayCacheRetainsLiveIDsAndPrunesOnlyExpiredRequests() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let transport = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(inventory: WatchTestInventory(node: node),
+      browserTransport: transport, makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: transport,
+          uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let clock = WatchTestClock()
+    let first = WatchMediaRequest.make(.read, now: clock.value)
+    let firstResult = await controller.handle(first, now: { clock.value })
+    XCTAssertEqual(firstResult.state, .observed)
+    let duplicate = await controller.handle(first, now: { clock.value })
+    XCTAssertEqual(duplicate.state, .blocked)
+
+    // More than the cache bound over nonoverlapping ten-second lifetimes stays usable.
+    for _ in 0..<129 {
+      clock.value += WatchMediaRequest.lifetimeMilliseconds + 1
+      let request = WatchMediaRequest.make(.read, now: clock.value)
+      let reply = await controller.handle(request, now: { clock.value })
+      XCTAssertEqual(reply.state, .observed)
+    }
+    let expiredReplay = await controller.handle(first, now: { clock.value })
+    XCTAssertEqual(expiredReplay.state, .blocked)
   }
 
   private func credential() -> NativeEnrollmentCredential {
@@ -124,6 +164,11 @@ final class WatchMediaPhoneTests: XCTestCase {
     }
     XCTFail("Expected browser dispatch did not settle")
   }
+}
+
+@MainActor
+private final class WatchTestClock {
+  var value: Int64 = 1_000_000
 }
 
 private actor WatchTestInventory: PhoneControlTransporting {
