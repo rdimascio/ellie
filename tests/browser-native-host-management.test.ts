@@ -409,6 +409,9 @@ test("the actual staged application imports and invokes native-host preflight", 
   await mkdir(source, { mode: 0o700 });
   for (const name of ["apps", "packages", "package.json", "bun.lock", "LICENSE"])
     await cp(join(repository, name), join(source, name), { recursive: true });
+  const license = "scripts/licenses/provider-utils-5.0.43.LICENSE";
+  await mkdir(join(source, "scripts/licenses"), { recursive: true });
+  await cp(join(repository, license), join(source, license));
   await materializeProductionDependencies(repository, source);
   await mkdir(join(source, "apps/command-center/dist"), { recursive: true });
   await writeFile(join(source, "apps/command-center/dist/index.html"), "fixture\n");
