@@ -99,6 +99,7 @@ struct SpeechTurnView: View {
       }
       browserContinuation
     }
+    .ellieScreen()
     .navigationTitle("Voice command")
     .onDisappear {
       speech.cancelAndDiscard()

@@ -15,6 +15,7 @@ const environment = {
 };
 const derivedData = mkdtempSync(`${tmpdir()}/ellie-ios-derived-`);
 const resultBundle = resolve(root, "test-results/native-ios.xcresult");
+const keepResultBundle = process.env.ELLIE_IOS_KEEP_RESULT === "1";
 const diagnosticFile = resolve(root, "test-results/native-ios-runner-diagnostic.txt");
 let simulatorID,
   activeChild,
@@ -357,8 +358,12 @@ try {
 } finally {
   await cleanup();
   if (succeeded && cleanupCertain) {
-    rmSync(resultBundle, { recursive: true, force: true });
-    diagnostic("passed", "removed-after-success");
+    if (keepResultBundle) {
+      diagnostic("passed", "retained-by-request");
+    } else {
+      rmSync(resultBundle, { recursive: true, force: true });
+      diagnostic("passed", "removed-after-success");
+    }
   } else {
     let result = "not-created";
     try {
