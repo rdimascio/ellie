@@ -3,6 +3,8 @@ import SwiftUI
 @main
 @MainActor
 struct EllieIOSApp: App {
+    init() { WatchMediaPhoneBridge.shared.activate() }
+
     var body: some Scene {
         WindowGroup {
             #if DEBUG
@@ -62,5 +64,12 @@ private struct EllieIOSNormalRoot: View {
         IOSDashboardList(store: store, enrollment: enrollment)
             .tint(ElliePalette.accent)
             .preferredColorScheme(.dark)
+            .onChange(of: enrollment.phase) { _, phase in
+                if case .enrolled(let credential) = phase {
+                    WatchMediaPhoneBridge.shared.retainOnly(credential)
+                } else {
+                    WatchMediaPhoneBridge.shared.disable()
+                }
+            }
     }
 }
