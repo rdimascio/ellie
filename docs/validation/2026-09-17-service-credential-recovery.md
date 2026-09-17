@@ -12,6 +12,12 @@ On the physical execution Mac, selection and launchd status passed, but startup 
 
 These observations do not establish a completed two-Mac upgrade, unchanged macOS consent across updates, sleep/wake recovery or an accepted daily-use release. A running launchd process is not sufficient evidence that the authenticated endpoint or node registration is ready.
 
+## Helper cleanup follow-up
+
+The reviewed `b7880e2` follow-up preserves the 60-second credential deadline and caps helper output at 65,536 bytes. A timeout or output failure now stops the retained child, escalates from TERM to KILL after 250 milliseconds if needed, and waits for its close event. Failure to confirm closure within three seconds produces the fixed `keychain_cleanup_uncertain` event. Late output cannot turn an expired request into a success. Credentials remain on stdin and in memory; the change neither reads another account nor alters permissions.
+
+The focused config and service tests passed 19 cases. Timeout and late-output checks use a real owned synthetic Node helper with an advanced test clock; the missing-close case uses an explicit fake child. These checks do not access the real Keychain. This cleanup change does not modify launchd's restart policy: an operator must still stop a service that repeatedly fails credential access before an attended recovery attempt.
+
 ## Automated browser evidence
 
 An isolated loopback test used the exact staged package's coordinator, client, node and browser-operation selector with a synthetic disconnected browser bridge. One explicit status request and one explicit refresh returned structured `unavailable` results. Both durable jobs ended as failed, without accessibility dispatch, node reconnection or replay. Owned fixture processes and state were closed and removed.
