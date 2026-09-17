@@ -320,6 +320,7 @@ export type BrowserView = {
     currentTimeSeconds?: number;
     horizontalScrollAvailable?: boolean;
     rows?: { id: string; label: string }[];
+    searchControl?: { id: string; label: string };
   };
 };
 export type BrowserExecutionSource = "webmcp" | "accessibility" | "companion";
@@ -479,6 +480,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
       const hasTime = Object.hasOwn(observed, "currentTimeSeconds");
       const hasRow = Object.hasOwn(observed, "horizontalScrollAvailable");
       const hasRows = Object.hasOwn(observed, "rows");
+      const hasSearchControl = Object.hasOwn(observed, "searchControl");
       exactObject(observed, [
         "provider",
         "page",
@@ -486,13 +488,14 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         ...(hasTime ? ["currentTimeSeconds"] : []),
         ...(hasRow ? ["horizontalScrollAvailable"] : []),
         ...(hasRows ? ["rows"] : []),
+        ...(hasSearchControl ? ["searchControl"] : []),
       ]);
       if (
         !["youtube", "netflix"].includes(observed.provider as string) ||
         !(
           observed.provider === "youtube"
             ? ["home", "results", "watch", "login", "unsupported"]
-            : ["browse", "watch", "login", "unsupported"]
+            : ["browse", "results", "watch", "login", "unsupported"]
         ).includes(observed.page as string) ||
         !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
         (observed.page !== "watch" && observed.playback !== "unavailable") ||
@@ -524,6 +527,28 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
             }) ||
             new Set(observed.rows.map((row: { id: string }) => row.id)).size !==
               observed.rows.length)) ||
+        (hasSearchControl &&
+          (() => {
+            if (
+              observed.provider !== "netflix" ||
+              (observed.page !== "browse" && observed.page !== "results")
+            )
+              return true;
+            try {
+              const control = exactObject(observed.searchControl, ["id", "label"]);
+              browserIdentifier(control.id);
+              if (
+                !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                  control.id as string,
+                )
+              )
+                return true;
+              boundedText(control.label, 100);
+              return false;
+            } catch {
+              return true;
+            }
+          })()) ||
         (hasTime &&
           (observed.page !== "watch" ||
             !["playing", "paused"].includes(observed.playback as string) ||

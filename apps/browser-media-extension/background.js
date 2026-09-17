@@ -6,6 +6,7 @@ const mutationTypes = new Set([
   "scrollViewport",
   "scrollRow",
   "scrollSelectedRow",
+  "searchObserved",
   "open",
   "play",
   "pause",
@@ -492,9 +493,15 @@ async function executeCompanion(request, controller) {
     typeof request.documentId !== "string" ||
     !request.command ||
     typeof request.command !== "object" ||
-    !["inspect", "scrollViewport", "scrollSelectedRow", "open", "play", "pause"].includes(
-      request.command.type,
-    )
+    ![
+      "inspect",
+      "scrollViewport",
+      "scrollSelectedRow",
+      "searchObserved",
+      "open",
+      "play",
+      "pause",
+    ].includes(request.command.type)
   )
     throw new Error("invalid_arguments");
   const binding = liveBinding();

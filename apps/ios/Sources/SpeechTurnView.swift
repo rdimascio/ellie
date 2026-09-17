@@ -71,6 +71,12 @@ struct SpeechTurnView: View {
             Text("This selects \(app.label). Use the separate Open button to send the command.")
               .font(.footnote).foregroundStyle(.secondary)
           } else if let intent = BrowserVoiceIntentParser.parse(speech.transcript) {
+            if case .search = intent, let site = browserStore.page?.site,
+              site.provider == .netflix, let control = site.searchControl {
+              Text("Run will use the observed \(control.label) field on \(controlStore.selectedNode?.label ?? "the selected Mac"). Read again to observe any result.")
+                .font(.footnote)
+                .accessibilityIdentifier("speech-netflix-search-review")
+            }
             if case .scroll(let direction) = intent,
               direction == .left || direction == .right,
               let site = browserStore.page?.site, site.provider == .netflix,

@@ -535,6 +535,48 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(count.label, "Fixture mutations: 1")
     }
 
+    func testReviewedNetflixVoiceSearchNeedsObservedFieldThenFreshResultsRead() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-complete-actions",
+            "--ellie-ui-browser-netflix-voice-search"
+        ]
+        app.launch()
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        XCTAssertEqual(app.textViews["speech-transcript"].value as? String,
+                       "Search for public video")
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        app.buttons["speech-browser-read"].tap()
+        let review = app.staticTexts["speech-netflix-search-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertTrue(review.label.contains("Search field on Fixture Mac A"))
+        XCTAssertTrue(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        run.tap()
+        waitForFixtureMutations(1, in: app)
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 5))
+        updatedRead.tap()
+        let continueButton = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 5))
+        continueButton.tap()
+        XCTAssertTrue(app.staticTexts["browser-observed-site"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["browser-observed-site"].label,
+                       "Observed Netflix search results")
+        let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
+        result.tap()
+        waitForFixtureMutations(2, in: app)
+    }
+
     func testReviewedVoiceRequiresFreshPageBetweenSearchSelectionAndPlayback() {
         let app = XCUIApplication()
         app.launchArguments = [

@@ -1432,6 +1432,309 @@ test(
 );
 
 test(
+  "Netflix observed search pins one accessible field and sends escaped text once",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ companionOnly: true, stableNativePort: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(`http://127.0.0.1:${port}/browse`);
+      await launched.page.setContent(`<label for="site-search">Search</label>
+        <input id="site-search" type="search" style="width:240px;height:40px">
+        <p id="observed-result"></p>`);
+      await launched.page.evaluate(() => {
+        globalThis.__searchEvents = 0;
+        document.querySelector("input")!.addEventListener("input", () => {
+          globalThis.__searchEvents += 1;
+          document.querySelector("#observed-result")!.textContent = (
+            document.querySelector("input") as HTMLInputElement
+          ).value;
+        });
+      });
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const native = (request: Record<string, unknown>) =>
+        launched.worker.evaluate((value) => globalThis.__ellieTestWebMCP.request(value), request);
+      const read = async () => {
+        const selected = await launched.worker.evaluate(() =>
+          globalThis.__ellieTestWebMCP.request({
+            protocol: "ellie.browser-webmcp.v1",
+            id: crypto.randomUUID(),
+            type: "binding.refresh",
+          }),
+        );
+        const observed = await native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: selected.bindingId,
+          documentId: selected.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        });
+        return { selected, observed };
+      };
+      const attempt = async (selected: any, observed: any, query: string) =>
+        launched.worker.evaluate(
+          async ({ bindingId, documentId, snapshotId, controlId, query }) => {
+            try {
+              return await globalThis.__ellieTestWebMCP.request({
+                protocol: "ellie.browser-webmcp.v1",
+                id: crypto.randomUUID(),
+                type: "media.execute",
+                bindingId,
+                documentId,
+                command: {
+                  type: "searchObserved",
+                  actionId: crypto.randomUUID(),
+                  snapshotId,
+                  controlId,
+                  query,
+                },
+              });
+            } catch (error) {
+              return error instanceof Error ? error.message : "failed";
+            }
+          },
+          {
+            bindingId: selected.bindingId,
+            documentId: selected.documentId,
+            snapshotId: observed.value.snapshotId,
+            controlId: observed.value.site.searchControl.id,
+            query,
+          },
+        );
+      let { selected, observed } = await read();
+      assert.equal(observed.value.site.searchControl.label, "Search");
+      await launched.page.locator("label").evaluate((label) => {
+        label.textContent = "Search profiles";
+      });
+      assert.equal(await attempt(selected, observed, "title"), "unknown");
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 0);
+      await launched.page.locator("label").evaluate((label) => {
+        label.textContent = "Search";
+      });
+
+      ({ selected, observed } = await read());
+      await launched.page.locator("input").evaluate((input) => {
+        input.type = "text";
+        input.setAttribute("role", "searchbox");
+      });
+      assert.equal(await attempt(selected, observed, "title"), "unknown");
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 0);
+      await launched.page.locator("input").evaluate((input) => {
+        input.type = "search";
+        input.removeAttribute("role");
+      });
+
+      ({ selected, observed } = await read());
+      await launched.page.locator("input").evaluate((input) => {
+        input.value = "person typed meanwhile";
+      });
+      assert.equal(await attempt(selected, observed, "title"), "unknown");
+      assert.equal(await launched.page.locator("input").inputValue(), "person typed meanwhile");
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 0);
+      await launched.page.locator("input").evaluate((input) => {
+        input.value = "";
+      });
+
+      ({ selected, observed } = await read());
+      await launched.page.locator("input").evaluate((input) => {
+        const replacement = input.cloneNode(true);
+        input.replaceWith(replacement);
+      });
+      assert.equal(await attempt(selected, observed, "title"), "unknown");
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 0);
+      await launched.page.evaluate(() => {
+        document.querySelector("input")!.addEventListener("input", () => {
+          globalThis.__searchEvents += 1;
+          document.querySelector("#observed-result")!.textContent = (
+            document.querySelector("input") as HTMLInputElement
+          ).value;
+        });
+      });
+
+      ({ selected, observed } = await read());
+      await launched.page.evaluate(() => {
+        const extra = document.createElement("input");
+        extra.type = "search";
+        extra.setAttribute("aria-label", "Search");
+        extra.style.cssText = "width:240px;height:40px";
+        document.body.append(extra);
+      });
+      assert.equal(await attempt(selected, observed, "title"), "unknown");
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 0);
+      await launched.page
+        .locator("input")
+        .last()
+        .evaluate((input) => input.remove());
+
+      ({ selected, observed } = await read());
+      await launched.page.evaluate(() => {
+        document.querySelector("input")!.addEventListener("input", () => {
+          const query = (document.querySelector("input") as HTMLInputElement).value;
+          history.pushState({}, "", `/search?q=${encodeURIComponent(query)}`);
+          const title = document.createElement("a");
+          title.href = "/watch/123";
+          title.textContent = "Synthetic search result";
+          title.setAttribute("aria-label", "Synthetic search result");
+          title.style.cssText = "display:block;width:240px;height:40px";
+          document.body.append(title);
+        });
+      });
+      const query = `Space " & < 🌙`;
+      const result = await attempt(selected, observed, query);
+      assert.equal(
+        result,
+        "unknown",
+        "a search-triggered SPA navigation has an unverified action outcome",
+      );
+      assert.equal(await launched.page.locator("input").inputValue(), query);
+      assert.equal(await launched.page.locator("#observed-result").textContent(), query);
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 1);
+      assert.equal(await attempt(selected, observed, query), "unbound");
+      assert.equal(await launched.page.evaluate(() => globalThis.__searchEvents), 1);
+      const results = await read();
+      assert.equal(results.observed.value.site.page, "results");
+      assert.equal(results.observed.value.candidates.length, 1);
+      assert.equal(results.observed.value.candidates[0].title, "Synthetic search result");
+      const selectRequest = {
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: results.selected.bindingId,
+        documentId: results.selected.documentId,
+        command: {
+          type: "open",
+          actionId: crypto.randomUUID(),
+          snapshotId: results.observed.value.snapshotId,
+          candidateId: results.observed.value.candidates[0].id,
+        },
+      };
+      const selectedResult = await launched.worker.evaluate(async (request) => {
+        try {
+          return await globalThis.__ellieTestWebMCP.request(request);
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
+      }, selectRequest);
+      assert.equal(
+        selectedResult,
+        "unknown",
+        "selection navigation is not a verified command reply",
+      );
+      await launched.page.waitForURL(/\/watch\/123$/, { timeout: 3_000 });
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "cancelled Netflix search arming leaves the observed field unchanged",
+  { timeout: 20_000 },
+  async () => {
+    const owned = await fixture({
+      companionOnly: true,
+      stableNativePort: true,
+      companionArming: true,
+    });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(`http://127.0.0.1:${port}/browse`);
+      await launched.page.setContent(
+        '<label for="search">Search</label><input id="search" type="search" style="width:240px;height:40px">',
+      );
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const selected = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      const observed = await launched.worker.evaluate(
+        (binding) =>
+          globalThis.__ellieTestWebMCP.request({
+            protocol: "ellie.browser-webmcp.v1",
+            id: crypto.randomUUID(),
+            type: "media.execute",
+            bindingId: binding.bindingId,
+            documentId: binding.documentId,
+            command: { type: "inspect", actionId: crypto.randomUUID() },
+          }),
+        selected,
+      );
+      assert.equal(observed.value.site.searchControl.label, "Search");
+      await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.arm());
+      const pending = launched.worker.evaluate(
+        async ({ bindingId, documentId, snapshotId, controlId }) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request({
+              protocol: "ellie.browser-webmcp.v1",
+              id: crypto.randomUUID(),
+              type: "media.execute",
+              bindingId,
+              documentId,
+              command: {
+                type: "searchObserved",
+                actionId: crypto.randomUUID(),
+                snapshotId,
+                controlId,
+                query: "cancelled query",
+              },
+            });
+            return "effect";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          bindingId: selected.bindingId,
+          documentId: selected.documentId,
+          snapshotId: observed.value.snapshotId,
+          controlId: observed.value.site.searchControl.id,
+        },
+      );
+      try {
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.entered());
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.abortActive());
+      } finally {
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.release());
+      }
+      assert.equal(await pending, "cancelled");
+      assert.equal(await launched.page.locator("input").inputValue(), "");
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "Netflix row uniqueness scans beyond the 40 returned titles",
   { timeout: 20_000 },
   async () => {

@@ -17,7 +17,9 @@ struct EllieIOSApp: App {
                     completeActions: ProcessInfo.processInfo.arguments.contains(
                         "--ellie-ui-browser-complete-actions"),
                     netflixRows: ProcessInfo.processInfo.arguments.contains(
-                        "--ellie-ui-browser-netflix-voice-rows"))
+                        "--ellie-ui-browser-netflix-voice-rows"),
+                    netflixSearch: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-netflix-voice-search"))
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-native-scanner-sheet-fixture") {
                 NativeScannerSheetUITestFixtureView()

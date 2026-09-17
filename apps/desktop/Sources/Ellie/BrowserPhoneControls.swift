@@ -655,8 +655,9 @@ final class BrowserPhoneControlStore: ObservableObject {
     guard site.page != .login, site.page != .unsupported else { return false }
     if site.provider == .netflix {
       switch intent {
-      case .search: return false
-      case .openResult: return site.page == .browse
+      case .search:
+        return (site.page == .browse || site.page == .results) && site.searchControl != nil
+      case .openResult: return site.page == .browse || site.page == .results
       case .scroll(let direction) where direction == .left || direction == .right:
         return site.page == .browse && site.rows?.isEmpty == false
       default: break
