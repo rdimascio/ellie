@@ -314,7 +314,7 @@ export type BrowserView = {
   summary?: string;
   items: { id: string; label: string; state?: string }[];
   site?: {
-    provider: "youtube" | "netflix";
+    provider: "youtube" | "netflix" | "youtube_tv";
     page: "home" | "results" | "browse" | "watch" | "login" | "unsupported";
     playback: "playing" | "paused" | "unavailable" | "ambiguous";
     currentTimeSeconds?: number;
@@ -491,11 +491,13 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         ...(hasSearchControl ? ["searchControl"] : []),
       ]);
       if (
-        !["youtube", "netflix"].includes(observed.provider as string) ||
+        !["youtube", "netflix", "youtube_tv"].includes(observed.provider as string) ||
         !(
           observed.provider === "youtube"
             ? ["home", "results", "watch", "login", "unsupported"]
-            : ["browse", "results", "watch", "login", "unsupported"]
+            : observed.provider === "netflix"
+              ? ["browse", "results", "watch", "login", "unsupported"]
+              : ["browse", "watch", "login", "unsupported"]
         ).includes(observed.page as string) ||
         !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
         (observed.page !== "watch" && observed.playback !== "unavailable") ||
@@ -560,7 +562,11 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         throw new Error("Invalid browser operation result.");
       site = observed as BrowserView["site"];
     }
-    if (browser.source === "companion" && site?.provider !== "netflix")
+    if (
+      browser.source === "companion" &&
+      site?.provider !== "netflix" &&
+      site?.provider !== "youtube_tv"
+    )
       throw new Error("Invalid browser operation result.");
     return {
       ok: body.ok,

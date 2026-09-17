@@ -125,7 +125,9 @@ export class BrowserWebMCPOperations {
       throw new Error();
     if (url.origin !== origin.origin || url.username || url.password) throw new Error();
     if (
-      (availability === "companion" && origin.origin !== "https://www.netflix.com") ||
+      (availability === "companion" &&
+        origin.origin !== "https://www.netflix.com" &&
+        origin.origin !== "https://tv.youtube.com") ||
       (availability === "accessibility" && origin.origin !== "https://www.youtube.com")
     )
       throw new Error();

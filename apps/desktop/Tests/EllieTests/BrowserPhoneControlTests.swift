@@ -117,6 +117,25 @@ final class BrowserPhoneControlTests: XCTestCase {
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
+  func testYouTubeTVCompanionObservationKeepsSearchAndRowsClosed() throws {
+    let revision = String(repeating: "d", count: 64)
+    func read(_ site: String) -> Data {
+      Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    }
+    guard case .page(let page) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"youtube_tv","page":"watch","playback":"paused"}"#), nodeID: "mac")
+    else { return XCTFail("Expected selected YouTube TV player") }
+    XCTAssertEqual(page.site?.provider, .youtubeTV)
+    XCTAssertEqual(page.site?.page, .watch)
+    for invalid in [
+      #"{"provider":"youtube_tv","page":"results","playback":"unavailable"}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"playing"}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","rows":[]}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
+    ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
+  }
+
   @MainActor
   func testNetflixObservedControlsFailClosedBeforeDispatch() async {
     let node = PhoneControlNode(
@@ -142,6 +161,14 @@ final class BrowserPhoneControlTests: XCTestCase {
       (BrowserPhoneSite(provider: .netflix, page: .login, playback: .unavailable,
         currentTimeSeconds: nil), .openResult(index: 1), false),
       (BrowserPhoneSite(provider: .netflix, page: .watch, playback: .paused,
+        currentTimeSeconds: 1), .play, true),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .search(query: "news"), false),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.right), false),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.down), true),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .watch, playback: .paused,
         currentTimeSeconds: 1), .play, true),
     ]
     for (site, intent, allowed) in cases {

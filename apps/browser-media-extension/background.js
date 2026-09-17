@@ -1,6 +1,10 @@
-const productionOrigins = new Set(["https://www.netflix.com", "https://www.youtube.com"]);
+const productionOrigins = new Set([
+  "https://www.netflix.com",
+  "https://www.youtube.com",
+  "https://tv.youtube.com",
+]);
 const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);
-const companionBindingOrigins = new Set(["https://www.netflix.com"]);
+const companionBindingOrigins = new Set(["https://www.netflix.com", "https://tv.youtube.com"]);
 const mutationLedgers = new Map();
 const mutationTypes = new Set([
   "scrollViewport",
@@ -81,7 +85,8 @@ function nativeHostMissing(message) {
 
 function allowedOrigin(url) {
   try {
-    return productionOrigins.has(new URL(url).origin);
+    const parsed = new URL(url);
+    return !parsed.username && !parsed.password && productionOrigins.has(parsed.origin);
   } catch {
     return false;
   }
@@ -99,6 +104,10 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
   }
   const before = await chrome.tabs.get(tabId);
   if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
+  const controllerFile =
+    new URL(before.url).origin === "https://tv.youtube.com"
+      ? "youtube-tv-controller.js"
+      : "media-controller.js";
   if (
     expectedBinding &&
     (before.url !== expectedBinding.url ||
@@ -110,7 +119,7 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
     throw new Error("page_changed");
   const installed = await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["media-controller.js"],
+    files: [controllerFile],
   });
   const documentId = installed[0]?.documentId;
   if (!documentId) throw new Error("page_changed");
@@ -508,7 +517,7 @@ async function executeCompanion(request, controller) {
   const selection = liveSelection();
   if (
     binding.availability !== "companion" ||
-    binding.origin !== "https://www.netflix.com" ||
+    !companionBindingOrigins.has(binding.origin) ||
     selection.tabId !== binding.tabId ||
     selection.windowId !== binding.windowId ||
     request.bindingId !== binding.bindingId ||
