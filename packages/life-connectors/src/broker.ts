@@ -39,8 +39,21 @@ export interface ConnectedOAuth {
     signal?: AbortSignal,
   ): Promise<GoogleOAuthCredential>;
 }
-type StoredCredential = ProviderCredential & { refreshToken?: string; expiresAt?: number; grantedScopes?: string[] };
+type StoredCredential = ProviderCredential & {
+  refreshToken?: string;
+  expiresAt?: number;
+  grantedScopes?: string[];
+};
 const DAY = 86_400_000;
+const AGENDA_HORIZON = 30 * DAY;
+const AGENDA_LIMIT = 20;
+const civilDay = (value: string): number | undefined => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const instant = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value
+    ? instant
+    : undefined;
+};
 const LABELS: Record<ProviderId, string> = {
   "google-calendar": "Google Calendar",
   gmail: "Gmail",
@@ -448,6 +461,93 @@ export class ConnectorBroker {
       )
       .filter((item) => item !== null);
     return { items, lastSyncAt: c.lastSyncAt, error: c.error, state: c.state };
+  }
+  /** A bounded projection of already imported events from this actor's selected calendar. */
+  agenda(actorId: string, id: string) {
+    const connection = this.current(actorId, id);
+    if (connection.provider !== "google-calendar" || connection.state === "revoked")
+      throw new Error("Calendar connection is unavailable.");
+    const now = this.now();
+    const horizonEnd = now + AGENDA_HORIZON;
+    // Include one UTC civil-day margin so the phone can apply its own display time zone to
+    // all-day events without dropping an event near midnight.
+    const firstDay = new Date(now - DAY).toISOString().slice(0, 10);
+    const lastDay = new Date(horizonEnd + DAY).toISOString().slice(0, 10);
+    const complete = connection.lastSyncAt !== undefined && !connection.continuation;
+    type AgendaEvent = {
+      title: string;
+      status: "confirmed" | "tentative" | "cancelled";
+      startAt?: number;
+      endAt?: number;
+      startDate?: string;
+      endDate?: string;
+      timeZone?: string;
+      sortAt: number;
+      tie: string;
+    };
+    const events = complete
+      ? this.store
+          .observations(actorId, id)
+          .flatMap((item): AgendaEvent[] => {
+            if (item.kind !== "event" || item.deleted || item.data.status === "cancelled")
+              return [];
+            const { startAt, endAt, startDate, endDate, timeZone, status } = item.data;
+            const title = item.title.slice(0, 160);
+            if (!title) return [];
+            if (
+              Number.isFinite(startAt) &&
+              Number.isFinite(endAt) &&
+              startAt! < endAt! &&
+              endAt! > now &&
+              startAt! < horizonEnd
+            )
+              return [
+                {
+                  title,
+                  startAt: startAt!,
+                  endAt: endAt!,
+                  ...(timeZone ? { timeZone: timeZone.slice(0, 80) } : {}),
+                  status,
+                  sortAt: startAt!,
+                  tie: item.sourceKey,
+                },
+              ];
+            const day = startDate ? civilDay(startDate) : undefined;
+            if (
+              day !== undefined &&
+              endDate &&
+              civilDay(endDate) !== undefined &&
+              startDate! < endDate &&
+              endDate > firstDay &&
+              startDate! < lastDay
+            )
+              return [
+                {
+                  title,
+                  startDate,
+                  endDate,
+                  status,
+                  sortAt: day,
+                  tie: item.sourceKey,
+                },
+              ];
+            return [];
+          })
+          .sort((a, b) => a.sortAt - b.sortAt || a.tie.localeCompare(b.tie))
+          .slice(0, AGENDA_LIMIT)
+          .map(({ sortAt: _sortAt, tie: _tie, ...event }) => event)
+      : [];
+    return {
+      connectionId: connection.id,
+      label: connection.label.slice(0, 80),
+      state: connection.state,
+      selectedCalendarId: (connection.selectedCalendarId ?? "primary").slice(0, 1_024),
+      ...(connection.lastSyncAt !== undefined ? { lastSyncAt: connection.lastSyncAt } : {}),
+      complete,
+      horizonStart: now,
+      horizonEnd,
+      events,
+    };
   }
   async setMode(actorId: string, id: string, mode: ConnectionMode): Promise<void> {
     if (!["observe", "prepare"].includes(mode)) throw new TypeError("Connection mode is invalid.");
