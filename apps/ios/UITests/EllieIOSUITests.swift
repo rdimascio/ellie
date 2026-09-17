@@ -831,6 +831,9 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
         XCTAssertFalse(app.staticTexts["Changed household chore"].exists)
 
+        revealHouseholdControl(app.buttons["ios-household-chores-read"], in: app).tap()
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 2",
+            "Discard requires a fresh household read before another edit")
         revealHouseholdControl(edit, in: app).tap()
         try typeTextReliably("Take blue basket", into: app.descendants(matching: .any)["ios-household-chore-details"], in: app)
         app.buttons["ios-household-chore-prepare"].tap()
@@ -850,7 +853,7 @@ final class EllieIOSUITests: XCTestCase {
         revealHouseholdControl(app.buttons["ios-household-chores-check-result"], in: app).tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(
             format: "label CONTAINS %@", "currently matches the prepared copy")).firstMatch.waitForExistence(timeout: 5))
-        XCTAssertEqual(reads.label, "Fixture chore GETs: 2")
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 3")
         XCTAssertEqual(puts.label, "Fixture chore PUTs: 1",
             "Cancellation and recovery must not send the prepared change again")
         XCTAssertFalse(app.buttons["ios-household-chores-save"].isEnabled)
