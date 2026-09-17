@@ -2668,6 +2668,55 @@ main {
   background: var(--paper);
   padding: 8px 13px;
 }
+.connection-status {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+.gmail-preview-item {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 5px 0;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-color: var(--rule);
+  cursor: pointer;
+}
+.gmail-preview-item[aria-pressed="true"] {
+  text-decoration-color: var(--coral);
+}
+.gmail-message-detail {
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  background: var(--paper);
+  margin-top: 12px;
+  padding: 16px;
+  overflow-wrap: anywhere;
+}
+.gmail-message-detail-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gmail-message-detail h4 {
+  margin: 0;
+}
+.gmail-message-detail dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 5px 12px;
+}
+.gmail-message-detail dd {
+  margin: 0;
+}
+.gmail-message-detail pre {
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 24rem;
+  overflow: auto;
+}
 .connection-empty {
   border-block: 1px solid var(--rule);
   padding: 16px 2px;

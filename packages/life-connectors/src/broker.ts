@@ -465,8 +465,10 @@ export class ConnectorBroker {
           : item.kind === "message"
             ? {
                 kind: "message" as const,
+                messageId: item.sourceKey,
                 subject: item.data.subject.slice(0, 200),
                 from: item.data.from.slice(0, 320),
+                to: item.data.to.slice(0, 50).map((recipient) => recipient.slice(0, 320)),
                 snippet: item.data.snippet?.slice(0, 500),
                 sentAt: item.data.sentAt,
               }
@@ -474,6 +476,58 @@ export class ConnectorBroker {
       )
       .filter((item) => item !== null);
     return { items, lastSyncAt: c.lastSyncAt, error: c.error, state: c.state };
+  }
+  async messageDetail(actorId: string, id: string, messageId: string) {
+    if (!/^[A-Za-z0-9_-]{1,1024}$/.test(messageId))
+      throw new Error("Imported message is unavailable.");
+    const c = this.current(actorId, id);
+    const adapter = this.providers.get(c.provider);
+    if (
+      c.state !== "connected" ||
+      c.provider !== "gmail" ||
+      !adapter?.readMessageText ||
+      !c.grantedScopes.includes("https://www.googleapis.com/auth/gmail.readonly")
+    )
+      throw new Error("Gmail connection is unavailable.");
+    const observed = () =>
+      this.store
+        .observations(actorId, id)
+        .find((item) => item.kind === "message" && !item.deleted && item.sourceKey === messageId);
+    const before = observed();
+    if (!before) throw new Error("Imported message is unavailable.");
+    const signal = AbortSignal.timeout(30_000);
+    const credential = await this.currentCredential(actorId, c, signal);
+    signal.throwIfAborted();
+    const beforeDispatch = this.current(actorId, id, c.generation);
+    const currentBeforeDispatch = observed();
+    if (
+      beforeDispatch.state !== "connected" ||
+      !beforeDispatch.grantedScopes.includes("https://www.googleapis.com/auth/gmail.readonly") ||
+      !currentBeforeDispatch ||
+      currentBeforeDispatch.sourceRevision !== before.sourceRevision
+    )
+      throw new Error("Imported message changed. Refresh its preview.");
+    const text = await adapter.readMessageText(messageId, credential, signal);
+    signal.throwIfAborted();
+    const after = this.current(actorId, id, c.generation);
+    const current = observed();
+    if (
+      after.state !== "connected" ||
+      !after.grantedScopes.includes("https://www.googleapis.com/auth/gmail.readonly") ||
+      !current ||
+      current.kind !== "message" ||
+      current.sourceRevision !== before.sourceRevision
+    )
+      throw new Error("Imported message changed. Refresh its preview.");
+    return {
+      messageId,
+      subject: current.data.subject.slice(0, 200),
+      from: current.data.from.slice(0, 320),
+      to: current.data.to.slice(0, 50).map((recipient) => recipient.slice(0, 320)),
+      sentAt: current.data.sentAt,
+      snippet: current.data.snippet?.slice(0, 500),
+      ...text,
+    };
   }
   /** A bounded projection of already imported events from this actor's selected calendar. */
   agenda(actorId: string, id: string, displayTimeZone: string) {

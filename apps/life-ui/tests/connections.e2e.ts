@@ -144,23 +144,31 @@ const calendar: LifeProviderAdapter = {
     };
   },
 };
-const gmail = adapter("gmail", [
-  {
-    sourceKey: "fixture-message",
-    sourceRevision: "fixture-v1",
-    observedAt: now,
-    title: "Private fixture subject",
-    kind: "message",
-    data: {
-      sentAt: now,
-      from: "sender@example.test",
-      to: ["owner@example.test"],
-      subject: "Private fixture subject",
-      snippet: "Bounded fixture snippet",
-      direction: "incoming",
+let explicitFullReads = 0;
+const gmail: LifeProviderAdapter = {
+  ...adapter("gmail", [
+    {
+      sourceKey: "fixture-message",
+      sourceRevision: "fixture-v1",
+      observedAt: now,
+      title: "Private fixture subject",
+      kind: "message",
+      data: {
+        sentAt: now,
+        from: "sender@example.test",
+        to: ["owner@example.test"],
+        subject: "Private fixture subject",
+        snippet: "Bounded fixture snippet",
+        direction: "incoming",
+      },
     },
+  ]),
+  async readMessageText(messageId) {
+    explicitFullReads++;
+    assert.equal(messageId, "fixture-message");
+    return { status: "plain", text: "Private fixture body, fetched only after selection." };
   },
-]);
+};
 const connectors = new ConnectorBroker({
   store: connectorStore,
   life,
@@ -243,8 +251,8 @@ try {
   await page.getByRole("heading", { name: "Connected accounts", exact: true }).waitFor();
   const openSettings = async () => {
     const mobile = page.getByLabel("Settings", { exact: true });
-    if (await mobile.isVisible()) await mobile.click();
-    else await page.locator("aside .settings-link").click();
+    await expect(mobile).toBeVisible();
+    await mobile.click();
   };
   const holdNextConnectionsList = async () => {
     let capture!: () => void;
@@ -419,9 +427,60 @@ try {
   await gmailArticle.getByRole("button", { name: "View imported activity" }).click();
   await gmailArticle.getByText(/Private fixture subject/).waitFor();
   await gmailArticle.getByText(/Bounded fixture snippet/).waitFor();
+  assert.equal(explicitFullReads, 0, "preview must not fetch any message body");
+  await gmailArticle
+    .getByRole("button", { name: /Private fixture subject.*sender@example.test/ })
+    .click();
+  await gmailArticle
+    .getByRole("region", { name: "Selected Gmail message" })
+    .getByText("Private fixture body, fetched only after selection.")
+    .waitFor();
+  assert.equal(explicitFullReads, 1);
+  await calendarArticle.getByRole("button", { name: "View imported activity" }).click();
+  assert.equal(
+    await gmailArticle.getByText("Private fixture body, fetched only after selection.").count(),
+    0,
+  );
   const gmailId = connectorStore
     .list(actorId)
     .find((item) => item.provider === "gmail" && item.state === "connected")!.id;
+  const otherStateDir = join(root, "other-actor");
+  await mkdir(otherStateDir, { mode: 0o700 });
+  const otherServer = createLifeServer({
+    stateDir: otherStateDir,
+    assetsDir: resolve("apps/life-ui/dist"),
+    store: life,
+    plugins,
+    tasks,
+    harness,
+    connectors,
+    port: 0,
+    userId: "different-fixture-actor",
+    userName: "Other fixture actor",
+    timeZone: "America/Los_Angeles",
+    now: () => now,
+  });
+  try {
+    const otherListening = await otherServer.listen();
+    const otherContext = await browser.newContext();
+    try {
+      const otherPage = await otherContext.newPage();
+      await otherPage.goto(otherListening.launchUrl);
+      const deniedMessage = await otherPage.evaluate(
+        async ({ id }) =>
+          fetch(`/api/connections/${encodeURIComponent(id)}/messages/fixture-message`).then(
+            (response) => response.status,
+          ),
+        { id: gmailId },
+      );
+      assert.notEqual(deniedMessage, 200, "another actor cannot open imported mail");
+      assert.equal(explicitFullReads, 1, "cross-actor denial must precede provider access");
+    } finally {
+      await otherContext.close();
+    }
+  } finally {
+    await otherServer.close();
+  }
   let releaseGmailRead!: () => void;
   let captureGmailRead!: () => void;
   let deliveredGmailRead!: () => void;
@@ -447,7 +506,6 @@ try {
   };
   await page.route("**/api/connections/*/preview", gmailPreviewRoute);
   try {
-    await gmailArticle.getByRole("button", { name: "Hide imported activity" }).click();
     await gmailArticle.getByRole("button", { name: "View imported activity" }).click();
     await Promise.race([
       heldGmail,
@@ -532,23 +590,72 @@ try {
   );
   await gmailArticle.getByRole("button", { name: "View imported activity" }).click();
   await gmailArticle.getByText(/Private fixture subject/).waitFor();
-  assert.equal(
-    await page.evaluate(
-      (id) =>
-        fetch(`/api/connections/${id}/revoke`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: "{}",
-        }).then((response) => response.status),
-      gmailId,
-    ),
-    200,
-  );
-  await page
-    .locator(".provider-list article")
-    .filter({ hasText: "Gmail" })
-    .getByRole("button", { name: "Connect" })
-    .waitFor({ timeout: 10_000 });
+  let releaseMessageRead!: () => void;
+  let messageReadCaptured!: () => void;
+  const heldMessageRead = new Promise<void>((resolve) => {
+    messageReadCaptured = resolve;
+  });
+  const messageReadGate = new Promise<void>((resolve) => {
+    releaseMessageRead = resolve;
+  });
+  let messageRouteSettled!: () => void;
+  const routeSettled = new Promise<void>((resolve) => {
+    messageRouteSettled = resolve;
+  });
+  const messageRoute = async (route: import("@playwright/test").Route) => {
+    try {
+      const response = await route.fetch();
+      messageReadCaptured();
+      await messageReadGate;
+      try {
+        await route.fulfill({ response });
+      } catch (error) {
+        if (!(error instanceof Error) || !/Route is already handled/.test(error.message))
+          throw error;
+      }
+    } finally {
+      messageRouteSettled();
+    }
+  };
+  await page.route("**/api/connections/*/messages/*", messageRoute);
+  try {
+    await gmailArticle
+      .getByRole("button", { name: /Private fixture subject.*sender@example.test/ })
+      .click();
+    await Promise.race([
+      heldMessageRead,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for held message read.")), 7_000),
+      ),
+    ]);
+    assert.equal(explicitFullReads, 2);
+    assert.equal(
+      await page.evaluate(
+        (id) =>
+          fetch(`/api/connections/${id}/revoke`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }).then((response) => response.status),
+        gmailId,
+      ),
+      200,
+    );
+    await page
+      .locator(".provider-list article")
+      .filter({ hasText: "Gmail" })
+      .getByRole("button", { name: "Connect" })
+      .waitFor({ timeout: 10_000 });
+  } finally {
+    releaseMessageRead();
+    await Promise.race([
+      routeSettled,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Held message route did not settle.")), 7_000),
+      ),
+    ]);
+    await page.unroute("**/api/connections/*/messages/*", messageRoute);
+  }
   assert.equal(
     await page
       .locator(".connections")
@@ -556,6 +663,11 @@ try {
       .count(),
     0,
     "a polled revocation clears the previously opened private preview",
+  );
+  assert.equal(
+    await page.getByText("Private fixture body, fetched only after selection.").count(),
+    0,
+    "a late message response cannot restore private body after revocation",
   );
   if (artifactDir) {
     await page
@@ -582,6 +694,7 @@ try {
   assert.match(archive, /ellie-connectors-v1/);
   assert.match(archive, /Doctor appointment/);
   assert.doesNotMatch(archive, /browser-fixture-secret/);
+  assert.doesNotMatch(archive, /Private fixture body, fetched only after selection/);
 
   await page.route(cancelRoute, (route) =>
     route.fulfill({
