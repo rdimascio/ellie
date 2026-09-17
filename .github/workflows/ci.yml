@@ -28,6 +28,8 @@ jobs:
       - run: bun run test
   native:
     runs-on: macos-15
+    # The full iOS UI suite has a 20-minute deadline; leave time for other native checks and cleanup.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
