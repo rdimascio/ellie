@@ -1,7 +1,7 @@
 {
   "sourceBranch": "codex/mobile-redesign",
   "sourceHead": "6d5d404cda0c809ecd104a4b350e753d015ff1bf",
-  "sourceState": "Uncommitted owner-approved working tree; original preview and native appearance edits remain there.",
+  "sourceState": "Uncommitted owner-approved source snapshot; native appearance changes excluded from this web extraction.",
   "candidateBase": "8c058ddbcc34e47aa1bde95fd4aab367a94e5e47",
   "upstreamOverlappingSelectedPaths": [],
   "upstreamOverlappingExcludedPaths": ["apps/ios/Sources/NativeEnrollmentView.swift"],
@@ -100,7 +100,7 @@
     }
   ],
   "extractionHead": "23fd936e4fc71fdd1b25837d9ecbd8f6c7a2f4a7",
-  "transferScope": "Source hashes and transfer labels describe the initial extraction commit. Subsequent review corrections below intentionally differ; the original worktree remains unchanged.",
+  "transferScope": "Source hashes and transfer labels describe the initial extraction commit. Subsequent review corrections below intentionally differ.",
   "reviewCorrections": [
     {
       "paths": [

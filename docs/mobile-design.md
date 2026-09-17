@@ -4,7 +4,7 @@ The mobile interface uses midnight blue surfaces, pearl text, ice blue controls,
 
 This candidate contains only the Life web interface, its tests, preview fixture, npm scripts, and documentation. It was extracted from the owner-approved design work on `codex/mobile-redesign` at `6d5d404cda0c809ecd104a4b350e753d015ff1bf` onto fresh main `8c058ddbcc34e47aa1bde95fd4aab367a94e5e47`. The source changes were uncommitted. [The provenance manifest](mobile-design-provenance.json) records SHA-256 hashes for every selected source file and lists excluded native files.
 
-The selected files have no overlapping upstream changes between those commits. The original native enrollment appearance edit overlaps upstream `apps/ios/Sources/NativeEnrollmentView.swift` and is explicitly excluded, along with all other native edits. The original worktree and port 4187 preview remain intact. This candidate does not alter the Xcode project, enrollment, voice, native applications, or service rollout.
+The selected files have no overlapping upstream changes between those commits. The original native enrollment appearance edit overlaps upstream `apps/ios/Sources/NativeEnrollmentView.swift` and is explicitly excluded, along with all other native edits. This candidate does not alter the Xcode project, enrollment, voice, native applications, or service rollout.
 
 The byte-identical extraction was committed as `23fd936e4fc71fdd1b25837d9ecbd8f6c7a2f4a7`. Subsequent review corrections tighten financial provenance and test cleanup only in the candidate; their paths and purpose are recorded separately in the manifest. Original source hashes continue to describe the initial extraction, not these later corrections.
 
@@ -51,7 +51,7 @@ bun run life:design-preview
 
 Open `http://127.0.0.1:4187/review`. The review page lets you choose a 320, 390, or 430 pixel phone frame and interact with the actual production UI. The fixture serves synthetic data only on loopback. Requests that change data are rejected with an explicit preview message; it has no coordinator connection, credential, model access, or ability to execute commands.
 
-The owner's existing preview uses that port in the original worktree. Do not stop or replace it for review. Automated design tests build this candidate and use an ephemeral loopback port instead.
+For startup on a different port and the DES01–DES05 acceptance cases, see [owner QA](mobile-design-qa.md). Automated design tests build this candidate and use an ephemeral loopback port.
 
 ## Validation
 
