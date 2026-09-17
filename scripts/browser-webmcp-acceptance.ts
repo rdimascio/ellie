@@ -914,8 +914,13 @@ async function main() {
         if (composed && request.type === "tool.execute") {
           const direction = request.args.direction;
           trace.directionState =
-            direction === "down" ? "down" : direction === "up" ? "up" :
-            direction === undefined ? "missing" : "other";
+            direction === "down"
+              ? "down"
+              : direction === "up"
+                ? "up"
+                : direction === undefined
+                  ? "missing"
+                  : "other";
         }
         if (composed && bridgeTrace.length < 64) bridgeTrace.push(trace);
         const onAbort = () => {
@@ -1203,6 +1208,7 @@ async function main() {
         "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations),scrollCallbacks:Number(document.body.dataset.scrollCallbacks),scrollDirectionState:document.body.dataset.scrollDirectionState,scrollEntries:Number(document.body.dataset.scrollEntries),scrollInvocations:Number(document.body.dataset.scrollInvocations),scrollAbortObserved:Number(document.body.dataset.scrollAbortObserved),scrollStage:document.body.dataset.scrollStage,scrollHasSignal:document.body.dataset.scrollHasSignal})",
       ]);
       const media = record(observed.result);
+      nativeEvidence = { mediaAfterIOS: media };
       assert.equal(media.phase, "watch");
       assert.equal(media.query, "owned synthetic video");
       assert.equal(media.selection, "Owned synthetic video");
@@ -1609,6 +1615,7 @@ async function main() {
             diagnostics: {
               bridgeTrace,
               nativeHttpEvents: nativeJourney?.nativeHttpEvents ?? [],
+              mediaAfterIOS: nativeEvidence?.mediaAfterIOS ?? null,
               fixtureAtFailure: fixtureAtFailure ?? "unavailable",
             },
           }
