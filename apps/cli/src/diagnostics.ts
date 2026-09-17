@@ -14,6 +14,7 @@ import type { InferenceWorkerConfig, NodeConfig, ServerConfig } from "@ellie/con
 import { MacOSExecutor } from "@ellie/macos";
 import { Client } from "@ellie/transport";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
+import { packagedServiceContext, packagedServiceStatus } from "./packaged-service-status.ts";
 import { privatePath, run, Services } from "./services.ts";
 import type { Run, ServiceRole, ServiceStatus } from "./services.ts";
 
@@ -54,7 +55,10 @@ function dependencies(overrides: Partial<DiagnosticDependencies>): DiagnosticDep
     privatePath,
     access,
     keychainGet: (account) => keychain.get(account),
-    serviceStatus: (role) => services.status(role),
+    serviceStatus: (role) => {
+      const context = packagedServiceContext();
+      return context ? packagedServiceStatus(role, context, run) : services.status(role);
+    },
     capabilities: () => new MacOSExecutor().capabilities(),
     run,
     client: (origin, cert, token) => new Client(origin, cert, token),

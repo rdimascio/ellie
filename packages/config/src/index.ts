@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve, relative } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { record, identifier, string, installedModels } from "@ellie/protocol";
 import type { InstalledModel } from "@ellie/protocol";
 import { defaults } from "./defaults.ts";
@@ -176,40 +177,101 @@ export interface MutableSecretStore extends SecretStore {
   add(account: string, value: string): Promise<void>;
   delete(account: string): Promise<void>;
 }
+export type KeychainFailureReason =
+  | "timeout"
+  | "helper_unavailable"
+  | "access_unavailable"
+  | "cleanup_uncertain";
+export class KeychainFailure extends Error {
+  readonly reason: KeychainFailureReason;
+  constructor(reason: KeychainFailureReason) {
+    super(
+      reason === "timeout"
+        ? "Keychain request timed out."
+        : reason === "helper_unavailable"
+          ? "Build the macOS helper first: bun run build:macos"
+          : reason === "cleanup_uncertain"
+            ? "Keychain helper cleanup could not be confirmed."
+            : "Keychain access failed. Unlock the login keychain and allow the helper.",
+    );
+    this.name = "KeychainFailure";
+    this.reason = reason;
+  }
+}
 export class Keychain implements MutableSecretStore {
+  protected spawnHelper(): ChildProcessWithoutNullStreams {
+    return spawn(nativeHelperPath(), [], { stdio: ["pipe", "pipe", "pipe"] });
+  }
   async call(request: Record<string, string>): Promise<string> {
     if (process.platform !== "darwin")
       throw new Error("Keychain requires macOS. Tests use an explicit in-memory store.");
     return new Promise((resolve, reject) => {
-      const child = spawn(nativeHelperPath(), [], {
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      let output = "";
-      const timer = setTimeout(() => {
-        child.kill();
-        reject(new Error("Keychain request timed out."));
-      }, 60_000);
-      child.stdout.on("data", (data) => {
-        output += String(data);
-        if (output.length > 65536) child.kill();
+      const child = this.spawnHelper();
+      const output: Buffer[] = [];
+      let outputBytes = 0;
+      let failure: KeychainFailureReason | undefined;
+      let closed = false;
+      let grace: NodeJS.Timeout | undefined;
+      let reap: NodeJS.Timeout | undefined;
+      const clearTimers = () => {
+        clearTimeout(deadline);
+        if (grace) clearTimeout(grace);
+        if (reap) clearTimeout(reap);
+      };
+      const stop = (reason: KeychainFailureReason) => {
+        if (closed || failure) return;
+        failure = reason;
+        clearTimeout(deadline);
+        child.stdin.destroy();
+        if (child.exitCode === null && child.signalCode === null && child.pid !== undefined)
+          child.kill("SIGTERM");
+        grace = setTimeout(() => {
+          if (
+            !closed &&
+            child.exitCode === null &&
+            child.signalCode === null &&
+            child.pid !== undefined
+          )
+            child.kill("SIGKILL");
+        }, 250);
+        reap = setTimeout(() => {
+          if (closed) return;
+          // Keep the exact child and its close listener until it eventually closes.
+          // A caller must never mistake an unreaped helper for a successful request.
+          reject(new KeychainFailure("cleanup_uncertain"));
+        }, 3_000);
+      };
+      const deadline = setTimeout(() => stop("timeout"), 60_000);
+      child.stdout.on("data", (data: Buffer) => {
+        if (closed || failure) return;
+        const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+        if (outputBytes + chunk.length > 65_536) {
+          stop("access_unavailable");
+          return;
+        }
+        outputBytes += chunk.length;
+        output.push(chunk);
       });
       child.stderr.resume();
       child.on("error", () => {
-        clearTimeout(timer);
-        reject(new Error("Build the macOS helper first: bun run build:macos"));
+        stop("helper_unavailable");
       });
       child.on("close", (code) => {
-        clearTimeout(timer);
+        closed = true;
+        clearTimers();
+        if (failure) {
+          reject(new KeychainFailure(failure));
+          return;
+        }
         try {
-          if (code !== 0)
-            throw new Error(
-              "Keychain access failed. Unlock the login keychain and allow the helper.",
-            );
-          resolve(String(record(JSON.parse(output)).value ?? ""));
-        } catch {
-          reject(
-            new Error("Keychain access failed. Unlock the login keychain and allow the helper."),
+          if (code !== 0) throw new KeychainFailure("access_unavailable");
+          resolve(
+            String(
+              record(JSON.parse(Buffer.concat(output, outputBytes).toString("utf8"))).value ?? "",
+            ),
           );
+        } catch {
+          reject(new KeychainFailure("access_unavailable"));
         }
       });
       child.stdin.on("error", () => {});

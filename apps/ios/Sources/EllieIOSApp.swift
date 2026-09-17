@@ -8,6 +8,9 @@ struct EllieIOSApp: App {
             #if DEBUG
             if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-native-scanner-sheet-fixture") {
+                NativeScannerSheetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(

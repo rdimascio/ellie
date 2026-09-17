@@ -1,6 +1,6 @@
 # Ellie manual QA
 
-Updated September 16, 2026. This catalogue preserves earlier sessions and defines future build-specific checks. A session is ready only when the coordinator names the exact build, target and prerequisites; do not infer a current handoff from an older preview record.
+Updated September 17, 2026. This catalogue preserves earlier sessions and defines future build-specific checks. A session is ready only when the coordinator names the exact build, target and prerequisites; do not infer a current handoff from an older preview record.
 
 ## What to open
 
@@ -14,9 +14,13 @@ Use a dashboard and records named **Ellie QA** so test data is easy to recognize
 
 ## Native iPhone browser voice — future build-specific session
 
+The [current service recovery record](validation/2026-09-17-service-credential-recovery.md) explains the execution Mac's credential gate and the expired temporary phone listener. Wait for the coordinator's recovered, identified candidate before IP01–IP07; a previously paired phone alone does not establish that its endpoint or execution Mac is available.
+
 These cases are the current product priority, but they are **not ready for owner QA from this document alone**. They require an identified iPhone build installed on a physical phone, completed coordinator enrollment, one explicitly granted Mac, the named browser build and an approved public test page. The coordinator must provide the exact build and target before the session. Simulator transcripts and in-memory transports do not satisfy these cases.
 
 The [September 16 recovery validation](validation/2026-09-16-native-phone-recovery.md) records the passing automated restart and failed-read checks. Physical IP01–IP07 acceptance remains pending for the identified owner build.
+
+The [September 17 physical app-opening record](validation/2026-09-17-native-phone-app-opening.md) preserves one completed QR enrollment (PH01) and owner-observed microphone → reviewed command → separate Mac app opening (PH02). On this unchanged build, do not ask the owner to repeat those observations without a new failure or relevant change. Cancel/discard (PH03, corresponding to IP02) has already been handed to the owner and awaits a reply; transcript editing and the website cases below need later build-specific handoffs. The partial voice result does not complete IP01 or IP03–IP07.
 
 | ID                                       | Actions                                                                                                                                                                                      | Pass when                                                                                                                                                                                                                 |
 | ---------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
