@@ -203,7 +203,9 @@ private func disabled(_ output: String, label: String) throws -> Bool {
   var lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
   while lines.first == "" { lines.removeFirst() }
   while lines.last == "" { lines.removeLast() }
-  guard lines.first == "disabled services = {", lines.last == "}", lines.count <= 258 else {
+  let unindented = lines.first == "disabled services = {" && lines.last == "}"
+  let indented = lines.first == "\tdisabled services = {" && lines.last == "\t}"
+  guard (unindented || indented), lines.count <= 258 else {
     throw LifecycleFailure.unavailable
   }
   for line in lines.dropFirst().dropLast() {
