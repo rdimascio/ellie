@@ -1,6 +1,32 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testWeatherRequiresOptInUsesChosenPlaceAndCanBeDisabled() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture"]
+        app.launch()
+        let calls = app.staticTexts["home-fixture-weather-calls"]
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0")
+        openDashboard(named: "Home", in: app)
+        app.buttons["ios-weather-setup"].tap()
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0")
+        app.switches["ios-weather-enable"].tap()
+        try typeTextReliably("London QA", into: app.textFields["ios-weather-name"], in: app)
+        try typeTextReliably("51.5074", into: app.textFields["ios-weather-latitude"], in: app)
+        try typeTextReliably("-0.1278", into: app.textFields["ios-weather-longitude"], in: app)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-place"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertTrue(app.staticTexts["Partly cloudy"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture weather requests: 1")
+        app.buttons["ios-weather-settings"].tap()
+        app.switches["ios-weather-enable"].tap()
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture weather requests: 1",
+            "Disabling must not send another forecast request")
+    }
+
     func testHomeLifeEntryRequiresExplicitTapAndFollowsEnrollment() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-home-appearance-fixture"]

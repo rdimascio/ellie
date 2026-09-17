@@ -4,7 +4,7 @@ The command-center preview includes a **Dashboards** view for creating room boar
 
 ## Current behavior
 
-The clock uses the viewing device's local time and updates once a second. Notes are editable text. Weather, calendar, chores, and playlist widgets are clearly marked connection placeholders. They do not contact a provider, display synthetic live data, accept credentials, or support embedded HTML, scripts, and iframes.
+The clock uses the viewing device's local time and updates once a second. Notes are editable text. On iPhone, weather stays off until you choose a place, enter coordinates, and explicitly enable Open-Meteo. Its private local cache shows the forecast age and remains labeled as cached when stale or the provider fails; turning weather off cancels the request and clears the saved place and forecast. Weather settings apply to all weather widgets on that iPhone. No location permission or household sync is used. Calendar remains a connection placeholder on iPhone.
 
 The editor validates stored and imported data against the strict dashboard schema. Invalid stored data is replaced with the starter board and announced in the interface. An invalid import leaves the current dashboards unchanged. A downloaded export contains dashboard configuration and note text, so review it before sharing.
 
