@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID, X509Certificate } from "node:crypto";
 import { createServer } from "node:https";
+import { request as httpsRequest } from "node:https";
+import { createServer as createNetServer, type AddressInfo } from "node:net";
 import {
   chmod,
   cp,
@@ -13,10 +15,21 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { generateBrowserTlsIdentity } from "../apps/cli/src/certificate.ts";
+import { defaults } from "@ellie/config";
+import { record } from "@ellie/protocol";
+import { BrowserNodeExecutor } from "../apps/node/src/browser-executor.ts";
+import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
+import { BrowserAccessibilityRuntime } from "../apps/node/src/browser-accessibility-runtime.ts";
+import { runNode } from "../apps/node/src/index.ts";
+import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
+import { createBrowserRemote } from "../apps/server/src/browser-remote.ts";
+import { createBrowserServer } from "../apps/server/src/browser-server.ts";
+import { NativeAuth } from "../apps/server/src/native-auth.ts";
+import { fixture as coordinatorFixture } from "../tests/helpers.ts";
 import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
 import {
   canonicalReviewedBrowserRegistry,
@@ -39,6 +52,24 @@ const scrollSchema = Object.freeze({
   type: "object",
   properties: { direction: { type: "string", enum: ["up", "down"] } },
   required: ["direction"],
+  additionalProperties: false,
+});
+const searchSchema = Object.freeze({
+  type: "object",
+  properties: { query: { type: "string" } },
+  required: ["query"],
+  additionalProperties: false,
+});
+const selectSchema = Object.freeze({
+  type: "object",
+  properties: { itemId: { type: "string" } },
+  required: ["itemId"],
+  additionalProperties: false,
+});
+const playbackSchema = Object.freeze({
+  type: "object",
+  properties: { action: { type: "string", enum: ["play", "pause"] } },
+  required: ["action"],
   additionalProperties: false,
 });
 const annotations = Object.freeze({
@@ -116,6 +147,16 @@ async function prepareExtension(root: string, origin: string) {
         annotations,
         argumentEncoding: "json-string",
       },
+      ...[
+        ["ellie_acceptance_search", searchSchema],
+        ["ellie_acceptance_select", selectSchema],
+        ["ellie_acceptance_playback", playbackSchema],
+      ].map(([name, inputSchema]) => ({
+        name,
+        inputSchema,
+        annotations,
+        argumentEncoding: "json-string",
+      })),
     ],
   });
   await replaceExactly(
@@ -145,8 +186,8 @@ async function prepareExtension(root: string, origin: string) {
     productionFiles,
     fixtureDifferences: [
       `background.js productionOrigins contains only ${origin}`,
-      "background.js reviewedWebMCPBindings contains only the two acceptance tools",
-      "both reviewed acceptance tools require the Chrome 152 JSON-string argument dialect",
+      "background.js reviewedWebMCPBindings contains only the five acceptance tools",
+      "all reviewed acceptance tools require the Chrome 152 JSON-string argument dialect",
       `manifest.json host_permissions contains only ${origin}/*`,
     ],
     productionManifestSha256: sha256(productionManifest),
@@ -164,11 +205,21 @@ body{font:18px system-ui;margin:40px;max-width:700px}.viewport{height:180px;over
 <p id="registration">Registering real browser tools…</p>
 <p id="result" class="result">Scroll offset: 0</p>
 <div id="viewport" class="viewport" tabindex="0" aria-label="Acceptance viewport"><div class="space">Owned fixture content</div></div>
+<section id="media" aria-label="Owned synthetic media page"><p id="phase">Home</p><p id="query"></p><p id="selection"></p><p id="playback"></p></section>
 <script>
 const viewport = document.querySelector('#viewport');
 const result = document.querySelector('#result');
 const update = () => { result.textContent = 'Scroll offset: ' + Math.round(viewport.scrollTop); };
 viewport.addEventListener('scroll', update);
+let phase = 'home'; let query = ''; let playback = 'paused'; let mutationCount = 0;
+const media = () => {
+  document.querySelector('#phase').textContent = phase;
+  document.querySelector('#query').textContent = query;
+  document.querySelector('#selection').textContent = phase === 'watch' ? 'Owned synthetic video' : '';
+  document.querySelector('#playback').textContent = phase === 'watch' ? playback : '';
+  document.body.dataset.mutations = String(mutationCount);
+};
+media();
 Promise.all([
   document.modelContext.registerTool({
     name: 'ellie_acceptance_read',
@@ -177,8 +228,11 @@ Promise.all([
     annotations: ${JSON.stringify(readAnnotations)},
     execute: async () => ({
       title: 'Ellie owned WebMCP acceptance',
-      summary: result.textContent,
-      items: [{id: 'acceptance-viewport', label: 'Owned acceptance viewport', state: String(Math.round(viewport.scrollTop))}]
+      summary: phase + ': ' + query + ': ' + playback,
+      items: [
+        {id: 'acceptance-viewport', label: 'Owned acceptance viewport', state: String(Math.round(viewport.scrollTop))},
+        ...(phase === 'results' ? [{id: 'owned-video-1', label: 'Owned synthetic video'}] : [])
+      ]
     })
   }),
   document.modelContext.registerTool({
@@ -195,6 +249,44 @@ Promise.all([
       if (direction === 'down' ? after <= before : after >= before) throw new Error('scroll_not_observed');
       update();
       return ${JSON.stringify(completedValue)};
+    }
+  }),
+  document.modelContext.registerTool({
+    name: 'ellie_acceptance_search',
+    description: 'Search the owned synthetic media page once.',
+    inputSchema: ${JSON.stringify(searchSchema)},
+    annotations: ${JSON.stringify(annotations)},
+    execute: async ({query: requested}, context = {}) => {
+      context.signal?.throwIfAborted();
+      if (phase !== 'home' || requested !== 'owned synthetic video') throw new Error('search_not_reviewed');
+      query = requested; phase = 'results'; mutationCount++; media();
+      return ${JSON.stringify(completedValue)};
+    }
+  }),
+  document.modelContext.registerTool({
+    name: 'ellie_acceptance_select',
+    description: 'Select the one observed owned media result.',
+    inputSchema: ${JSON.stringify(selectSchema)},
+    annotations: ${JSON.stringify(annotations)},
+    execute: async ({itemId}, context = {}) => {
+      context.signal?.throwIfAborted();
+      if (phase !== 'results' || itemId !== 'owned-video-1') throw new Error('selection_not_reviewed');
+      phase = 'watch'; mutationCount++; media();
+      return ${JSON.stringify(completedValue)};
+    }
+  }),
+  document.modelContext.registerTool({
+    name: 'ellie_acceptance_playback',
+    description: 'Control the owned synthetic media playback state.',
+    inputSchema: ${JSON.stringify(playbackSchema)},
+    annotations: ${JSON.stringify(annotations)},
+    execute: async ({action}, context = {}) => {
+      context.signal?.throwIfAborted();
+      if (phase !== 'watch' || (action === 'play' && playback !== 'paused') ||
+          (action === 'pause' && playback !== 'playing')) throw new Error('playback_not_reviewed');
+      playback = action === 'play' ? 'playing' : 'paused'; mutationCount++; media();
+      // The first play deliberately loses its completion proof after one visible mutation.
+      return action === 'play' ? {applied: false} : ${JSON.stringify(completedValue)};
     }
   })
 ]).then(() => {
@@ -222,6 +314,20 @@ async function prepareRegistry(home: string, origin: string) {
         inputSchemaSha256: sha256(canonical(readSchema)),
       },
       {
+        id: "catalog",
+        origin,
+        operation: "read",
+        toolName: "ellie_acceptance_read",
+        inputSchemaSha256: sha256(canonical(readSchema)),
+      },
+      {
+        id: "player",
+        origin,
+        operation: "read",
+        toolName: "ellie_acceptance_read",
+        inputSchemaSha256: sha256(canonical(readSchema)),
+      },
+      {
         id: "scroll",
         origin,
         operation: "scroll",
@@ -229,6 +335,33 @@ async function prepareRegistry(home: string, origin: string) {
         inputSchemaSha256: sha256(canonical(scrollSchema)),
         successValueSha256,
         argumentKey: "direction",
+      },
+      {
+        id: "search",
+        origin,
+        operation: "search",
+        toolName: "ellie_acceptance_search",
+        inputSchemaSha256: sha256(canonical(searchSchema)),
+        successValueSha256,
+        argumentKey: "query",
+      },
+      {
+        id: "select",
+        origin,
+        operation: "select",
+        toolName: "ellie_acceptance_select",
+        inputSchemaSha256: sha256(canonical(selectSchema)),
+        successValueSha256,
+        argumentKey: "itemId",
+      },
+      {
+        id: "playback",
+        origin,
+        operation: "playback",
+        toolName: "ellie_acceptance_playback",
+        inputSchemaSha256: sha256(canonical(playbackSchema)),
+        successValueSha256,
+        argumentKey: "action",
       },
     ],
   });
@@ -289,6 +422,172 @@ async function closeFixtureServer(server: ReturnType<typeof createServer>): Prom
   await new Promise<void>((resolveClose, reject) =>
     server.close((error) => (error ? reject(error) : resolveClose())),
   );
+}
+
+async function availablePort(): Promise<number> {
+  const reservation = createNetServer();
+  try {
+    await new Promise<void>((resolveListen, reject) => {
+      reservation.once("error", reject);
+      reservation.listen(0, "127.0.0.1", resolveListen);
+    });
+    return (reservation.address() as AddressInfo).port;
+  } finally {
+    if (reservation.listening)
+      await new Promise<void>((resolveClose) => reservation.close(() => resolveClose()));
+  }
+}
+
+async function within<T>(work: Promise<T>, milliseconds: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function startNativeJourney(operations: BrowserWebMCPOperations, ownedRoot: string) {
+  const target = "owned-browser-node";
+  const coordinator = await coordinatorFixture(5_000);
+  const nodeAbort = new AbortController();
+  const events: string[] = [];
+  let node: Promise<void> | undefined;
+  let listener: ReturnType<typeof createBrowserServer> | undefined;
+  let accessibility: BrowserAccessibilityRuntime | undefined;
+  let cleanupStarted = false;
+  const close = async () => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    nodeAbort.abort();
+    const closed = listener?.server.listening
+      ? new Promise<void>((resolveClose) => listener!.server.once("close", resolveClose))
+      : Promise.resolve();
+    listener?.shutdown();
+    await within(
+      Promise.all([closed, node, accessibility?.close(), coordinator.close()]),
+      5_000,
+      "Owned native journey cleanup is uncertain.",
+    );
+  };
+  try {
+    const client = await coordinator.pair(target);
+    accessibility = new BrowserAccessibilityRuntime(
+      join(ownedRoot, "unavailable-ax"),
+      () => undefined,
+    );
+    const selector = new BrowserOperationSelector(
+      (signal, refresh) =>
+        refresh ? operations.bindingRefresh(signal) : operations.bindingStatus(signal),
+      operations,
+      accessibility,
+    );
+    let registered!: () => void;
+    const ready = new Promise<void>((resolveReady) => (registered = resolveReady));
+    node = runNode({
+      client,
+      preferences: defaults,
+      signal: nodeAbort.signal,
+      executor: new BrowserNodeExecutor(
+        {
+          capabilities: async () => ["app.open"],
+          execute: async () => {
+            throw new Error("Desktop dispatch is outside this fixture.");
+          },
+        },
+        selector,
+      ),
+      onStatus: registered,
+      onEvent: (event) => events.push(event),
+    });
+    await within(ready, 5_000, "Owned browser node did not register.");
+    const identity = await generateBrowserTlsIdentity("ellie-native-acceptance.local", {
+      tempDir: ownedRoot,
+    });
+    const port = await availablePort();
+    const auth = new NativeAuth(NativeAuth.empty(), async () => {});
+    listener = createBrowserServer({
+      key: identity.leafKey,
+      cert: identity.leafCert,
+      origin: `https://ellie-native-acceptance.local:${port}`,
+      auth: new BrowserAuth(BrowserAuth.empty(), async () => {}),
+      nativeAuth: auth,
+      remote: createBrowserRemote(coordinator.controller, [
+        { id: target, label: "Owned browser node" },
+      ]),
+    });
+    await new Promise<void>((resolveListen, reject) => {
+      listener!.server.once("error", reject);
+      listener!.server.listen(port, "127.0.0.1", resolveListen);
+    });
+    const request = async (path: string, body: unknown, token?: string) => {
+      const payload = JSON.stringify(body);
+      return new Promise<{ status: number; body: unknown }>((resolveResponse, reject) => {
+        const call = httpsRequest(
+          {
+            host: "127.0.0.1",
+            port,
+            servername: "ellie-native-acceptance.local",
+            path,
+            method: "POST",
+            ca: identity.rootCert,
+            rejectUnauthorized: true,
+            timeout: 5_000,
+            headers: {
+              host: `ellie-native-acceptance.local:${port}`,
+              "x-ellie-version": "1",
+              "content-type": "application/json",
+              "content-length": Buffer.byteLength(payload),
+              ...(token ? { authorization: `Bearer ${token}` } : {}),
+            },
+          },
+          (response) => {
+            const chunks: Buffer[] = [];
+            let bytes = 0;
+            response.on("data", (chunk: Buffer) => {
+              bytes += chunk.length;
+              if (bytes > 64 * 1024)
+                call.destroy(new Error("Owned native reply exceeded its bound."));
+              else chunks.push(Buffer.from(chunk));
+            });
+            response.once("error", reject);
+            response.once("end", () => {
+              try {
+                resolveResponse({
+                  status: response.statusCode ?? 0,
+                  body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+                });
+              } catch (error) {
+                reject(error);
+              }
+            });
+          },
+        );
+        call.once("timeout", () => call.destroy(new Error("Owned native request timed out.")));
+        call.once("error", reject);
+        call.end(payload);
+      });
+    };
+    const pair = async (token: string, capabilities: ("browser.read" | "browser.control")[]) => {
+      const invitation = await auth.invite({
+        label: "Owned synthetic phone",
+        grants: [{ target, capabilities }],
+      });
+      assert.equal(
+        (await request("/native/v1/pair", { invitation: invitation.code, token })).status,
+        200,
+      );
+    };
+    return { close, coordinator, events, pair, request, target };
+  } catch (error) {
+    await close().catch(() => {});
+    throw error;
+  }
 }
 
 async function prepareAcceptanceEnvironment(ownedRoot: string, home: string, release: string) {
@@ -401,6 +700,8 @@ async function main() {
   let actionResult: unknown;
   let rollbackResult: unknown;
   let browserUserAgent = "";
+  let nativeJourney: Awaited<ReturnType<typeof startNativeJourney>> | undefined;
+  let nativeEvidence: Record<string, unknown> | undefined;
   let retainedRoot = true;
   let cleanupError: string | undefined;
 
@@ -427,7 +728,7 @@ async function main() {
           cwd: resolve("."),
           env: {
             HOME: home,
-            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            PATH: `${dirname(process.execPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
             LANG: "C",
             LC_ALL: "C",
             AGENT_BROWSER_MAX_OUTPUT: String(maximumCommandOutput),
@@ -443,14 +744,18 @@ async function main() {
         child.stdout.on("data", (chunk: Buffer) => (stdout = append(stdout, chunk)));
         child.stderr.on("data", (chunk: Buffer) => (stderr = append(stderr, chunk)));
         let timedOut = false;
+        let escalation: ReturnType<typeof setTimeout> | undefined;
         const timer = setTimeout(() => {
           timedOut = true;
-          child.kill("SIGTERM");
-          setTimeout(() => child.kill("SIGKILL"), 1_000).unref();
+          if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+          escalation = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          }, 1_000);
         }, commandTimeoutMs);
         child.once("error", reject);
         child.once("close", (code) => {
           clearTimeout(timer);
+          if (escalation) clearTimeout(escalation);
           const combined = `${stdout}${stderr ? `\n${stderr}` : ""}`.trim();
           if (code === 0 && !timedOut) resolveOutput(combined);
           else
@@ -515,7 +820,7 @@ async function main() {
     });
     const bound = await agentJson<{ result: unknown }>([
       "eval",
-      `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');return chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}})})()`,
+      `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});return chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}})})()`,
     ]);
     const bindingReply = bound.result as { ok?: unknown; value?: { availability?: unknown } };
     assert.equal(bindingReply.ok, true);
@@ -597,6 +902,185 @@ async function main() {
     ]);
     assert.deepEqual(rolledBack.result, { offset: 0, text: "Scroll offset: 0" });
 
+    nativeJourney = await startNativeJourney(operations, ownedRoot);
+    const native = nativeJourney;
+    const browserResult = (reply: { status: number; body: unknown }) => {
+      assert.equal(reply.status, 200);
+      return record(record(record(reply.body).result).browser);
+    };
+    const command = (action: Record<string, unknown>, token: string) =>
+      native.request("/native/v1/commands", { nodeId: native.target, action }, token);
+    const readOnlyToken = "1".repeat(64);
+    const controlToken = "2".repeat(64);
+    await native.pair(readOnlyToken, ["browser.read"]);
+    const firstStatus = browserResult(await command({ tool: "browser.status" }, readOnlyToken));
+    assert.equal(firstStatus.status, "connected");
+    assert.equal(typeof firstStatus.revision, "string");
+    const beforeDeniedJobs = native.coordinator.jobStore.list(native.target, 100).length;
+    assert.equal(
+      (
+        await command(
+          {
+            tool: "browser.search",
+            query: "owned synthetic video",
+            revision: firstStatus.revision,
+          },
+          readOnlyToken,
+        )
+      ).status,
+      403,
+    );
+    assert.equal(native.coordinator.jobStore.list(native.target, 100).length, beforeDeniedJobs);
+    await native.pair(controlToken, ["browser.read", "browser.control"]);
+    const nativeStatus = browserResult(await command({ tool: "browser.status" }, controlToken));
+    assert.equal(nativeStatus.status, "connected");
+    const nativeRevision = String(nativeStatus.revision);
+    const nativeRead = browserResult(
+      await command(
+        { tool: "browser.read", view: "catalog", revision: nativeRevision },
+        controlToken,
+      ),
+    );
+    assert.equal(nativeRead.status, "completed");
+    assert.match(String(record(nativeRead.view).summary), /^home:/);
+    const beforeDiscardJobs = native.coordinator.jobStore.list(native.target, 100).length;
+    const discarded = {
+      tool: "browser.search",
+      query: "discarded synthetic query",
+      revision: nativeRevision,
+    };
+    assert.equal(discarded.query, "discarded synthetic query");
+    assert.equal(
+      native.coordinator.jobStore.list(native.target, 100).length,
+      beforeDiscardJobs,
+      "an unsubmitted reviewed candidate cannot create a coordinator job",
+    );
+    const beforeStaleEvents = bridgeEvents.length;
+    const stale = await command(
+      { tool: "browser.search", query: "owned synthetic video", revision: "a".repeat(64) },
+      controlToken,
+    );
+    assert.equal(
+      stale.status,
+      502,
+      "native transport conservatively reports post-dispatch uncertainty",
+    );
+    assert.equal(record(stale.body).outcome, "unknown");
+    assert.deepEqual(
+      bridgeEvents.slice(beforeStaleEvents).map((event) => event.type),
+      ["binding.status", "binding.status"],
+      "a stale revision cannot reach the companion mutation tool",
+    );
+    assert.equal(
+      browserResult(
+        await command(
+          { tool: "browser.search", query: "owned synthetic video", revision: nativeRevision },
+          controlToken,
+        ),
+      ).status,
+      "completed",
+    );
+    const results = browserResult(
+      await command(
+        { tool: "browser.read", view: "catalog", revision: nativeRevision },
+        controlToken,
+      ),
+    );
+    assert.match(String(record(results.view).summary), /^results: owned synthetic video:/);
+    const resultItems = record(results.view).items;
+    assert.ok(Array.isArray(resultItems));
+    const selected = resultItems.find((item) => record(item).id === "owned-video-1");
+    assert.ok(selected);
+    assert.equal(
+      browserResult(
+        await command(
+          { tool: "browser.select", itemId: record(selected).id, revision: nativeRevision },
+          controlToken,
+        ),
+      ).status,
+      "completed",
+    );
+    const watch = browserResult(
+      await command(
+        { tool: "browser.read", view: "player", revision: nativeRevision },
+        controlToken,
+      ),
+    );
+    assert.match(String(record(watch.view).summary), /^watch: owned synthetic video: paused$/);
+    const play = await command(
+      { tool: "browser.playback", action: "play", revision: nativeRevision },
+      controlToken,
+    );
+    assert.equal(play.status, 200);
+    assert.equal(record(play.body).outcome, "unknown");
+    assert.equal(record(record(record(play.body).result).browser).status, "unknown");
+    const afterUnknownJobs = native.coordinator.jobStore.list(native.target, 100).length;
+    const playing = browserResult(
+      await command(
+        { tool: "browser.read", view: "player", revision: nativeRevision },
+        controlToken,
+      ),
+    );
+    assert.match(String(record(playing.view).summary), /^watch: owned synthetic video: playing$/);
+    assert.equal(
+      native.coordinator.jobStore.list(native.target, 100).length,
+      afterUnknownJobs + 1,
+      "fresh read does not replay the unknown play mutation",
+    );
+    assert.equal(
+      browserResult(
+        await command(
+          { tool: "browser.playback", action: "pause", revision: nativeRevision },
+          controlToken,
+        ),
+      ).status,
+      "completed",
+    );
+    const finalRead = browserResult(
+      await command(
+        { tool: "browser.read", view: "player", revision: nativeRevision },
+        controlToken,
+      ),
+    );
+    assert.match(String(record(finalRead.view).summary), /^watch: owned synthetic video: paused$/);
+    const visibleMedia = await agentJson<{ result: unknown }>([
+      "eval",
+      "({phase:document.querySelector('#phase').textContent,query:document.querySelector('#query').textContent,selection:document.querySelector('#selection').textContent,playback:document.querySelector('#playback').textContent,mutations:Number(document.body.dataset.mutations)})",
+    ]);
+    assert.deepEqual(visibleMedia.result, {
+      phase: "watch",
+      query: "owned synthetic video",
+      selection: "Owned synthetic video",
+      playback: "paused",
+      mutations: 4,
+    });
+    await bridge.close();
+    const disconnected = await command({ tool: "browser.status" }, controlToken);
+    assert.equal(disconnected.status, 200);
+    assert.equal(record(disconnected.body).outcome, "failed");
+    assert.equal(
+      native.coordinator.jobStore.list(native.target, 100).length,
+      afterUnknownJobs + 4,
+      "disconnect does not create any replay job",
+    );
+    nativeEvidence = {
+      path: "pinned native HTTPS → scoped grant → coordinator job → owned node → production WebMCP selector → loaded extension",
+      deniedControlStatus: 403,
+      discardedCandidateDispatched: false,
+      staleRevisionOutcome: "unknown transport result; no companion mutation dispatched",
+      search: "completed",
+      select: "completed",
+      play: "unknown",
+      pause: "completed",
+      freshReadAfterUnknown: "playing",
+      visibleMedia: visibleMedia.result,
+      disconnectedStatus: "failed",
+      jobs: native.coordinator.jobStore
+        .list(native.target, 100)
+        .map((job) => ({ state: job.state })),
+      nodeEvents: native.events,
+    };
+
     report = {
       version: 1,
       status: "pass",
@@ -647,6 +1131,7 @@ async function main() {
         accessibilityFallbackAttempted: false,
         replayAttempted: false,
       },
+      nativeJourney: nativeEvidence,
       commands,
       artifacts: ["before.snapshot.txt", "before.png", "after.snapshot.txt", "after.png"],
     };
@@ -673,6 +1158,7 @@ async function main() {
     };
   } finally {
     if (browserStarted) await agent(["close"]).catch((error) => (cleanupError = String(error)));
+    await nativeJourney?.close().catch((error) => (cleanupError = String(error)));
     await bridge.close().catch((error) => (cleanupError = String(error)));
     await closeFixtureServer(server).catch((error) => (cleanupError = String(error)));
     if (!failure && !cleanupError) {

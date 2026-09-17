@@ -40,6 +40,15 @@ actual player effects, or the physical iPhone voice flow.
 agent-browser profile, the production extension scripts, an owner-provided staged development
 native host artifact, the real Unix bridge seam and the canonical browser-operation executor. The page registers its read
 and scroll tools with the browser's native `document.modelContext.registerTool()` implementation.
+The same owned run pairs synthetic native clients through a pinned HTTPS listener, routes commands
+through an owned coordinator and node, and reaches that loaded companion with reviewed search,
+read, select and playback tools on the local page. A read-only grant rejects control before a job
+exists. A stale revision reaches no mutation tool; the native transport conservatively returns
+an unknown outcome after dispatch begins. One play tool changes the visible fixture but withholds
+completion proof, so a fresh read is required before a separate pause command. The runner checks
+exactly four media mutations, no replay job and an unavailable status after bridge disconnect.
+A discarded candidate is deliberately not posted; this checks the network boundary, not the
+native review UI.
 The runner records the exact source, release, extension fixture changes, browser executable,
 registry, snapshots and screenshots. It requires a measured scroll offset and visible text change,
 then reverses that one action only after both the WebMCP result and page effect are known. An
@@ -62,9 +71,11 @@ All browser profiles, manifests, private runtime state and certificates are crea
 owned temporary root. The HTTPS exception is scoped to the fixture leaf's SPKI and hostname; the
 runner does not change the user trust store or cross a security interstitial. A passing run proves
 the reviewed Chrome 152 dialect (serialized schemas, JSON-string arguments and results), extension,
-packaged native host and reviewed Node Unix bridge seam. The current WebMCP draft instead takes an
+packaged native host, reviewed Node Unix bridge seam, native HTTPS grant enforcement and coordinator
+job routing against a synthetic owned site. The current WebMCP draft instead takes an
 object argument while retaining serialized schemas, so the reviewed origin/tool policy selects the
 argument dialect explicitly before dispatch. Schema representation is never used as the dialect
 signal, and an action is never retried with another representation. This run does not prove
 authenticated publisher admission, the packaged Swift broker's Arc ancestry check, an Arc WebMCP
-implementation, Accessibility, a streaming provider, or a physical phone path.
+implementation, Accessibility, public streaming playback, native phone review or microphone input,
+or a physical phone path.
