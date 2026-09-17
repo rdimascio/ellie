@@ -763,20 +763,36 @@ for await (const line of createInterface({ input: process.stdin })) {
       authenticated: true,
     };
     runtime = new BrowserAccessibilityRuntime(executable, () => context);
-    const selector = new BrowserOperationSelector(
-      async () => ({
-        availability: "accessibility",
-        bindingId: "binding-1",
-        documentId: "document-1",
-        origin: "https://www.youtube.com",
-        url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
-        expiresAt: Date.now() + 60_000,
-      }),
+    const webmcp = new BrowserWebMCPOperations(
       {
-        async execute() {
-          throw new Error("WebMCP must not dispatch.");
+        async request(request) {
+          if (request.type === "binding.status")
+            return browserWebMCPResultFor(request.id, "ok", {
+              availability: "accessibility",
+              bindingId: "binding-1",
+              documentId: "document-1",
+              origin: "https://www.youtube.com",
+              url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+              expiresAt: Date.now() + 60_000,
+            });
+          if (request.type === "page.inspect") {
+            assert.equal(request.bindingId, "binding-1");
+            assert.equal(request.documentId, "document-1");
+            return browserWebMCPResultFor(request.id, "ok", {
+              bindingId: "binding-1",
+              documentId: "document-1",
+              url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+              site: { provider: "youtube", page: "watch", playback: "unavailable" },
+            });
+          }
+          throw new Error("WebMCP must not dispatch a site action.");
         },
       },
+      reviewedBrowserRegistry({ version: 1, bindings: [] }),
+    );
+    const selector = new BrowserOperationSelector(
+      (signal) => webmcp.bindingStatus(signal),
+      webmcp,
       runtime,
     );
     const paired = await f.pair("ax-unknown-node");
@@ -803,9 +819,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       action: { tool: "browser.status" },
     })) as { browser: { revision: string } };
     const revision = status.browser.revision;
-    await f.controller.call("POST", "/v1/commands", {
+    const freshRead = (await f.controller.call("POST", "/v1/commands", {
       nodeId: "ax-unknown-node",
       action: { tool: "browser.read", view: "summary", revision },
+    })) as { browser: { status: string; view: { site?: unknown } } };
+    assert.equal(freshRead.browser.status, "completed");
+    assert.deepEqual(freshRead.browser.view.site, {
+      provider: "youtube",
+      page: "watch",
+      playback: "unavailable",
     });
     const response = (await f.controller.call("POST", "/v1/commands", {
       nodeId: "ax-unknown-node",
