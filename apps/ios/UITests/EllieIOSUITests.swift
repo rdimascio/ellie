@@ -11,6 +11,10 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["quiet-see-all"].exists)
         XCTAssertTrue(app.buttons["quiet-voice"].exists)
         XCTAssertEqual(app.textFields.count, 0, "Quiet review must not add a text composer")
+        let home = XCTAttachment(screenshot: app.screenshot())
+        home.name = "Quiet home fixture"
+        home.lifetime = .keepAlways
+        add(home)
         app.buttons["quiet-session-trip_session"].tap()
         XCTAssertTrue(app.descendants(matching: .any).matching(
             identifier: "quiet-turn-turn_trip_session").firstMatch.waitForExistence(timeout: 5))
@@ -18,6 +22,10 @@ final class EllieIOSUITests: XCTestCase {
             identifier: "quiet-activity-task_trip_session").firstMatch.exists)
         XCTAssertFalse(app.descendants(matching: .any).matching(
             identifier: "quiet-activity-task_photo_session").firstMatch.exists)
+        let session = XCTAttachment(screenshot: app.screenshot())
+        session.name = "Quiet session fixture"
+        session.lifetime = .keepAlways
+        add(session)
         app.navigationBars.buttons.firstMatch.tap()
         app.buttons["quiet-session-photo_session"].tap()
         XCTAssertTrue(app.descendants(matching: .any).matching(
