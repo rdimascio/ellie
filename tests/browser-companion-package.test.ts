@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,6 +11,14 @@ import {
 
 const source = new URL("../apps/browser-media-extension/", import.meta.url).pathname;
 const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+async function setTreeMode(path: string, installed: boolean): Promise<void> {
+  const info = await stat(path);
+  if (info.isDirectory()) {
+    if (!installed) await chmod(path, 0o755);
+    for (const entry of await readdir(path)) await setTreeMode(join(path, entry), installed);
+    if (installed) await chmod(path, 0o555);
+  } else await chmod(path, installed ? 0o444 : 0o644);
+}
 
 test("packaged browser companion contains every transitively referenced provider script", async () => {
   const root = await mkdtemp(join(tmpdir(), "ellie-companion-package-"));
@@ -33,6 +41,15 @@ test("packaged browser companion contains every transitively referenced provider
         hash(await readFile(join(input, name))),
         hash(await readFile(join(output, name))),
       );
+
+    await setTreeMode(output, true);
+    try {
+      assert.deepEqual(await verifyBrowserCompanionClosure(output), closure);
+      assert.equal((await stat(output)).mode & 0o777, 0o555);
+      assert.equal((await stat(join(output, "youtube-tv-controller.js"))).mode & 0o777, 0o444);
+    } finally {
+      await setTreeMode(output, false);
+    }
 
     await rm(join(output, "youtube-tv-controller.js"));
     await assert.rejects(
