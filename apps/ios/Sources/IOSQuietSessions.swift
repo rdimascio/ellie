@@ -413,6 +413,7 @@ struct IOSQuietSessionsHome: View {
                             .foregroundStyle(ElliePalette.muted)
                     }
                     .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("quiet-session-\(session.id)")
