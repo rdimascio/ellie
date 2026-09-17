@@ -52,11 +52,26 @@
       const style = getComputedStyle(node);
       if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0)
         return false;
+      const parent = node.parentElement;
+      if (parent) {
+        const bounds = parent.getBoundingClientRect();
+        const parentStyle = getComputedStyle(parent);
+        if (
+          ["hidden", "auto", "scroll"].includes(parentStyle.overflowX) &&
+          (rect.right <= bounds.left || rect.left >= bounds.right)
+        )
+          return false;
+        if (
+          ["hidden", "auto", "scroll"].includes(parentStyle.overflowY) &&
+          (rect.bottom <= bounds.top || rect.top >= bounds.bottom)
+        )
+          return false;
+      }
     }
     const x = Math.min(innerWidth - 1, Math.max(0, rect.left + Math.min(rect.width / 2, 8)));
     const y = Math.min(innerHeight - 1, Math.max(0, rect.top + Math.min(rect.height / 2, 8)));
     const hit = document.elementFromPoint(x, y);
-    return Boolean(hit && (element.contains(hit) || hit.contains(element)));
+    return Boolean(hit && element.contains(hit));
   };
   const title = (anchor) => {
     for (const value of [

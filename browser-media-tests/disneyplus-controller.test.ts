@@ -187,6 +187,37 @@ test(
 );
 
 test(
+  "Disney+ a clipped or covered title link is not an observed choice",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await page.locator("main").evaluate((node) => {
+        node.style.width = "0px";
+        node.style.overflow = "hidden";
+      });
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).candidates,
+        [],
+      );
+      await page.locator("main").evaluate((node) => {
+        node.style.width = "";
+        node.style.overflow = "";
+      });
+      await page.evaluate(() => {
+        const overlay = document.createElement("div");
+        overlay.id = "cover";
+        overlay.style.cssText = "position:fixed;left:0;top:0;width:100vw;height:100vh;z-index:99";
+        document.body.append(overlay);
+      });
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).candidates,
+        [],
+      );
+    });
+  },
+);
+
+test(
   "Disney+ unobserved navigation is an unknown outcome with no replay",
   { timeout: 15_000 },
   async () => {
