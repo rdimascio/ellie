@@ -8,7 +8,9 @@ The development package from `a7a01019faefe2d00783d9bafdc8c6758312ffba` includes
 
 On the physical coordinator Mac, the managed stop, selection, start and status checks passed. Its HTTPS listener became ready, and the existing execution node reconnected after the interruption. Existing identity and configuration fingerprints were unchanged.
 
-On the physical execution Mac, selection and launchd status passed, but startup then reported a Keychain timeout after 60 seconds. The previous package and its exact browser-native-host ownership record were restored. That package also failed to start after 60 seconds. The node was explicitly stopped to contain automatic restart attempts. Metadata-only inspection reported unlocked login and default Keychains; it did not read an item or prove why credential access stalled. A separately prepared attended credential check has not run.
+On the physical execution Mac, selection and launchd status passed, but startup then reported a Keychain timeout after 60 seconds. The previous package and its exact browser-native-host ownership record were restored. That package also failed to start after 60 seconds. The node was explicitly stopped to contain automatic restart attempts. Metadata-only inspection reported unlocked login and default Keychains; it did not read an item or prove why credential access stalled.
+
+After the owner reported approval, a separately reviewed one-shot check attempted to read the execution Mac's existing credential. It failed after 60 seconds; the owned helper exited and the finished diagnostic LaunchAgent was unloaded. The check made no network requests, service changes or credential writes. The execution node remains stopped. The location and type of the reported approval still require clarification before another attended attempt; the failed read does not establish that approval was denied or the credential was lost.
 
 These observations do not establish a completed two-Mac upgrade, unchanged macOS consent across updates, sleep/wake recovery or an accepted daily-use release. A running launchd process is not sufficient evidence that the authenticated endpoint or node registration is ready.
 
@@ -17,6 +19,8 @@ These observations do not establish a completed two-Mac upgrade, unchanged macOS
 The reviewed `b7880e2` follow-up preserves the 60-second credential deadline and caps helper output at 65,536 bytes. A timeout or output failure now stops the retained child, escalates from TERM to KILL after 250 milliseconds if needed, and waits for its close event. Failure to confirm closure within three seconds produces the fixed `keychain_cleanup_uncertain` event. Late output cannot turn an expired request into a success. Credentials remain on stdin and in memory; the change neither reads another account nor alters permissions.
 
 The focused config and service tests passed 19 cases. Timeout and late-output checks use a real owned synthetic Node helper with an advanced test clock; the missing-close case uses an explicit fake child. These checks do not access the real Keychain. This cleanup change does not modify launchd's restart policy: an operator must still stop a service that repeatedly fails credential access before an attended recovery attempt.
+
+PR152 merged the cleanup change and PR153 added native HTTPS authorization through the production coordinator and node for a disconnected browser-status request. Their merged source, `a7ec76c`, passed post-merge CI: 904 Node tests with one platform skip, 197 Swift tests, six iPhone Simulator UI tests, and the app-hosted pinned HTTPS/Keychain gate. These automated checks do not establish physical Keychain recovery or website acceptance. The new cleanup code is not part of the installed package described above.
 
 ## Automated browser evidence
 
