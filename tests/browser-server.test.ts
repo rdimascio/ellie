@@ -1953,6 +1953,235 @@ test("native command disconnect after dispatch cancels upstream without replay o
   assert.equal(calls, 1);
 });
 
+test("explicit native browser refresh waits only for a cancelled delivered command to settle", async (t) => {
+  let settling = true;
+  let observed!: () => void;
+  const firstObservation = new Promise<void>((resolve) => (observed = resolve));
+  let dispatches = 0;
+  const f = await fixture(undefined, {
+    async nodes() {
+      observed();
+      return [
+        {
+          id: nativeTarget.id,
+          label: nativeTarget.label,
+          online: true,
+          capabilities: ["browser.read"],
+          ...(settling ? { cancellationSettling: true as const } : {}),
+        },
+      ];
+    },
+    async openApp() {
+      throw new Error("No app action is expected.");
+    },
+    async execute() {
+      dispatches++;
+      return {
+        ok: true,
+        message: "Browser connected.",
+        browser: {
+          source: "webmcp",
+          operation: "status",
+          status: "connected",
+          revision: "fresh-revision",
+          origin: "https://www.youtube.com",
+        },
+      };
+    },
+  });
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Read-only iPhone",
+    grants: [{ target: nativeTarget.id, capabilities: ["browser.read"] }],
+  });
+  const token = "d".repeat(64);
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token },
+        headers: { "x-ellie-version": "1" },
+      })
+    ).status,
+    200,
+  );
+  const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+  const request = f.request("POST", "/native/v1/commands", {
+    headers,
+    body: { nodeId: nativeTarget.id, action: { tool: "browser.refresh" } },
+  });
+  await firstObservation;
+  assert.equal(dispatches, 0);
+  settling = false;
+  const response = await request;
+  assert.equal(response.status, 200);
+  assert.equal((response.body as { outcome: string }).outcome, "completed");
+  assert.equal(dispatches, 1, "the one explicit read-only request dispatches once");
+});
+
+test("a cancelled or revoked native recovery read cannot dispatch after settlement", async (t) => {
+  for (const condition of ["cancel", "revoke"] as const) {
+    let settling = true;
+    const observed = deferred<void>();
+    let dispatches = 0;
+    const f = await fixture(undefined, {
+      async nodes() {
+        observed.resolve();
+        return [
+          {
+            id: nativeTarget.id,
+            label: nativeTarget.label,
+            online: true,
+            capabilities: ["browser.read"],
+            ...(settling ? { cancellationSettling: true as const } : {}),
+          },
+        ];
+      },
+      async openApp() {
+        throw new Error("No app action is expected.");
+      },
+      async execute() {
+        dispatches++;
+        throw new Error("Recovery read must not dispatch.");
+      },
+    });
+    t.after(() => f.close());
+    const invitation = await f.nativeAuth.invite({
+      label: "Read-only iPhone",
+      grants: [{ target: nativeTarget.id, capabilities: ["browser.read"] }],
+    });
+    const token = "e".repeat(64);
+    const paired = await f.request("POST", "/native/v1/pair", {
+      body: { invitation: invitation.code, token },
+      headers: { "x-ellie-version": "1" },
+    });
+    const client = (paired.body as { client: { id: string } }).client;
+    const headers = { "x-ellie-version": "1", authorization: `Bearer ${token}` };
+    const abort = new AbortController();
+    const request = f.request("POST", "/native/v1/commands", {
+      headers,
+      body: { nodeId: nativeTarget.id, action: { tool: "browser.refresh" } },
+      signal: abort.signal,
+    });
+    await observed.promise;
+    if (condition === "cancel") {
+      const cancelled = assert.rejects(request, { name: "AbortError" });
+      abort.abort();
+      await cancelled;
+    } else {
+      await f.nativeAuth.revoke(client.id);
+    }
+    settling = false;
+    if (condition === "revoke") assert.equal((await request).status, 401);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(dispatches, 0, condition);
+  }
+});
+
+test("native recovery wait has a finite truthful settling result and does not dispatch", async (t) => {
+  let dispatches = 0;
+  const f = await fixture(undefined, {
+    async nodes() {
+      return [
+        {
+          id: nativeTarget.id,
+          label: nativeTarget.label,
+          online: true,
+          capabilities: ["browser.read"],
+          cancellationSettling: true,
+        },
+      ];
+    },
+    async openApp() {
+      throw new Error("No app action is expected.");
+    },
+    async execute() {
+      dispatches++;
+      throw new Error("Unexpected read dispatch.");
+    },
+  });
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Read-only iPhone",
+    grants: [{ target: nativeTarget.id, capabilities: ["browser.read"] }],
+  });
+  const token = "f".repeat(64);
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token },
+        headers: { "x-ellie-version": "1" },
+      })
+    ).status,
+    200,
+  );
+  const started = performance.now();
+  const response = await f.request("POST", "/native/v1/commands", {
+    headers: { "x-ellie-version": "1", authorization: `Bearer ${token}` },
+    body: { nodeId: nativeTarget.id, action: { tool: "browser.refresh" } },
+  });
+  assert.equal(response.status, 409);
+  assert.deepEqual(response.body, {
+    error: "A previous browser command is still settling. Wait and read again.",
+    code: "browser_read_settling",
+  });
+  assert.ok(performance.now() - started < 7_000);
+  assert.equal(dispatches, 0);
+});
+
+test("a browser mutation never waits or retries behind a cancelled-job settlement flag", async (t) => {
+  let observations = 0;
+  let dispatches = 0;
+  const f = await fixture(undefined, {
+    async nodes() {
+      observations++;
+      return [
+        {
+          id: nativeTarget.id,
+          label: nativeTarget.label,
+          online: true,
+          capabilities: ["browser.control"],
+          cancellationSettling: true,
+        },
+      ];
+    },
+    async openApp() {
+      throw new Error("No app action is expected.");
+    },
+    async execute() {
+      dispatches++;
+      throw new Error("Synthetic coordinator still owns the previous job.");
+    },
+  });
+  t.after(() => f.close());
+  const invitation = await f.nativeAuth.invite({
+    label: "Browser iPhone",
+    grants: [{ target: nativeTarget.id, capabilities: ["browser.control"] }],
+  });
+  const token = "a".repeat(64);
+  assert.equal(
+    (
+      await f.request("POST", "/native/v1/pair", {
+        body: { invitation: invitation.code, token },
+        headers: { "x-ellie-version": "1" },
+      })
+    ).status,
+    200,
+  );
+  const started = performance.now();
+  const response = await f.request("POST", "/native/v1/commands", {
+    headers: { "x-ellie-version": "1", authorization: `Bearer ${token}` },
+    body: {
+      nodeId: nativeTarget.id,
+      action: { tool: "browser.scroll", direction: "down", revision: "observed-revision" },
+    },
+  });
+  assert.equal(response.status, 502);
+  assert.deepEqual(response.body, { outcome: "unknown" });
+  assert.ok(performance.now() - started < 1_000);
+  assert.equal(observations, 1);
+  assert.equal(dispatches, 1);
+});
+
 test("native discovery deadline never dispatches after a late inventory response", async (t) => {
   const started = deferred<void>();
   const discovery = deferred<(typeof nativeTarget)[]>();

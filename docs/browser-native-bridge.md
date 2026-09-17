@@ -81,3 +81,42 @@ signal, and an action is never retried with another representation. This run doe
 authenticated publisher admission, the packaged Swift broker's Arc ancestry check, an Arc WebMCP
 implementation, Accessibility, public streaming playback, native phone review or microphone input,
 or a physical phone path.
+
+### Native iPhone composition
+
+On an exclusively reserved Mac with Xcode and an available iPhone Simulator runtime, set
+`ELLIE_BROWSER_ACCEPTANCE_IOS_COMPOSED=1` with the same explicit artifact and browser paths:
+
+```sh
+ELLIE_BROWSER_ACCEPTANCE_IOS_COMPOSED=1 \
+ELLIE_BROWSER_ACCEPTANCE_RELEASE=/absolute/path/to/staged-development-artifact \
+ELLIE_BROWSER_ACCEPTANCE_BROWSER=/absolute/path/to/Google\ Chrome\ for\ Testing \
+REPORT_DIR=/absolute/path/to/new-private-report-directory \
+bun run accept:browser-webmcp
+```
+
+The package script runs Node 24. Do not replace it with `bun scripts/browser-webmcp-acceptance.ts`:
+the harness uses its actual interpreter for the source native-host bootstrap. Preserve the normal
+home and Keychain environment. The runner creates its own Simulator, certificates, identities,
+browser profile and synthetic media page; it does not use an existing phone enrollment.
+
+The composed test starts at the real SwiftUI voice surface with synthetic recording and transcript
+input, then crosses pinned native HTTPS, coordinator job dispatch, the node and the loaded WebMCP
+controller. It requires review and a fresh observation before search, selection and playback,
+then cancels one held scroll and explicitly reads again. Passing requires the one requested
+XCTest to execute without a skip, exact dispatch/effect counts, page-observed cancellation, no
+replayed action, and certain cleanup of the owned resources. A rendered UI or passing XCTest
+alone is insufficient when an aggregate assertion fails.
+
+Browser versions are part of the evidence. In an owned comparison with the same production
+controller, Chrome for Testing 152.0.7977.75 rejected the caller's cancelled invocation without
+providing an abort signal to the page callback. Version 153.0.8010.12 delivered the signal and the
+callback observed abort. Keep the page-abort assertion when choosing a compatible browser.
+This does not promise that arbitrary website tools honor cancellation; an uncertain action is
+never replayed automatically.
+
+The composed harness bootstraps native-host source against an identified staged artifact. It
+does not establish the installed launcher, authenticated publisher admission, a physical microphone
+or iPhone, Accessibility fallback, or any public streaming service. Private reports must retain
+the exact source, interpreter, browser, toolchain, result and cleanup evidence. Keep earlier failed
+attempts when a correction is tested.

@@ -8,6 +8,109 @@ import { runNode } from "../apps/node/src/index.ts";
 
 import { fixture } from "./helpers.ts";
 
+test("coordinator exposes a cancelled delivered command as settling only until node outcome", async () => {
+  const f = await fixture(5_000);
+  const stop = new AbortController();
+  let agent: Promise<void> | undefined;
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => (release = resolve));
+  let entered!: () => void;
+  const started = new Promise<void>((resolve) => (entered = resolve));
+  let dispatches = 0;
+  try {
+    const node = await f.pair("settling-node");
+    let registered!: () => void;
+    const ready = new Promise<void>((resolve) => (registered = resolve));
+    agent = runNode({
+      client: node,
+      preferences: defaults,
+      signal: stop.signal,
+      heartbeatMs: 100,
+      executor: {
+        capabilities: async () => [...CAPABILITIES],
+        async execute(_action, signal) {
+          dispatches++;
+          entered();
+          await held;
+          signal?.throwIfAborted();
+          return { ok: true, message: "Unexpected completed action." };
+        },
+      },
+      onStatus: (status) => {
+        if (status.startsWith("Node connected")) registered();
+      },
+    });
+    let registrationTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        ready,
+        new Promise<never>((_resolve, reject) => {
+          registrationTimer = setTimeout(
+            () => reject(new Error("Node registration timed out.")),
+            5_000,
+          );
+        }),
+      ]);
+    } finally {
+      if (registrationTimer) clearTimeout(registrationTimer);
+    }
+    const caller = new AbortController();
+    const command = f.controller.call(
+      "POST",
+      "/v1/commands",
+      {
+        nodeId: "settling-node",
+        action: {
+          tool: "browser.scroll",
+          direction: "down",
+          revision: "observed-revision",
+        },
+      },
+      { signal: caller.signal },
+    );
+    await started;
+    const cancellation = assert.rejects(command);
+    caller.abort();
+    await cancellation;
+    const deadline = Date.now() + 2_000;
+    let settling = false;
+    while (Date.now() < deadline) {
+      const nodes = (await f.controller.call("GET", "/v1/nodes")) as Array<{
+        id: string;
+        cancellationSettling?: true;
+      }>;
+      if (nodes.find((item) => item.id === "settling-node")?.cancellationSettling === true) {
+        settling = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(settling, true);
+    assert.equal(dispatches, 1);
+    release();
+    let cleared = false;
+    const clearDeadline = Date.now() + 2_000;
+    while (Date.now() < clearDeadline) {
+      const nodes = (await f.controller.call("GET", "/v1/nodes")) as Array<{
+        id: string;
+        cancellationSettling?: true;
+      }>;
+      if (nodes.find((item) => item.id === "settling-node")?.cancellationSettling !== true) {
+        cleared = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.equal(cleared, true);
+    assert.equal(dispatches, 1);
+  } finally {
+    release?.();
+    stop.abort();
+    if (agent) await agent;
+    await f.close();
+  }
+});
+
 test("real HTTPS command round trip through node executor with contextual follow-up", async () => {
   const f = await fixture();
   const abort = new AbortController();

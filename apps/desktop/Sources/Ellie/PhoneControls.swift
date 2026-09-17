@@ -21,6 +21,7 @@ enum PhoneCommandOutcome: Equatable, Sendable {
 
 enum PhoneControlFailure: Error, Equatable, LocalizedError {
   case revoked, rejected, unavailable, invalidResponse, cancelled
+  case browserReadSettling, browserObservationUnavailable
   var errorDescription: String? {
     switch self {
     case .revoked: "This iPhone’s coordinator session is no longer authorized."
@@ -28,6 +29,10 @@ enum PhoneControlFailure: Error, Equatable, LocalizedError {
     case .unavailable: "The coordinator is unavailable."
     case .invalidResponse: "The coordinator returned an invalid response."
     case .cancelled: "The request stopped."
+    case .browserReadSettling:
+      "The previous browser command is still settling. Wait, then tap Read current page again."
+    case .browserObservationUnavailable:
+      "The page could not be observed yet. Wait, then tap Read current page again."
     }
   }
 }
