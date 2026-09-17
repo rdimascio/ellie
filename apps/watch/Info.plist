@@ -9,7 +9,7 @@
   <key>CFBundleShortVersionString</key><string>$(MARKETING_VERSION)</string>
   <key>CFBundleVersion</key><string>$(CURRENT_PROJECT_VERSION)</string>
   <key>WKCompanionAppBundleIdentifier</key><string>org.ellie.dashboard.ios</string>
-  <key>WKWatchKitApp</key><true/>
+  <key>WKApplication</key><true/>
   <key>WKRunsIndependentlyOfCompanionApp</key><false/>
 </dict>
 </plist>
