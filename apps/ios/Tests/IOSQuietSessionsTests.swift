@@ -7,7 +7,9 @@ private actor QuietFixtureClient: IOSQuietClient {
     var completedDetails: [String] = []
     var revoked = false
     var holdDetail = false
+    var holdList = false
     private var held: CheckedContinuation<IOSQuietDetail, Error>?
+    private var heldPage: CheckedContinuation<IOSQuietPage, Error>?
     let photo = IOSQuietSession(id: "photo_session", title: "Family photos",
         updatedAt: Date(timeIntervalSince1970: 1_800_000_000), turnCount: 1, pending: false)
     let trip = IOSQuietSession(id: "trip_session", title: "Trip planning",
@@ -16,6 +18,10 @@ private actor QuietFixtureClient: IOSQuietClient {
     func sessions(_ credential: NativeEnrollmentCredential, limit: Int, cursor: String?) async throws -> IOSQuietPage {
         calls.append("list:\(limit)")
         if revoked { throw IOSQuietFailure.revoked }
+        if holdList {
+            holdList = false
+            return try await withCheckedThrowingContinuation { heldPage = $0 }
+        }
         return IOSQuietPage(sessions: limit == 3 ? [trip, photo] : [trip, photo],
             hasMore: false, nextCursor: nil)
     }
@@ -41,8 +47,15 @@ private actor QuietFixtureClient: IOSQuietClient {
             activityLimited: false, olderTurnsOmitted: false)
     }
     func setHold() { holdDetail = true }
+    func setHoldList() { holdList = true }
     func pending() -> Bool { held != nil }
+    func pendingPage() -> Bool { heldPage != nil }
     func release(_ id: String) { held?.resume(returning: result(id)); held = nil }
+    func releasePage() {
+        heldPage?.resume(returning: IOSQuietPage(sessions: [trip, photo], hasMore: false,
+            nextCursor: nil))
+        heldPage = nil
+    }
     func revoke() { revoked = true }
     func requests() -> [String] { calls }
     func completed() -> [String] { completedDetails }
@@ -137,6 +150,33 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTAssertEqual(detail.activity.first?.progress, ["Checked three albums"])
         XCTAssertEqual(detail.activity.first?.finding?.summary, "Three albums checked.")
         XCTAssertEqual(detail.activity.first?.finding?.citations, ["Album register"])
+    }
+
+    @MainActor
+    func testAllSessionsCancelClearsAndExplicitRefreshRecovers() async {
+        let client = QuietFixtureClient(), store = IOSQuietSessionsStore(client: client)
+        store.bind(credential())
+        await client.setHoldList()
+        store.loadAll()
+        for _ in 0..<100 {
+            if await client.pendingPage() { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let pendingPage = await client.pendingPage()
+        XCTAssertTrue(pendingPage)
+        XCTAssertTrue(store.busy)
+        store.cancel()
+        XCTAssertFalse(store.busy)
+        XCTAssertTrue(store.all.isEmpty)
+        XCTAssertTrue(store.notice?.contains("cancelled") == true)
+        await client.releasePage()
+        for _ in 0..<20 {
+            await Task.yield()
+            XCTAssertTrue(store.all.isEmpty)
+        }
+        store.loadAll()
+        await eventually { !store.busy && store.all.count == 2 }
+        XCTAssertEqual(store.all.map(\.id), ["trip_session", "photo_session"])
     }
 
     @MainActor

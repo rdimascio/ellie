@@ -428,7 +428,7 @@ struct IOSQuietSessionsHome: View {
                     .accessibilityIdentifier("quiet-voice")
             }
             .font(.subheadline.weight(.medium))
-            Text("Life sessions are read-only here. Voice controls still use their separate grants and review.")
+            Text("Review Life sessions here. Use Voice controls for reviewed desktop actions.")
                 .font(.caption).foregroundStyle(ElliePalette.muted)
         }
         .padding(.horizontal, 4)
@@ -463,6 +463,12 @@ private struct IOSQuietAllSessions: View {
     @ObservedObject var store: IOSQuietSessionsStore
     var body: some View {
         List {
+            if store.busy {
+                ProgressView("Reading sessions")
+                    .accessibilityIdentifier("quiet-all-progress")
+                Button("Stop waiting") { store.cancel() }
+                    .accessibilityIdentifier("quiet-all-cancel")
+            }
             if let notice = store.notice {
                 Text(notice).accessibilityIdentifier("quiet-all-notice")
             }

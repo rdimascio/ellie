@@ -25,6 +25,29 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any).matching(
             identifier: "quiet-activity-task_trip_session").firstMatch.exists)
         app.navigationBars.buttons.firstMatch.tap()
+        let seeAll = app.buttons["quiet-see-all"]
+        for _ in 0..<4 where !seeAll.isHittable { app.swipeUp() }
+        XCTAssertTrue(seeAll.isHittable)
+        seeAll.tap()
+        let allPhoto = app.buttons["quiet-all-session-photo_session"]
+        XCTAssertTrue(allPhoto.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["quiet-all-session-trip_session"].exists)
+        allPhoto.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_photo_session").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_trip_session").firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.navigationBars.buttons.firstMatch.tap()
+        let voice = app.buttons["quiet-voice"]
+        for _ in 0..<4 where !voice.isHittable { app.swipeUp() }
+        XCTAssertTrue(voice.isHittable)
+        voice.tap()
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 5),
+            "Voice entry must expose its existing explicit availability and review flow")
+        XCTAssertFalse(app.buttons["speech-record"].exists,
+            "Opening Voice controls must not start recording")
+        app.navigationBars.buttons.firstMatch.tap()
         app.buttons["quiet-fixture-revoke"].tap()
         let notice = app.staticTexts["quiet-notice"]
         XCTAssertTrue(notice.waitForExistence(timeout: 5))
