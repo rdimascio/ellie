@@ -8,6 +8,7 @@ private actor QuietFixtureClient: IOSQuietClient {
     var revoked = false
     var holdDetail = false
     var holdList = false
+    var completedPages = 0
     private var held: CheckedContinuation<IOSQuietDetail, Error>?
     private var heldPage: CheckedContinuation<IOSQuietPage, Error>?
     let photo = IOSQuietSession(id: "photo_session", title: "Family photos",
@@ -20,7 +21,9 @@ private actor QuietFixtureClient: IOSQuietClient {
         if revoked { throw IOSQuietFailure.revoked }
         if holdList {
             holdList = false
-            return try await withCheckedThrowingContinuation { heldPage = $0 }
+            let page: IOSQuietPage = try await withCheckedThrowingContinuation { heldPage = $0 }
+            completedPages += 1
+            return page
         }
         return IOSQuietPage(sessions: limit == 3 ? [trip, photo] : [trip, photo],
             hasMore: false, nextCursor: nil)
@@ -50,6 +53,7 @@ private actor QuietFixtureClient: IOSQuietClient {
     func setHoldList() { holdList = true }
     func pending() -> Bool { held != nil }
     func pendingPage() -> Bool { heldPage != nil }
+    func pageCompletions() -> Int { completedPages }
     func release(_ id: String) { held?.resume(returning: result(id)); held = nil }
     func releasePage() {
         heldPage?.resume(returning: IOSQuietPage(sessions: [trip, photo], hasMore: false,
@@ -170,9 +174,17 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTAssertTrue(store.all.isEmpty)
         XCTAssertTrue(store.notice?.contains("cancelled") == true)
         await client.releasePage()
-        for _ in 0..<20 {
-            await Task.yield()
+        let completionDeadline = ContinuousClock.now + .seconds(2)
+        while ContinuousClock.now < completionDeadline {
+            if await client.pageCompletions() == 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let completions = await client.pageCompletions()
+        XCTAssertEqual(completions, 1, "The held list client did not settle after release")
+        let observationEnd = ContinuousClock.now + .milliseconds(250)
+        while ContinuousClock.now < observationEnd {
             XCTAssertTrue(store.all.isEmpty)
+            try? await Task.sleep(for: .milliseconds(20))
         }
         store.loadAll()
         await eventually { !store.busy && store.all.count == 2 }
