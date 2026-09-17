@@ -89,7 +89,7 @@ import { createInterface } from 'node:readline';
 let session, documentRevision;
 for await (const line of createInterface({ input: process.stdin })) {
   const value = JSON.parse(line);
-  appendFileSync(${JSON.stringify(helperLog)}, JSON.stringify({type:value.type,operation:value.operation,itemID:value.itemID,action:value.action}) + '\\n');
+  appendFileSync(${JSON.stringify(helperLog)}, JSON.stringify({type:value.type,operation:value.operation,query:value.query,itemID:value.itemID,action:value.action}) + '\\n');
   if (value.type === 'bind') {
     session = 'session-1'; documentRevision = value.documentRevision;
     console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision}));
@@ -273,9 +273,57 @@ for await (const line of createInterface({ input: process.stdin })) {
     const controlToken = "3".repeat(64);
     await pair(["browser.read", "browser.control"], controlToken);
     binding = {
+      bindingId: "initial-binding",
+      documentId: "initial-document",
+      url: "https://www.youtube.com/",
+    };
+    const initialStatus = await nativeRequest("/native/v1/commands", command, controlToken);
+    assert.equal(initialStatus.status, 200);
+    assert.equal(record(initialStatus.body).outcome, "completed");
+    const initialStatusBrowser = record(record(record(initialStatus.body).result).browser);
+    assert.deepEqual(
+      [initialStatusBrowser.source, initialStatusBrowser.operation, initialStatusBrowser.status],
+      ["accessibility", "status", "connected"],
+    );
+    const initialRevision = initialStatusBrowser.revision;
+    assert.equal(typeof initialRevision, "string");
+    const initialRead = await nativeRequest(
+      "/native/v1/commands",
+      {
+        nodeId: target,
+        action: { tool: "browser.read", view: "summary", revision: initialRevision },
+      },
+      controlToken,
+    );
+    assert.equal(initialRead.status, 200);
+    assert.equal(record(initialRead.body).outcome, "completed");
+    const initialReadBrowser = record(record(record(initialRead.body).result).browser);
+    assert.deepEqual(
+      [
+        initialReadBrowser.source,
+        initialReadBrowser.operation,
+        initialReadBrowser.status,
+        initialReadBrowser.revision,
+      ],
+      ["accessibility", "read", "completed", initialRevision],
+    );
+    const query = "Blender official Big Buck Bunny";
+    const search = await nativeRequest(
+      "/native/v1/commands",
+      { nodeId: target, action: { tool: "browser.search", query, revision: initialRevision } },
+      controlToken,
+    );
+    assert.equal(search.status, 200);
+    assert.equal(record(search.body).outcome, "unknown");
+    assert.equal(record(record(record(search.body).result).browser).status, "unknown");
+    assert.equal(coordinator.jobStore.list(target, 1)[0]!.state, "unknown");
+    assert.equal(bridgeRequests, 4, "search cannot trigger a second binding or adapter attempt");
+
+    // Results are separately supplied and read after unknown; search has no automatic recovery.
+    binding = {
       bindingId: "results-binding",
       documentId: "results-document",
-      url: "https://www.youtube.com/results?search_query=synthetic+public+video",
+      url: "https://www.youtube.com/results?search_query=Blender+official+Big+Buck+Bunny",
     };
     const connected = await nativeRequest("/native/v1/commands", command, controlToken);
     assert.equal(connected.status, 200);
@@ -285,6 +333,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(resultsStatus.status, "connected");
     const resultsRevision = resultsStatus.revision;
     assert.equal(typeof resultsRevision, "string");
+    assert.notEqual(resultsRevision, initialRevision);
 
     const resultsRead = await nativeRequest(
       "/native/v1/commands",
@@ -324,7 +373,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(record(selection.body).outcome, "unknown");
     assert.equal(record(record(record(selection.body).result).browser).status, "unknown");
     assert.equal(coordinator.jobStore.list(target, 1)[0]!.state, "unknown");
-    assert.equal(bridgeRequests, 4, "selection cannot cause a second binding or adapter attempt");
+    assert.equal(bridgeRequests, 7, "selection cannot cause a second binding or adapter attempt");
 
     // A new watch binding and explicit read are separate test observations, not an AX fallback.
     binding = {
@@ -368,7 +417,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     assert.equal(play.status, 200);
     assert.equal(record(play.body).outcome, "unknown");
-    assert.equal(bridgeRequests, 7, "play cannot trigger a second binding or adapter attempt");
+    assert.equal(bridgeRequests, 10, "play cannot trigger a second binding or adapter attempt");
     const secondWatchRead = await nativeRequest(
       "/native/v1/commands",
       watchReadAction,
@@ -405,11 +454,15 @@ for await (const line of createInterface({ input: process.stdin })) {
           JSON.parse(line) as {
             type: string;
             operation?: string;
+            query?: string;
             itemID?: string;
             action?: string;
           },
       );
     assert.deepEqual(helperRequests, [
+      { type: "bind" },
+      { type: "read" },
+      { type: "perform", operation: "search", query: "Blender official Big Buck Bunny" },
       { type: "bind" },
       { type: "read" },
       { type: "perform", operation: "select", itemID: "observed-video-1" },
@@ -419,14 +472,14 @@ for await (const line of createInterface({ input: process.stdin })) {
       { type: "read" },
       { type: "perform", operation: "playback", action: "pause" },
     ]);
-    assert.equal(bridgeRequests, 9, "each explicit operation requires one fresh binding check");
+    assert.equal(bridgeRequests, 12, "each explicit operation requires one fresh binding check");
     assert.equal(webActionCalls, 0, "AX dispatch must never switch to WebMCP after selection");
     assert.equal(desktopCalls, 0);
     const allJobs = coordinator.jobStore.list(target, 20);
-    assert.equal(allJobs.length, 9, "unknown operations must not generate replay jobs");
+    assert.equal(allJobs.length, 12, "unknown operations must not generate replay jobs");
     assert.deepEqual(
       allJobs.map((job) => job.state).sort(),
-      ["failed", ...Array(5).fill("completed"), ...Array(3).fill("unknown")].sort(),
+      ["failed", ...Array(7).fill("completed"), ...Array(4).fill("unknown")].sort(),
     );
     assert.deepEqual(events, ["connected"]);
   } catch (error) {
