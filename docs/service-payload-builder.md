@@ -24,6 +24,11 @@ payload manifest, round-trips manifest verification, and creates a ZIP plus `SHA
 runtime caches belong outside the repository and remain ignored. Populate and review the Bun cache
 as a separate release-input step; a missing cached package fails the build.
 
+The ZIP omits resource forks, extended attributes, quarantine, and ACLs. None are part of the
+manifested runtime identity. This keeps macOS AppleDouble metadata from inflating the archive
+entry count beyond the bounded offline runtime check; the builder still verifies extracted app
+signatures and the complete manifest after the ZIP round trip.
+
 The development payload has a finite inventory budget shared by the builder, native inspector,
 and bundled launchers: at most 3,072 files and 4,096 total file/directory entries, depth 16,
 128 MiB per file, 512 MiB of files in total, and a 4 MiB manifest. The builder rejects an

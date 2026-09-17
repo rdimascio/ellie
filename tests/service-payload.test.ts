@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createReleaseArchive,
   extractVerifiedNode,
   MAXIMUM_PAYLOAD_FILES,
   nativeArchitecture,
@@ -25,6 +26,8 @@ import {
   verifyManifest,
   verifyStagedLifeRuntime,
 } from "../scripts/build-service-payload.mjs";
+// @ts-expect-error The archive preflight remains directly executable JavaScript.
+import { zipEntries } from "../scripts/test-packaged-runtime.mjs";
 
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
 
@@ -68,6 +71,34 @@ async function temporary(t: test.TestContext, prefix: string): Promise<string> {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test(
+  "release ZIP omits AppleDouble metadata while preserving manifested file modes",
+  {
+    skip: process.platform !== "darwin",
+  },
+  async (t) => {
+    const directory = await temporary(t, "ellie-payload-zip-");
+    const release = join(directory, "EllieServices-test");
+    await mkdir(release);
+    const executable = join(release, "helper");
+    await writeFile(executable, "fixture\n", { mode: 0o755 });
+    execFileSync("/usr/bin/xattr", ["-w", "com.ellie.test.fixture", "metadata", executable]);
+    const archive = join(directory, "release.zip");
+
+    createReleaseArchive(release, archive);
+
+    const entries = zipEntries(await readFile(archive), "EllieServices-test") as Array<{
+      name: string;
+      mode: number;
+    }>;
+    assert.deepEqual(
+      entries.map((entry) => entry.name),
+      ["EllieServices-test/", "EllieServices-test/helper"],
+    );
+    assert.equal(entries[1]!.mode & 0o777, 0o755);
+  },
+);
 
 test("extracts only a checksum-verified target Node runtime and its license", async (t) => {
   const directory = await temporary(t, "ellie-node-archive-");

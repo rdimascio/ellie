@@ -1017,6 +1017,17 @@ function assertClean(root) {
   if (status) throw new Error("Refusing to build from modified or untracked source.");
 }
 
+export function createReleaseArchive(release, archive) {
+  // Payload identity is entirely file-backed. Resource forks, xattrs, quarantine,
+  // and ACLs are neither manifested nor used by the shipped installer, and
+  // sequestering them would add unbounded AppleDouble entries to the ZIP.
+  command(
+    "/usr/bin/ditto",
+    ["-c", "-k", "--norsrc", "--noextattr", "--noqtn", "--noacl", "--keepParent", release, archive],
+    { stdio: "ignore" },
+  );
+}
+
 export async function buildServicePayload(options) {
   requireDevelopmentOptions(options, [
     "source",
@@ -1332,9 +1343,7 @@ export async function buildServicePayload(options) {
     const originalSource = await regularFile(join(release, "SOURCE.txt"), 0o644, 16 * 1024);
     const archiveName = `${name}.zip`;
     const archive = join(stagedOutput, archiveName);
-    command("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", release, archive], {
-      stdio: "ignore",
-    });
+    createReleaseArchive(release, archive);
     const roundTrip = join(scratch, "round-trip");
     await mkdir(roundTrip, { mode: 0o700 });
     command("/usr/bin/ditto", ["-x", "-k", archive, roundTrip], {

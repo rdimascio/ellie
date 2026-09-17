@@ -32,6 +32,8 @@ export function stageApplication(
 
 export function verifyManifest(release: string): Promise<Record<string, unknown>>;
 
+export function createReleaseArchive(release: string, archive: string): void;
+
 export function verifyStagedLifeRuntime(payload: string, environmentRoot: string): Promise<void>;
 
 export function targetArchitecture(
