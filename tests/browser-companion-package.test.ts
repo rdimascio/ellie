@@ -30,6 +30,7 @@ test("packaged browser companion contains every transitively referenced provider
     const closure = await verifyBrowserCompanionClosure(output);
     assert.deepEqual(closure, [
       "background.js",
+      "disneyplus-controller.js",
       "media-controller.js",
       "popup.html",
       "popup.js",
@@ -47,10 +48,17 @@ test("packaged browser companion contains every transitively referenced provider
       assert.deepEqual(await verifyBrowserCompanionClosure(output), closure);
       assert.equal((await stat(output)).mode & 0o777, 0o555);
       assert.equal((await stat(join(output, "youtube-tv-controller.js"))).mode & 0o777, 0o444);
+      assert.equal((await stat(join(output, "disneyplus-controller.js"))).mode & 0o777, 0o444);
     } finally {
       await setTreeMode(output, false);
     }
 
+    await rm(join(output, "disneyplus-controller.js"));
+    await assert.rejects(
+      verifyBrowserCompanionClosure(output),
+      /Browser companion script is missing: disneyplus-controller\.js/,
+    );
+    await cp(join(input, "disneyplus-controller.js"), join(output, "disneyplus-controller.js"));
     await rm(join(output, "youtube-tv-controller.js"));
     await assert.rejects(
       verifyBrowserCompanionClosure(output),
@@ -60,6 +68,12 @@ test("packaged browser companion contains every transitively referenced provider
     await assert.rejects(
       stageBrowserCompanion(join(root, "source"), join(root, "missing-source-payload")),
       /Browser companion script is missing: youtube-tv-controller\.js/,
+    );
+    await cp(join(source, "youtube-tv-controller.js"), join(input, "youtube-tv-controller.js"));
+    await rm(join(input, "disneyplus-controller.js"));
+    await assert.rejects(
+      stageBrowserCompanion(join(root, "source"), join(root, "missing-disney-payload")),
+      /Browser companion script is missing: disneyplus-controller\.js/,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
