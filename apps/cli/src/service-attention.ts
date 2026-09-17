@@ -50,14 +50,26 @@ export function holdForServiceAttention(signal?: AbortSignal): Promise<void> {
 
 // A fresh `starting` entry makes any previous run's attention record stale.
 // The service PID is checked separately: log history alone is not readiness.
-export type ServiceCredentialState = "none" | "starting" | "needs_attention";
+export type ServiceCredentialState = "none" | "starting" | "needs_attention" | "unknown";
 export async function serviceCredentialState(
   state: string,
   role: ServiceRole,
 ): Promise<ServiceCredentialState> {
   const entries = await serviceLogs(state, role);
   const start = entries.findLastIndex((entry) => entry.event === "starting");
-  if (start < 0) return "none";
+  // Rotation can drop `starting` from a long-running healthy service. A later
+  // readiness/reconnect event still proves it advanced beyond credential read.
+  // Empty or ambiguous records cannot establish that boundary.
+  if (start < 0) {
+    const latest = entries.at(-1)?.event;
+    return latest === "ready" ||
+      latest === "connected" ||
+      latest === "reconnecting" ||
+      latest === "browser_ready" ||
+      latest === "browser_unavailable"
+      ? "none"
+      : "unknown";
+  }
   const latest = entries.at(-1)?.event;
   if (latest === "starting") return "starting";
   if (
@@ -74,3 +86,5 @@ export async function serviceCredentialState(
 
 export const attentionRecovery =
   "Credentials need attention in this Mac's login session. Review service logs; after resolving access, run service stop then service start for this role. Any cleanup-uncertain event needs operator reconciliation first.";
+export const unknownAttentionRecovery =
+  "Service startup evidence is unavailable. Inspect service logs and reconcile state before explicitly stopping and starting this role; doctor will not query Keychain.";

@@ -63,6 +63,7 @@ import {
   serviceCredentialState,
   settleStartupCleanup,
   startupCredential,
+  unknownAttentionRecovery,
 } from "./service-attention.ts";
 import { doctor, doctorService } from "./diagnostics.ts";
 import {
@@ -384,14 +385,18 @@ async function main(): Promise<void> {
                     ? { runtime: "needs_attention", recovery: attentionRecovery }
                     : runtime === "starting"
                       ? { runtime: "starting" }
-                      : {}),
+                      : runtime === "unknown"
+                        ? { runtime: "unknown", recovery: unknownAttentionRecovery }
+                        : {}),
                   lifeOnNextStart: selectedLife ? "enabled" : "disabled",
                 }
               : runtime === "needs_attention"
                 ? { ...status, runtime: "needs_attention", recovery: attentionRecovery }
                 : runtime === "starting"
                   ? { ...status, runtime: "starting" }
-                  : status,
+                  : runtime === "unknown"
+                    ? { ...status, runtime: "unknown", recovery: unknownAttentionRecovery }
+                    : status,
             null,
             2,
           ),
