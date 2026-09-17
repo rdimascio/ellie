@@ -164,6 +164,44 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
     return path.contains("/messages/") ? 240 * 1_024 : 48_000
   }
 
+  /// Actor-scoped, read-only Quiet review routes. The native session remains memory-only.
+  func lifeQuietGET(path: String, credential: LifeWebCredential, sessionToken: String)
+    async throws -> (Data, HTTPURLResponse)
+  {
+    guard let maximumBytes = Self.lifeQuietMaximumBytes(path: path),
+      sessionToken.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+      credential.origin.scheme == "https",
+      let host = nativeTLSHost(credential.origin.host),
+      let url = URL(string: path, relativeTo: credential.origin)?.absoluteURL,
+      url.scheme == "https", url.host == credential.origin.host,
+      url.port == credential.origin.port, url.user == nil, url.password == nil,
+      url.fragment == nil
+    else { throw NativeEnrollmentFailure.invalidCode }
+    return try await pinnedLifeGET(url: url, host: host, credential: credential,
+      sessionToken: sessionToken, maximumBytes: maximumBytes)
+  }
+
+  static func lifeQuietMaximumBytes(path: String) -> Int? {
+    guard let components = URLComponents(string: path),
+      components.scheme == nil, components.host == nil, components.fragment == nil,
+      components.percentEncodedPath + (components.percentEncodedQuery.map { "?" + $0 } ?? "") == path
+    else { return nil }
+    if components.path == "/api/life/native/sessions" {
+      let query = components.queryItems ?? []
+      guard query.count == 1 || query.count == 2,
+        query.first?.name == "limit", ["3", "20"].contains(query.first?.value ?? ""),
+        (query.count == 1 || (query[1].name == "cursor" &&
+          query[1].value?.range(of: "^[A-Za-z0-9_-]{1,512}$", options: .regularExpression) != nil))
+      else { return nil }
+      return 24_000
+    }
+    guard components.query == nil,
+      path.range(of: "^/api/life/native/sessions/[A-Za-z0-9_-]{1,128}$",
+        options: .regularExpression) != nil
+    else { return nil }
+    return 256_000
+  }
+
   private func pinnedLifeGET(url: URL, host: String, credential: LifeWebCredential,
     sessionToken: String, maximumBytes: Int) async throws -> (Data, HTTPURLResponse)
   {

@@ -1,6 +1,37 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testQuietRecentSessionsReviewUsesDistinctLinkedWorkAndRevocationClearsIt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-quiet-session-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["quiet-session-trip_session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["quiet-session-photo_session"].exists)
+        XCTAssertTrue(app.buttons["quiet-see-all"].exists)
+        XCTAssertTrue(app.buttons["quiet-voice"].exists)
+        XCTAssertEqual(app.textFields.count, 0, "Quiet review must not add a text composer")
+        app.buttons["quiet-session-trip_session"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-turn-turn_trip_session").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_trip_session").firstMatch.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_photo_session").firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["quiet-session-photo_session"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_photo_session").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_trip_session").firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["quiet-fixture-revoke"].tap()
+        let notice = app.staticTexts["quiet-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertTrue(notice.label.contains("access was removed"))
+        XCTAssertFalse(app.buttons["quiet-session-photo_session"].exists)
+    }
+
     func testGmailRequiresExplicitBodyReadAndCancelsLateOrRevokedResults() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-gmail-read-fixture"]
