@@ -1,0 +1,41 @@
+# Paired Watch media simulator acceptance
+
+The source-level Watch tests call `WatchMediaPhoneController` directly. This separate opt-in run
+installs Ellie on a newly created paired iPhone and Watch Simulator, drives `WatchMediaView` with
+watchOS UI tests, and carries messages through the apps' real `WCSession` delegates. The phone's
+Mac inventory and browser result are DEBUG-only synthetic data. No coordinator, browser, player,
+household account, Keychain identity, or physical device participates.
+
+On the leased Xcode host, choose **installed** iOS and watchOS runtime/device-type identifiers
+from `xcrun simctl list -j`. From the exact source checkout, use a new private output directory
+under an existing parent:
+
+```sh
+node scripts/test-watch-paired.mjs \
+  --execute leased \
+  --out /absolute/private/new-watch-paired-run \
+  --ios-runtime com.apple.CoreSimulator.SimRuntime.iOS-18-2 \
+  --watch-runtime com.apple.CoreSimulator.SimRuntime.watchOS-11-2 \
+  --ios-type com.apple.CoreSimulator.SimDeviceType.iPhone-16-Pro \
+  --watch-type com.apple.CoreSimulator.SimDeviceType.Apple-Watch-Series-10-46mm
+```
+
+The identifiers above are examples, not a claim that those device types or runtimes are installed.
+The runner refuses an existing output directory, records source hashes and Xcode result bundles,
+and retains a direct child handle and finite deadline for every command. It creates and later
+deletes only its two recorded Simulator IDs. If direct-child cleanup is uncertain, it retains the
+pair and evidence for owner inspection. A test counts only when `xcresulttool` reports exactly one
+executed pass with zero failed or skipped tests. The expected sequence is a fresh observed Mac A
+page, one Play sent with an unknown result and disabled follow-up controls, an unreachable phone
+phase, then a restarted phone explicitly selecting Mac B and a fresh B observation. The phone's
+synthetic event log must contain exactly one A Play and no B mutation or replay.
+
+This verifies the paired UI/transport seam if it passes. It does not prove media playback, a real
+browser action, physical-device reachability, or an old A observation remaining live during a
+mid-request switch to B. Existing controller tests cover the stale epoch; a future paired scenario
+must test that exact in-process transition before claiming it as UI acceptance.
+
+Apple documents immediate WatchConnectivity messages only while the counterpart is reachable and
+both sessions are active: [WCSession](https://developer.apple.com/documentation/watchconnectivity/wcsession).
+Xcode supports watchOS UI test targets: [Setting up tests for your watchOS app](https://developer.apple.com/documentation/watchos-apps/setting-up-tests-for-your-watchos-app).
+Simulator behavior must still be confirmed on the selected Xcode host.

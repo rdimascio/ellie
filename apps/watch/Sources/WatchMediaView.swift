@@ -10,18 +10,24 @@ struct WatchMediaView: View {
         Text("Ellie media").font(.headline)
         if let observed = media.observation {
           Text("YouTube · \(observed.targetLabel)").font(.caption).foregroundStyle(.secondary)
+            .accessibilityIdentifier("watch-observed-target")
           Text(observed.title ?? "Title not observed").font(.body).lineLimit(3)
+            .accessibilityIdentifier("watch-observed-title")
           Text(observed.playback == "playing" ? "Playing" : observed.playback == "paused" ? "Paused" : "Player state unavailable")
             .font(.caption)
         }
         Text(media.status).font(.caption).foregroundStyle(.secondary)
+          .accessibilityIdentifier("watch-media-status")
         Button("Read current page", systemImage: "arrow.clockwise") { media.read() }
           .disabled(media.waiting || !media.reachable)
+          .accessibilityIdentifier("watch-read")
         HStack {
           Button("Play", systemImage: "play.fill") { media.play() }
             .disabled(!media.canPlay)
+            .accessibilityIdentifier("watch-play")
           Button("Pause", systemImage: "pause.fill") { media.pause() }
             .disabled(!media.canPause)
+            .accessibilityIdentifier("watch-pause")
         }
         .labelStyle(.iconOnly)
       }

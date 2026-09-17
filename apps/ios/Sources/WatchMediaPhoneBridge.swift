@@ -10,7 +10,7 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
 
   @Published private(set) var enabledTargetID: String?
   @Published private(set) var available = false
-  private let controller = WatchMediaPhoneController()
+  private var controller = WatchMediaPhoneController()
   private var activated = false
 
   func activate() {
@@ -36,6 +36,16 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     controller.disable()
     enabledTargetID = nil
   }
+
+  #if DEBUG
+  /// The paired-Simulator fixture changes only the phone's backend. WCSession and this delegate
+  /// remain the installed app's real transport.
+  func installPairedTestController(_ fixture: WatchMediaPhoneController) {
+    guard ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") else { return }
+    disable()
+    controller = fixture
+  }
+  #endif
 
   func retainOnly(_ credential: NativeEnrollmentCredential?) {
     controller.retainOnly(credential)
