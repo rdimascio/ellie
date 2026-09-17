@@ -189,6 +189,15 @@ final class IOSGoogleAgendaTests: XCTestCase {
             .replacingOccurrences(of: "\"Fixture\"", with: "\"日程 🗓️\"")
         XCTAssertEqual(try IOSAgendaWire.snapshot(Data(unicode.utf8),
             expectedID: "calendar_123", now: now).events.map(\.title), ["家族 🗓️"])
+        let joined = valid.replacingOccurrences(of: "Tomorrow", with: "Family 👩‍👩‍👧‍👦")
+            .replacingOccurrences(of: "\"Fixture\"", with: "\"Family 👩‍👩‍👧‍👦 calendar\"")
+        let joinedSnapshot = try IOSAgendaWire.snapshot(Data(joined.utf8),
+            expectedID: "calendar_123", now: now)
+        XCTAssertEqual(joinedSnapshot.label, "Family 👩‍👩‍👧‍👦 calendar")
+        XCTAssertEqual(joinedSnapshot.events.map(\.title), ["Family 👩‍👩‍👧‍👦"])
+        let control = valid.replacingOccurrences(of: "Tomorrow", with: "Unsafe\\u0007title")
+        XCTAssertThrowsError(try IOSAgendaWire.snapshot(Data(control.utf8),
+            expectedID: "calendar_123", now: now))
         XCTAssertThrowsError(try IOSAgendaWire.snapshot(Data(valid.utf8), expectedID: "another", now: now))
         XCTAssertThrowsError(try IOSAgendaWire.snapshot(Data(valid.replacingOccurrences(of: "\"status\":\"confirmed\"", with: "\"status\":\"cancelled\"").utf8), expectedID: "calendar_123", now: now))
         XCTAssertThrowsError(try IOSAgendaWire.snapshot(Data(valid.replacingOccurrences(of: "\"title\":\"Tomorrow\"", with: "\"title\":\"Tomorrow\",\"token\":\"secret\"").utf8), expectedID: "calendar_123", now: now))
