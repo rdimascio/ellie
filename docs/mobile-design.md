@@ -6,6 +6,8 @@ This candidate contains only the Life web interface, its tests, preview fixture,
 
 The selected files have no overlapping upstream changes between those commits. The original native enrollment appearance edit overlaps upstream `apps/ios/Sources/NativeEnrollmentView.swift` and is explicitly excluded, along with all other native edits. The original worktree and port 4187 preview remain intact. This candidate does not alter the Xcode project, enrollment, voice, native applications, or service rollout.
 
+The byte-identical extraction was committed as `23fd936e4fc71fdd1b25837d9ecbd8f6c7a2f4a7`. Subsequent review corrections tighten financial provenance and test cleanup only in the candidate; their paths and purpose are recorded separately in the manifest. Original source hashes continue to describe the initial extraction, not these later corrections.
+
 ## Design system
 
 | Token     | Color     | Role                    |
@@ -23,7 +25,7 @@ The design uses existing data and actions. Agenda times respect the profile time
 
 The mobile dock is Home, Today, Ellie, Finances, and Integrations. Memory and custom tools remain accessible under Settings → Library and tools, and saved plans still open their existing detail view. Changing screens resets the page scroll position.
 
-Finances displays personal Plaid connections and current financial observations from those connections. Expired insights, invalidated sources, inactive connections, and records from other people or shared spaces are excluded. Account loading, errors with retry, and empty states are explicit. Asking Ellie about an insight opens an editable draft without submitting it. The service does not expose balances or a transaction ledger, and this screen does not invent them.
+Finances displays personal Plaid connections and current financial observations from those connections. The bootstrap contains record summaries without connected metadata or provenance, so Finances reads full candidate records through the existing authenticated detail API. Account-derived labels require a derived provenance reference to the same `connected-source-{connectionId}`, with no invalidated provenance. Missing or empty provenance, expired insights, invalidated sources, inactive connections, and records from other people or shared spaces are excluded. A summary's `valid` status alone is insufficient; full record responses need no summary-only status field. Account loading, errors with retry, and empty states are explicit. Details that fail to load are hidden with a retry notice. Asking Ellie about an insight opens an editable draft without submitting it. The service does not expose balances or a transaction ledger, and this screen does not invent them.
 
 Integrations brings the existing Gmail, Google Calendar, and Plaid connection controls into a dedicated screen. OAuth handoff, connection modes, refresh, and disconnect retain their existing behavior. New Plaid linking is not yet available in the connector service; the provider card reports this when unconfigured. The preview includes synthetic connected accounts and one financial insight solely for design review.
 
@@ -63,7 +65,9 @@ node apps/life-ui/tests/life.e2e.ts
 node apps/life-ui/tests/connections.e2e.ts
 ```
 
-The new acceptance test covers all primary mobile views, 320/390/430/1024 pixel widths, horizontal overflow, navigation selection and scroll reset, 44 pixel navigation hit areas, retained drafts, composer focus, Escape and close behavior, financial loading errors and recovery, unconfigured Plaid state, and no write requests while navigating or drafting. Financial insight unit tests cover source freshness, personal scope, and connection eligibility. Screenshots are written to the ignored `test-results/mobile-redesign` directory. WebKit checks browser rendering, not a physical iPhone or its keyboard and permission dialogs.
+The new acceptance test covers all primary mobile views, 320/390/430/1024 pixel widths, horizontal overflow, navigation selection and scroll reset, 44 pixel navigation hit areas, retained drafts, composer focus, Escape and close behavior, financial loading errors and recovery, unconfigured Plaid state, and no write requests while navigating or drafting. Financial insight unit tests cover source freshness, personal scope, connection eligibility, and missing, empty, non-derived, mismatched, or invalidated provenance. A cleanup test injects a browser launch failure and verifies that the owned preview server closes. Screenshots are written to the ignored `test-results/mobile-redesign` directory. WebKit checks browser rendering, not a physical iPhone or its keyboard and permission dialogs.
+
+The connected-account end-to-end test publishes a real Plaid insight through the connector broker using fixture settled transactions. It verifies the production summary/detail split and displays that insight in Finances, while a lookalike memory created through the signed-in record route remains hidden. This uses deterministic local fixtures and no model or live account access.
 
 The candidate is validated with the gates above: lint, formatting, generated-contract drift, TypeScript, Life production build, financial eligibility tests, Chromium and WebKit mobile acceptance, mobile orb regression, and the existing Life and connection end-to-end suites. The earlier full workspace result on the original redesign is historical evidence only, not a full-suite claim for this candidate.
 

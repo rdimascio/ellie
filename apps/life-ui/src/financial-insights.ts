@@ -29,7 +29,12 @@ export function financialInsights(
       Number.isFinite(expiresAt) &&
       expiresAt > now &&
       record.provenanceStatus !== "needs-review" &&
-      !record.provenance?.some((item) => item.invalidatedAt !== undefined)
+      // Full record responses carry provenance, but do not carry provenanceStatus.
+      // Summary status alone cannot establish that a memory came from this account.
+      record.provenance?.some(
+        (item) => item.derived === true && item.sourceId === `connected-source-${connectionId}`,
+      ) === true &&
+      record.provenance.every((item) => item.invalidatedAt === undefined)
     );
   });
 }

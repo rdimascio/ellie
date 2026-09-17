@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type ConnectorConnection } from "./api";
-import type { Bootstrap } from "./types";
+import type { Bootstrap, LifeRecord } from "./types";
 import { financialInsights } from "./financial-insights";
 import { InterfaceIcon } from "./InterfaceIcon";
 
@@ -16,6 +16,10 @@ export function Finances({
   openPersonal: () => void;
 }) {
   const [connections, setConnections] = useState<ConnectorConnection[]>([]);
+  const [verifiedRecords, setVerifiedRecords] = useState<LifeRecord[]>([]);
+  const [insightError, setInsightError] = useState("");
+  const recordsRef = useRef(data.records);
+  recordsRef.current = data.records;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [revision, setRevision] = useState(0);
@@ -26,23 +30,55 @@ export function Finances({
     let pending = false;
     setLoading(true);
     setConnections([]);
+    setVerifiedRecords([]);
+    setInsightError("");
     setError("");
     const refresh = async () => {
       if (pending || document.visibilityState !== "visible") return;
       pending = true;
       try {
         const result = await api.connections.list();
+        if (!current) return;
+        const financial = result.connections.filter(
+          (item) => item.provider === "plaid" && item.state !== "revoked",
+        );
+        setConnections(financial);
+        // Bootstrap summaries omit connected metadata and provenance. Only full,
+        // authenticated record details may establish an account-derived insight.
+        const candidates = financial.some((item) => item.state === "connected")
+          ? recordsRef.current.filter(
+              (record) =>
+                record.kind === "memory" &&
+                record.data.type === "connected-insight-v1" &&
+                record.scope.type === "user" &&
+                record.scope.id === data.profile.id &&
+                record.provenanceStatus !== "needs-review",
+            )
+          : [];
+        const details: LifeRecord[] = [];
+        let incomplete = false;
+        for (let offset = 0; offset < candidates.length && current; offset += 8) {
+          const results = await Promise.allSettled(
+            candidates.slice(offset, offset + 8).map((record) => api.record(record.id)),
+          );
+          for (const detail of results) {
+            if (detail.status === "fulfilled") details.push(detail.value);
+            else incomplete = true;
+          }
+        }
         if (current) {
-          setConnections(
-            result.connections.filter(
-              (item) => item.provider === "plaid" && item.state !== "revoked",
-            ),
+          setVerifiedRecords(details);
+          setInsightError(
+            incomplete
+              ? "Some insights couldn’t be verified and are hidden. They’ll refresh automatically."
+              : "",
           );
           setError("");
         }
       } catch (caught) {
         if (current) {
           setConnections([]);
+          setVerifiedRecords([]);
           setError(caught instanceof Error ? caught.message : "Accounts couldn’t be loaded.");
         }
       } finally {
@@ -59,7 +95,7 @@ export function Finances({
   }, [personal, data.profile.id, revision]);
   const insights =
     personal && !loading && !error
-      ? financialInsights(data.records, connections, data.profile.id)
+      ? financialInsights(verifiedRecords, connections, data.profile.id)
       : [];
   const connected = connections.filter((item) => item.state === "connected");
   return (
@@ -153,6 +189,11 @@ export function Finances({
             <h2>Worth a look</h2>
             <span>From your accounts</span>
           </div>
+          {insightError && (
+            <p className="finance-notice" role="status">
+              {insightError}
+            </p>
+          )}
           {insights.length ? (
             <div className="finance-insights">
               {insights.map((insight) => (

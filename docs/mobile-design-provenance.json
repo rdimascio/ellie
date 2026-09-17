@@ -98,5 +98,31 @@
       "sourceSha256": "4fef8f62c67bd216e28d8ca897095a9fec3218b4de65849ba418d74bf7620e6e",
       "transfer": "byte-identical"
     }
+  ],
+  "extractionHead": "23fd936e4fc71fdd1b25837d9ecbd8f6c7a2f4a7",
+  "transferScope": "Source hashes and transfer labels describe the initial extraction commit. Subsequent review corrections below intentionally differ; the original worktree remains unchanged.",
+  "reviewCorrections": [
+    {
+      "paths": [
+        "apps/life-ui/src/financial-insights.ts",
+        "apps/life-ui/src/Finances.tsx",
+        "apps/life-ui/tests/financial-insights.test.ts",
+        "apps/life-ui/tests/design-preview.ts",
+        "apps/life-ui/tests/connections.e2e.ts"
+      ],
+      "reason": "Require non-invalidated derived provenance tied to the same connected source, hydrate full records through the existing authenticated detail API, and verify actual broker compatibility plus rejection of signed-in user-created lookalikes."
+    },
+    {
+      "paths": [
+        "apps/life-ui/tests/mobile-design.e2e.ts",
+        "apps/life-ui/tests/mobile-design-cleanup.test.ts",
+        "package.json"
+      ],
+      "reason": "Own preview cleanup before browser launch, close it even on launch failure, and run the focused cleanup regression with design tests."
+    },
+    {
+      "paths": ["docs/mobile-design.md", "docs/mobile-design-provenance.json"],
+      "reason": "Record review corrections and distinguish the original extraction provenance from current candidate validation."
+    }
   ]
 }

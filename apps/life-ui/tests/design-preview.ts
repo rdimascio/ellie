@@ -94,7 +94,7 @@ export const designConnections = {
     },
   ],
 };
-designBootstrap.records.push({
+const designFinanceInsight: LifeRecord = {
   ...record(
     "design-finance-insight",
     "Your streaming charges follow a monthly rhythm.",
@@ -106,6 +106,17 @@ designBootstrap.records.push({
     },
     "Inferred from repeated settled charges in this sample account. A recurring pattern does not confirm an active subscription. Check the account before making changes.",
   ),
+  provenance: [
+    { sourceId: "connected-source-design-plaid", derived: true, reference: "sample-charge@v1" },
+  ],
+};
+// Match the production bootstrap summary/detail split rather than granting the
+// preview insight provenance that is absent from a real bootstrap response.
+designBootstrap.records.push({
+  ...designFinanceInsight,
+  data: { type: "connected-insight-v1" },
+  provenance: undefined,
+  provenanceStatus: "valid",
 });
 
 export const designPlans = {
@@ -160,6 +171,7 @@ export async function startDesignPreview(port = 0) {
         },
         "/api/life/model/status": { mode: "deterministic", available: true },
         "/api/life/conversations": { conversations: [], hasMore: false },
+        [`/api/life/records/${designFinanceInsight.id}`]: designFinanceInsight,
       };
       const value =
         values[pathname] ??

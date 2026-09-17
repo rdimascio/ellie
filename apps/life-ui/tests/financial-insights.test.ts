@@ -17,6 +17,7 @@ const insight: LifeRecord = {
   kind: "memory",
   title: "A recurring pattern",
   scope: { type: "user", id: "person" },
+  provenance: [{ sourceId: "connected-source-bank", derived: true, reference: "charge@v1" }],
   revision: 1,
   createdAt: new Date(now).toISOString(),
   updatedAt: new Date(now).toISOString(),
@@ -57,4 +58,24 @@ test("expired, malformed, ordinary, or invalidated memories are not financial in
     select([{ ...insight, provenance: [{ sourceId: "source", invalidatedAt: 0 }] }]),
     [],
   );
+});
+
+test("account-derived labels require valid derived provenance for the same connection", () => {
+  // The detail endpoint supplies provenance without the summary-only status field.
+  assert.equal(insight.provenanceStatus, undefined);
+  assert.deepEqual(select([insight]), [insight]);
+  assert.equal(select([{ ...insight, provenanceStatus: "valid" }]).length, 1);
+  for (const provenance of [
+    undefined,
+    [],
+    [{ sourceId: "connected-source-bank" }],
+    [{ sourceId: "connected-source-bank", derived: false }],
+    [{ sourceId: "connected-source-another-bank", derived: true }],
+    [{ sourceId: "manual-source", derived: true }],
+    [{ sourceId: "connected-source-bank", derived: true, invalidatedAt: 0 }],
+    [...insight.provenance!, { sourceId: "another-source", derived: true, invalidatedAt: now }],
+  ]) {
+    for (const provenanceStatus of [undefined, "valid"] as const)
+      assert.deepEqual(select([{ ...insight, provenance, provenanceStatus }]), []);
+  }
 });
