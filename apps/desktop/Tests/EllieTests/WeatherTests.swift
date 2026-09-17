@@ -99,6 +99,7 @@ final class WeatherTests: XCTestCase {
 
         store.configure(name: "San Francisco", latitudeText: "37.7749", longitudeText: "-122.4194")
         await eventually { store.state.snapshot != nil }
+        XCTAssertTrue(store.fetchedInCurrentSession)
         let countAfterEnable = await transport.requestCount()
         XCTAssertEqual(countAfterEnable, 1)
         XCTAssertEqual(store.state.place?.name, "San Francisco")
@@ -107,6 +108,7 @@ final class WeatherTests: XCTestCase {
 
         let cached = WeatherStore(fileURL: url, client: OpenMeteoClient(transport: transport), now: { Date(timeIntervalSince1970: 1_789_300_100) })
         XCTAssertEqual(cached.state.snapshot?.temperature, 72.4)
+        XCTAssertFalse(cached.fetchedInCurrentSession, "A restored cache is not a live fetch")
         XCTAssertFalse(cached.needsRefresh)
     }
 
@@ -118,6 +120,7 @@ final class WeatherTests: XCTestCase {
         store.configure(name: "Test City", latitudeText: "1", longitudeText: "2")
         await eventually { store.state.snapshot != nil }
         store.disable()
+        XCTAssertFalse(store.fetchedInCurrentSession)
         store.refresh(force: true)
 
         XCTAssertEqual(store.state, WeatherState())

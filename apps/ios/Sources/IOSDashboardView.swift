@@ -6,22 +6,27 @@ struct IOSDashboardList: View {
     @ObservedObject var store: DashboardStore
     @ObservedObject var enrollment: NativeEnrollmentStore
     @StateObject private var choresStore: ChoresStore
+    @StateObject private var weatherStore: WeatherStore
     #if DEBUG
     var uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)? = nil
     #endif
 
-    init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil) {
+    init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil,
+         weatherStore: WeatherStore? = nil) {
         self.store = store
         self.enrollment = enrollment
         _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
+        _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
     }
 
     #if DEBUG
     init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil,
+         weatherStore: WeatherStore? = nil,
          uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)?) {
         self.store = store
         self.enrollment = enrollment
         _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
+        _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
         self.uiTestLifeDestination = uiTestLifeDestination
     }
     #endif
@@ -57,7 +62,8 @@ struct IOSDashboardList: View {
                         VStack(spacing: 12) {
                             ForEach(store.state.dashboards) { dashboard in
                                 NavigationLink {
-                                    IOSDashboardDetail(store: store, choresStore: choresStore, dashboardID: dashboard.id)
+                                    IOSDashboardDetail(store: store, choresStore: choresStore,
+                                        weatherStore: weatherStore, dashboardID: dashboard.id)
                                 } label: {
                                     HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 16) {
                                         if !dynamicTypeSize.isAccessibilitySize {
@@ -267,6 +273,7 @@ private struct IOSDashboardDetail: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: DashboardStore
     @ObservedObject var choresStore: ChoresStore
+    @ObservedObject var weatherStore: WeatherStore
     let dashboardID: String
     @State private var editing = false
     @State private var adding = false
@@ -282,7 +289,7 @@ private struct IOSDashboardDetail: View {
             LazyVStack(spacing: 16) {
                 if let dashboard {
                     ForEach(dashboard.widgets) { widget in
-                        IOSWidgetCard(widget: widget, choresStore: choresStore, editing: editing,
+                        IOSWidgetCard(widget: widget, choresStore: choresStore, weatherStore: weatherStore, editing: editing,
                             edit: { editedWidget = widget },
                             earlier: { select(); store.moveWidget(id: widget.id, offset: -1) },
                             later: { select(); store.moveWidget(id: widget.id, offset: 1) },
@@ -298,6 +305,7 @@ private struct IOSDashboardDetail: View {
             }
             .padding()
         }
+        .accessibilityIdentifier("ios-dashboard-detail-scroll")
         .ellieScreen()
         .navigationTitle(dashboard?.name ?? "Dashboard")
         .navigationBarTitleDisplayMode(.large)
@@ -316,7 +324,7 @@ private struct IOSDashboardDetail: View {
         }
         .sheet(isPresented: $adding) { IOSWidgetGallery { select(); store.addWidget(kind: $0); adding = false } }
         .sheet(item: $editedWidget) { widget in
-            IOSWidgetEditor(widget: widget) { title, size, config in
+            IOSWidgetEditor(widget: widget, weatherStore: weatherStore) { title, size, config in
                 select(); store.updateWidget(id: widget.id, title: title, size: size, config: config)
                 if store.error == nil { editedWidget = nil }
             }

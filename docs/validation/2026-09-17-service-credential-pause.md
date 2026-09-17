@@ -16,6 +16,8 @@ The actual CLI process fixture runs both service roles under private temporary h
 
 No household Keychain, LaunchAgent, service, phone or website was exercised. These checks do not establish macOS consent, installed-service recovery or physical phone-to-website acceptance. No package was deployed for this change.
 
+An additional [isolated launchd fixture](../../scripts/service-attention-launchd.mjs) uses one private disposable GUI label, child-only `HOME`, a synthetic helper and loopback certificate, and the reviewed development payload. Its fake-launchd regression covers one rejecting bootstrap, explicit stop/start recovery, and failure retention. A first disposable GUI attempt observed KC01–KC02, then KC03 ended uncertain before the success fixture was started; that failure and later read-only reconciliation remain private. A fresh fixture using the corrected runner observed one rejected startup, doctor without another helper read, an explicit stop/start with one successful synthetic read, loopback readiness, and exact owned cleanup. Its KC02 path calls the production doctor function with an exact-label status adapter and a credential-read trap; the production `service status` command has a managed label and is **not** validated by this fixture. These synthetic results are not installed-service or real-Keychain acceptance, and no native launcher was exercised. The private records and evidence remain separate.
+
 ## Installed acceptance — not ready
 
 The coordinator must first supply an exact reviewed package, a candidate-specific rollout and recovery procedure, and a controlled credential-failure fixture. Do not lock the household Keychain, change access controls, revoke an existing identity or stop a working service to manufacture a test.

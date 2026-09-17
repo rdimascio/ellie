@@ -1,6 +1,136 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testWeatherRequiresOptInUsesChosenPlaceAndCanBeDisabled() throws {
+        let app = XCUIApplication()
+        let weatherSession = UUID().uuidString
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-weather-session", weatherSession]
+        defer {
+            app.terminate()
+            app.launchArguments.append("--ellie-ui-weather-cleanup")
+            app.launch()
+            app.terminate()
+        }
+        app.launch()
+        let calls = app.staticTexts["home-fixture-weather-calls"]
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0")
+        openDashboard(named: "Home", in: app)
+        try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0")
+        app.buttons["Cancel"].tap()
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "Opening and cancelling setup must not opt in")
+        try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
+        try setWeatherEnable(in: app, expectedValue: "1")
+        try typeTextReliably("London QA", into: revealWeatherControl(app.textFields["ios-weather-name"], in: app, editor: true), in: app)
+        try typeTextReliably("51.5074", into: revealWeatherControl(app.textFields["ios-weather-latitude"], in: app, editor: true), in: app)
+        try typeTextReliably("-0.1278", into: revealWeatherControl(app.textFields["ios-weather-longitude"], in: app, editor: true), in: app)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-place"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertTrue(app.staticTexts["Partly cloudy"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture weather requests: 1")
+        app.buttons["home-fixture-weather-fail-next"].tap()
+        let refresh = try revealWeatherControl(app.buttons["ios-weather-refresh"], in: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"), object: refresh)], timeout: 5), .completed)
+        refresh.tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].label.contains("Cached forecast"),
+            "A failed refresh must keep the prior value and mark it cached")
+        XCTAssertEqual(calls.label, "Fixture weather requests: 2")
+        app.terminate()
+        app.launch()
+        openDashboard(named: "Home", in: app)
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertTrue(app.staticTexts["Partly cloudy"].exists,
+            "The private cache should survive an app relaunch")
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].label.contains("Cached forecast"),
+            "A restored value must identify itself as cached even when less than 30 minutes old")
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "Fresh persisted weather must not cause an implicit second request")
+        returnToDashboardList(from: "Home", in: app)
+        let other = "Weather QA \(UUID().uuidString.prefix(8))"
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(other, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: other, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Weather"].tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-place"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "A second dashboard must reuse the same fresh cached forecast")
+        try revealWeatherControl(app.buttons["ios-weather-settings"], in: app).tap()
+        try setWeatherEnable(in: app, expectedValue: "0")
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "Disabling must not send another forecast request")
+        returnToDashboardList(from: other, in: app)
+        openDashboard(named: "Home", in: app)
+        XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5),
+            "Disabling shared weather must clear the first dashboard too")
+    }
+
+    private enum WeatherControlError: Error { case unavailable }
+
+    private func setWeatherEnable(in app: XCUIApplication, expectedValue: String) throws {
+        let row = try revealWeatherControl(app.switches["ios-weather-enable"], in: app, editor: true)
+        let toggle = row.switches.firstMatch
+        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
+            throw weatherControlFailure("Physical weather opt-in switch was not reachable in the open editor", in: app)
+        }
+        toggle.tap()
+        let value = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", expectedValue), object: row)
+        guard XCTWaiter.wait(for: [value], timeout: 5) == .completed else {
+            throw weatherControlFailure("Weather opt-in switch did not reach value \(expectedValue) in the open editor", in: app)
+        }
+    }
+
+    private func weatherControlFailure(_ message: String, in app: XCUIApplication) -> WeatherControlError {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "weather-control-first-unmet-screenshot"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "weather-control-first-unmet-hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTFail(message)
+        return .unavailable
+    }
+
+    private func revealWeatherControl(_ element: XCUIElement, in app: XCUIApplication,
+                                      editor: Bool = false) throws -> XCUIElement {
+        let navigation = app.navigationBars["Edit Weather"]
+        let container = editor
+            ? app.descendants(matching: .any).matching(identifier: "ios-widget-editor-form").firstMatch
+            : app.scrollViews["ios-dashboard-detail-scroll"]
+        guard container.waitForExistence(timeout: 5), !editor || navigation.exists else {
+            throw weatherControlFailure("Expected the active weather editor or dashboard scroll container", in: app)
+        }
+        for _ in 0..<4 {
+            if element.exists && element.isHittable { return element }
+            guard !editor || (navigation.exists && container.exists) else {
+                throw weatherControlFailure("Weather editor disappeared before its control was reachable", in: app)
+            }
+            container.swipeUp()
+        }
+        if !editor {
+            for _ in 0..<4 {
+                if element.exists && element.isHittable { return element }
+                container.swipeDown()
+            }
+        }
+        guard element.exists && element.isHittable, !editor || (navigation.exists && container.exists) else {
+            throw weatherControlFailure("Expected weather control \(element.identifier) in the active \(editor ? "editor" : "dashboard")", in: app)
+        }
+        return element
+    }
+
     func testHomeLifeEntryRequiresExplicitTapAndFollowsEnrollment() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-home-appearance-fixture"]
