@@ -332,8 +332,11 @@
     if (rendered.length > 1) return { provider, page, playback: "ambiguous" };
     if (rendered.length === 0) return { provider, page, playback: "unavailable" };
     // A visible video can be an advertisement. Never identify it as the selected title.
+    const dialogs = document.querySelectorAll("[aria-modal='true'], [role='dialog']");
     if (
-      document.querySelector(".html5-video-player.ad-showing, [aria-modal='true'], [role='dialog']")
+      document.querySelector(".html5-video-player.ad-showing") ||
+      dialogs.length > 32 ||
+      [...dialogs].some(visible)
     )
       return { provider, page, playback: "ambiguous" };
     const video = rendered[0];

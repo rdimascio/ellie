@@ -920,6 +920,41 @@ test(
         playback: "paused",
         currentTimeSeconds: 0,
       });
+      await launched.page.evaluate(() => {
+        for (const [id, style] of [
+          ["display-hidden-dialog", "display:none"],
+          ["visibility-hidden-dialog", "visibility:hidden"],
+          ["offscreen-dialog", "position:fixed;left:-500px;top:20px;width:200px;height:100px"],
+        ]) {
+          const dialog = document.createElement("div");
+          dialog.id = id;
+          dialog.setAttribute("role", "dialog");
+          dialog.setAttribute("aria-modal", "true");
+          dialog.style.cssText = style;
+          document.body.append(dialog);
+        }
+      });
+      assert.equal((await observe(watch)).site.playback, "paused");
+      await launched.page.evaluate(() => {
+        const dialog = document.createElement("div");
+        dialog.id = "visible-dialog";
+        dialog.setAttribute("role", "dialog");
+        dialog.setAttribute("aria-modal", "true");
+        dialog.style.cssText =
+          "position:fixed;left:20px;top:20px;width:200px;height:100px;background:white;z-index:99";
+        document.body.append(dialog);
+      });
+      assert.equal((await observe(watch)).site.playback, "ambiguous");
+      await launched.page.evaluate(() => {
+        document.querySelector("#visible-dialog")?.remove();
+        const ad = document.createElement("div");
+        ad.id = "ad-showing";
+        ad.className = "html5-video-player ad-showing";
+        document.body.append(ad);
+      });
+      assert.equal((await observe(watch)).site.playback, "ambiguous");
+      await launched.page.evaluate(() => document.querySelector("#ad-showing")?.remove());
+      assert.equal((await observe(watch)).site.playback, "paused");
       await launched.page.locator("video").evaluate((video: HTMLVideoElement) => video.play());
       const playing = (await observe(watch)).site;
       assert.equal(playing.playback, "playing");
