@@ -49,9 +49,14 @@ function supportedNativeRequest(request) {
   return (
     request?.protocol === nativeProtocol &&
     typeof request.id === "string" &&
-    ["cancel", "binding.status", "binding.refresh", "tools.list", "tool.execute"].includes(
-      request.type,
-    )
+    [
+      "cancel",
+      "binding.status",
+      "binding.refresh",
+      "page.inspect",
+      "tools.list",
+      "tool.execute",
+    ].includes(request.type)
   );
 }
 
@@ -403,6 +408,46 @@ async function listWebMCPTools() {
   };
 }
 
+async function inspectSelectedPage(request, controller) {
+  if (
+    Object.keys(request).sort().join() !== "bindingId,documentId,id,protocol,type" ||
+    typeof request.bindingId !== "string" ||
+    typeof request.documentId !== "string"
+  )
+    throw new Error("invalid_arguments");
+  const binding = liveBinding();
+  const selection = liveSelection();
+  if (
+    selection.tabId !== binding.tabId ||
+    selection.windowId !== binding.windowId ||
+    binding.availability !== "accessibility" ||
+    binding.origin !== "https://www.youtube.com" ||
+    request.bindingId !== binding.bindingId ||
+    request.documentId !== binding.documentId
+  )
+    throw new Error("page_changed");
+  const navigationGeneration = selection.navigationGeneration;
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const before = await selectedAnchorTab(selection);
+  await currentWebMCPDocument(binding);
+  if (before.url !== binding.url || controller.signal.aborted) throw new Error("page_changed");
+  const site = await dispatch(binding.tabId, { type: "observe", actionId: crypto.randomUUID() });
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const after = await selectedAnchorTab(selection);
+  await currentWebMCPDocument(binding);
+  if (
+    webMCPSelection !== selection ||
+    webMCPBinding !== binding ||
+    selection.navigationGeneration !== navigationGeneration ||
+    after.url !== before.url ||
+    Date.now() >= binding.expiresAt ||
+    request.bindingId !== binding.bindingId ||
+    request.documentId !== binding.documentId
+  )
+    throw new Error("page_changed");
+  return { bindingId: binding.bindingId, documentId: binding.documentId, url: binding.url, site };
+}
+
 async function executeWebMCP(request, controller) {
   const binding = liveBinding();
   const before = await chrome.tabs.get(binding.tabId);
@@ -522,6 +567,7 @@ async function handleNativeRequest(request) {
       };
     }
     if (request.type === "tools.list") return await listWebMCPTools();
+    if (request.type === "page.inspect") return await inspectSelectedPage(request, controller);
     if (request.type === "tool.execute") return await executeWebMCP(request, controller);
     throw new Error("unavailable");
   } finally {

@@ -68,6 +68,7 @@ test("native browser route reaches unavailable status and a preselected syntheti
   let accessibility: BrowserAccessibilityRuntime | undefined;
   let helperRoot: string | undefined;
   let bridgeRequests = 0;
+  const bridgeTypes: string[] = [];
   let webActionCalls = 0;
   let desktopCalls = 0;
   let binding: "unavailable" | { bindingId: string; documentId: string; url: string } =
@@ -114,6 +115,30 @@ for await (const line of createInterface({ input: process.stdin })) {
       {
         request: async (request) => {
           bridgeRequests++;
+          bridgeTypes.push(request.type);
+          if (request.type === "page.inspect" && binding !== "unavailable") {
+            const page =
+              binding.documentId === "watch-document"
+                ? "watch"
+                : binding.documentId === "results-document"
+                  ? "results"
+                  : "home";
+            return browserWebMCPResultFor(request.id, "ok", {
+              bindingId: binding.bindingId,
+              documentId: binding.documentId,
+              url: binding.url,
+              site: {
+                provider: "youtube",
+                page,
+                playback:
+                  page === "watch"
+                    ? bridgeTypes.filter((type) => type === "page.inspect").length === 3
+                      ? "paused"
+                      : "playing"
+                    : "unavailable",
+              },
+            });
+          }
           if (request.type !== "binding.status") {
             webActionCalls++;
             throw new Error("WebMCP must not execute a site action after AX selection.");
@@ -307,6 +332,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       ],
       ["accessibility", "read", "completed", initialRevision],
     );
+    assert.deepEqual(record(record(initialReadBrowser.view).site), {
+      provider: "youtube",
+      page: "home",
+      playback: "unavailable",
+    });
     const query = "Blender official Big Buck Bunny";
     const search = await nativeRequest(
       "/native/v1/commands",
@@ -317,7 +347,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(record(search.body).outcome, "unknown");
     assert.equal(record(record(record(search.body).result).browser).status, "unknown");
     assert.equal(coordinator.jobStore.list(target, 1)[0]!.state, "unknown");
-    assert.equal(bridgeRequests, 4, "search cannot trigger a second binding or adapter attempt");
+    assert.equal(bridgeRequests, 5, "search cannot trigger a second binding or adapter attempt");
 
     // Results are separately supplied and read after unknown; search has no automatic recovery.
     binding = {
@@ -356,6 +386,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       ["accessibility", "read", "completed", resultsRevision],
     );
     const resultsView = resultsReadBrowser.view;
+    assert.deepEqual(record(record(resultsView).site), {
+      provider: "youtube",
+      page: "results",
+      playback: "unavailable",
+    });
     const resultsItems = record(resultsView).items;
     assert.ok(Array.isArray(resultsItems));
     assert.deepEqual(resultsItems, [{ id: "observed-video-1", label: "Synthetic public video" }]);
@@ -373,7 +408,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.equal(record(selection.body).outcome, "unknown");
     assert.equal(record(record(record(selection.body).result).browser).status, "unknown");
     assert.equal(coordinator.jobStore.list(target, 1)[0]!.state, "unknown");
-    assert.equal(bridgeRequests, 7, "selection cannot cause a second binding or adapter attempt");
+    assert.equal(bridgeRequests, 9, "selection cannot cause a second binding or adapter attempt");
 
     // A new watch binding and explicit read are separate test observations, not an AX fallback.
     binding = {
@@ -407,6 +442,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       ],
       ["accessibility", "read", "completed", watchRevision],
     );
+    assert.deepEqual(record(record(watchReadBrowser.view).site), {
+      provider: "youtube",
+      page: "watch",
+      playback: "paused",
+    });
     const play = await nativeRequest(
       "/native/v1/commands",
       {
@@ -417,7 +457,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     assert.equal(play.status, 200);
     assert.equal(record(play.body).outcome, "unknown");
-    assert.equal(bridgeRequests, 10, "play cannot trigger a second binding or adapter attempt");
+    assert.equal(bridgeRequests, 13, "play cannot trigger a second binding or adapter attempt");
     const secondWatchRead = await nativeRequest(
       "/native/v1/commands",
       watchReadAction,
@@ -435,6 +475,11 @@ for await (const line of createInterface({ input: process.stdin })) {
       ],
       ["accessibility", "read", "completed", watchRevision],
     );
+    assert.deepEqual(record(record(secondWatchReadBrowser.view).site), {
+      provider: "youtube",
+      page: "watch",
+      playback: "playing",
+    });
     const pause = await nativeRequest(
       "/native/v1/commands",
       {
@@ -472,7 +517,29 @@ for await (const line of createInterface({ input: process.stdin })) {
       { type: "read" },
       { type: "perform", operation: "playback", action: "pause" },
     ]);
-    assert.equal(bridgeRequests, 12, "each explicit operation requires one fresh binding check");
+    assert.equal(
+      bridgeRequests,
+      16,
+      "each explicit operation requires one fresh binding check and read observation",
+    );
+    assert.deepEqual(bridgeTypes, [
+      "binding.status",
+      "binding.status",
+      "binding.status",
+      "page.inspect",
+      "binding.status",
+      "binding.status",
+      "binding.status",
+      "page.inspect",
+      "binding.status",
+      "binding.status",
+      "binding.status",
+      "page.inspect",
+      "binding.status",
+      "binding.status",
+      "page.inspect",
+      "binding.status",
+    ]);
     assert.equal(webActionCalls, 0, "AX dispatch must never switch to WebMCP after selection");
     assert.equal(desktopCalls, 0);
     const allJobs = coordinator.jobStore.list(target, 20);

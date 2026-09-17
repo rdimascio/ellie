@@ -9,6 +9,7 @@ import {
   type BrowserWebMCPRequest,
   type BrowserWebMCPResult,
   type BrowserWebMCPOperationResult,
+  type BrowserView,
 } from "@ellie/protocol";
 import type {
   ReviewedBrowserBinding,
@@ -144,6 +145,46 @@ export class BrowserWebMCPOperations {
   }
   async bindingRefresh(signal: AbortSignal): Promise<BrowserBinding | "unbound" | "unsupported"> {
     return this.binding("binding.refresh", signal);
+  }
+  /** Read-only companion observation, pinned to the selected accessibility document. */
+  async inspectSelectedPage(
+    binding: BrowserBinding,
+    signal: AbortSignal,
+  ): Promise<NonNullable<BrowserView["site"]>> {
+    if (binding.availability !== "accessibility" || binding.origin !== "https://www.youtube.com")
+      throw new Error("Browser page observation is unsupported.");
+    const response = await this.call(
+      {
+        protocol: BROWSER_WEBMCP_PROTOCOL,
+        id: randomUUID(),
+        type: "page.inspect",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+      },
+      signal,
+    );
+    if (response.status !== "ok") throw new Error("Browser page changed during observation.");
+    const value = exact(response.value, ["bindingId", "documentId", "url", "site"]);
+    if (
+      value.bindingId !== binding.bindingId ||
+      value.documentId !== binding.documentId ||
+      value.url !== binding.url
+    )
+      throw new Error("Browser page changed during observation.");
+    const checked = browserWebMCPOperationResult({
+      ok: true,
+      message: "Browser site observed.",
+      browser: {
+        source: "accessibility",
+        operation: "read",
+        status: "completed",
+        revision: browserBindingRevision(binding),
+        view: { items: [], site: value.site },
+      },
+    });
+    if (checked.browser.operation !== "read" || !checked.browser.view.site)
+      throw new Error("Invalid browser page observation.");
+    return checked.browser.view.site;
   }
   private reviewed(
     origin: string,
