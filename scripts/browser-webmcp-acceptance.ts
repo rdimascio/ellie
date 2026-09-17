@@ -972,13 +972,36 @@ async function main() {
       id: ELLIE_BROWSER_EXTENSION_ID,
       url: `chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/popup.html`,
     });
-    const bound = await agentJson<{ result: unknown }>([
-      "eval",
-      `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});return chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}})})()`,
-    ]);
-    const bindingReply = bound.result as { ok?: unknown; value?: { availability?: unknown } };
-    assert.equal(bindingReply.ok, true);
-    assert.equal(bindingReply.value?.availability, "webmcp");
+    const bindExpression = composed
+      ? `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});const selected=await chrome.tabs.get(tab.id);const ownerWindow=await chrome.windows.get(selected.windowId);const reply=await chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}});return {reply,precondition:{tabActive:selected.active===true,tabComplete:selected.status==='complete',windowFocused:ownerWindow.focused===true}}})()`
+      : `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});return chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}})})()`;
+    const bound = await agentJson<{ result: unknown }>(["eval", bindExpression]);
+    const composedBinding = composed
+      ? (bound.result as {
+          reply?: { ok?: unknown; error?: unknown; value?: { availability?: unknown } };
+          precondition?: {
+            tabActive?: unknown;
+            tabComplete?: unknown;
+            windowFocused?: unknown;
+          };
+        })
+      : undefined;
+    const bindingReply = composed
+      ? composedBinding?.reply
+      : (bound.result as { ok?: unknown; value?: { availability?: unknown } });
+    const bindError =
+      typeof composedBinding?.reply?.error === "string" &&
+      /^[a-z_]{1,64}$/.test(composedBinding.reply.error)
+        ? composedBinding.reply.error
+        : "unavailable";
+    assert.equal(
+      bindingReply?.ok,
+      true,
+      composed
+        ? `Owned bind rejected: ${bindError}; active=${composedBinding?.precondition?.tabActive === true}; complete=${composedBinding?.precondition?.tabComplete === true}; focused=${composedBinding?.precondition?.windowFocused === true}`
+        : undefined,
+    );
+    assert.equal(bindingReply?.value?.availability, "webmcp");
     await waitUntil(() => bridge.connected(), "The real browser did not open the native host.");
 
     if (composed) {
