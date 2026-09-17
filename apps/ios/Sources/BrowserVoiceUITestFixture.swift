@@ -285,7 +285,7 @@ private struct BrowserVoiceUITestPhoneTransport: PhoneControlTransporting {
         id: BrowserVoiceUITestFixture.nodeAID, label: "Fixture Mac A", online: true,
         capabilities: ["browser.read"])]
     }
-    [
+    return [
       PhoneControlNode(
         id: BrowserVoiceUITestFixture.nodeAID, label: "Fixture Mac A", online: true,
         capabilities: ["browser.read", "browser.control"]),
