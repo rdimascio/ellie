@@ -2,7 +2,7 @@
 
 This is an unpacked development extension for exercising page controls inside a selected browser tab. It is not installed by an Ellie service and is not yet connected to the native Mac, iPhone or Apple Watch interfaces. The product remote remains SwiftUI.
 
-The source is `apps/browser-media-extension`. Its production manifest requests only `activeTab` and `scripting`. Its code permits the exact HTTPS origins `www.netflix.com` and `www.youtube.com`; there are no persistent all-site permissions, website-to-native HTTP server, browser-cookie reads or household credentials.
+The source is `apps/browser-media-extension`. Its production manifest requests `activeTab`, `scripting`, and local `nativeMessaging`. Its code permits the exact HTTPS origins `www.netflix.com` and `www.youtube.com`; there are no persistent all-site permissions, website-to-native HTTP server, browser-cookie reads or household credentials.
 
 ## Scope
 
@@ -13,6 +13,8 @@ Player actions distinguish observed playback from a submitted request: play requ
 Mutation IDs are retained per tab by the extension worker, including across document reload, up to 256 actions. Capacity is refused instead of evicting replay protection. This ledger is not durable across a worker/browser restart; the companion never automatically resubmits old actions. The worker supplies an absolute deadline checked by the controller before mutation so an invocation that starts late cannot act after its deadline. Downloads and explicit new-window title links are excluded.
 
 Both production origins are experimental. A synthetic catalogue passing tests does not establish Netflix or YouTube support. The current title adapter recognizes same-origin title/video links and scrollable row containers; it does not cover every service layout, carousel implementation, overlay or player. The public Netflix landing page uses title buttons and does not provide authenticated playback. YouTube TV and Disney+ are not enabled by this slice. No DRM, authentication or subscription behavior is bypassed.
+
+For an explicitly selected Netflix tab, the native companion uses the existing native-host connection and a distinct `companion` result source. It accepts a bounded read, vertical scroll, unique visible-row horizontal scroll, selection of an item from that read, and play/pause from one observed watch-page player. Search and ambiguous controls remain unavailable. Every dispatched mutation invalidates the old binding and has an unknown result until a new explicit refresh/read. Synthetic browser fixtures do not verify Netflix account content or real playback.
 
 WebMCP discovery is read-only and bounded. It checks the current `document.modelContext.getTools` surface, reports legacy API presence separately, and distinguishes unavailable, failed and timed-out discovery. Returned tool metadata is untrusted. No discovered tool is executed or treated as a media grant. No streaming-service WebMCP implementation has been accepted.
 

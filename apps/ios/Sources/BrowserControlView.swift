@@ -20,12 +20,12 @@ struct BrowserControlView: View {
         Section("Current page") {
           if let title = page.title { Text(title).font(.headline) }
           if let summary = page.summary { Text(summary).foregroundStyle(.secondary) }
-          Label(page.source == .webmcp ? "WebMCP" : "Accessibility", systemImage: "link")
+          Label(page.source == .webmcp ? "WebMCP" : page.source == .companion ? "Browser companion" : "Accessibility", systemImage: "link")
             .font(.caption).foregroundStyle(.secondary)
         }
         if let site = page.site {
           Section("Observed site") {
-            Label(observedPageLabel(site.page), systemImage: "eye")
+            Label(observedPageLabel(site), systemImage: "eye")
               .accessibilityIdentifier("browser-observed-site")
             if site.page == .watch {
               Text(observedPlaybackLabel(site.playback))
@@ -35,6 +35,14 @@ struct BrowserControlView: View {
                   .font(.caption).foregroundStyle(.secondary)
               }
               Text("Visible media state does not confirm which video is playing.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+            if site.provider == .netflix {
+              Text("Netflix search is not supported yet.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
+            if site.provider == .netflix && site.page == .browse && site.horizontalScrollAvailable != true {
+              Text("Horizontal browsing needs one unambiguous visible row.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
           }
@@ -131,10 +139,20 @@ struct BrowserControlView: View {
     }
   }
 
-  private func observedPageLabel(_ page: BrowserPhoneYouTubePage) -> String {
-    switch page {
+  private func observedPageLabel(_ site: BrowserPhoneSite) -> String {
+    if site.provider == .netflix {
+      switch site.page {
+      case .browse: return "Observed Netflix catalogue"
+      case .watch: return "Observed Netflix watch page"
+      case .login: return "Observed Netflix sign-in page"
+      case .unsupported: return "Observed Netflix page is unsupported"
+      case .home, .results: return "Observed Netflix page is unsupported"
+      }
+    }
+    switch site.page {
     case .home: "Observed YouTube home page"
     case .results: "Observed YouTube results page"
+    case .browse: "Observed YouTube page is unsupported"
     case .watch: "Observed YouTube watch page"
     case .login: "Observed YouTube sign-in page"
     case .unsupported: "Observed YouTube page is unsupported"
