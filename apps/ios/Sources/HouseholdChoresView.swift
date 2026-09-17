@@ -11,6 +11,7 @@ struct HouseholdChoresView: View {
   @State private var form: HouseholdChoreForm?
   @State private var deleting: Chore?
   @State private var discarding = false
+  @State private var showingFullCopy = false
 
   init(
     credential: NativeEnrollmentCredential,
@@ -78,22 +79,9 @@ struct HouseholdChoresView: View {
       }
 
       if let draft = sync.draft {
-        Section("Prepared change") {
-          LabeledContent("Based on revision", value: "\(draft.baseRevision)")
-          LabeledContent("Proposed chores", value: "\(draft.value.chores.count)")
-          Text("Review the full household copy before saving. This replaces revision \(draft.baseRevision) only if it is still current.")
-            .font(.footnote).foregroundStyle(.secondary)
-          ForEach(draft.value.chores.sorted(by: choreOrder)) { chore in
-            VStack(alignment: .leading, spacing: 2) {
-              if let change = changeLabel(chore) {
-                Text(change).font(.caption.weight(.semibold)).foregroundStyle(Color.accentColor)
-              }
-              Text("\(chore.title) · \(chore.member) · Due \(chore.dueDay.value)")
-              if !chore.body.isEmpty { Text(chore.body).font(.caption) }
-              if let completed = chore.completedDay {
-                Text("Completed \(completed.value)").font(.caption)
-              }
-            }
+        Section("Review household change") {
+          ForEach(changedChores) { chore in
+            proposedRow(chore, label: changeLabel(chore) ?? "Proposed household chore")
           }
           ForEach(removedChores) { chore in
             Text("Remove \(chore.title) · \(chore.member)")
@@ -106,11 +94,26 @@ struct HouseholdChoresView: View {
           Button("Save Prepared Change Once") { sync.savePrepared() }
             .disabled(!sync.canSave)
             .accessibilityIdentifier("ios-household-chores-save")
-          Button("Check Result Without Resending") { sync.checkResult() }
-            .disabled(sync.isBusy)
-            .accessibilityIdentifier("ios-household-chores-check-result")
-          Button("Discard Prepared Change", role: .destructive) { discarding = true }
-            .disabled(sync.isBusy)
+          if sync.phase != .prepared {
+            Button("Check Result Without Resending") { sync.checkResult() }
+              .disabled(sync.isBusy)
+              .accessibilityIdentifier("ios-household-chores-check-result")
+          }
+          if sync.phase == .prepared {
+            Button("Cancel Prepared Change", role: .cancel) { sync.discardPending() }
+              .disabled(sync.isBusy)
+          } else {
+            Button("Discard Pending Change", role: .destructive) { discarding = true }
+              .disabled(sync.isBusy)
+          }
+          DisclosureGroup("Full proposed household copy (\(draft.value.chores.count))",
+            isExpanded: $showingFullCopy) {
+            ForEach(draft.value.chores.sorted(by: choreOrder)) { chore in
+              proposedRow(chore, label: nil)
+            }
+          }
+          Text("Based on revision \(draft.baseRevision). One conditional save replaces that revision only if it is still current.")
+            .font(.footnote).foregroundStyle(.secondary)
         }
       }
 
@@ -210,6 +213,25 @@ struct HouseholdChoresView: View {
     guard let remote = sync.remote, let draft = sync.draft else { return [] }
     let proposedIDs = Set(draft.value.chores.map(\.id))
     return remote.value.chores.filter { !proposedIDs.contains($0.id) }.sorted(by: choreOrder)
+  }
+
+  private var changedChores: [Chore] {
+    guard let remote = sync.remote, let draft = sync.draft else { return [] }
+    let old = Dictionary(uniqueKeysWithValues: remote.value.chores.map { ($0.id, $0) })
+    return draft.value.chores.filter { old[$0.id] != $0 }.sorted(by: choreOrder)
+  }
+
+  private func proposedRow(_ chore: Chore, label: String?) -> some View {
+    VStack(alignment: .leading, spacing: 2) {
+      if let label {
+        Text(label).font(.caption.weight(.semibold)).foregroundStyle(Color.accentColor)
+      }
+      Text("\(chore.title) · \(chore.member) · Due \(chore.dueDay.value)")
+      if !chore.body.isEmpty { Text(chore.body).font(.caption) }
+      if let completed = chore.completedDay {
+        Text("Completed \(completed.value)").font(.caption)
+      }
+    }
   }
 }
 
