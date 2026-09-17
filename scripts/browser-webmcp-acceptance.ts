@@ -879,6 +879,7 @@ async function main() {
         const child = spawn(agentBrowserPath, [...common, ...launchArgs, ...args], {
           cwd: resolve("."),
           env: {
+            ...process.env,
             ...(composed ? {} : { HOME: home }),
             PATH: `${dirname(process.execPath)}:${process.env.PATH ?? "/usr/bin:/bin"}`,
             LANG: "C",
