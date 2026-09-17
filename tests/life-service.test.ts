@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
@@ -249,7 +249,7 @@ test("service shutdown aborts a conversational custom build without a late insta
   }
 });
 
-async function fixture() {
+async function fixture(id?: () => string) {
   const root = await mkdtemp(join(tmpdir(), "ellie-life-service-"));
   await chmod(root, 0o700);
   const assets = join(root, "assets");
@@ -258,11 +258,15 @@ async function fixture() {
     mode: 0o600,
   });
   let now = 1_800_000_000_000;
-  const life = new LifeStore(join(root, "life.sqlite"), { now: () => now });
+  const life = new LifeStore(join(root, "life.sqlite"), { now: () => now, ...(id ? { id } : {}) });
   const plugins = new PluginStore(join(root, "plugins.sqlite"), () => now);
   const context = new ProactivityEngine(life, () => now);
   const activeServers = new Set<ReturnType<typeof createLifeServer>>();
   const taskRows = new Map<string, TaskRecord>();
+  const taskProgress = new Map<
+    string,
+    Array<{ id: number; taskId: string; at: number; message: string }>
+  >();
   const cancelledTasks = new Set<string>();
   const tasks = {
     get: (id: string, owner?: OwnerScope) => {
@@ -292,7 +296,7 @@ async function fixture() {
       return true;
     },
     runNow: async () => {},
-    progress: () => [],
+    progress: (id: string) => taskProgress.get(id) ?? [],
   } as unknown as TaskRuntime;
   const harness: LifeHarnessLike = {
     async chat(input) {
@@ -353,6 +357,7 @@ async function fixture() {
     plugins,
     tasks,
     taskRows,
+    taskProgress,
     cancelledTasks,
     harness,
     create,
@@ -1567,6 +1572,320 @@ test("conversation response feedback is bound to an owned turn and stored privat
     );
   } finally {
     await f.close();
+  }
+});
+
+test("native Quiet review links only persisted same-actor conversation tasks across server restart", async () => {
+  const f = await fixture();
+  try {
+    const actor = { userId: "local" };
+    const source = f.life.createRecord(actor, {
+      id: "source.album:1@life/path",
+      kind: "source",
+      title: "Album register",
+      body: "Three albums were checked.",
+      scope: { type: "user", id: "local" },
+      data: {},
+    });
+    const photoTaskId = "photo.task:1@life/path";
+    const makeTurn = (requestId: string, message: string, taskIds: string[]) => {
+      const begun = f.life.beginConversationTurn(actor, {
+        scope: { type: "user", id: "local" },
+        requestId,
+        chatEpoch: 1,
+        message,
+      });
+      f.life.completeConversationTurn(actor, {
+        conversationId: begun.conversation.id,
+        turnId: begun.turn.id,
+        requestId,
+        result: { reply: `Review ${message}`, actions: [], recordIds: [], taskIds, evidence: [] },
+      });
+      return begun.conversation.id;
+    };
+    const photos = makeTurn("quiet-photos", "Review the family photos", [
+      photoTaskId,
+      "stale-task",
+      "foreign-task",
+    ]);
+    for (let index = 0; index < 13; index++) {
+      const requestId = `photo-followup-${index}`;
+      const begun = f.life.beginConversationTurn(actor, {
+        scope: { type: "user", id: "local" },
+        conversationId: photos,
+        requestId,
+        chatEpoch: 1,
+        message: `Follow-up ${index}`,
+      });
+      f.life.completeConversationTurn(actor, {
+        conversationId: photos,
+        turnId: begun.turn.id,
+        requestId,
+        result: {
+          reply: "Still reviewing.",
+          actions: [],
+          recordIds: [],
+          taskIds: [],
+          evidence: [],
+        },
+      });
+    }
+    const trip = makeTurn("quiet-trip", "Plan the trip", ["trip-task"]);
+    const unicode = makeTurn("quiet-unicode", "Family 👩‍👩‍👧‍👧\r\nphotos", []);
+    const group = f.life.createGroup(actor, { id: "quiet-group", name: "Family" });
+    const groupTurn = f.life.beginConversationTurn(actor, {
+      scope: { type: "group", id: group.id },
+      requestId: "quiet-group-turn",
+      chatEpoch: 1,
+      message: "Private group plan",
+    });
+    f.life.completeConversationTurn(actor, {
+      conversationId: groupTurn.conversation.id,
+      turnId: groupTurn.turn.id,
+      requestId: "quiet-group-turn",
+      result: { reply: "Reviewed.", actions: [], recordIds: [], taskIds: [], evidence: [] },
+    });
+    const task = (id: string, owner: OwnerScope, state: TaskRecord["state"]): TaskRecord => ({
+      id,
+      owner,
+      handler: "knowledge.aggregate",
+      input: {},
+      state,
+      requiredCapabilities: [],
+      allowedCapabilities: [],
+      rootId: id,
+      dependsOn: [],
+      budget: {},
+      attempt: 0,
+      idempotencyKey: id,
+      createdAt: 1_800_000_000_000,
+      updatedAt: 1_800_000_000_000,
+      ...(state === "succeeded" ? { outcomeVerified: true } : {}),
+      ...(state === "succeeded"
+        ? {
+            result: {
+              status: "complete",
+              summary: "Three verified albums.",
+              citations: [
+                {
+                  sourceId: source.id,
+                  sourceRevision: source.revision,
+                  title: source.title,
+                  references: [],
+                },
+              ],
+            },
+          }
+        : {}),
+    });
+    f.taskRows.set(photoTaskId, task(photoTaskId, "user:local", "succeeded"));
+    f.taskRows.set("stale-task", {
+      ...task("stale-task", "user:local", "succeeded"),
+      result: {
+        status: "complete",
+        summary: "Unverified source claim.",
+        citations: [
+          {
+            sourceId: "missing-source",
+            sourceRevision: 1,
+            title: "Missing source",
+            references: [],
+          },
+        ],
+      },
+    });
+    f.taskRows.set("trip-task", task("trip-task", "user:local", "running"));
+    f.taskRows.set("foreign-task", task("foreign-task", "user:bob", "running"));
+    f.taskProgress.set("trip-task", [
+      { id: 1, taskId: "trip-task", at: 1_800_000_000_000, message: "Checking dates" },
+    ]);
+    let running = await f.start();
+    let cookie = await authenticate(running.url, "a".repeat(43));
+    const list = await fetch(`${running.url}/api/life/native/sessions?limit=3`, {
+      headers: { cookie },
+    });
+    assert.equal(list.status, 200);
+    const listed = (await list.json()) as { sessions: Array<{ id: string }> };
+    assert.deepEqual(
+      new Set(listed.sessions.map((item) => item.id)),
+      new Set([photos, trip, unicode]),
+    );
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/native/sessions/${groupTurn.conversation.id}`, {
+          headers: { cookie },
+        })
+      ).status,
+      404,
+    );
+    const read = async (id: string) => {
+      const response = await fetch(`${running.url}/api/life/native/sessions/${id}`, {
+        headers: { cookie },
+      });
+      assert.equal(response.status, 200);
+      return (await response.json()) as {
+        originalRequest: string;
+        page: { hasMore: boolean };
+        activity: Array<{
+          id: string;
+          state: string;
+          finding?: { summary: string };
+          progress: Array<{ message: string }>;
+        }>;
+      };
+    };
+    assert.deepEqual(
+      (await read(photos)).activity.map((item) => item.id),
+      [photoTaskId, "stale-task"],
+    );
+    assert.equal((await read(photos)).activity[0]?.finding?.summary, "Three verified albums.");
+    assert.equal((await read(photos)).activity[1]?.finding, undefined);
+    assert.equal((await read(photos)).originalRequest, "Review the family photos");
+    assert.equal((await read(photos)).page.hasMore, true);
+    assert.equal((await read(unicode)).originalRequest, "Family 👩‍👩‍👧‍👧\r\nphotos");
+    await running.server.close();
+    running = await f.start();
+    cookie = await authenticate(running.url, "a".repeat(43));
+    const afterRestart = await read(trip);
+    assert.deepEqual(
+      afterRestart.activity.map((item) => item.id),
+      ["trip-task"],
+    );
+    assert.equal(afterRestart.activity[0]?.progress[0]?.message, "Checking dates");
+    assert.equal(afterRestart.activity[0]?.state, "running");
+    assert.equal((await read(photos)).activity[0]?.id, photoTaskId);
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/native/sessions?limit=21`, {
+          headers: { cookie },
+        })
+      ).status,
+      400,
+    );
+    assert.equal((await fetch(`${running.url}/api/life/native/sessions`)).status, 401);
+    await running.server.close();
+    running = await f.start("b".repeat(43), "bob");
+    cookie = await authenticate(running.url, "b".repeat(43));
+    assert.equal(
+      (
+        await fetch(`${running.url}/api/life/native/sessions/${photos}`, {
+          headers: { cookie },
+        })
+      ).status,
+      403,
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("native Quiet progress and verified finding survive TaskRuntime restart", async () => {
+  let sequence = 0;
+  const f = await fixture(() => `quiet_${++sequence}`);
+  const directory = join(f.root, "quiet-tasks");
+  let runtime = new TaskRuntime({ directory, now: () => 1_800_000_000_000 });
+  try {
+    const actor = { userId: "local" };
+    const source = f.life.createRecord(actor, {
+      id: "source.album:1@life/path",
+      kind: "source",
+      title: "Album register",
+      body: "Three albums were checked.",
+      scope: { type: "user", id: "local" },
+      data: {},
+    });
+    runtime.registerHandler({
+      name: "quiet.synthetic",
+      async run(context) {
+        context.progress({ message: "Checked three albums" });
+        return {
+          status: "complete",
+          summary: "Three albums checked.",
+          citations: [
+            {
+              sourceId: source.id,
+              sourceRevision: source.revision,
+              title: source.title,
+              references: [],
+            },
+          ],
+        };
+      },
+      checkOutcome: () => true,
+    });
+    const task = runtime.enqueue({
+      id: "photo.task:1",
+      owner: "user:local",
+      handler: "quiet.synthetic",
+    });
+    await runtime.runNow(task.id, "user:local");
+    for (
+      let attempt = 0;
+      attempt < 100 && runtime.get(task.id, "user:local")?.state !== "succeeded";
+      attempt++
+    )
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(runtime.get(task.id, "user:local")?.state, "succeeded");
+    const begun = f.life.beginConversationTurn(actor, {
+      scope: { type: "user", id: "local" },
+      requestId: "durable-quiet",
+      chatEpoch: 1,
+      message: "Review the albums",
+    });
+    f.life.completeConversationTurn(actor, {
+      conversationId: begun.conversation.id,
+      turnId: begun.turn.id,
+      requestId: "durable-quiet",
+      result: {
+        reply: "Review is ready.",
+        actions: [],
+        recordIds: [],
+        taskIds: [task.id],
+        evidence: [],
+      },
+    });
+    let running = await f.start("a".repeat(43), "local", { tasks: runtime });
+    await running.server.close();
+    await runtime.close();
+    runtime = new TaskRuntime({ directory, now: () => 1_800_000_000_000 });
+    running = await f.start("a".repeat(43), "local", { tasks: runtime });
+    const cookie = await authenticate(running.url, "a".repeat(43));
+    const response = await fetch(
+      `${running.url}/api/life/native/sessions/${begun.conversation.id}`,
+      {
+        headers: { cookie },
+      },
+    );
+    assert.equal(response.status, 200);
+    const detail = (await response.json()) as {
+      activity: Array<{
+        id: string;
+        state: string;
+        progress: Array<{ message: string }>;
+        finding?: { summary: string };
+      }>;
+    };
+    const nativeWire = JSON.parse(
+      await readFile(
+        new URL("../apps/ios/Tests/Fixtures/QuietNativeDetail.json", import.meta.url),
+        "utf8",
+      ),
+    ) as unknown;
+    assert.deepEqual(
+      detail,
+      nativeWire,
+      "Swift fixture must match the production Life JSON exactly",
+    );
+    assert.deepEqual(
+      detail.activity.map((item) => item.id),
+      [task.id],
+    );
+    assert.equal(detail.activity[0]?.state, "succeeded");
+    assert.equal(detail.activity[0]?.progress[0]?.message, "Checked three albums");
+    assert.equal(detail.activity[0]?.finding?.summary, "Three albums checked.");
+  } finally {
+    await f.close();
+    await runtime.close();
   }
 });
 
