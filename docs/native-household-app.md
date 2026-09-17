@@ -2,7 +2,7 @@
 
 Ellie's Mac and iPhone interfaces are SwiftUI applications. The Mac app uses a system sidebar, toolbar, menus, sheets, file panels and a separate Devices window. The iPhone app uses native navigation, forms, camera enrollment and Keychain storage. The browser prototype remains a compatibility and protocol reference.
 
-This integration preserves the native Mac pairing, iPhone enrollment and app-control, and imported-agenda histories in one build. The Mac owns one dashboard, chores, weather and agenda store per application; every relevant widget observes its store. A selected playlist remains configured per widget. Editing an imported playlist's title or size on iPhone preserves its playlist ID even though playback is currently a Mac feature.
+This integration preserves the native Mac pairing, iPhone enrollment and app-control, and imported-agenda histories in one build. The Mac owns one dashboard, chores, weather and agenda store per application; every relevant widget observes its store. A selected playlist remains configured per widget. Editing an imported playlist's title or size on iPhone preserves its playlist ID. Both native clients open the selected playlist only after an explicit playback request.
 
 ## Run an isolated Mac preview
 
@@ -25,7 +25,7 @@ Open `apps/ios/EllieIOS.xcodeproj` in Xcode. `bun run ios:build` builds for the 
 
 The iPhone supports local dashboard editing and chores, notes, clocks, explicit coordinator enrollment and granted app opening. Local chores remain in this iPhone's private file. Imported widget settings survive edits and export. Physical installation still requires signing; simulator results do not validate a phone camera, local-network consent or a phone-to-Mac action.
 
-The [household-state backend](household-state.md) provides explicit private/shared grants and durable conditional saves. Paired iPhones can open **Coordinator → Household Chores** for a separate shared copy; local chores are never uploaded or replaced automatically. Calendar is an offline snapshot, not a connected Google account. Voice recognition never supplies authorization for a privileged action.
+The [household-state backend](household-state.md) provides explicit private/shared grants and durable conditional saves. Paired iPhones can open **Coordinator → Household Chores** for a separate shared copy; local chores are never uploaded or replaced automatically. Calendar widgets can show an explicitly imported offline snapshot or, with a separate Life account grant, the selected Google calendars previously synchronized by the coordinator. Reading the connected agenda does not initiate a provider sync. Voice recognition never supplies authorization for a privileged action.
 
 ## Shared chore setup and manual QA
 
