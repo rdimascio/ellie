@@ -1126,13 +1126,21 @@ export class LifeHttpServer {
         const connection = connectors.store.get(this.actor.userId, id);
         if (!connection || connection.state === "revoked")
           throw new HttpError(404, "Connection is unavailable.");
+        const displayTimeZone = url.searchParams.get("timeZone");
+        if (
+          connectionRead[2] === "agenda" &&
+          (url.searchParams.size !== 1 ||
+            !displayTimeZone ||
+            !/^[A-Za-z0-9_+./-]{1,80}$/.test(displayTimeZone))
+        )
+          throw new HttpError(400, "Calendar display time zone is invalid.");
         this.send(
           response,
           200,
           connectionRead[2] === "calendars"
             ? await connectors.calendars(this.actor.userId, id)
             : connectionRead[2] === "agenda"
-              ? connectors.agenda(this.actor.userId, id)
+              ? connectors.agenda(this.actor.userId, id, displayTimeZone!)
               : connectors.preview(this.actor.userId, id),
         );
         return;

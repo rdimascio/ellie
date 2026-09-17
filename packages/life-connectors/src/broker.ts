@@ -463,16 +463,35 @@ export class ConnectorBroker {
     return { items, lastSyncAt: c.lastSyncAt, error: c.error, state: c.state };
   }
   /** A bounded projection of already imported events from this actor's selected calendar. */
-  agenda(actorId: string, id: string) {
+  agenda(actorId: string, id: string, displayTimeZone: string) {
     const connection = this.current(actorId, id);
     if (connection.provider !== "google-calendar" || connection.state === "revoked")
       throw new Error("Calendar connection is unavailable.");
     const now = this.now();
     const horizonEnd = now + AGENDA_HORIZON;
-    // Include one UTC civil-day margin so the phone can apply its own display time zone to
-    // all-day events without dropping an event near midnight.
-    const firstDay = new Date(now - DAY).toISOString().slice(0, 10);
-    const lastDay = new Date(horizonEnd + DAY).toISOString().slice(0, 10);
+    if (!/^[A-Za-z0-9_+./-]{1,80}$/.test(displayTimeZone))
+      throw new Error("Calendar display time zone is invalid.");
+    let formatter: Intl.DateTimeFormat;
+    try {
+      formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: displayTimeZone,
+        calendar: "gregory",
+        numberingSystem: "latn",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+    } catch {
+      throw new Error("Calendar display time zone is invalid.");
+    }
+    const civilDate = (instant: number) => {
+      const parts = Object.fromEntries(
+        formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+      );
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    const firstDay = civilDate(now);
+    const lastDay = civilDate(horizonEnd);
     const complete = connection.lastSyncAt !== undefined && !connection.continuation;
     type AgendaEvent = {
       title: string;
@@ -519,7 +538,7 @@ export class ConnectorBroker {
               civilDay(endDate) !== undefined &&
               startDate! < endDate &&
               endDate > firstDay &&
-              startDate! < lastDay
+              startDate! <= lastDay
             )
               return [
                 {
@@ -542,6 +561,7 @@ export class ConnectorBroker {
       label: connection.label.slice(0, 80),
       state: connection.state,
       selectedCalendarId: (connection.selectedCalendarId ?? "primary").slice(0, 1_024),
+      displayTimeZone,
       ...(connection.lastSyncAt !== undefined ? { lastSyncAt: connection.lastSyncAt } : {}),
       complete,
       horizonStart: now,

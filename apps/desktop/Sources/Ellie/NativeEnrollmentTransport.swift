@@ -113,15 +113,21 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
   func lifeCalendarGET(path: String, credential: LifeWebCredential, sessionToken: String)
     async throws -> (Data, HTTPURLResponse)
   {
-    guard path == "/api/connections" ||
-      path.range(of: "^/api/connections/[A-Za-z0-9_-]{1,128}/agenda$", options: .regularExpression) != nil,
+    guard let components = URLComponents(string: path),
+      components.scheme == nil, components.host == nil,
+      components.fragment == nil,
+      (path == "/api/connections" ||
+        (components.path.range(of: "^/api/connections/[A-Za-z0-9_-]{1,128}/agenda$", options: .regularExpression) != nil &&
+          components.queryItems?.count == 1 &&
+          components.queryItems?.first?.name == "timeZone" &&
+          components.queryItems?.first?.value?.range(of: "^[A-Za-z0-9_+./-]{1,80}$", options: .regularExpression) != nil)),
       sessionToken.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
       credential.origin.scheme == "https",
       let host = nativeTLSHost(credential.origin.host),
       let url = URL(string: path, relativeTo: credential.origin)?.absoluteURL,
       url.scheme == "https", url.host == credential.origin.host,
       url.port == credential.origin.port, url.user == nil, url.password == nil,
-      url.query == nil, url.fragment == nil
+      url.fragment == nil
     else { throw NativeEnrollmentFailure.invalidCode }
     var request = URLRequest(
       url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)

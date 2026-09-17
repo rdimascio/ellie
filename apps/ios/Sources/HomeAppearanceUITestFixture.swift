@@ -158,7 +158,8 @@ private actor HomeAppearanceAgendaClient: IOSAgendaClient {
         if await probe.calledAgenda() { throw IOSAgendaFailure.unavailable }
         let now = Date()
         return IOSAgendaSnapshot(connectionId: id, label: "Fixture Google account", state: "connected",
-            selectedCalendarId: "selected-fixture-calendar", lastSyncAt: now, complete: true,
+            selectedCalendarId: "selected-fixture-calendar", displayTimeZone: TimeZone.current.identifier,
+            lastSyncAt: now, complete: true,
             horizonStart: now, horizonEnd: now.addingTimeInterval(30 * 86_400),
             events: [IOSAgendaEvent(title: "Fixture calendar event", status: "confirmed",
                 start: now.addingTimeInterval(86_400), end: now.addingTimeInterval(90_000),

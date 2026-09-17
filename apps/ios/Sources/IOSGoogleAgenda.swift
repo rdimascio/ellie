@@ -29,11 +29,28 @@ struct IOSAgendaSnapshot: Equatable, Sendable {
     let label: String
     let state: String
     let selectedCalendarId: String
+    let displayTimeZone: String
     let lastSyncAt: Date?
     let complete: Bool
     let horizonStart: Date
     let horizonEnd: Date
     let events: [IOSAgendaEvent]
+}
+
+enum IOSAgendaPresentation {
+    static func upcoming(_ snapshot: IOSAgendaSnapshot, at now: Date,
+                         timeZone: TimeZone) -> [IOSAgendaEvent] {
+        guard snapshot.displayTimeZone == timeZone.identifier else { return [] }
+        let display = DateFormatter()
+        display.locale = Locale(identifier: "en_US_POSIX")
+        display.timeZone = timeZone
+        display.dateFormat = "yyyy-MM-dd"
+        let today = display.string(from: now)
+        return snapshot.events.filter { event in
+            if let end = event.end { return end > now }
+            return event.endDate.map { $0 > today } ?? false
+        }
+    }
 }
 
 enum IOSAgendaWire {
@@ -42,7 +59,8 @@ enum IOSAgendaWire {
         return object
     }
     private static func text(_ value: Any?, maximum: Int) throws -> String {
-        guard let value = value as? String, !value.isEmpty, value.utf8.count <= maximum,
+        guard let value = value as? String, !value.isEmpty,
+              value.utf16.count <= maximum, value.utf8.count <= maximum * 4,
               value.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
         else { throw IOSAgendaFailure.invalidResponse }
         return value
@@ -76,15 +94,16 @@ enum IOSAgendaWire {
                   ["connecting", "connected", "paused", "error", "revoked"].contains(state)
             else { throw IOSAgendaFailure.invalidResponse }
             return IOSAgendaConnection(
-                id: try identifier(row["id"]), label: try text(row["label"], maximum: 80),
+                id: try identifier(row["id"]),
+                label: String(try text(row["label"], maximum: 2_000).prefix(80)),
                 state: state, selectedCalendarId: try text(row["selectedCalendarId"], maximum: 1_024))
         }
     }
     static func snapshot(_ data: Data, expectedID: String, now: Date = Date()) throws -> IOSAgendaSnapshot {
         guard data.count <= 48_000 else { throw IOSAgendaFailure.invalidResponse }
         let root = try object(JSONSerialization.jsonObject(with: data))
-        guard Set(root.keys).isSubset(of: ["connectionId", "label", "state", "selectedCalendarId", "lastSyncAt", "complete", "horizonStart", "horizonEnd", "events"]),
-              Set(["connectionId", "label", "state", "selectedCalendarId", "complete", "horizonStart", "horizonEnd", "events"]).isSubset(of: Set(root.keys)),
+        guard Set(root.keys).isSubset(of: ["connectionId", "label", "state", "selectedCalendarId", "displayTimeZone", "lastSyncAt", "complete", "horizonStart", "horizonEnd", "events"]),
+              Set(["connectionId", "label", "state", "selectedCalendarId", "displayTimeZone", "complete", "horizonStart", "horizonEnd", "events"]).isSubset(of: Set(root.keys)),
               try identifier(root["connectionId"]) == expectedID,
               let state = root["state"] as? String,
               ["connected", "paused", "error", "connecting"].contains(state),
@@ -94,9 +113,11 @@ enum IOSAgendaWire {
         else { throw IOSAgendaFailure.invalidResponse }
         let horizonStart = try milliseconds(root["horizonStart"])
         let horizonEnd = try milliseconds(root["horizonEnd"])
+        let displayTimeZone = try text(root["displayTimeZone"], maximum: 80)
         guard horizonEnd > horizonStart,
               abs(horizonEnd.timeIntervalSince(horizonStart) - 30 * 86_400) < 0.001,
               abs(now.timeIntervalSince(horizonStart)) <= 86_400,
+              displayTimeZone == TimeZone.current.identifier,
               complete.boolValue || rows.isEmpty
         else { throw IOSAgendaFailure.invalidResponse }
         let lastSyncAt = try root["lastSyncAt"].map(milliseconds)
@@ -131,6 +152,7 @@ enum IOSAgendaWire {
         }
         return IOSAgendaSnapshot(connectionId: expectedID, label: try text(root["label"], maximum: 80),
             state: state, selectedCalendarId: try text(root["selectedCalendarId"], maximum: 1_024),
+            displayTimeZone: displayTimeZone,
             lastSyncAt: lastSyncAt, complete: complete.boolValue, horizonStart: horizonStart,
             horizonEnd: horizonEnd, events: events)
     }
@@ -158,7 +180,11 @@ struct IOSPinnedAgendaClient: IOSAgendaClient {
     func agenda(_ credential: NativeEnrollmentCredential, id: String) async throws -> IOSAgendaSnapshot {
         guard id.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil
         else { throw IOSAgendaFailure.invalidResponse }
-        let (data, response) = try await get(credential, path: "/api/connections/\(id)/agenda")
+        var components = URLComponents()
+        components.path = "/api/connections/\(id)/agenda"
+        components.queryItems = [URLQueryItem(name: "timeZone", value: TimeZone.current.identifier)]
+        guard let path = components.string else { throw IOSAgendaFailure.invalidResponse }
+        let (data, response) = try await get(credential, path: path)
         try check(response.statusCode)
         return try IOSAgendaWire.snapshot(data, expectedID: id)
     }
@@ -204,7 +230,7 @@ final class IOSGoogleAgendaStore: ObservableObject {
 
     func bind(_ incoming: NativeEnrollmentCredential?) {
         let next = incoming.map(Self.scopeForCredential)
-        guard next != scope else { return }
+        guard next != scope || incoming != credential else { return }
         generation += 1
         operation?.cancel(); operation = nil
         credential = incoming
@@ -243,6 +269,12 @@ final class IOSGoogleAgendaStore: ObservableObject {
                 self.connections = available.filter { $0.state != "revoked" }
                 if let id = self.selectedID, !self.connections.contains(where: { $0.id == id }) {
                     self.clearSelection(scope: scope)
+                }
+                if let old = self.snapshot, let id = self.selectedID,
+                   let current = self.connections.first(where: { $0.id == id }),
+                   old.selectedCalendarId != current.selectedCalendarId {
+                    self.snapshot = nil
+                    self.refreshedAt = nil
                 }
                 if let id = self.selectedID {
                     let result = try await client.agenda(credential, id: id)
@@ -306,13 +338,24 @@ struct IOSGoogleAgendaWidget: View {
                 if let snapshot = store.snapshot {
                     if !snapshot.complete {
                         Text("Waiting for the Mac’s first completed import.").font(.caption)
-                    } else if snapshot.events.isEmpty {
-                        Text("No upcoming events in the imported calendar.").font(.caption)
                     } else {
-                        ForEach(Array(snapshot.events.prefix(3).enumerated()), id: \.offset) { _, event in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(event.title).font(.subheadline)
-                                Text(eventDate(event)).font(.caption).foregroundStyle(.secondary)
+                        TimelineView(.periodic(from: .now, by: 60)) { context in
+                            if snapshot.displayTimeZone != TimeZone.current.identifier {
+                                Text("Time zone changed. Refresh this calendar before viewing events.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            } else {
+                                let events = IOSAgendaPresentation.upcoming(snapshot, at: context.date,
+                                    timeZone: .current)
+                                if events.isEmpty {
+                                    Text("No upcoming events in this read. Refresh to check the Mac’s latest import.")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                ForEach(Array(events.prefix(3).enumerated()), id: \.offset) { _, event in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(event.title).font(.subheadline)
+                                        Text(eventDate(event)).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                         }
                     }
