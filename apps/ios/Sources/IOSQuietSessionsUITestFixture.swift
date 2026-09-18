@@ -38,25 +38,32 @@ private actor IOSQuietFixtureClient: IOSQuietClient {
 @MainActor
 struct IOSQuietSessionsUITestFixtureView: View {
     @StateObject private var store: IOSQuietSessionsStore
+    @StateObject private var voice: IOSQuietVoiceStore
     private let client: IOSQuietFixtureClient
-    private let credential = NativeEnrollmentCredential(
-        origin: URL(string: "https://127.0.0.1:8444")!,
-        certificateSha256: String(repeating: "b", count: 64),
-        client: NativeClient(id: "fixture-phone", role: "native_phone_controller",
-            label: "Fixture", grants: [], createdAt: 1_800_000_000_000,
-            expiresAt: 1_807_776_000_000),
-        token: String(repeating: "c", count: 64))
+    private let credential: NativeEnrollmentCredential
 
     init() {
         let client = IOSQuietFixtureClient()
+        let credential = NativeEnrollmentCredential(
+            origin: URL(string: "https://127.0.0.1:8444")!,
+            certificateSha256: String(repeating: "b", count: 64),
+            client: NativeClient(id: "fixture-phone", role: "native_phone_controller",
+                label: "Fixture", grants: [], createdAt: 1_800_000_000_000,
+                expiresAt: 1_807_776_000_000),
+            token: String(repeating: "c", count: 64))
         self.client = client
+        self.credential = credential
         _store = StateObject(wrappedValue: IOSQuietSessionsStore(client: client))
+        _voice = StateObject(wrappedValue: IOSQuietVoiceStore(credential: credential,
+            client: IOSQuietUnavailableVoiceFixtureClient(),
+            journal: IOSQuietMemoryMarkerFixture()))
     }
     var body: some View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 10) {
-                    IOSQuietSessionsHome(store: store, credential: credential)
+                    IOSQuietSessionsHome(store: store, credential: credential,
+                        uiTestVoiceStore: voice)
                     Button("Revoke fixture grant") {
                         Task { await client.revoke(); store.refreshRecent() }
                     }
@@ -66,6 +73,33 @@ struct IOSQuietSessionsUITestFixtureView: View {
             }
             .ellieScreen()
         }
+    }
+}
+
+@MainActor
+private struct IOSQuietUnavailableVoiceFixtureClient: IOSQuietVoiceClient {
+    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int {
+        throw IOSQuietFailure.unavailable
+    }
+    func send(_ credential: NativeEnrollmentCredential, body: Data) async throws
+        -> IOSQuietChatOutcome { throw IOSQuietFailure.unavailable }
+    func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws
+        -> IOSQuietChatOutcome { throw IOSQuietFailure.unavailable }
+}
+
+@MainActor
+private final class IOSQuietMemoryMarkerFixture: BrowserMutationUncertaintyPersisting {
+    private var marker: String?
+    func pendingToken(for scope: String) throws -> String? { marker }
+    func recordIfClear(token: String, for scope: String) throws -> Bool {
+        guard marker == nil else { return false }
+        marker = token
+        return true
+    }
+    func clear(token: String, for scope: String) throws -> BrowserMutationUncertaintyClearResult {
+        guard marker == token else { return .mismatch }
+        marker = nil
+        return .cleared
     }
 }
 #endif

@@ -410,6 +410,7 @@ final class IOSQuietSessionsStore: ObservableObject {
 struct IOSQuietSessionsHome: View {
     @ObservedObject var store: IOSQuietSessionsStore
     let credential: NativeEnrollmentCredential
+    var uiTestVoiceStore: IOSQuietVoiceStore? = nil
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -433,7 +434,8 @@ struct IOSQuietSessionsHome: View {
             }
             ForEach(store.recent) { session in
                 NavigationLink {
-                    IOSQuietSessionDetail(store: store, credential: credential, id: session.id)
+                    IOSQuietSessionDetail(store: store, credential: credential,
+                        uiTestVoiceStore: uiTestVoiceStore, id: session.id)
                 } label: {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -454,11 +456,14 @@ struct IOSQuietSessionsHome: View {
                 if session.id != store.recent.last?.id { Divider().overlay(ElliePalette.border) }
             }
             HStack(spacing: 18) {
-                NavigationLink("See all") { IOSQuietAllSessions(store: store, credential: credential) }
+                NavigationLink("See all") {
+                    IOSQuietAllSessions(store: store, credential: credential,
+                        uiTestVoiceStore: uiTestVoiceStore)
+                }
                     .accessibilityIdentifier("quiet-see-all")
                 Spacer()
                 NavigationLink {
-                    IOSQuietVoiceEntry(credential: credential)
+                    IOSQuietVoiceEntry(credential: credential, lifeReview: uiTestVoiceStore)
                 } label: { Label("Voice controls", systemImage: "waveform") }
                     .accessibilityIdentifier("quiet-voice")
             }
@@ -481,17 +486,20 @@ struct IOSQuietSessionsHome: View {
 private struct IOSQuietVoiceEntry: View {
     let credential: NativeEnrollmentCredential
     var conversationID: String? = nil
+    var lifeReview: IOSQuietVoiceStore? = nil
     @StateObject private var controls: PhoneControlStore
     @StateObject private var browser: BrowserPhoneControlStore
-    init(credential: NativeEnrollmentCredential, conversationID: String? = nil) {
+    init(credential: NativeEnrollmentCredential, conversationID: String? = nil,
+        lifeReview: IOSQuietVoiceStore? = nil) {
         self.credential = credential
         self.conversationID = conversationID
+        self.lifeReview = lifeReview
         _controls = StateObject(wrappedValue: PhoneControlStore(credential: credential))
         _browser = StateObject(wrappedValue: BrowserPhoneControlStore(credential: credential))
     }
     var body: some View {
         SpeechTurnView(credential: credential, controls: controls, browser: browser,
-            lifeConversationID: conversationID)
+            lifeReview: lifeReview, lifeConversationID: conversationID)
     }
 }
 
@@ -499,6 +507,7 @@ private struct IOSQuietVoiceEntry: View {
 private struct IOSQuietAllSessions: View {
     @ObservedObject var store: IOSQuietSessionsStore
     let credential: NativeEnrollmentCredential
+    var uiTestVoiceStore: IOSQuietVoiceStore? = nil
     var body: some View {
         List {
             if store.busy {
@@ -512,7 +521,8 @@ private struct IOSQuietAllSessions: View {
             }
             ForEach(store.all) { session in
                 NavigationLink(session.title) {
-                    IOSQuietSessionDetail(store: store, credential: credential, id: session.id)
+                    IOSQuietSessionDetail(store: store, credential: credential,
+                        uiTestVoiceStore: uiTestVoiceStore, id: session.id)
                 }
                     .accessibilityIdentifier("quiet-all-session-\(session.id)")
             }
@@ -532,6 +542,7 @@ private struct IOSQuietAllSessions: View {
 private struct IOSQuietSessionDetail: View {
     @ObservedObject var store: IOSQuietSessionsStore
     let credential: NativeEnrollmentCredential
+    var uiTestVoiceStore: IOSQuietVoiceStore? = nil
     let id: String
     var body: some View {
         ScrollView {
@@ -547,7 +558,8 @@ private struct IOSQuietSessionDetail: View {
                 }
                 if let detail = store.detail, detail.session.id == id {
                     NavigationLink {
-                        IOSQuietVoiceEntry(credential: credential, conversationID: id)
+                        IOSQuietVoiceEntry(credential: credential, conversationID: id,
+                            lifeReview: uiTestVoiceStore)
                     } label: {
                         Label("Ask Life about this session", systemImage: "waveform")
                     }

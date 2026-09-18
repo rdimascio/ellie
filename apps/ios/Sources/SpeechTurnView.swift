@@ -13,6 +13,7 @@ struct SpeechTurnView: View {
     credential: NativeEnrollmentCredential, controls: PhoneControlStore,
     browser: BrowserPhoneControlStore,
     speech: SpeechTurnStore? = nil,
+    lifeReview: IOSQuietVoiceStore? = nil,
     lifeConversationID: String? = nil
   ) {
     controlStore = controls
@@ -20,7 +21,7 @@ struct SpeechTurnView: View {
     _speech = StateObject(
       wrappedValue: speech
         ?? SpeechTurnStore(credential: credential, recorder: IOSSpeechRecorder()))
-    _lifeReview = StateObject(wrappedValue: IOSQuietVoiceStore(credential: credential))
+    _lifeReview = StateObject(wrappedValue: lifeReview ?? IOSQuietVoiceStore(credential: credential))
     self.lifeConversationID = lifeConversationID
   }
 
