@@ -645,6 +645,7 @@
         setter.call(chosen.input, command.query);
         chosen.input.dispatchEvent(event);
         if (youtube) {
+          const expectedOrigin = new URL(expectedUrl).origin;
           active(command, expectedUrl, deadline);
           const ready = observedYoutubeSearchControl();
           if (
@@ -663,7 +664,7 @@
             const url = new URL(location.href);
             if (url.href === expectedUrl) continue;
             if (
-              url.origin !== location.origin ||
+              url.origin !== expectedOrigin ||
               url.pathname !== "/results" ||
               url.hash ||
               url.searchParams.size !== 1 ||

@@ -681,6 +681,93 @@ test("popup submits only the search control from its fresh observed page", async
   assert.equal(sent.length, 2, "a consumed observation cannot dispatch a second search");
 });
 
+test("YouTube search accepts only the exact observed result on the same active focused tab", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const beforeUrl = "https://www.youtube.com/";
+  const query = "NASA Artemis official launch";
+  const exactResults = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+  const cases = [
+    { name: "exact result", afterUrl: exactResults, allowed: true },
+    { name: "wrong query", afterUrl: "https://www.youtube.com/results?search_query=other" },
+    { name: "extra parameter", afterUrl: `${exactResults}&sp=other` },
+    { name: "changed origin", afterUrl: "https://elsewhere.example/results?search_query=NASA" },
+    { name: "late navigation", afterUrl: beforeUrl },
+    { name: "inactive after dispatch", afterUrl: exactResults, afterActive: false },
+    { name: "changed window", afterUrl: exactResults, afterWindow: 9 },
+    { name: "unfocused after dispatch", afterUrl: exactResults, afterFocused: false },
+    {
+      name: "inactive before dispatch",
+      afterUrl: exactResults,
+      beforeActive: false,
+      noInjection: true,
+    },
+  ];
+  for (const scenario of cases) {
+    let tab = {
+      id: 7,
+      windowId: 3,
+      active: scenario.beforeActive ?? true,
+      status: "complete",
+      url: beforeUrl,
+    };
+    let focused = true;
+    let injections = 0;
+    const context: Record<string, any> = {
+      chrome: {
+        runtime: { onMessage: extensionEvent() },
+        tabs: {
+          onRemoved: extensionEvent(),
+          onReplaced: extensionEvent(),
+          onUpdated: extensionEvent(),
+          get: async () => ({ ...tab }),
+        },
+        windows: { get: async (id: number) => ({ id, focused }) },
+        scripting: {
+          async executeScript(options: { files?: string[] }) {
+            injections += 1;
+            if (options.files) return [{ documentId: "selected-document" }];
+            tab = {
+              ...tab,
+              url: scenario.afterUrl,
+              active: scenario.afterActive ?? true,
+              windowId: scenario.afterWindow ?? 3,
+            };
+            focused = scenario.afterFocused ?? true;
+            return [{ result: { ok: true, value: { outcome: "navigation_observed" } } }];
+          },
+        },
+      },
+      AbortController,
+      URL,
+      Promise,
+      Set,
+      Map,
+      Date,
+      Error,
+      Object,
+      Array,
+      String,
+      Number,
+      RegExp,
+      crypto,
+      setTimeout,
+      clearTimeout,
+    };
+    runInNewContext(`${background}\n;globalThis.__searchDispatch=dispatch;`, context);
+    const perform = context.__searchDispatch(7, {
+      type: "searchObserved",
+      actionId: crypto.randomUUID(),
+      query,
+    });
+    if (scenario.allowed) {
+      assert.equal((await perform).outcome, "navigation_observed", scenario.name);
+    } else {
+      await assert.rejects(perform, /page_changed/, scenario.name);
+    }
+    assert.equal(injections, scenario.noInjection ? 0 : 2, scenario.name);
+  }
+});
+
 async function fixture(
   options: {
     accessibilityOnly?: boolean;

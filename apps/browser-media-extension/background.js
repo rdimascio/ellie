@@ -109,6 +109,15 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
   }
   const before = await chrome.tabs.get(tabId);
   if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
+  const youtubeSearch =
+    command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com";
+  if (
+    youtubeSearch &&
+    (before.active !== true ||
+      before.status !== "complete" ||
+      !(await chrome.windows.get(before.windowId)).focused)
+  )
+    throw new Error("page_changed");
   const controllerFile =
     new URL(before.url).origin === "https://tv.youtube.com"
       ? "youtube-tv-controller.js"
@@ -165,10 +174,28 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
     new Promise((_, reject) => setTimeout(() => reject(new Error("command_timeout")), 2500)),
   ]);
   const after = await chrome.tabs.get(tabId);
+  const observedYoutubeResults = (() => {
+    if (!youtubeSearch || !after.url) return false;
+    const url = new URL(after.url);
+    return (
+      url.origin === new URL(before.url).origin &&
+      url.pathname === "/results" &&
+      !url.hash &&
+      url.searchParams.size === 1 &&
+      url.searchParams.getAll("search_query").length === 1 &&
+      url.searchParams.get("search_query") === command.query
+    );
+  })();
   if (
     !after.url ||
     !allowedOrigin(after.url) ||
-    (command.type !== "open" && after.url !== before.url)
+    (youtubeSearch && (!observedYoutubeResults || after.url === before.url)) ||
+    (!youtubeSearch && command.type !== "open" && after.url !== before.url) ||
+    (youtubeSearch &&
+      (after.windowId !== before.windowId ||
+        after.active !== true ||
+        after.status !== "complete" ||
+        !(await chrome.windows.get(before.windowId)).focused))
   )
     throw new Error("page_changed");
   if (command.type === "open" && new URL(after.url).origin !== new URL(before.url).origin)
