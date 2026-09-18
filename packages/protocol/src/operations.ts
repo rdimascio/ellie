@@ -313,6 +313,8 @@ export type BrowserView = {
   title?: string;
   summary?: string;
   items: { id: string; label: string; state?: string }[];
+  /** Directions observed on the bound AX web area during this read only. */
+  axScrollDirections?: ("up" | "down")[];
   site?: {
     provider: "youtube" | "netflix" | "youtube_tv" | "disneyplus";
     page: "home" | "results" | "browse" | "watch" | "login" | "unsupported";
@@ -454,7 +456,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     const view = browser.view as Record<string, unknown>;
     if (!view || typeof view !== "object" || Array.isArray(view))
       throw new Error("Invalid browser operation result.");
-    const allowed = ["title", "summary", "items", "site"];
+    const allowed = ["title", "summary", "items", "site", "axScrollDirections"];
     if (
       Object.keys(view).some((key) => !allowed.includes(key)) ||
       !Array.isArray(view.items) ||
@@ -472,6 +474,18 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     });
     if (new Set(items.map((item) => item.id)).size !== items.length)
       throw new Error("Invalid browser operation result.");
+    let axScrollDirections: BrowserView["axScrollDirections"];
+    if (view.axScrollDirections !== undefined) {
+      if (
+        browser.source !== "accessibility" ||
+        !Array.isArray(view.axScrollDirections) ||
+        view.axScrollDirections.length > 2 ||
+        view.axScrollDirections.some((direction) => direction !== "up" && direction !== "down") ||
+        new Set(view.axScrollDirections).size !== view.axScrollDirections.length
+      )
+        throw new Error("Invalid browser operation result.");
+      axScrollDirections = view.axScrollDirections as ("up" | "down")[];
+    }
     let site: BrowserView["site"];
     if (view.site !== undefined) {
       const observed = view.site as Record<string, unknown>;
@@ -590,6 +604,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
           ...(view.title === undefined ? {} : { title: boundedText(view.title, 500) }),
           ...(view.summary === undefined ? {} : { summary: boundedText(view.summary, 2000) }),
           items,
+          ...(axScrollDirections === undefined ? {} : { axScrollDirections }),
           ...(site === undefined ? {} : { site }),
         },
       },
