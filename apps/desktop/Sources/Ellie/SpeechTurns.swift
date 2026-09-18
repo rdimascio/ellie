@@ -79,6 +79,8 @@ final class SpeechTurnStore: ObservableObject {
       phase != .revoked, phase != .cleanupRequired else { return }
     phase = .checking
     launch {
+      try Task.checkCancellation()
+      guard !self.credentialInvalidated else { throw CancellationError() }
       try await self.transport.availability(for: self.credential)
       return .ready
     }
@@ -90,6 +92,8 @@ final class SpeechTurnStore: ObservableObject {
     activeTurnID = UUID()
     phase = .checking
     launch {
+      try Task.checkCancellation()
+      guard !self.credentialInvalidated else { throw CancellationError() }
       try await self.transport.availability(for: self.credential)
       guard !Task.isCancelled else { throw CancellationError() }
       self.phase = .starting
@@ -117,6 +121,10 @@ final class SpeechTurnStore: ObservableObject {
       let artifact = try await self.recorder.stop()
       let text: String
       do {
+        // stop() may finish after a pairing change. Dispose its artifact even when
+        // transcription must not be admitted under the old credential.
+        try Task.checkCancellation()
+        guard !self.credentialInvalidated else { throw CancellationError() }
         text = try await self.transport.transcribe(
           artifact, turnID: turnID, credential: self.credential)
       } catch {
@@ -210,6 +218,7 @@ final class SpeechTurnStore: ObservableObject {
     task = Task {
       defer { if expected == generation { task = nil } }
       do {
+        try Task.checkCancellation()
         let next = try await operation()
         if expected == generation { phase = next }
       } catch {
