@@ -66,6 +66,8 @@ export type ProviderObservation = ObservationBase &
 
 export interface ProviderPullInput {
   credential: ProviderCredential;
+  /** Selected resource within a provider account; absent retains legacy primary behavior. */
+  resourceId?: string;
   cursor?: string;
   continuation?: string;
   window: { from: number; to: number };
@@ -85,6 +87,21 @@ export interface ProviderPullResult {
 
 export interface LifeProviderAdapter {
   readonly id: ProviderId;
+  /** Explicit, transient read of an already imported Gmail message. Never an observation. */
+  readMessageText?(
+    messageId: string,
+    credential: ProviderCredential,
+    signal: AbortSignal,
+  ): Promise<{
+    status: "plain" | "truncated" | "unavailable";
+    text?: string;
+    additionalPartsOmitted?: true;
+  }>;
+  /** Read-only resource picker for providers with multiple calendars. */
+  calendars?(
+    credential: ProviderCredential,
+    signal: AbortSignal,
+  ): Promise<{ id: string; label: string; primary: boolean }[]>;
   identity(
     credential: ProviderCredential,
     signal: AbortSignal,

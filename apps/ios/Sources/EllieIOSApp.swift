@@ -3,16 +3,61 @@ import SwiftUI
 @main
 @MainActor
 struct EllieIOSApp: App {
+    init() { WatchMediaPhoneBridge.shared.activate() }
+
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
-                BrowserVoiceUITestFixtureView()
+            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") {
+                WatchPairedUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
+                HomeAppearanceUITestFixtureView(
+                    accessibilityLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"),
+                    narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-gmail-read-fixture") {
+                IOSGmailUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-session-fixture") {
+                IOSQuietSessionsUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-voice-fixture") {
+                IOSQuietVoiceUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
+                BrowserVoiceUITestFixtureView(
+                    completeActions: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-complete-actions"),
+                    netflixRows: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-netflix-voice-rows"),
+                    netflixSearch: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-netflix-voice-search"),
+                    youtubeSearch: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-youtube-voice-search"))
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-composed-fixture") {
+                if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
+                    from: ProcessInfo.processInfo.arguments,
+                    after: "--ellie-ui-browser-composed-fixture"),
+                   let fixture = BrowserComposedUITestFixture.load(identifier: identifier) {
+                    BrowserComposedUITestFixtureView(fixture: fixture, identifier: identifier)
+                } else {
+                    Text("Invalid composed browser fixture")
+                }
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-household-chores-fixture") {
+                HouseholdChoresUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-native-scanner-sheet-fixture") {
                 NativeScannerSheetUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-target-fixture") {
                 BrowserTargetUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-netflix-rows-fixture") {
+                BrowserTargetUITestFixtureView(netflixRows: true)
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-row-actions-fixture") {
+                BrowserTargetUITestFixtureView(rowActions: true)
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-ax-scroll-fixture") {
+                BrowserTargetUITestFixtureView(axFallback: true)
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-browser-read-only-fixture") {
+                BrowserTargetUITestFixtureView(readOnly: true)
+            } else if ProcessInfo.processInfo.arguments.contains(
+                "--ellie-ui-browser-unavailable-playback-fixture") {
+                BrowserTargetUITestFixtureView(unavailablePlayback: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-unknown-relaunch-fixture") {
                 if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
@@ -48,6 +93,14 @@ private struct EllieIOSNormalRoot: View {
 
     var body: some View {
         IOSDashboardList(store: store, enrollment: enrollment)
-            .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
+            .tint(ElliePalette.accent)
+            .preferredColorScheme(.dark)
+            .onChange(of: enrollment.phase) { _, phase in
+                if case .enrolled(let credential) = phase {
+                    WatchMediaPhoneBridge.shared.retainOnly(credential)
+                } else {
+                    WatchMediaPhoneBridge.shared.disable()
+                }
+            }
     }
 }

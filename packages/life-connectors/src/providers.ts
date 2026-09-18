@@ -57,6 +57,16 @@ function requiredText(value: unknown, max = 2_000): string {
     throw new ProviderError("invalid_response", "The provider returned an invalid response.");
   return result;
 }
+function calendarId(value: unknown): string {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value.length > 1_024 ||
+    [...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) === 127)
+  )
+    throw new ProviderError("invalid_response", "Calendar identifier is invalid.");
+  return value;
+}
 function instant(value: unknown): number | undefined {
   if (typeof value !== "string") return undefined;
   const parsed = Date.parse(value);
@@ -252,6 +262,30 @@ export class GoogleCalendarProvider implements LifeProviderAdapter {
   constructor(options: ProviderAdapterOptions = {}) {
     this.client = new Client(options);
   }
+  async calendars(credential: ProviderCredential, signal: AbortSignal) {
+    const calendars: { id: string; label: string; primary: boolean }[] = [];
+    let pageToken: string | undefined;
+    for (let page = 0; page < 5; page++) {
+      const url = new URL(`${GOOGLE_CALENDAR}/calendar/v3/users/me/calendarList`);
+      url.searchParams.set("maxResults", "100");
+      if (pageToken) url.searchParams.set("pageToken", pageToken);
+      const value = await this.client.json(url.href, { headers: auth(credential) }, signal);
+      for (const raw of array(value.items)) {
+        const item = object(raw),
+          id = calendarId(item.id);
+        calendars.push({
+          id,
+          label: text(item.summary, 200) ?? "Calendar",
+          primary: item.primary === true,
+        });
+      }
+      if (calendars.length > 500)
+        throw new ProviderError("limit_exceeded", "Calendar list is too large.");
+      pageToken = text(value.nextPageToken, 4_096);
+      if (!pageToken) return calendars;
+    }
+    throw new ProviderError("limit_exceeded", "Calendar list is partial.");
+  }
   async identity(credential: ProviderCredential, signal: AbortSignal) {
     const value = await this.client.json(
       `${GOOGLE_CALENDAR}/calendar/v3/calendars/primary`,
@@ -265,13 +299,17 @@ export class GoogleCalendarProvider implements LifeProviderAdapter {
   }
   async pull(input: ProviderPullInput): Promise<ProviderPullResult> {
     boundedInput(input);
+    const resourceId = input.resourceId ?? "primary";
+    calendarId(resourceId);
     const identity = await this.identity(input.credential, input.signal),
       saved = continuation(input.continuation, this.id),
       baseCursor = text(saved?.cursor, 4_096) ?? input.cursor,
       pageToken = text(saved?.pageToken, 4_096),
       windowFrom = typeof saved?.windowFrom === "number" ? saved.windowFrom : input.window.from,
       windowTo = typeof saved?.windowTo === "number" ? saved.windowTo : input.window.to,
-      url = new URL(`${GOOGLE_CALENDAR}/calendar/v3/calendars/primary/events`);
+      url = new URL(
+        `${GOOGLE_CALENDAR}/calendar/v3/calendars/${encodeURIComponent(resourceId)}/events`,
+      );
     if (
       (saved?.windowFrom !== undefined && typeof saved.windowFrom !== "number") ||
       (saved?.windowTo !== undefined && typeof saved.windowTo !== "number") ||
@@ -376,6 +414,88 @@ function header(message: Json, name: string): string | undefined {
   return undefined;
 }
 
+const MAX_GMAIL_PLAIN_TEXT_BYTES = 32 * 1_024;
+
+function messagePartHeader(part: Json, name: string): string | undefined {
+  for (const raw of array(part.headers)) {
+    const candidate = object(raw);
+    if (text(candidate.name, 100)?.toLowerCase() === name.toLowerCase())
+      return text(candidate.value, 500);
+  }
+  return undefined;
+}
+
+function inlineGmailPlainText(payload: Json): {
+  status: "plain" | "truncated" | "unavailable";
+  text?: string;
+  additionalPartsOmitted?: true;
+} {
+  let visited = 0;
+  let found: string | undefined;
+  let inlinePlainParts = 0;
+  const visit = (raw: unknown, depth: number): void => {
+    if (++visited > 64 || depth > 8)
+      throw new ProviderError("limit_exceeded", "The message structure is too large.");
+    const part = object(raw);
+    const mime = requiredText(part.mimeType, 120).toLowerCase();
+    if (
+      text(part.filename, 200) ||
+      /^attachment(?:\s*;|$)/i.test(messagePartHeader(part, "Content-Disposition") ?? "")
+    )
+      return;
+    if (mime === "text/plain") {
+      const charset = /(?:^|;)\s*charset\s*=\s*"?([^";\s]+)/i
+        .exec(messagePartHeader(part, "Content-Type") ?? "")?.[1]
+        ?.toLowerCase();
+      if (charset && !["utf-8", "utf8", "us-ascii"].includes(charset)) return;
+      const body = object(part.body ?? {});
+      if (body.attachmentId !== undefined || body.data === undefined) return;
+      inlinePlainParts++;
+      if (found !== undefined) return;
+      if (
+        typeof body.data !== "string" ||
+        !/^[A-Za-z0-9_-]*={0,2}$/.test(body.data) ||
+        body.data.length % 4 === 1
+      )
+        throw new ProviderError("invalid_response", "The message body is invalid.");
+      const bytes = Buffer.from(body.data, "base64url");
+      if (bytes.toString("base64url") !== body.data.replace(/=+$/, ""))
+        throw new ProviderError("invalid_response", "The message body is invalid.");
+      try {
+        found = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      } catch {
+        throw new ProviderError("invalid_response", "The message body encoding is invalid.");
+      }
+      return;
+    }
+    if (!mime.startsWith("multipart/")) return;
+    const children = array(part.parts);
+    if (children.length > 64)
+      throw new ProviderError("limit_exceeded", "The message structure is too large.");
+    for (const child of children) visit(child, depth + 1);
+  };
+  visit(payload, 0);
+  if (found === undefined) return { status: "unavailable" };
+  let bytes = 0;
+  let output = "";
+  for (const character of found) {
+    const size = Buffer.byteLength(character, "utf8");
+    if (bytes + size > MAX_GMAIL_PLAIN_TEXT_BYTES)
+      return {
+        status: "truncated",
+        text: output,
+        ...(inlinePlainParts > 1 ? { additionalPartsOmitted: true as const } : {}),
+      };
+    output += character;
+    bytes += size;
+  }
+  return {
+    status: "plain",
+    text: output,
+    ...(inlinePlainParts > 1 ? { additionalPartsOmitted: true as const } : {}),
+  };
+}
+
 export class GmailProvider implements LifeProviderAdapter {
   readonly id = "gmail" as const;
   private readonly client: Client;
@@ -397,6 +517,16 @@ export class GmailProvider implements LifeProviderAdapter {
   async identity(credential: ProviderCredential, signal: AbortSignal) {
     const { accountId, label } = await this.profile(credential, signal);
     return { accountId, label };
+  }
+  async readMessageText(messageId: string, credential: ProviderCredential, signal: AbortSignal) {
+    if (!/^[A-Za-z0-9_-]{1,1024}$/.test(messageId))
+      throw new ProviderError("invalid_response", "Message identifier is invalid.");
+    const url = new URL(`${GMAIL}/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}`);
+    url.searchParams.set("format", "full");
+    const value = await this.client.json(url.href, { headers: auth(credential) }, signal);
+    if (value.id !== messageId)
+      throw new ProviderError("invalid_response", "The provider returned another message.");
+    return inlineGmailPlainText(object(value.payload));
   }
   private async message(
     id: string,

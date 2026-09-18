@@ -1,5 +1,13 @@
-import { useEffect, useState } from "react";
-import { api, type ConnectorConnection, type ConnectorMode, type ConnectorProvider } from "./api";
+import { useEffect, useRef, useState } from "react";
+import {
+  api,
+  type ConnectionPreview,
+  type ConnectorConnection,
+  type ConnectorMode,
+  type ConnectorProvider,
+  type GmailMessageDetail as MessageDetail,
+} from "./api";
+import { GmailMessageDetail } from "./GmailMessageDetail";
 
 export function Connections({ standalone = false }: { standalone?: boolean }) {
   const [connections, setConnections] = useState<ConnectorConnection[]>([]);
@@ -8,39 +16,119 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
+  const [notice, setNotice] = useState("");
   const [copyStatus, setCopyStatus] = useState("");
+  const listRequest = useRef(0);
+  const actionInFlight = useRef(false);
+  const detailRequest = useRef(0);
+  const messageRequest = useRef(0);
+  const activeDetailId = useRef("");
+  const currentConnections = useRef<ConnectorConnection[]>([]);
+  useEffect(
+    () => () => {
+      listRequest.current++;
+      detailRequest.current++;
+      messageRequest.current++;
+      activeDetailId.current = "";
+    },
+    [],
+  );
+  const [detailId, setDetailId] = useState("");
+  const [selectedMessageId, setSelectedMessageId] = useState("");
+  const [messageDetail, setMessageDetail] = useState<MessageDetail | null>(null);
+  const [messageLoading, setMessageLoading] = useState(false);
+  const [messageError, setMessageError] = useState("");
+  const [preview, setPreview] = useState<ConnectionPreview | null>(null);
+  const [calendarOptions, setCalendarOptions] = useState<
+    { id: string; label: string; primary: boolean }[]
+  >([]);
+  const [calendarChoice, setCalendarChoice] = useState("");
+  const [detailError, setDetailError] = useState("");
+  const detailSync = connections.find((item) => item.id === detailId)?.lastSyncAt;
+  const clearMessage = () => {
+    messageRequest.current++;
+    setSelectedMessageId("");
+    setMessageDetail(null);
+    setMessageLoading(false);
+    setMessageError("");
+  };
+  const applyConnections = (value: ConnectorConnection[]) => {
+    currentConnections.current = value;
+    if (
+      activeDetailId.current &&
+      !value.some((item) => item.id === activeDetailId.current && item.state === "connected")
+    ) {
+      detailRequest.current++;
+      clearMessage();
+      setPreview(null);
+    }
+    setConnections(value);
+  };
+  useEffect(() => {
+    if (!detailId) return;
+    const current = connections.find((item) => item.id === detailId);
+    if (!current || current.state === "revoked") {
+      detailRequest.current++;
+      activeDetailId.current = "";
+      clearMessage();
+      setDetailId("");
+      setPreview(null);
+      setCalendarOptions([]);
+      setCalendarChoice("");
+      setDetailError("");
+    }
+  }, [connections, detailId]);
+  useEffect(() => {
+    if (detailId && detailSync && !actionInFlight.current) void openDetails(detailId);
+  }, [detailId, detailSync]);
   const [pending, setPending] = useState<{
     provider: ConnectorProvider["id"];
+    connectionId: string;
     authorizationUrl?: string;
     openedExternally: boolean;
+    seen: boolean;
   } | null>(null);
 
   const load = async () => {
+    const request = ++listRequest.current;
     const value = await api.connections.list();
-    setConnections(value.connections);
+    if (request !== listRequest.current) return false;
+    applyConnections(value.connections);
     setProviders(value.providers);
-    setPending((current) =>
-      current &&
-      value.connections.some(
-        (connection) =>
-          connection.provider === current.provider && connection.state === "connected",
-      )
-        ? null
-        : current,
-    );
+    setLoadError("");
+    return true;
   };
+  useEffect(() => {
+    if (!pending) return;
+    const connection = connections.find(
+      (item) => item.id === pending.connectionId && item.provider === pending.provider,
+    );
+    if (connection?.state === "connecting") {
+      if (!pending.seen) setPending({ ...pending, seen: true });
+      return;
+    }
+    if (!connection && !pending.seen) return;
+    setPending(null);
+    setCopyStatus("");
+    if (connection?.state === "connected") setNotice("Google connection is ready.");
+    else if (connection?.state === "paused" || connection?.state === "error")
+      setNotice("Google sign-in finished, but the connection needs attention.");
+    else setNotice("Google connection setup did not finish. You can start again.");
+  }, [connections, pending]);
   useEffect(() => {
     let current = true;
     let loading = false;
     const refresh = async () => {
-      if (loading || document.visibilityState !== "visible") return;
+      if (loading || actionInFlight.current || document.visibilityState !== "visible") return;
       loading = true;
+      const request = ++listRequest.current;
       try {
         const value = await api.connections.list();
-        if (!current) return;
-        setConnections(value.connections);
+        if (!current || request !== listRequest.current) return;
+        applyConnections(value.connections);
         setProviders(value.providers);
-        setError("");
+        setLoadError("");
         setPending((pendingConnection) =>
           pendingConnection &&
           value.connections.some(
@@ -52,8 +140,8 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
             : pendingConnection,
         );
       } catch (caught) {
-        if (current)
-          setError(
+        if (current && request === listRequest.current)
+          setLoadError(
             caught instanceof Error ? caught.message : "Connected accounts are unavailable.",
           );
       } finally {
@@ -65,31 +153,119 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
     const timer = window.setInterval(() => void refresh(), 5_000);
     return () => {
       current = false;
+      listRequest.current++;
       window.clearInterval(timer);
     };
   }, []);
 
   const run = async (key: string, operation: () => Promise<unknown>) => {
+    actionInFlight.current = true;
+    listRequest.current++;
     setBusy(key);
     setError("");
+    setNotice("");
+    if (detailId) {
+      detailRequest.current++;
+      setPreview(null);
+    }
+    clearMessage();
     try {
       await operation();
       await load();
+      if (detailId && !key.startsWith("revoke:") && !key.startsWith("cancel:"))
+        await openDetails(detailId);
+      else if (key.startsWith("revoke:") || key.startsWith("cancel:")) {
+        activeDetailId.current = "";
+        setDetailId("");
+        setCalendarOptions([]);
+        setPreview(null);
+        setCalendarChoice("");
+      }
     } catch (caught) {
+      try {
+        await load();
+        if (detailId) await openDetails(detailId);
+      } catch {
+        /* Preserve the action failure. */
+      }
       setError(
         caught instanceof Error ? caught.message : "The connected account could not be updated.",
       );
     } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   };
+  const openDetails = async (id: string) => {
+    const request = ++detailRequest.current;
+    activeDetailId.current = id;
+    clearMessage();
+    setDetailId(id);
+    setPreview(null);
+    setCalendarOptions([]);
+    setCalendarChoice("");
+    setDetailError("");
+    try {
+      const connection = connections.find((item) => item.id === id);
+      const [nextPreview, calendars] = await Promise.all([
+        api.connections.preview(id),
+        connection?.provider === "google-calendar" && connection.state === "connected"
+          ? api.connections.calendars(id)
+          : Promise.resolve(null),
+      ]);
+      if (request !== detailRequest.current) return;
+      setPreview(nextPreview);
+      setCalendarOptions(calendars?.calendars ?? []);
+      setCalendarChoice(calendars?.selectedCalendarId ?? "");
+    } catch (caught) {
+      if (request === detailRequest.current)
+        setDetailError(
+          caught instanceof Error ? caught.message : "Imported activity is unavailable.",
+        );
+    }
+  };
+  const openMessage = async (id: string, messageId: string) => {
+    const request = ++messageRequest.current;
+    setSelectedMessageId(messageId);
+    setMessageDetail(null);
+    setMessageError("");
+    setMessageLoading(true);
+    try {
+      const value = await api.connections.message(id, messageId);
+      if (
+        request !== messageRequest.current ||
+        activeDetailId.current !== id ||
+        !currentConnections.current.some((item) => item.id === id && item.state === "connected")
+      )
+        return;
+      setMessageDetail(value);
+    } catch (caught) {
+      if (
+        request === messageRequest.current &&
+        activeDetailId.current === id &&
+        currentConnections.current.some((item) => item.id === id && item.state === "connected")
+      )
+        setMessageError(
+          caught instanceof Error ? caught.message : "The selected message is unavailable.",
+        );
+    } finally {
+      if (request === messageRequest.current) setMessageLoading(false);
+    }
+  };
   const connect = async (provider: ConnectorProvider) => {
+    actionInFlight.current = true;
+    listRequest.current++;
     setBusy(`connect:${provider.id}`);
     setError("");
+    setNotice("");
     setCopyStatus("");
     try {
       const value = await api.connections.start(provider.id, connectMode),
         target = new URL(value.authorizationUrl, location.origin);
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value.connectionId)
+      )
+        throw new Error("The connection response was invalid.");
       const local = target.origin === location.origin,
         google =
           target.protocol === "https:" &&
@@ -102,15 +278,25 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
       if (!local && !google) throw new Error("The connection URL was not trusted.");
       setPending({
         provider: provider.id,
+        connectionId: value.connectionId,
         ...(value.openedExternally ? {} : { authorizationUrl: target.href }),
         openedExternally: value.openedExternally === true,
+        seen: false,
       });
-      setBusy("");
-      await load();
+      try {
+        if (await load())
+          setPending((current) =>
+            current?.connectionId === value.connectionId ? { ...current, seen: true } : current,
+          );
+      } catch {
+        setError("Connection started, but its current status could not be loaded.");
+      }
     } catch (caught) {
       setError(
         caught instanceof Error ? caught.message : "The account connection could not start.",
       );
+    } finally {
+      actionInFlight.current = false;
       setBusy("");
     }
   };
@@ -184,7 +370,23 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
             </div>
           )}
           {copyStatus && <small>{copyStatus}</small>}
+          <button
+            type="button"
+            disabled={busy !== ""}
+            onClick={() =>
+              void run(`cancel:${pending.connectionId}`, () =>
+                api.connections.revoke(pending.connectionId),
+              )
+            }
+          >
+            {busy === `cancel:${pending.connectionId}` ? "Stopping…" : "Stop setup"}
+          </button>
         </div>
+      )}
+      {notice && (
+        <p className="connection-status" role="status">
+          {notice}
+        </p>
       )}
       {connections.length > 0 && (
         <div className="connection-list">
@@ -219,6 +421,25 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                 </select>
               </label>
               <div className="connection-actions">
+                {connection.state !== "revoked" && (
+                  <button
+                    type="button"
+                    disabled={busy !== ""}
+                    onClick={() =>
+                      detailId === connection.id
+                        ? (detailRequest.current++,
+                          (activeDetailId.current = ""),
+                          clearMessage(),
+                          setDetailId(""),
+                          setPreview(null))
+                        : void openDetails(connection.id)
+                    }
+                  >
+                    {detailId === connection.id
+                      ? "Hide imported activity"
+                      : "View imported activity"}
+                  </button>
+                )}
                 <button
                   disabled={busy !== "" || connection.state === "revoked"}
                   onClick={() =>
@@ -239,6 +460,86 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                   Disconnect
                 </button>
               </div>
+              {detailId === connection.id && (
+                <div className="connection-status">
+                  {connection.provider === "google-calendar" && calendarOptions.length > 0 && (
+                    <label>
+                      Calendar to read
+                      <select
+                        value={calendarChoice}
+                        disabled={busy !== ""}
+                        onChange={(event) =>
+                          void run(`calendar:${connection.id}`, () =>
+                            api.connections.selectCalendar(connection.id, event.target.value),
+                          )
+                        }
+                      >
+                        {calendarChoice &&
+                          !calendarOptions.some((item) => item.id === calendarChoice) && (
+                            <option value={calendarChoice}>
+                              Previously selected calendar (unavailable)
+                            </option>
+                          )}
+                        {calendarOptions.map((calendar) => (
+                          <option key={calendar.id} value={calendar.id}>
+                            {calendar.label}
+                            {calendar.primary ? " (primary)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
+                  {detailError && <p role="alert">{detailError}</p>}
+                  {preview && (
+                    <>
+                      <p>
+                        {preview.lastSyncAt
+                          ? `Last imported ${new Date(preview.lastSyncAt).toLocaleString()}`
+                          : "No completed import yet."}
+                        {preview.error ? ` · Import needs attention: ${preview.error}` : ""}
+                      </p>
+                      {preview.items.length === 0 ? (
+                        <p>No imported activity to preview.</p>
+                      ) : (
+                        <ul>
+                          {preview.items.map((item, index) => (
+                            <li key={item.kind === "message" ? item.messageId : index}>
+                              {item.kind === "event" ? (
+                                `${item.title}${item.startAt ? ` · ${new Date(item.startAt).toLocaleString()}` : item.startDate ? ` · ${item.startDate}` : ""}`
+                              ) : connection.provider === "gmail" ? (
+                                <button
+                                  type="button"
+                                  className="gmail-preview-item"
+                                  aria-pressed={selectedMessageId === item.messageId}
+                                  onClick={() => void openMessage(connection.id, item.messageId)}
+                                >
+                                  {item.subject} · {item.from}
+                                  {item.snippet ? ` · ${item.snippet}` : ""}
+                                </button>
+                              ) : (
+                                `${item.subject} · ${item.from}${item.snippet ? ` · ${item.snippet}` : ""}`
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                      <small>
+                        Private read-only preview. Select a Gmail message to read its bounded
+                        plain-text body.
+                      </small>
+                      {selectedMessageId && (
+                        <div className="gmail-selected-message">
+                          {messageLoading && <p>Reading selected message…</p>}
+                          {messageError && <p role="alert">{messageError}</p>}
+                          {messageDetail && (
+                            <GmailMessageDetail message={messageDetail} onClose={clearMessage} />
+                          )}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
             </article>
           ))}
         </div>
@@ -273,8 +574,14 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                 </div>
               </div>
               <button
-                disabled={!provider.configured || busy !== ""}
-                title={!provider.configured ? provider.setupMessage : undefined}
+                disabled={!provider.configured || busy !== "" || pending !== null}
+                title={
+                  !provider.configured
+                    ? provider.setupMessage
+                    : pending
+                      ? "Finish or stop the current connection first."
+                      : undefined
+                }
                 onClick={() => void connect(provider)}
               >
                 {busy === `connect:${provider.id}`
@@ -297,6 +604,11 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
       {error && (
         <p className="settings-error" role="alert">
           {error}
+        </p>
+      )}
+      {loadError && (
+        <p className="settings-error" role="alert">
+          {loadError}
         </p>
       )}
     </section>

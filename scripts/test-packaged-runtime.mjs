@@ -25,6 +25,7 @@ import { Auth, newToken } from "../apps/server/src/auth.ts";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 import { Client } from "@ellie/transport";
 import { defaults } from "@ellie/config";
+import { MAXIMUM_PAYLOAD_FILES } from "./build-service-payload.mjs";
 
 const source = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const helperSource = join(source, "tests/fixtures/PackagedRuntimeHelper.swift");
@@ -450,7 +451,7 @@ async function main() {
     const manifest = JSON.parse(await readFile(join(original, "manifest.json"), "utf8"));
     assert.equal(manifest.sourceRevision, expectedRevision);
     assert.equal(manifest.sourceModified, false);
-    assert.ok(manifest.files.length > 0 && manifest.files.length <= 2048);
+    assert.ok(manifest.files.length > 0 && manifest.files.length <= MAXIMUM_PAYLOAD_FILES);
     const inspected = command(join(original, "payload/bin/ellie-service-installer"), [
       "inspect",
       original,

@@ -15,6 +15,8 @@ export interface DependencyComponent {
   files: string[];
 }
 
+export const MAXIMUM_PAYLOAD_FILES: 3072;
+
 export function extractVerifiedNode(options: {
   archive: string;
   expectedSha256: string;
@@ -28,7 +30,12 @@ export function stageApplication(
   metadata?: { created?: string },
 ): Promise<DependencyComponent[]>;
 
+export function verifyBrowserCompanionClosure(directory: string): Promise<string[]>;
+export function stageBrowserCompanion(source: string, destination: string): Promise<string>;
+
 export function verifyManifest(release: string): Promise<Record<string, unknown>>;
+
+export function createReleaseArchive(release: string, archive: string): void;
 
 export function verifyStagedLifeRuntime(payload: string, environmentRoot: string): Promise<void>;
 

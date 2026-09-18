@@ -2,57 +2,6 @@ import Combine
 import SwiftUI
 @preconcurrency import WebKit
 
-enum YouTubePlaylist {
-    static func isValidID(_ value: String) -> Bool {
-        DashboardModel.isValidYouTubePlaylistID(value)
-    }
-
-    static func parse(_ input: String) -> String? {
-        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
-        if isValidID(trimmed) { return trimmed }
-        guard trimmed.utf8.count <= 2_048, let components = URLComponents(string: trimmed),
-              components.scheme == "https",
-              components.user == nil, components.password == nil, components.port == nil,
-              ["youtube.com", "www.youtube.com", "m.youtube.com"].contains(components.host?.lowercased() ?? ""),
-              ["/playlist", "/watch"].contains(components.path),
-              let items = components.queryItems,
-              items.filter({ $0.name == "list" }).count == 1,
-              let value = items.first(where: { $0.name == "list" })?.value,
-              isValidID(value) else { return nil }
-        return value
-    }
-}
-
-enum PlaylistPlayerState: Equatable {
-    case loading, ready, unavailable, embeddingDisabled, networkUnavailable, playerStopped
-
-    var message: String? {
-        switch self {
-        case .loading, .ready: nil
-        case .unavailable: "This playlist is unavailable. It may be private, removed, or restricted."
-        case .embeddingDisabled: "The playlist contains media that its owner does not allow in embedded players."
-        case .networkUnavailable: "YouTube could not be reached. Check the network and try again."
-        case .playerStopped: "The embedded player stopped unexpectedly. Close this window and try again."
-        }
-    }
-
-    static func playerError(_ code: Int?) -> Self {
-        code == 101 || code == 150 ? .embeddingDisabled : .unavailable
-    }
-}
-
-enum PlaylistNavigationPolicy {
-    static let documentOrigin = URL(string: "https://ellie.local/playlist-player")!
-    static let contentRuleListJSON = #"[{"trigger":{"url-filter":".*"},"action":{"type":"block"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*youtube\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*youtube-nocookie\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*googlevideo\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*ytimg\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^https://([A-Za-z0-9-]+\\.)*ggpht\\.com/"},"action":{"type":"ignore-previous-rules"}},{"trigger":{"url-filter":"^blob:https://www\\.youtube-nocookie\\.com/"},"action":{"type":"ignore-previous-rules"}}]"#
-
-    static func allows(_ url: URL, mainFrame: Bool) -> Bool {
-        if mainFrame { return url == documentOrigin }
-        if url.absoluteString == "about:blank" { return true }
-        return url.scheme == "https" && url.host?.lowercased() == "www.youtube-nocookie.com" &&
-            (url.path == "/embed" || url.path.hasPrefix("/embed/"))
-    }
-}
-
 @MainActor
 final class PlaylistPlayerModel: ObservableObject {
     @Published var state: PlaylistPlayerState = .loading
@@ -108,7 +57,9 @@ private struct PlaylistPlayerSheet: View {
             }.padding(16)
             Divider()
             ZStack {
-                PlaylistWebView(playlistID: playlistID, model: model)
+                if model.state.message == nil {
+                    PlaylistWebView(playlistID: playlistID, model: model)
+                }
                 if model.state == .loading { ProgressView("Connecting to YouTube…").padding(20).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12)) }
                 if let message = model.state.message {
                     ContentUnavailableView("Playback unavailable", systemImage: "exclamationmark.triangle", description: Text(message))
@@ -124,7 +75,9 @@ private struct PlaylistWebView: NSViewRepresentable {
     let playlistID: String
     @ObservedObject var model: PlaylistPlayerModel
 
-    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model, policy: PlaylistNavigationPolicy(bundleIdentifier: Bundle.main.bundleIdentifier))
+    }
 
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
@@ -157,24 +110,6 @@ private struct PlaylistWebView: NSViewRepresentable {
         view.loadHTMLString("", baseURL: nil)
     }
 
-    static func html(playlistID: String) -> String {
-        // playlistID is constrained to ASCII identifier characters before interpolation.
-        """
-        <!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
-        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-ellie-player' https://www.youtube.com; frame-src https://www.youtube-nocookie.com; style-src 'unsafe-inline'; img-src data: https://*.ytimg.com https://*.ggpht.com; connect-src https://*.youtube.com https://*.youtube-nocookie.com https://*.googlevideo.com; media-src blob: https://*.googlevideo.com">
-        <style>html,body,#player{width:100%;height:100%;margin:0;background:#000;overflow:hidden}</style></head>
-        <body><div id="player"></div><script nonce="ellie-player" src="https://www.youtube.com/iframe_api"></script><script nonce="ellie-player">
-        function send(type, value) { window.webkit.messageHandlers.elliePlayer.postMessage({type:type,value:value||0}); }
-        function onYouTubeIframeAPIReady() {
-          new YT.Player('player', {host:'https://www.youtube-nocookie.com',width:'100%',height:'100%',
-            playerVars:{listType:'playlist',list:'\(playlistID)',autoplay:1,playsinline:1,origin:'https://ellie.local'},
-            events:{onReady:function(){send('ready')},onError:function(e){send('error',e.data)}}});
-        }
-        window.addEventListener('offline', function(){send('network')});
-        </script></body></html>
-        """
-    }
-
     private static func installContentRules(on view: WKWebView, playlistID: String, coordinator: Coordinator) {
         WKContentRuleListStore.default().compileContentRuleList(
             forIdentifier: "ElliePlaylistMediaAllowlistV1", encodedContentRuleList: PlaylistNavigationPolicy.contentRuleListJSON
@@ -183,7 +118,11 @@ private struct PlaylistWebView: NSViewRepresentable {
                 guard let list, coordinator.isActive else { coordinator.failSetup(); return }
                 view.configuration.userContentController.add(list)
                 coordinator.startTimeout()
-                view.loadHTMLString(Self.html(playlistID: playlistID), baseURL: PlaylistNavigationPolicy.documentOrigin)
+                guard let policy = coordinator.policy, let html = policy.playerHTML(playlistID: playlistID) else {
+                    coordinator.failSetup()
+                    return
+                }
+                view.loadHTMLString(html, baseURL: policy.documentURL)
             }
         }
     }
@@ -191,9 +130,13 @@ private struct PlaylistWebView: NSViewRepresentable {
     @MainActor
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         private let model: PlaylistPlayerModel
+        let policy: PlaylistNavigationPolicy?
         private var timeoutTask: Task<Void, Never>?
         private(set) var isActive = true
-        init(model: PlaylistPlayerModel) { self.model = model }
+        init(model: PlaylistPlayerModel, policy: PlaylistNavigationPolicy?) {
+            self.model = model
+            self.policy = policy
+        }
 
         func startTimeout() {
             timeoutTask?.cancel()
@@ -209,7 +152,7 @@ private struct PlaylistWebView: NSViewRepresentable {
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             let origin = message.frameInfo.securityOrigin
             guard isActive, message.name == "elliePlayer", message.frameInfo.isMainFrame,
-                  origin.protocol == "https", origin.host == "ellie.local",
+                  let policy, origin.protocol == "https", origin.host.lowercased() == policy.origin.host,
                   let body = message.body as? [String: Any], body.count <= 2,
                   let type = body["type"] as? String, type.utf8.count <= 16 else { return }
             if type == "ready" { timeoutTask?.cancel(); model.state = .ready }
@@ -226,14 +169,14 @@ private struct PlaylistWebView: NSViewRepresentable {
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             if navigationAction.shouldPerformDownload { decisionHandler(.cancel); return }
             guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
-            let allowed = PlaylistNavigationPolicy.allows(url, mainFrame: navigationAction.targetFrame?.isMainFrame == true)
+            let allowed = policy?.allows(url, mainFrame: navigationAction.targetFrame?.isMainFrame == true) == true
             decisionHandler(allowed ? .allow : .cancel)
         }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
                      decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
             guard let url = navigationResponse.response.url,
-                  PlaylistNavigationPolicy.allows(url, mainFrame: navigationResponse.isForMainFrame),
+                  policy?.allows(url, mainFrame: navigationResponse.isForMainFrame) == true,
                   navigationResponse.canShowMIMEType else { decisionHandler(.cancel); return }
             decisionHandler(.allow)
         }

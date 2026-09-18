@@ -29,6 +29,8 @@ export const SERVICE_EVENTS = [
   "keychain_helper_unavailable",
   "keychain_access_unavailable",
   "keychain_cleanup_uncertain",
+  "service_cleanup_uncertain",
+  "needs_attention",
 ] as const;
 export type ServiceEvent = (typeof SERVICE_EVENTS)[number];
 export interface LogEntry {

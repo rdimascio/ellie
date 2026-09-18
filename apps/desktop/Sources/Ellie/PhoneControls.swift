@@ -21,6 +21,7 @@ enum PhoneCommandOutcome: Equatable, Sendable {
 
 enum PhoneControlFailure: Error, Equatable, LocalizedError {
   case revoked, rejected, unavailable, invalidResponse, cancelled
+  case browserReadSettling, browserObservationUnavailable
   var errorDescription: String? {
     switch self {
     case .revoked: "This iPhone’s coordinator session is no longer authorized."
@@ -28,6 +29,10 @@ enum PhoneControlFailure: Error, Equatable, LocalizedError {
     case .unavailable: "The coordinator is unavailable."
     case .invalidResponse: "The coordinator returned an invalid response."
     case .cancelled: "The request stopped."
+    case .browserReadSettling:
+      "The previous browser command is still settling. Wait, then tap Read current page again."
+    case .browserObservationUnavailable:
+      "The page could not be observed yet. Wait, then tap Read current page again."
     }
   }
 }
@@ -50,6 +55,7 @@ final class PhoneControlStore: ObservableObject {
 
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var nodes: [PhoneControlNode] = []
+  @Published private(set) var credentialChanged = false
   @Published var selectedNodeID: String?
   @Published var selectedApp: PhoneControlApp = .safari
 
@@ -72,17 +78,19 @@ final class PhoneControlStore: ObservableObject {
   }
 
   var canSend: Bool {
-    task == nil && selectedNode?.canOpenApps == true
+    !credentialChanged && task == nil && selectedNode?.canOpenApps == true
   }
 
   func refresh() {
-    guard task == nil else { return }
+    guard !credentialChanged, task == nil else { return }
     phase = .loading
     launchInventory()
   }
 
   func send() {
-    guard task == nil, let node = selectedNode, node.canOpenApps else { return }
+    guard !credentialChanged, task == nil, let node = selectedNode, node.canOpenApps else {
+      return
+    }
     let nodeID = node.id
     let app = selectedApp
     activeCommand = (nodeID, app)
@@ -101,6 +109,14 @@ final class PhoneControlStore: ObservableObject {
     phase = .cancelling
   }
 
+  func credentialDidChange() {
+    guard !credentialChanged else { return }
+    credentialChanged = true
+    cancel()
+    nodes = []
+    selectedNodeID = nil
+  }
+
   private func launchInventory() {
     generation += 1
     let expected = generation
@@ -110,6 +126,7 @@ final class PhoneControlStore: ObservableObject {
         if expected != generation, phase == .cancelling { phase = .idle }
       }
       do {
+        try Task.checkCancellation()
         let received = try await transport.nodes(for: credential)
         guard expected == generation else { return }
         nodes = received
@@ -149,6 +166,7 @@ final class PhoneControlStore: ObservableObject {
         activeCommand = nil
       }
       do {
+        try Task.checkCancellation()
         let result = try await operation()
         if expected == generation { phase = result }
       } catch {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { connect } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -100,6 +100,98 @@ async function compileSwift(
   );
 }
 
+async function waitForPublishedBrokerSocket(
+  socket: string,
+  lock: string,
+  { child, bridge }: { child?: ChildProcess; bridge?: BrowserKernelBridge } = {},
+) {
+  const deadline = performance.now() + 5_000;
+  let publication = "socket=missing lock=missing record=missing";
+  while (true) {
+    const [current, currentLock, record] = await Promise.all([
+      lstat(socket).catch(() => undefined),
+      lstat(lock).catch(() => undefined),
+      readFile(lock, "utf8").catch(() => undefined),
+    ]);
+    const socketState = !current
+      ? "missing"
+      : !current.isSocket()
+        ? "wrong-type"
+        : (current.mode & 0o777) !== 0o600 || current.uid !== process.getuid!()
+          ? "unsafe"
+          : "valid";
+    const lockState = !currentLock
+      ? "missing"
+      : !currentLock.isFile()
+        ? "wrong-type"
+        : (currentLock.mode & 0o777) !== 0o600 || currentLock.uid !== process.getuid!()
+          ? "unsafe"
+          : "valid";
+    const recordState =
+      record === undefined
+        ? "missing"
+        : current && record === `v1 ${current.dev} ${current.ino}\n`
+          ? "match"
+          : "mismatch";
+    publication = `socket=${socketState} lock=${lockState} record=${recordState}`;
+    if (child && (child.exitCode !== null || child.signalCode !== null))
+      assert.fail(
+        `broker exited before publication (${publication}; child=${child.signalCode ?? child.exitCode})`,
+      );
+    if (performance.now() >= deadline) {
+      const bridgeState = bridge ? (bridge.connected() ? "connected" : "disconnected") : "n/a";
+      assert.fail(
+        `broker publication deadline exceeded (${publication}; bridge=${bridgeState}; child=${child ? "active" : "unobserved"})`,
+      );
+    }
+    if (socketState === "valid" && lockState === "valid" && recordState === "match")
+      return current!;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("broker publication waits for a delayed exact socket and ownership record", async () => {
+  const root = await mkdtemp("/tmp/e-bk-publication-");
+  const socket = join(root, "broker.sock");
+  const lock = join(root, "broker.lock");
+  const server = createServer();
+  try {
+    let firstFailure: { error: unknown } | undefined;
+    const observed = <T>(promise: Promise<T>): Promise<T> =>
+      promise.catch((error) => {
+        firstFailure ??= { error };
+        throw error;
+      });
+    const publish = observed(
+      (async () => {
+        await new Promise((resolve) => setTimeout(resolve, 650));
+        await new Promise<void>((resolve, reject) => {
+          server.once("error", reject);
+          server.listen(socket, () => {
+            server.off("error", reject);
+            resolve();
+          });
+        });
+        await chmod(socket, 0o600);
+        const current = await lstat(socket);
+        await writeFile(lock, `v1 ${current.dev} ${current.ino}\n`, { mode: 0o600 });
+      })(),
+    );
+    const readiness = observed(waitForPublishedBrokerSocket(socket, lock));
+    const [published, ready] = await Promise.allSettled([publish, readiness]);
+    if (firstFailure) throw firstFailure.error;
+    assert.equal(published.status, "fulfilled");
+    assert.equal(ready.status, "fulfilled");
+    if (ready.status === "fulfilled") assert.equal(ready.value.isSocket(), true);
+  } finally {
+    if (server.listening)
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    await rm(root, { recursive: true });
+  }
+});
+
 test("persistent accessibility helper binds, reads and reports mutations as unverified", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-runtime-"));
   let completed = false;
@@ -113,7 +205,7 @@ let session;
 for await (const line of createInterface({ input: process.stdin })) {
   const value = JSON.parse(line);
   if (value.type === 'bind') { session = 'session-1'; console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision:value.documentRevision})); }
-  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],operation:'read'}));
+  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],scrollDirections:['down'],operation:'read'}));
   else console.log(JSON.stringify({id:value.id,status:'dispatchedUnverified',sessionID:session,documentRevision:'document-1',operation:value.operation}));
 }
 `,
@@ -142,6 +234,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     assert.equal(view.browser.source, "accessibility");
     assert.equal(view.browser.operation, "read");
+    if (view.browser.operation !== "read") throw new Error("Expected accessibility read.");
+    assert.deepEqual(view.browser.view.axScrollDirections, ["down"]);
     const mutation = await runtime.execute(
       browserWebMCPAction({ tool: "browser.scroll", direction: "down", revision: "revision-1" }),
       binding,
@@ -177,6 +271,66 @@ for await (const line of createInterface({ input: process.stdin })) {
   } finally {
     if (completed) await rm(root, { recursive: true });
     else t.diagnostic(`Retained browser AX runtime fixture: ${root}`);
+  }
+});
+
+test("AX helper requires read-only rebind before reading a new selected document", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-rebind-"));
+  let completed = false;
+  let runtime: BrowserAccessibilityRuntime | undefined;
+  try {
+    const helper = join(root, "helper.mjs");
+    await writeFile(
+      helper,
+      `#!${process.execPath}
+import { createInterface } from 'node:readline';
+let revision;
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.type === 'bind') {
+    revision = request.documentRevision;
+    console.log(JSON.stringify({id:request.id,status:'bound',sessionID:'session-1',documentRevision:revision}));
+  } else if (request.type === 'read') {
+    console.log(JSON.stringify({id:request.id,status:'completed',sessionID:'session-1',generation:'generation-1',documentRevision:revision,items:[],scrollDirections:['down'],operation:'read'}));
+  }
+}
+`,
+    );
+    await chmod(helper, 0o700);
+    runtime = new BrowserAccessibilityRuntime(helper, () => ({
+      browserProcessPid: process.pid,
+      browserStartSeconds: 1,
+      browserStartMicroseconds: 0,
+      browserCodeHash: "00".repeat(20),
+      connectionId: "connection-1",
+      authenticated: true,
+    }));
+    const signal = AbortSignal.timeout(5_000);
+    const first = {
+      availability: "accessibility" as const,
+      documentId: "document-1",
+      url: "https://www.netflix.com/browse",
+      revision: "revision-1",
+    };
+    const second = { ...first, documentId: "document-2", revision: "revision-2" };
+    const status = browserWebMCPAction({ tool: "browser.status" });
+    const read = (revision: string) =>
+      browserWebMCPAction({ tool: "browser.read", view: "summary", revision });
+    assert.equal((await runtime.execute(status, first, signal)).browser.status, "connected");
+    const firstRead = await runtime.execute(read(first.revision), first, signal);
+    if (firstRead.browser.operation !== "read") throw new Error("Expected first AX read.");
+    assert.deepEqual(firstRead.browser.view.axScrollDirections, ["down"]);
+    await assert.rejects(runtime.execute(read(second.revision), second, signal), /page changed/);
+    assert.equal((await runtime.execute(status, second, signal)).browser.status, "connected");
+    const secondRead = await runtime.execute(read(second.revision), second, signal);
+    if (secondRead.browser.operation !== "read") throw new Error("Expected rebound AX read.");
+    assert.deepEqual(secondRead.browser.view.axScrollDirections, ["down"]);
+    await runtime.close();
+    completed = true;
+  } finally {
+    await runtime?.close();
+    if (completed) await rm(root, { recursive: true });
+    else t.diagnostic(`Retained browser AX rebind fixture: ${root}`);
   }
 });
 
@@ -423,6 +577,165 @@ test("validated extension availability reaches the accessibility selector", asyn
   assert.equal(accessibilityCalls, 1);
 });
 
+test("fresh site observation blocks login, unsupported, and unobservable playback before AX dispatch", async () => {
+  const binding = {
+    availability: "accessibility" as const,
+    bindingId: "binding-1",
+    documentId: "document-1",
+    origin: "https://www.youtube.com",
+    url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+    expiresAt: Date.now() + 60_000,
+  };
+  let page: "login" | "unsupported" | "watch" = "login";
+  let playback: "unavailable" | "paused" | "playing" = "unavailable";
+  let inspectionGate: Promise<void> | undefined;
+  let inspectionEntered: (() => void) | undefined;
+  const dispatched: string[] = [];
+  const selector = new BrowserOperationSelector(
+    async () => binding,
+    {
+      async execute() {
+        throw new Error("WebMCP action must not run.");
+      },
+      async inspectSelectedPage() {
+        inspectionEntered?.();
+        await inspectionGate;
+        return { provider: "youtube", page, playback };
+      },
+    },
+    {
+      async execute(action: BrowserAction, selected: BrowserAccessibilityBinding) {
+        if (action.tool === "browser.status")
+          return {
+            ok: true,
+            message: "Connected.",
+            browser: {
+              source: "accessibility",
+              operation: "status",
+              status: "connected",
+              revision: selected.revision,
+              origin: binding.origin,
+            },
+          };
+        if (action.tool === "browser.read")
+          return {
+            ok: true,
+            message: "Read.",
+            browser: {
+              source: "accessibility",
+              operation: "read",
+              status: "completed",
+              revision: selected.revision,
+              view: { items: [] },
+            },
+          };
+        dispatched.push(action.tool);
+        return {
+          ok: false,
+          message: "Outcome unknown.",
+          browser: {
+            source: "accessibility",
+            operation: "command",
+            status: "unknown",
+            revision: selected.revision,
+          },
+        };
+      },
+    } as unknown as BrowserAccessibilityRuntime,
+  );
+  const statusResult = await selector.execute(
+    { tool: "browser.status" },
+    AbortSignal.timeout(1000),
+  );
+  assert.ok("browser" in statusResult);
+  const revision = statusResult.browser.revision!;
+  const read = () =>
+    selector.execute(
+      { tool: "browser.read", view: "summary", revision },
+      AbortSignal.timeout(1000),
+    );
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.scroll", direction: "down", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
+  await read();
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.search", query: "public video", revision },
+      AbortSignal.timeout(1000),
+    ),
+  );
+  page = "unsupported";
+  await read();
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.select", itemId: "item-1", revision },
+      AbortSignal.timeout(1000),
+    ),
+  );
+  page = "watch";
+  await read();
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.playback", action: "play", revision },
+      AbortSignal.timeout(1000),
+    ),
+  );
+  assert.deepEqual(dispatched, []);
+  playback = "paused";
+  await read();
+  await selector.execute(
+    { tool: "browser.playback", action: "play", revision },
+    AbortSignal.timeout(1000),
+  );
+  assert.deepEqual(dispatched, ["browser.playback"]);
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.scroll", direction: "down", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.playback", action: "pause", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
+  assert.deepEqual(dispatched, ["browser.playback"]);
+  playback = "playing";
+  await read();
+  await selector.execute(
+    { tool: "browser.playback", action: "pause", revision },
+    AbortSignal.timeout(1000),
+  );
+  assert.deepEqual(dispatched, ["browser.playback", "browser.playback"]);
+  let releaseInspection!: () => void;
+  inspectionGate = new Promise<void>((resolve) => {
+    releaseInspection = resolve;
+  });
+  const entered = new Promise<void>((resolve) => {
+    inspectionEntered = resolve;
+  });
+  const staleRead = read();
+  await entered;
+  await selector.execute({ tool: "browser.refresh" }, AbortSignal.timeout(1000));
+  releaseInspection();
+  await assert.rejects(staleRead, /changed during read/);
+  await assert.rejects(
+    selector.execute(
+      { tool: "browser.playback", action: "pause", revision },
+      AbortSignal.timeout(1000),
+    ),
+    /fresh read/,
+  );
+  assert.deepEqual(dispatched, ["browser.playback", "browser.playback"]);
+});
+
 test("selector requests renewal only for explicit refresh and passes adapters ordinary status", async () => {
   const refreshModes: boolean[] = [];
   const adapterTools: string[] = [];
@@ -604,20 +917,36 @@ for await (const line of createInterface({ input: process.stdin })) {
       authenticated: true,
     };
     runtime = new BrowserAccessibilityRuntime(executable, () => context);
-    const selector = new BrowserOperationSelector(
-      async () => ({
-        availability: "accessibility",
-        bindingId: "binding-1",
-        documentId: "document-1",
-        origin: "https://www.youtube.com",
-        url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
-        expiresAt: Date.now() + 60_000,
-      }),
+    const webmcp = new BrowserWebMCPOperations(
       {
-        async execute() {
-          throw new Error("WebMCP must not dispatch.");
+        async request(request) {
+          if (request.type === "binding.status")
+            return browserWebMCPResultFor(request.id, "ok", {
+              availability: "accessibility",
+              bindingId: "binding-1",
+              documentId: "document-1",
+              origin: "https://www.youtube.com",
+              url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+              expiresAt: Date.now() + 60_000,
+            });
+          if (request.type === "page.inspect") {
+            assert.equal(request.bindingId, "binding-1");
+            assert.equal(request.documentId, "document-1");
+            return browserWebMCPResultFor(request.id, "ok", {
+              bindingId: "binding-1",
+              documentId: "document-1",
+              url: "https://www.youtube.com/watch?v=iTHUUjTA-LI",
+              site: { provider: "youtube", page: "watch", playback: "unavailable" },
+            });
+          }
+          throw new Error("WebMCP must not dispatch a site action.");
         },
       },
+      reviewedBrowserRegistry({ version: 1, bindings: [] }),
+    );
+    const selector = new BrowserOperationSelector(
+      (signal) => webmcp.bindingStatus(signal),
+      webmcp,
       runtime,
     );
     const paired = await f.pair("ax-unknown-node");
@@ -644,9 +973,15 @@ for await (const line of createInterface({ input: process.stdin })) {
       action: { tool: "browser.status" },
     })) as { browser: { revision: string } };
     const revision = status.browser.revision;
-    await f.controller.call("POST", "/v1/commands", {
+    const freshRead = (await f.controller.call("POST", "/v1/commands", {
       nodeId: "ax-unknown-node",
       action: { tool: "browser.read", view: "summary", revision },
+    })) as { browser: { status: string; view: { site?: unknown } } };
+    assert.equal(freshRead.browser.status, "completed");
+    assert.deepEqual(freshRead.browser.view.site, {
+      provider: "youtube",
+      page: "watch",
+      playback: "unavailable",
     });
     const response = (await f.controller.call("POST", "/v1/commands", {
       nodeId: "ax-unknown-node",
@@ -759,21 +1094,6 @@ test(
         "Library/Application Support/Ellie/BrowserBridge/browser-webmcp-v1.sock",
       );
       const lock = join(home, "Library/Application Support/Ellie/BrowserBridge/broker.lock");
-      const waitForPublishedSocket = async () => {
-        for (let count = 0; count < 100; count += 1) {
-          const current = await lstat(socket).catch(() => undefined);
-          if (
-            current?.isSocket() &&
-            (current.mode & 0o777) === 0o600 &&
-            current.uid === process.getuid!() &&
-            (await readFile(lock, "utf8").catch(() => undefined)) ===
-              `v1 ${current.dev} ${current.ino}\n`
-          )
-            return current;
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
-        assert.fail("broker socket and ownership record were not published together");
-      };
       const waitForNoSocket = async () => {
         for (let count = 0; count < 100; count += 1) {
           if (
@@ -795,7 +1115,7 @@ test(
         }),
       );
       const crashedExit = new Promise((resolve) => crashed.once("close", resolve));
-      const publishedSocket = await waitForPublishedSocket();
+      const publishedSocket = await waitForPublishedBrokerSocket(socket, lock, { child: crashed });
       assert.equal(crashed.kill("SIGKILL"), true);
       assert.equal(await crashedExit, null);
       assert.equal(
@@ -892,7 +1212,7 @@ test(
       const production = trackBridge(
         await startBrowserKernelBridge({ home, executable: productionBroker }),
       );
-      await waitForPublishedSocket();
+      await waitForPublishedBrokerSocket(socket, lock, { bridge: production });
       const untrustedExactPeer = trackChild(
         spawn(peer, [], { env: { HOME: home }, stdio: "ignore" }),
       );
@@ -905,7 +1225,7 @@ test(
       await waitForNoSocket();
 
       const bridge = trackBridge(await startBrowserKernelBridge({ home, executable: broker }));
-      await waitForPublishedSocket();
+      await waitForPublishedBrokerSocket(socket, lock, { bridge });
       const child = trackChild(
         spawn(peer, ["--disconnect"], { env: { HOME: home }, stdio: "ignore" }),
       );

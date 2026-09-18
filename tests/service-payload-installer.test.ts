@@ -824,6 +824,35 @@ async function withFixture(
 
 const options = { skip: !mac };
 test(
+  "native inspector accepts its test file boundary and rejects one more declared file",
+  options,
+  async (t) => {
+    await withFixture(t, async ({ release, installer, id }) => {
+      const manifestPath = join(release, "manifest.json");
+      const initial = JSON.parse(await readFile(manifestPath, "utf8"));
+      const extra = join(release, "payload/lib/ellie/limit-fixture");
+      await mkdir(extra);
+      for (let index = initial.files.length; index < 100; index++)
+        await writeFile(join(extra, `f${String(index).padStart(3, "0")}`), "x", { mode: 0o644 });
+      await refreshManifestFiles(release);
+      const atBoundary = JSON.parse(await readFile(manifestPath, "utf8"));
+      assert.equal(atBoundary.files.length, 100);
+      const accepted = run(installer, ["inspect", release]);
+      assert.equal(accepted.error, undefined);
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.equal(accepted.stdout, `${id}\n`);
+
+      await writeFile(join(extra, "f101"), "x", { mode: 0o644 });
+      await refreshManifestFiles(release);
+      const overBoundary = JSON.parse(await readFile(manifestPath, "utf8"));
+      assert.equal(overBoundary.files.length, 101);
+      const rejected = run(installer, ["inspect", release]);
+      assert.equal(rejected.error, undefined);
+      assert.equal(rejected.status, 1);
+    });
+  },
+);
+test(
   "compiled installer templates copy into isolated mutable fixture roots",
   options,
   async (t) => {
@@ -1041,13 +1070,13 @@ test("installer stage diagnostics are compiled into test builds only", options, 
   for (const [architecture, payloadDigest, trustedDigest] of [
     [
       "arm64",
-      "8018ebd7d746542ef0a42cb70a0a0fad41f8218189c8b44592f0b23029571783",
-      "3497bc3e451d746bdbc0241fdef8cd93e262448811a96dacd41d8c6b3ddae064",
+      "0dff1b03a67c5213ead9dcc4b8c05a0327847f99ef6f7202ceb466401dcf3eae",
+      "8c87fc9f9b6dc2439e9fab1fea8dc951472155fb93a2c2db80a79000df402582",
     ],
     [
       "x64",
-      "1e70693bf0d7d7ec7193903287ed19e6dcbcd2499cf9fb57d85f8e3c2a9008dd",
-      "d4f01560545cdf7d2f41a008965a8e4c911d0bf67af2ee9ecf9f065171966d9c",
+      "41abb344d41dd8d08232dcee11810488171ffb8beac16c329b57e0c2ac4f17ef",
+      "d2ac2dcef599662315aac9a4ca9bddc1cdec44b98b4b67a3039a1de11ee1e753",
     ],
   ] as const) {
     const policy = run(policyTesting, [
@@ -1064,6 +1093,69 @@ test("installer stage diagnostics are compiled into test builds only", options, 
     assert.equal((JSON.parse(json) as Record<string, unknown>).payloadPolicyDigest, payloadDigest);
     assert.equal(policyDigest, trustedDigest);
   }
+});
+
+test("production inspector accepts 3072 declared files and rejects 3073", options, async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "ellie-production-file-limit-")));
+  let completed = false;
+  t.after(async () => {
+    if (completed) await removeOwned(root);
+  });
+  const installer = join(root, "installer");
+  const tiny = join(root, "tiny");
+  const coordinator = join(root, "coordinator-launcher");
+  const node = join(root, "node-launcher");
+  execFileSync(
+    "/usr/bin/xcrun",
+    [
+      "swiftc",
+      "-swift-version",
+      "5",
+      "-parse-as-library",
+      authorizationSource,
+      authenticatedPayloadSource,
+      activationPolicySource,
+      candidateVerifierSource,
+      captureSource,
+      selectionSource,
+      lifecycleSource,
+      migrationSource,
+      source,
+      "-o",
+      installer,
+    ],
+    boundedCommand,
+  );
+  execFileSync(
+    "/usr/bin/codesign",
+    ["--force", "--sign", "-", "--identifier", "org.ellie.installer", installer],
+    boundedCommand,
+  );
+  await copyTemplateArtifact("tiny", tiny);
+  await copyTemplateArtifact("coordinator-launcher", coordinator);
+  await copyTemplateArtifact("node-launcher", node);
+  const { release, id } = await fixture(root, installer, tiny, { coordinator, node });
+  const extra = join(release, "payload/lib/ellie/limit-fixture");
+  await mkdir(extra);
+  const original = JSON.parse(await readFile(join(release, "manifest.json"), "utf8"));
+  for (let index = original.files.length; index < 3_072; index++)
+    await writeFile(join(extra, `f${String(index).padStart(4, "0")}`), "x", { mode: 0o644 });
+  await refreshManifestFiles(release);
+  const atBoundary = JSON.parse(await readFile(join(release, "manifest.json"), "utf8"));
+  assert.equal(atBoundary.files.length, 3_072);
+  const accepted = run(installer, ["inspect", release]);
+  assert.equal(accepted.error, undefined);
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(accepted.stdout, `${id}\n`);
+
+  await writeFile(join(extra, "f3073"), "x", { mode: 0o644 });
+  await refreshManifestFiles(release);
+  const overBoundary = JSON.parse(await readFile(join(release, "manifest.json"), "utf8"));
+  assert.equal(overBoundary.files.length, 3_073);
+  const rejected = run(installer, ["inspect", release]);
+  assert.equal(rejected.error, undefined);
+  assert.equal(rejected.status, 1);
+  completed = true;
 });
 
 test(
@@ -3684,6 +3776,190 @@ test(
       assert.deepEqual(await readFile(appManifest), appBefore);
       assert.deepEqual(await readFile(plist), plistBefore);
       assert.equal(run(installer, ["recover-legacy-restore", "--test-home-root", home]).status, 0);
+    });
+  },
+);
+
+test(
+  "native unselect removes only a stopped verified role and recovers before or after receipt commit",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const home = join(root, "unselect-home");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(services, { recursive: true, mode: 0o700 });
+      for (const part of [
+        "Library",
+        "Library/Application Support",
+        "Library/Application Support/Ellie",
+      ])
+        await chmod(join(home, part), 0o700);
+      await mkdir(join(home, "Applications"), { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      await mkdir(join(home, ".ellie"), { mode: 0o700 });
+      const identity = join(home, ".ellie/node.json");
+      await writeFile(identity, "private identity survives\n", { mode: 0o600 });
+      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      const select = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator,node",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(select.status, 0, select.stderr);
+      const receipt = join(services, "receipts/installed.json");
+      const before = await readFile(receipt);
+      const coordinatorPlist = join(
+        home,
+        "Library/LaunchAgents/org.ellie.assistant.coordinator.plist",
+      );
+      const coordinatorBefore = await readFile(coordinatorPlist);
+      const coordinatorApp = join(home, "Applications/Ellie Coordinator.app");
+      const coordinatorAppBefore = await readFile(join(coordinatorApp, "Contents/Info.plist"));
+      const nodeApp = join(home, "Applications/Ellie Node.app");
+      const nodePlist = join(home, "Library/LaunchAgents/org.ellie.assistant.node.plist");
+      const unselect = (...extra: string[]) =>
+        run(installer, ["unselect", "node", "--test-home-root", home, ...extra]);
+      const recover = () => run(installer, ["recover", "--test-home-root", home]);
+      const present = async (path: string) =>
+        lstat(path)
+          .then(() => true)
+          .catch(() => false);
+      const stillSelected = async () => {
+        assert.deepEqual(await readFile(receipt), before);
+        assert.equal(await present(nodeApp), true);
+        assert.equal(await present(nodePlist), true);
+      };
+      const loaded = unselect("--test-loaded", "node");
+      assert.notEqual(loaded.status, 0);
+      await stillSelected();
+      for (const point of [
+        "after-journal",
+        "after-old-app-unseal-node",
+        "after-old-app-backup-node",
+        "after-old-plist-backup-node",
+      ]) {
+        const interrupted = unselect("--test-fault", point);
+        assert.equal(interrupted.status, 86, `${point}: ${interrupted.stderr}`);
+        const restored = recover();
+        assert.equal(restored.status, 0, `${point}: ${restored.stderr}`);
+        await stillSelected();
+      }
+      const committed = unselect("--test-loaded", "coordinator", "--test-fault", "after-receipt");
+      assert.equal(committed.status, 86, committed.stderr);
+      const finished = recover();
+      assert.equal(finished.status, 0, finished.stderr);
+      assert.equal(JSON.parse(await readFile(receipt, "utf8")).node, null);
+      assert.equal(await present(nodeApp), false);
+      assert.equal(await present(nodePlist), false);
+      assert.deepEqual(await readFile(coordinatorPlist), coordinatorBefore);
+      assert.deepEqual(
+        await readFile(join(coordinatorApp, "Contents/Info.plist")),
+        coordinatorAppBefore,
+      );
+      assert.equal(await readFile(identity, "utf8"), "private identity survives\n");
+      assert.notEqual(unselect().status, 0);
+      await symlink(identity, nodePlist);
+      assert.notEqual(unselect().status, 0);
+      assert.equal(await present(nodePlist), true);
+      assert.deepEqual(await readFile(coordinatorPlist), coordinatorBefore);
+      await rm(nodePlist);
+      const removeCoordinator = run(installer, [
+        "unselect",
+        "coordinator",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(removeCoordinator.status, 0, removeCoordinator.stderr);
+      assert.deepEqual(JSON.parse(await readFile(receipt, "utf8")), {
+        version: 1,
+        coordinator: null,
+        node: null,
+      });
+      assert.equal(await present(coordinatorApp), false);
+      assert.equal(await present(coordinatorPlist), false);
+      assert.equal(await readFile(identity, "utf8"), "private identity survives\n");
+    });
+  },
+);
+
+test(
+  "native unselect refuses missing managed assets and retains unverified recovery backups",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const home = join(root, "unselect-damage-home");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(services, { recursive: true, mode: 0o700 });
+      for (const part of [
+        "Library",
+        "Library/Application Support",
+        "Library/Application Support/Ellie",
+      ])
+        await chmod(join(home, part), 0o700);
+      await mkdir(join(home, "Applications"), { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      assert.equal(
+        run(installer, ["select", id, "--roles", "node", "--test-home-root", home]).status,
+        0,
+      );
+      const receipt = join(services, "receipts/installed.json");
+      const before = await readFile(receipt);
+      const nodePlist = join(home, "Library/LaunchAgents/org.ellie.assistant.node.plist");
+      const missingPlist = join(home, "Library/LaunchAgents/missing-node.plist");
+      await rename(nodePlist, missingPlist);
+      assert.notEqual(run(installer, ["unselect", "node", "--test-home-root", home]).status, 0);
+      assert.deepEqual(await readFile(receipt), before);
+      assert.equal(await lstat(missingPlist).then(() => true), true);
+      await rename(missingPlist, nodePlist);
+      const interrupted = run(installer, [
+        "unselect",
+        "node",
+        "--test-home-root",
+        home,
+        "--test-fault",
+        "after-old-app-backup-node",
+      ]);
+      assert.equal(interrupted.status, 86, interrupted.stderr);
+      const journalPath = join(services, "selection-journal.json");
+      const transaction = JSON.parse(await readFile(journalPath, "utf8")).transactionID;
+      const backup = join(home, "Applications", `.ellie-backup-${transaction}-node.app`);
+      const info = join(backup, "Contents/Info.plist");
+      const originalInfo = await readFile(info);
+      await chmod(info, 0o644);
+      await writeFile(info, "damaged managed backup");
+      const refused = run(installer, ["recover", "--test-home-root", home]);
+      assert.notEqual(refused.status, 0);
+      assert.deepEqual(await readFile(receipt), before);
+      assert.equal(await readFile(info, "utf8"), "damaged managed backup");
+      assert.equal(await lstat(journalPath).then(() => true), true);
+      assert.equal(await lstat(backup).then(() => true), true);
+      await writeFile(info, originalInfo);
+      await chmod(info, 0o444);
+      assert.equal(run(installer, ["recover", "--test-home-root", home]).status, 0);
+      assert.deepEqual(await readFile(receipt), before);
+      const committed = run(installer, [
+        "unselect",
+        "node",
+        "--test-home-root",
+        home,
+        "--test-fault",
+        "after-receipt",
+      ]);
+      assert.equal(committed.status, 86, committed.stderr);
+      const nextTransaction = JSON.parse(await readFile(journalPath, "utf8")).transactionID;
+      const nextBackup = join(home, "Applications", `.ellie-backup-${nextTransaction}-node.app`);
+      const nextInfo = join(nextBackup, "Contents/Info.plist");
+      await chmod(nextInfo, 0o644);
+      await writeFile(nextInfo, "damaged committed backup");
+      assert.notEqual(run(installer, ["recover", "--test-home-root", home]).status, 0);
+      assert.equal(JSON.parse(await readFile(receipt, "utf8")).node, null);
+      assert.equal(await readFile(nextInfo, "utf8"), "damaged committed backup");
+      assert.equal(await lstat(nextBackup).then(() => true), true);
+      assert.equal(await lstat(journalPath).then(() => true), true);
     });
   },
 );

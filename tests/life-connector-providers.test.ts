@@ -23,6 +23,41 @@ function mock(responses: Array<{ status?: number; body: unknown }>) {
 
 const signal = () => new AbortController().signal;
 
+test("Google Calendar lists bounded choices and pulls only the selected calendar", async () => {
+  const transport = mock([
+    {
+      body: {
+        items: [
+          { id: "primary@example.test", summary: "Primary", primary: true },
+          { id: "other@example.test", summary: "Other", primary: false },
+        ],
+      },
+    },
+    { body: { id: "primary@example.test", summary: "Primary" } },
+    { body: { items: [], nextSyncToken: "other-cursor" } },
+  ]);
+  const provider = new GoogleCalendarProvider({ fetch: transport.fetch });
+  const calendars = await provider.calendars({ accessToken: "secret" }, signal());
+  assert.deepEqual(
+    calendars.map((item) => item.id),
+    ["primary@example.test", "other@example.test"],
+  );
+  assert.equal(new URL(transport.requests[0]!.url).pathname, "/calendar/v3/users/me/calendarList");
+  const result = await provider.pull({
+    credential: { accessToken: "secret" },
+    resourceId: "other@example.test",
+    window: { from: 1_700_000_000_000, to: 1_800_000_000_000 },
+    limit: 50,
+    signal: signal(),
+  });
+  assert.equal(result.cursor, "other-cursor");
+  assert.equal(
+    new URL(transport.requests[2]!.url).pathname,
+    "/calendar/v3/calendars/other%40example.test/events",
+  );
+  assert.equal(JSON.stringify(calendars).includes("secret"), false);
+});
+
 test("Google Calendar uses fixed incremental request shapes and exposes tombstones", async () => {
   const first = mock([
     { body: { id: "owner@example.test", summary: "Primary" } },
@@ -166,6 +201,170 @@ test("Gmail initial pagination retains the original bounded search window", asyn
   const continued = new URL(second.requests[1]!.url);
   assert.equal(continued.searchParams.get("pageToken"), "gmail-page-2");
   assert.equal(continued.searchParams.get("q"), originalQuery);
+});
+
+test("explicit Gmail full read returns only bounded inline plain text", async () => {
+  const plain = "Hello from a private fixture.\nNo HTML is rendered.";
+  const transport = mock([
+    {
+      body: {
+        id: "message_1",
+        payload: {
+          mimeType: "multipart/alternative",
+          parts: [
+            { mimeType: "text/plain", body: { data: Buffer.from(plain).toString("base64url") } },
+            {
+              mimeType: "text/html",
+              body: { data: Buffer.from("<img src='remote'>").toString("base64url") },
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  const result = await new GmailProvider({ fetch: transport.fetch }).readMessageText(
+    "message_1",
+    { accessToken: "private-token" },
+    signal(),
+  );
+  assert.deepEqual(result, { status: "plain", text: plain });
+  const request = new URL(transport.requests[0]!.url);
+  assert.equal(request.origin, "https://gmail.googleapis.com");
+  assert.equal(request.searchParams.get("format"), "full");
+  assert.equal(request.pathname, "/gmail/v1/users/me/messages/message_1");
+  assert.equal(JSON.stringify(result).includes("private-token"), false);
+  assert.equal(transport.requests.length, 1, "no attachment or image request follows");
+
+  const multiple = mock([
+    {
+      body: {
+        id: "multipart_1",
+        payload: {
+          mimeType: "multipart/mixed",
+          parts: [
+            {
+              mimeType: "text/plain",
+              body: { data: Buffer.from("First part").toString("base64url") },
+            },
+            {
+              mimeType: "text/plain",
+              body: { data: Buffer.from("Second part").toString("base64url") },
+            },
+          ],
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(
+    await new GmailProvider({ fetch: multiple.fetch }).readMessageText(
+      "multipart_1",
+      { accessToken: "private-token" },
+      signal(),
+    ),
+    { status: "plain", text: "First part", additionalPartsOmitted: true },
+  );
+  assert.equal(multiple.requests.length, 1);
+
+  const long = mock([
+    {
+      body: {
+        id: "long_1",
+        payload: {
+          mimeType: "text/plain",
+          body: {
+            data: Buffer.from("x".repeat(32 * 1_024 + 7)).toString("base64url"),
+          },
+        },
+      },
+    },
+  ]);
+  const truncated = await new GmailProvider({ fetch: long.fetch }).readMessageText(
+    "long_1",
+    { accessToken: "private-token" },
+    signal(),
+  );
+  assert.equal(truncated.status, "truncated");
+  assert.equal(Buffer.byteLength(truncated.text ?? ""), 32 * 1_024);
+});
+
+test("Gmail full read reports HTML-only and rejects malformed or oversized MIME", async () => {
+  const htmlOnly = mock([
+    {
+      body: {
+        id: "html_1",
+        payload: {
+          mimeType: "text/html",
+          body: {
+            data: Buffer.from("<script>not plain text</script>").toString("base64url"),
+          },
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(
+    await new GmailProvider({ fetch: htmlOnly.fetch }).readMessageText(
+      "html_1",
+      { accessToken: "token" },
+      signal(),
+    ),
+    { status: "unavailable" },
+  );
+  const attached = mock([
+    {
+      body: {
+        id: "attached_1",
+        payload: {
+          mimeType: "text/plain",
+          filename: "secret.txt",
+          body: { attachmentId: "remote-attachment" },
+        },
+      },
+    },
+  ]);
+  assert.deepEqual(
+    await new GmailProvider({ fetch: attached.fetch }).readMessageText(
+      "attached_1",
+      { accessToken: "token" },
+      signal(),
+    ),
+    { status: "unavailable" },
+  );
+  assert.equal(attached.requests.length, 1);
+  const invalid = mock([
+    {
+      body: {
+        id: "bad_1",
+        payload: { mimeType: "text/plain", body: { data: "not+base64url" } },
+      },
+    },
+  ]);
+  await assert.rejects(
+    new GmailProvider({ fetch: invalid.fetch }).readMessageText(
+      "bad_1",
+      { accessToken: "token" },
+      signal(),
+    ),
+    (error: unknown) => error instanceof ProviderError && error.code === "invalid_response",
+  );
+  const oversized = mock([
+    {
+      body: {
+        id: "deep_1",
+        payload: {
+          mimeType: "multipart/mixed",
+          parts: Array.from({ length: 65 }, () => ({ mimeType: "text/html" })),
+        },
+      },
+    },
+  ]);
+  await assert.rejects(
+    new GmailProvider({ fetch: oversized.fetch }).readMessageText(
+      "deep_1",
+      { accessToken: "token" },
+      signal(),
+    ),
+    (error: unknown) => error instanceof ProviderError && error.code === "limit_exceeded",
+  );
 });
 
 test("Plaid sync uses fixed origin, exact decimal strings, and advances only complete cursor", async () => {

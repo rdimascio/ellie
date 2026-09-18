@@ -39,8 +39,34 @@ export interface ConnectedOAuth {
     signal?: AbortSignal,
   ): Promise<GoogleOAuthCredential>;
 }
-type StoredCredential = ProviderCredential & { refreshToken?: string; expiresAt?: number };
+type StoredCredential = ProviderCredential & {
+  refreshToken?: string;
+  expiresAt?: number;
+  grantedScopes?: string[];
+};
 const DAY = 86_400_000;
+const AGENDA_HORIZON = 30 * DAY;
+const AGENDA_LIMIT = 20;
+const civilDay = (value: string): number | undefined => {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const instant = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value
+    ? instant
+    : undefined;
+};
+/** Preserve complete Unicode scalars when bounding a host-owned display field by UTF-16 units. */
+const boundedCalendarText = (value: string, maximum: number): string => {
+  let result = "",
+    units = 0;
+  for (const scalar of value) {
+    const point = scalar.codePointAt(0)!;
+    if (point >= 0xd800 && point <= 0xdfff) continue;
+    if (units + scalar.length > maximum) break;
+    result += scalar;
+    units += scalar.length;
+  }
+  return result;
+};
 const LABELS: Record<ProviderId, string> = {
   "google-calendar": "Google Calendar",
   gmail: "Gmail",
@@ -67,6 +93,7 @@ export class ConnectorBroker {
     string,
     { controller: AbortController; promise: Promise<void> }
   >();
+  private readonly pendingOAuthState = new Map<string, string>();
   private readonly blocked = new Set<string>();
   private closed = false;
   constructor(options: {
@@ -191,7 +218,7 @@ export class ConnectorBroker {
     return {
       connections: this.store
         .list(actorId)
-        .map(({ id, provider, label, state, mode, lastSyncAt, error }) => ({
+        .map(({ id, provider, label, state, mode, lastSyncAt, error, selectedCalendarId }) => ({
           id,
           provider,
           label,
@@ -199,6 +226,9 @@ export class ConnectorBroker {
           mode,
           lastSyncAt,
           error,
+          ...(provider === "google-calendar"
+            ? { selectedCalendarId: selectedCalendarId ?? "primary" }
+            : {}),
         })),
       providers: [...this.providers.keys()].map((id) => ({
         id,
@@ -225,17 +255,20 @@ export class ConnectorBroker {
       throw new Error("This provider requires host setup.");
     if (this.closed || this.blocked.has(actorId)) throw new Error("Connected work is unavailable.");
     const c = this.store.create(actorId, provider, mode);
+    let started: { authorizationUrl: string; state: string } | undefined;
     try {
-      const started = this.oauth.begin({ actorId, provider, redirectUri });
+      started = this.oauth.begin({ actorId, provider, redirectUri });
       this.vault.put(`link-${hash(started.state)}`, {
         actorId,
         connectionId: c.id,
         generation: c.generation,
         redirectUri,
       });
-      return { authorizationUrl: started.authorizationUrl };
+      this.pendingOAuthState.set(c.id, started.state);
+      return { authorizationUrl: started.authorizationUrl, connectionId: c.id };
     } catch (error) {
       this.store.revoke(actorId, c.id);
+      if (started) this.oauth.cancelAuthorization?.(started.state);
       throw error;
     }
   }
@@ -244,6 +277,7 @@ export class ConnectorBroker {
       link = this.vault.get<{ actorId: string; connectionId: string }>(key);
     if (!link) throw new Error("Connection authorization is unavailable.");
     this.vault.delete(key);
+    this.pendingOAuthState.delete(link.connectionId);
     this.oauth?.cancelAuthorization?.(state);
     if (this.store.get(link.actorId, link.connectionId)?.state === "connecting")
       await this.revoke(link.actorId, link.connectionId);
@@ -265,6 +299,7 @@ export class ConnectorBroker {
     if (!link || link.redirectUri !== redirectUri)
       throw new Error("Connection authorization expired or was already used.");
     this.vault.delete(key);
+    this.pendingOAuthState.delete(link.connectionId);
     this.current(link.actorId, link.connectionId, link.generation);
     try {
       const result = await this.oauth.complete({ state, code, redirectUri }, signal);
@@ -359,6 +394,248 @@ export class ConnectorBroker {
     if (c.state !== "connected") throw new Error("Reconnect this account before refreshing.");
     await this.research.refresh(actorId, id);
   }
+  private async currentCredential(actorId: string, c: Connection, signal: AbortSignal) {
+    let credential = this.vault.get<StoredCredential>(credentialId(c.id));
+    if (!credential) throw new ProviderError("revoked", "Reconnect this account.");
+    if (credential.expiresAt !== undefined && credential.expiresAt <= this.now() + 60_000) {
+      if (
+        !this.oauth ||
+        !isGoogleOAuthProvider(c.provider) ||
+        !credential.refreshToken ||
+        !credential.clientId ||
+        !Array.isArray((credential as GoogleOAuthCredential).grantedScopes)
+      )
+        throw new ProviderError("revoked", "Reconnect this account.");
+      credential = await this.oauth.refreshCredential(credential as GoogleOAuthCredential, signal);
+      signal.throwIfAborted();
+      this.current(actorId, c.id, c.generation);
+      this.vault.put(credentialId(c.id), { ...credential });
+    }
+    signal.throwIfAborted();
+    this.current(actorId, c.id, c.generation);
+    return credential;
+  }
+  async calendars(actorId: string, id: string) {
+    const c = this.current(actorId, id),
+      adapter = this.providers.get(c.provider);
+    if (c.state !== "connected" || c.provider !== "google-calendar" || !adapter?.calendars)
+      throw new Error("Calendar connection is unavailable.");
+    const signal = AbortSignal.timeout(30_000);
+    const credential = await this.currentCredential(actorId, c, signal);
+    const calendars = await adapter.calendars(credential, signal);
+    signal.throwIfAborted();
+    this.current(actorId, id, c.generation);
+    return {
+      calendars,
+      selectedCalendarId:
+        c.selectedCalendarId ?? calendars.find((item) => item.primary)?.id ?? "primary",
+    };
+  }
+  async selectCalendar(actorId: string, id: string, calendarId: string): Promise<void> {
+    if (!calendarId || calendarId.length > 1_024) throw new Error("Calendar selection is invalid.");
+    const c = this.current(actorId, id);
+    const available = await this.calendars(actorId, id);
+    if (!available.calendars.some((item) => item.id === calendarId))
+      throw new Error("Calendar selection is unavailable.");
+    this.current(actorId, id, c.generation);
+    if ((c.selectedCalendarId ?? "primary") === calendarId) return;
+    this.active.get(id)?.controller.abort();
+    await this.active.get(id)?.promise.catch(() => {});
+    this.current(actorId, id, c.generation);
+    this.store.selectCalendar(actorId, id, c.generation, calendarId);
+    this.invalidateDerived(actorId, id, true);
+    await this.refresh(actorId, id);
+  }
+  preview(actorId: string, id: string) {
+    const c = this.current(actorId, id);
+    if (c.state === "revoked") throw new Error("Connection is unavailable.");
+    const items = this.store
+      .observations(actorId, id)
+      .filter((item) => !item.deleted && item.kind !== "deleted")
+      .sort((a, b) => b.observedAt - a.observedAt)
+      .slice(0, 10)
+      .map((item) =>
+        item.kind === "event"
+          ? {
+              kind: "event" as const,
+              title: item.title.slice(0, 200),
+              startAt: item.data.startAt,
+              startDate: item.data.startDate,
+            }
+          : item.kind === "message"
+            ? {
+                kind: "message" as const,
+                messageId: item.sourceKey,
+                subject: item.data.subject.slice(0, 200),
+                from: item.data.from.slice(0, 320),
+                to: item.data.to.slice(0, 50).map((recipient) => recipient.slice(0, 320)),
+                snippet: item.data.snippet?.slice(0, 500),
+                sentAt: item.data.sentAt,
+              }
+            : null,
+      )
+      .filter((item) => item !== null);
+    return { items, lastSyncAt: c.lastSyncAt, error: c.error, state: c.state };
+  }
+  async messageDetail(actorId: string, id: string, messageId: string) {
+    if (!/^[A-Za-z0-9_-]{1,1024}$/.test(messageId))
+      throw new Error("Imported message is unavailable.");
+    const c = this.current(actorId, id);
+    const adapter = this.providers.get(c.provider);
+    if (
+      c.state !== "connected" ||
+      c.provider !== "gmail" ||
+      !adapter?.readMessageText ||
+      !c.grantedScopes.includes("https://www.googleapis.com/auth/gmail.readonly")
+    )
+      throw new Error("Gmail connection is unavailable.");
+    const observed = () =>
+      this.store
+        .observations(actorId, id)
+        .find((item) => item.kind === "message" && !item.deleted && item.sourceKey === messageId);
+    const before = observed();
+    if (!before) throw new Error("Imported message is unavailable.");
+    const signal = AbortSignal.timeout(30_000);
+    const credential = await this.currentCredential(actorId, c, signal);
+    signal.throwIfAborted();
+    const beforeDispatch = this.current(actorId, id, c.generation);
+    const currentBeforeDispatch = observed();
+    if (
+      beforeDispatch.state !== "connected" ||
+      !beforeDispatch.grantedScopes.includes("https://www.googleapis.com/auth/gmail.readonly") ||
+      !currentBeforeDispatch ||
+      currentBeforeDispatch.sourceRevision !== before.sourceRevision
+    )
+      throw new Error("Imported message changed. Refresh its preview.");
+    const text = await adapter.readMessageText(messageId, credential, signal);
+    signal.throwIfAborted();
+    const after = this.current(actorId, id, c.generation);
+    const current = observed();
+    if (
+      after.state !== "connected" ||
+      !after.grantedScopes.includes("https://www.googleapis.com/auth/gmail.readonly") ||
+      !current ||
+      current.kind !== "message" ||
+      current.sourceRevision !== before.sourceRevision
+    )
+      throw new Error("Imported message changed. Refresh its preview.");
+    return {
+      messageId,
+      subject: current.data.subject.slice(0, 200),
+      from: current.data.from.slice(0, 320),
+      to: current.data.to.slice(0, 50).map((recipient) => recipient.slice(0, 320)),
+      sentAt: current.data.sentAt,
+      snippet: current.data.snippet?.slice(0, 500),
+      ...text,
+    };
+  }
+  /** A bounded projection of already imported events from this actor's selected calendar. */
+  agenda(actorId: string, id: string, displayTimeZone: string) {
+    const connection = this.current(actorId, id);
+    if (connection.provider !== "google-calendar" || connection.state === "revoked")
+      throw new Error("Calendar connection is unavailable.");
+    const now = this.now();
+    const horizonEnd = now + AGENDA_HORIZON;
+    if (!/^[A-Za-z0-9_+./-]{1,80}$/.test(displayTimeZone))
+      throw new Error("Calendar display time zone is invalid.");
+    let formatter: Intl.DateTimeFormat;
+    try {
+      formatter = new Intl.DateTimeFormat("en-US", {
+        timeZone: displayTimeZone,
+        calendar: "gregory",
+        numberingSystem: "latn",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+    } catch {
+      throw new Error("Calendar display time zone is invalid.");
+    }
+    const civilDate = (instant: number) => {
+      const parts = Object.fromEntries(
+        formatter.formatToParts(new Date(instant)).map((part) => [part.type, part.value]),
+      );
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    const firstDay = civilDate(now);
+    const lastDay = civilDate(horizonEnd);
+    const complete = connection.lastSyncAt !== undefined && !connection.continuation;
+    type AgendaEvent = {
+      title: string;
+      status: "confirmed" | "tentative" | "cancelled";
+      startAt?: number;
+      endAt?: number;
+      startDate?: string;
+      endDate?: string;
+      timeZone?: string;
+      sortAt: number;
+      tie: string;
+    };
+    const events = complete
+      ? this.store
+          .observations(actorId, id)
+          .flatMap((item): AgendaEvent[] => {
+            if (item.kind !== "event" || item.deleted || item.data.status === "cancelled")
+              return [];
+            const { startAt, endAt, startDate, endDate, timeZone, status } = item.data;
+            const title = boundedCalendarText(item.title, 160);
+            if (!title) return [];
+            if (
+              Number.isFinite(startAt) &&
+              Number.isFinite(endAt) &&
+              startAt! < endAt! &&
+              endAt! > now &&
+              startAt! < horizonEnd
+            )
+              return [
+                {
+                  title,
+                  startAt: startAt!,
+                  endAt: endAt!,
+                  ...(timeZone ? { timeZone: boundedCalendarText(timeZone, 80) } : {}),
+                  status,
+                  sortAt: startAt!,
+                  tie: item.sourceKey,
+                },
+              ];
+            const day = startDate ? civilDay(startDate) : undefined;
+            if (
+              day !== undefined &&
+              endDate &&
+              civilDay(endDate) !== undefined &&
+              startDate! < endDate &&
+              endDate > firstDay &&
+              startDate! <= lastDay
+            )
+              return [
+                {
+                  title,
+                  startDate,
+                  endDate,
+                  status,
+                  sortAt: day,
+                  tie: item.sourceKey,
+                },
+              ];
+            return [];
+          })
+          .sort((a, b) => a.sortAt - b.sortAt || a.tie.localeCompare(b.tie))
+          .slice(0, AGENDA_LIMIT)
+          .map(({ sortAt: _sortAt, tie: _tie, ...event }) => event)
+      : [];
+    return {
+      connectionId: connection.id,
+      label: boundedCalendarText(connection.label, 80),
+      state: connection.state,
+      selectedCalendarId: boundedCalendarText(connection.selectedCalendarId ?? "primary", 1_024),
+      displayTimeZone,
+      ...(connection.lastSyncAt !== undefined ? { lastSyncAt: connection.lastSyncAt } : {}),
+      complete,
+      horizonStart: now,
+      horizonEnd,
+      events,
+    };
+  }
   async setMode(actorId: string, id: string, mode: ConnectionMode): Promise<void> {
     if (!["observe", "prepare"].includes(mode)) throw new TypeError("Connection mode is invalid.");
     const c = this.current(actorId, id);
@@ -391,25 +668,7 @@ export class ConnectorBroker {
       adapter = this.providers.get(c.provider);
     if (c.state !== "connected" || !adapter) throw new Error("Connection is unavailable.");
     try {
-      let credential = this.vault.get<StoredCredential>(credentialId(id));
-      if (!credential) throw new ProviderError("revoked", "Reconnect this account.");
-      if (credential.expiresAt !== undefined && credential.expiresAt <= this.now() + 60_000) {
-        if (!this.oauth || !isGoogleOAuthProvider(c.provider))
-          throw new ProviderError("revoked", "Reconnect this account.");
-        if (
-          !credential.refreshToken ||
-          !credential.clientId ||
-          !Array.isArray((credential as GoogleOAuthCredential).grantedScopes)
-        )
-          throw new ProviderError("revoked", "Reconnect this account.");
-        credential = await this.oauth.refreshCredential(
-          credential as GoogleOAuthCredential,
-          signal,
-        );
-        signal.throwIfAborted();
-        this.current(actorId, id, generation);
-        this.vault.put(credentialId(id), { ...credential });
-      }
+      const credential = await this.currentCredential(actorId, c, signal);
       let resetCursor = false,
         restartedBatch = false;
       for (let page = 0; page < 20; page++) {
@@ -419,6 +678,9 @@ export class ConnectorBroker {
         try {
           result = await adapter.pull({
             credential,
+            ...(c.provider === "google-calendar"
+              ? { resourceId: current.selectedCalendarId ?? "primary" }
+              : {}),
             cursor: current.cursor,
             continuation: current.continuation,
             window: { from: this.now() - 366 * DAY, to: this.now() + 366 * DAY },
@@ -705,6 +967,23 @@ export class ConnectorBroker {
     this.store.revoke(actorId, id);
     this.active.get(id)?.controller.abort();
     this.vault.delete(credentialId(id));
+    // A stopped setup cannot later exchange a code. The in-memory state handles the current
+    // process; the encrypted vault scan also covers a pending setup restored after restart.
+    const state = this.pendingOAuthState.get(id);
+    this.pendingOAuthState.delete(id);
+    if (state) {
+      this.vault.delete(`link-${hash(state)}`);
+      this.oauth?.cancelAuthorization?.(state);
+    }
+    const pendingHashes: string[] = [];
+    this.vault.deleteMatching?.((key, value) => {
+      if (!/^link-[0-9a-f]{64}$/.test(key)) return false;
+      const link = value as { actorId?: unknown; connectionId?: unknown };
+      if (link.actorId !== actorId || link.connectionId !== id) return false;
+      pendingHashes.push(key.slice(5));
+      return true;
+    });
+    for (const digest of pendingHashes) this.vault.delete(`oauth-state:${digest}`);
     await this.research.revoke(actorId, id);
     await this.active.get(id)?.promise.catch(() => {});
     this.invalidateDerived(actorId, id, true);
@@ -728,6 +1007,7 @@ export class ConnectorBroker {
   }
   async close(): Promise<void> {
     this.closed = true;
+    this.pendingOAuthState.clear();
     for (const active of this.active.values()) active.controller.abort();
     await this.research.close();
     await Promise.allSettled([...this.active.values()].map((a) => a.promise));

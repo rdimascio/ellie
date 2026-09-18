@@ -1004,6 +1004,54 @@ private func removeAsset(parent: Int32, name: String) throws {
     throw SelectionFailure.recoveryRequired
   }
 }
+private func recoverRemovedAsset(
+  paths: SelectionPaths, directories: SelectionDirectories, role: SelectedRole,
+  asset: SelectionAsset, old: RoleReceipt, committed: Bool, transaction: String
+) throws {
+  let parent = asset == .application ? directories.applications : directories.agents
+  let target = asset == .application ? role.appName : role.plistName
+  let staged =
+    asset == .application
+    ? (paths.stagedApp(role, transaction) as NSString).lastPathComponent
+    : (paths.stagedPlist(role, transaction) as NSString).lastPathComponent
+  let backup =
+    asset == .application
+    ? (paths.backupApp(role, transaction) as NSString).lastPathComponent
+    : (paths.backupPlist(role, transaction) as NSString).lastPathComponent
+  guard try entry(parent, staged) == nil else { throw SelectionFailure.recoveryRequired }
+  if committed {
+    guard try entry(parent, target) == nil else { throw SelectionFailure.recoveryRequired }
+    if try entry(parent, backup) != nil {
+      try validateAsset(
+        paths: paths, directories: directories, role: role, record: old, asset: asset,
+        name: backup, applicationRootMode: asset == .application ? 0o700 : 0o555)
+      try removeAsset(parent: parent, name: backup)
+    }
+  } else if try entry(parent, backup) != nil {
+    guard try entry(parent, target) == nil else { throw SelectionFailure.recoveryRequired }
+    try validateAsset(
+      paths: paths, directories: directories, role: role, record: old, asset: asset,
+      name: backup, applicationRootMode: asset == .application ? 0o700 : 0o555)
+    try renameExclusive(from: parent, backup, to: parent, target)
+    if asset == .application {
+      try sealApplication(
+        paths: paths, directories: directories, role: role, record: old, name: target)
+    }
+  } else {
+    let targetMode = asset == .application ? try applicationMode(parent, target) : 0o555
+    guard asset != .application || targetMode == 0o700 || targetMode == 0o555 else {
+      throw SelectionFailure.recoveryRequired
+    }
+    try validateAsset(
+      paths: paths, directories: directories, role: role, record: old, asset: asset,
+      name: target, applicationRootMode: targetMode ?? 0o555)
+    if asset == .application, targetMode == 0o700 {
+      try sealApplication(
+        paths: paths, directories: directories, role: role, record: old, name: target)
+    }
+  }
+  try sync(parent)
+}
 private func recoverAsset(
   paths: SelectionPaths, directories: SelectionDirectories, role: SelectedRole,
   asset: SelectionAsset, old: RoleReceipt?, new: RoleReceipt, committed: Bool,
@@ -1127,7 +1175,9 @@ private func recover(
   let new = try decodedReceipt(journal.newReceipt)
   for role in SelectedRole.allCases {
     if journal.roles.contains(role) {
-      guard new[role] != nil else { throw SelectionFailure.recoveryRequired }
+      guard old[role] != nil || new[role] != nil else {
+        throw SelectionFailure.recoveryRequired
+      }
     } else {
       guard old[role] == new[role] else { throw SelectionFailure.recoveryRequired }
       try validateRole(paths: paths, directories: directories, receipt: old, role: role)
@@ -1149,13 +1199,17 @@ private func recover(
     throw SelectionFailure.recoveryRequired
   }
   for role in journal.roles {
-    guard let newRecord = new[role] else { throw SelectionFailure.recoveryRequired }
-    try recoverAsset(
-      paths: paths, directories: directories, role: role, asset: .application, old: old[role],
-      new: newRecord, committed: committed, transaction: journal.transactionID)
-    try recoverAsset(
-      paths: paths, directories: directories, role: role, asset: .plist, old: old[role],
-      new: newRecord, committed: committed, transaction: journal.transactionID)
+    for asset in [SelectionAsset.application, .plist] {
+      if let newRecord = new[role] {
+        try recoverAsset(
+          paths: paths, directories: directories, role: role, asset: asset, old: old[role],
+          new: newRecord, committed: committed, transaction: journal.transactionID)
+      } else if let oldRecord = old[role] {
+        try recoverRemovedAsset(
+          paths: paths, directories: directories, role: role, asset: asset, old: oldRecord,
+          committed: committed, transaction: journal.transactionID)
+      }
+    }
   }
   do {
     try validateSelection(paths: paths, directories: directories, receipt: committed ? new : old)
@@ -2349,6 +2403,12 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     guard args.isEmpty else { throw SelectionFailure.rejected }
     releaseID = nil
     roles = []
+  } else if command == "unselect" {
+    guard args.count == 1, let role = SelectedRole(rawValue: args[0]) else {
+      throw SelectionFailure.rejected
+    }
+    releaseID = nil
+    roles = [role]
   } else {
     guard command == "select", args.count == 3, args[1] == "--roles",
       exact(args[0], "[A-Za-z0-9._-]+", count: 128)
@@ -2402,6 +2462,56 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
   if command == "recover" {
     print("Selection recovery complete.")
     exit(0)
+  }
+  if command == "unselect" {
+    guard let role = roles.first else { throw SelectionFailure.rejected }
+    if try roleLoaded(role, testLoaded: testLoaded) { throw SelectionFailure.loaded }
+    let oldData =
+      try
+      (readPrivateAt(directories.receipts, paths.receiptName, maximum: 32 * 1024, missing: true)
+      ?? canonical(Receipt(version: 1, coordinator: nil, node: nil)))
+    let old = try decodedReceipt(oldData)
+    try validateSelection(paths: paths, directories: directories, receipt: old)
+    guard let oldRecord = old[role] else { throw SelectionFailure.rejected }
+    var next = old
+    next[role] = nil
+    let transaction = UUID().uuidString.lowercased()
+    let nextData = try canonical(next)
+    let journal = Journal(
+      version: 1, transactionID: transaction, roles: [role], oldReceipt: oldData,
+      newReceipt: nextData)
+    try writeJournalAt(
+      directories.services, name: paths.journalName, data: try canonical(journal),
+      beforeSync: { fault("before-journal-fsync") },
+      afterSync: { fault("after-journal-fsync") })
+    fault("after-journal")
+    do {
+      if testFailAfterJournal { throw SelectionFailure.rejected }
+      if testLoadAfterPreflight { throw SelectionFailure.loaded }
+      if try roleLoaded(role, testLoaded: testLoaded) { throw SelectionFailure.loaded }
+      try unsealApplication(
+        paths: paths, directories: directories, role: role, record: oldRecord,
+        name: role.appName)
+      fault("after-old-app-unseal-\(role.rawValue)")
+      let backupApp = (paths.backupApp(role, transaction) as NSString).lastPathComponent
+      let backupPlist = (paths.backupPlist(role, transaction) as NSString).lastPathComponent
+      try renameExclusive(
+        from: directories.applications, role.appName, to: directories.applications, backupApp)
+      fault("after-old-app-backup-\(role.rawValue)")
+      try renameExclusive(
+        from: directories.agents, role.plistName, to: directories.agents, backupPlist)
+      fault("after-old-plist-backup-\(role.rawValue)")
+      try writePrivateAt(
+        directories.receipts, name: paths.receiptName, data: nextData,
+        replace: true, transaction: transaction)
+      fault("after-receipt")
+      try recover(paths: paths, directories: directories, testLoaded: testLoaded)
+      print("Unselected \(role.rawValue); its managed LaunchAgent remains unloaded.")
+      exit(0)
+    } catch let error {
+      if case .loaded = error as? SelectionFailure { throw error }
+      throw SelectionFailure.recoveryRequired
+    }
   }
   guard let releaseID else { throw SelectionFailure.rejected }
   for role in roles where try roleLoaded(role, testLoaded: testLoaded) {

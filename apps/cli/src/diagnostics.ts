@@ -17,6 +17,8 @@ import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { packagedServiceContext, packagedServiceStatus } from "./packaged-service-status.ts";
 import { privatePath, run, Services } from "./services.ts";
 import type { Run, ServiceRole, ServiceStatus } from "./services.ts";
+import { serviceCredentialState as recordedCredentialState } from "./service-attention.ts";
+import type { ServiceCredentialState } from "./service-attention.ts";
 
 export interface DiagnosticReport {
   ok: boolean;
@@ -37,6 +39,7 @@ export interface DiagnosticDependencies {
   access: (path: string, mode?: number) => Promise<void>;
   keychainGet: (account: string) => Promise<string>;
   serviceStatus: (role: ServiceRole) => Promise<ServiceStatus>;
+  serviceCredentialState: (role: ServiceRole) => Promise<ServiceCredentialState>;
   capabilities: () => Promise<Capability[]>;
   run: Run;
   client: (origin: string, cert: string, token: string) => DiagnosticClient;
@@ -59,6 +62,7 @@ function dependencies(overrides: Partial<DiagnosticDependencies>): DiagnosticDep
       const context = packagedServiceContext();
       return context ? packagedServiceStatus(role, context, run) : services.status(role);
     },
+    serviceCredentialState: (role) => recordedCredentialState(dir, role),
     capabilities: () => new MacOSExecutor().capabilities(),
     run,
     client: (origin, cert, token) => new Client(origin, cert, token),
@@ -163,6 +167,42 @@ export async function doctorService(
   deps: Partial<DiagnosticDependencies> = {},
 ): Promise<DiagnosticReport> {
   const environment = dependencies(deps);
+  // A service logs `starting` before either admitted credential read. Until a
+  // later ready/connected event, doctor must not cause another Keychain prompt.
+  let initialStatus: ServiceStatus;
+  try {
+    initialStatus = await environment.serviceStatus(role);
+    const runtime =
+      initialStatus.state === "running" ? await environment.serviceCredentialState(role) : "none";
+    if (runtime === "needs_attention")
+      return {
+        ok: false,
+        lines: [
+          "FAIL The latest service start needs credential attention. Doctor skipped Keychain; review service logs, reconcile uncertain helper cleanup, then explicitly stop and start the service.",
+        ],
+      };
+    if (runtime === "starting")
+      return {
+        ok: false,
+        lines: [
+          "FAIL The service has not reported startup readiness. Doctor skipped Keychain; inspect service logs before another start.",
+        ],
+      };
+    if (runtime === "unknown")
+      return {
+        ok: false,
+        lines: [
+          "FAIL The running service has no complete startup record. Doctor skipped Keychain; inspect service logs and reconcile before another start.",
+        ],
+      };
+  } catch {
+    return {
+      ok: false,
+      lines: [
+        "FAIL Service state or attention records could not be inspected safely; Keychain was not queried.",
+      ],
+    };
+  }
   const lines: string[] = [];
   let ok = true;
   const pass = (message: string): void => {
@@ -269,7 +309,7 @@ export async function doctorService(
   }
 
   try {
-    const status = await environment.serviceStatus(role);
+    const status = initialStatus;
     if (!status.guiSession) fail("No logged-in graphical session is available for this service.");
     else pass("A logged-in graphical session is available.");
     if (statusHealthy(status))

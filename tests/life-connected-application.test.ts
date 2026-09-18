@@ -18,6 +18,7 @@ test("application enforces connector session/origin and resets an unfinished OAu
     openAuthorizationUrl: async () => false,
   });
   let state = "";
+  let stoppedState = "";
   try {
     const ready = await app.listen();
     assert.equal((await fetch(`${ready.url}/api/connections`)).status, 401);
@@ -50,9 +51,12 @@ test("application enforces connector session/origin and resets an unfinished OAu
       body: JSON.stringify({ provider: "google-calendar", mode: "prepare" }),
     });
     assert.equal(started.status, 200);
-    const authorization = new URL(
-      ((await started.json()) as { authorizationUrl: string }).authorizationUrl,
-    );
+    const startedBody = (await started.json()) as {
+      authorizationUrl: string;
+      connectionId: string;
+    };
+    assert.match(startedBody.connectionId, /^[0-9a-f-]{36}$/);
+    const authorization = new URL(startedBody.authorizationUrl);
     assert.equal(authorization.origin, "https://accounts.google.com");
     assert.equal(
       authorization.searchParams.get("redirect_uri"),
@@ -122,6 +126,62 @@ test("application enforces connector session/origin and resets an unfinished OAu
       failed.connections.map((c) => c.state),
       ["revoked"],
     );
+
+    const firstPending = (await (
+      await fetch(`${ready.url}/api/connections/start`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ provider: "gmail", mode: "observe" }),
+      })
+    ).json()) as { authorizationUrl: string; connectionId: string };
+    const secondPending = (await (
+      await fetch(`${ready.url}/api/connections/start`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ provider: "gmail", mode: "observe" }),
+      })
+    ).json()) as { authorizationUrl: string; connectionId: string };
+    assert.notEqual(firstPending.connectionId, secondPending.connectionId);
+    stoppedState = new URL(firstPending.authorizationUrl).searchParams.get("state")!;
+    const otherState = new URL(secondPending.authorizationUrl).searchParams.get("state")!;
+    const stopped = await fetch(
+      `${ready.url}/api/connections/${firstPending.connectionId}/revoke`,
+      { method: "POST", headers, body: "{}" },
+    );
+    assert.equal(stopped.status, 200);
+    const pendingList = (await (
+      await fetch(`${ready.url}/api/connections`, { headers })
+    ).json()) as {
+      connections: { id: string; state: string }[];
+    };
+    assert.equal(
+      pendingList.connections.find((c) => c.id === firstPending.connectionId)?.state,
+      "revoked",
+    );
+    assert.equal(
+      pendingList.connections.find((c) => c.id === secondPending.connectionId)?.state,
+      "connecting",
+    );
+    assert.equal(
+      (
+        await fetch(
+          `${ready.url}/api/connections/callback?state=${stoppedState}&code=synthetic-never-exchanged`,
+          { redirect: "manual" },
+        )
+      ).status,
+      400,
+      "Stop setup must reject a late callback before token exchange",
+    );
+    assert.equal(
+      (
+        await fetch(
+          `${ready.url}/api/connections/callback?state=${otherState}&error=access_denied`,
+          { redirect: "manual" },
+        )
+      ).status,
+      303,
+      "Stopping one Gmail setup must not cancel another ID",
+    );
   } finally {
     await app.close();
   }
@@ -130,6 +190,9 @@ test("application enforces connector session/origin and resets an unfinished OAu
     const key = createHash("sha256").update(state).digest("hex");
     assert.equal(vault.get(`link-${key}`), undefined);
     assert.equal(vault.get(`oauth-state:${key}`), undefined);
+    const stoppedHash = createHash("sha256").update(stoppedState).digest("hex");
+    assert.equal(vault.get(`link-${stoppedHash}`), undefined);
+    assert.equal(vault.get(`oauth-state:${stoppedHash}`), undefined);
     vault.close();
   } finally {
     await rm(directory, { recursive: true, force: true });

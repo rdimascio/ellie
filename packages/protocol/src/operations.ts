@@ -207,6 +207,24 @@ export const OPERATION_REGISTRY = {
       output: RESULT,
     },
     {
+      id: "browser.scrollRow",
+      requiredCapability: "browser.control",
+      description: "Scroll one explicitly chosen row from the current browser observation.",
+      localPolicy: { appFields: [], urlFields: [] },
+      input: {
+        type: "object",
+        additionalProperties: false,
+        required: ["tool", "direction", "rowId", "revision"],
+        properties: {
+          tool: { const: "browser.scrollRow" },
+          direction: { type: "string", enum: ["left", "right"] },
+          rowId: BROWSER_IDENTIFIER,
+          revision: BROWSER_REVISION,
+        },
+      },
+      output: RESULT,
+    },
+    {
       id: "browser.search",
       requiredCapability: "browser.control",
       description: "Submit a bounded search to the authorized browser page.",
@@ -295,8 +313,19 @@ export type BrowserView = {
   title?: string;
   summary?: string;
   items: { id: string; label: string; state?: string }[];
+  /** Directions observed on the bound AX web area during this read only. */
+  axScrollDirections?: ("up" | "down")[];
+  site?: {
+    provider: "youtube" | "netflix" | "youtube_tv" | "disneyplus";
+    page: "home" | "results" | "browse" | "watch" | "login" | "unsupported";
+    playback: "playing" | "paused" | "unavailable" | "ambiguous";
+    currentTimeSeconds?: number;
+    horizontalScrollAvailable?: boolean;
+    rows?: { id: string; label: string }[];
+    searchControl?: { id: string; label: string };
+  };
 };
-export type BrowserExecutionSource = "webmcp" | "accessibility";
+export type BrowserExecutionSource = "webmcp" | "accessibility" | "companion";
 export type BrowserWebMCPStructuredResult =
   | {
       source: BrowserExecutionSource;
@@ -383,7 +412,11 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         ? ["source", "operation", "status", "revision", "origin"]
         : ["source", "operation", "status"],
     );
-    if (browser.source !== "webmcp" && browser.source !== "accessibility")
+    if (
+      browser.source !== "webmcp" &&
+      browser.source !== "accessibility" &&
+      browser.source !== "companion"
+    )
       throw new Error("Invalid browser operation result.");
     if (!connected && browser.source !== "webmcp")
       throw new Error("Invalid browser operation result.");
@@ -412,14 +445,18 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
   }
   if (browser.operation === "read") {
     exactObject(browser, ["source", "operation", "status", "revision", "view"]);
-    if (browser.source !== "webmcp" && browser.source !== "accessibility")
+    if (
+      browser.source !== "webmcp" &&
+      browser.source !== "accessibility" &&
+      browser.source !== "companion"
+    )
       throw new Error("Invalid browser operation result.");
     if (browser.status !== "completed") throw new Error("Invalid browser operation result.");
     if (body.ok !== true) throw new Error("Invalid browser operation result.");
     const view = browser.view as Record<string, unknown>;
     if (!view || typeof view !== "object" || Array.isArray(view))
       throw new Error("Invalid browser operation result.");
-    const allowed = ["title", "summary", "items"];
+    const allowed = ["title", "summary", "items", "site", "axScrollDirections"];
     if (
       Object.keys(view).some((key) => !allowed.includes(key)) ||
       !Array.isArray(view.items) ||
@@ -437,6 +474,124 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     });
     if (new Set(items.map((item) => item.id)).size !== items.length)
       throw new Error("Invalid browser operation result.");
+    let axScrollDirections: BrowserView["axScrollDirections"];
+    if (view.axScrollDirections !== undefined) {
+      if (
+        browser.source !== "accessibility" ||
+        !Array.isArray(view.axScrollDirections) ||
+        view.axScrollDirections.length > 2 ||
+        view.axScrollDirections.some((direction) => direction !== "up" && direction !== "down") ||
+        new Set(view.axScrollDirections).size !== view.axScrollDirections.length
+      )
+        throw new Error("Invalid browser operation result.");
+      axScrollDirections = view.axScrollDirections as ("up" | "down")[];
+    }
+    let site: BrowserView["site"];
+    if (view.site !== undefined) {
+      const observed = view.site as Record<string, unknown>;
+      if (!observed || typeof observed !== "object" || Array.isArray(observed))
+        throw new Error("Invalid browser operation result.");
+      const hasTime = Object.hasOwn(observed, "currentTimeSeconds");
+      const hasRow = Object.hasOwn(observed, "horizontalScrollAvailable");
+      const hasRows = Object.hasOwn(observed, "rows");
+      const hasSearchControl = Object.hasOwn(observed, "searchControl");
+      exactObject(observed, [
+        "provider",
+        "page",
+        "playback",
+        ...(hasTime ? ["currentTimeSeconds"] : []),
+        ...(hasRow ? ["horizontalScrollAvailable"] : []),
+        ...(hasRows ? ["rows"] : []),
+        ...(hasSearchControl ? ["searchControl"] : []),
+      ]);
+      if (
+        !["youtube", "netflix", "youtube_tv", "disneyplus"].includes(observed.provider as string) ||
+        !(
+          observed.provider === "youtube"
+            ? ["home", "results", "watch", "login", "unsupported"]
+            : observed.provider === "netflix"
+              ? ["browse", "results", "watch", "login", "unsupported"]
+              : observed.provider === "youtube_tv"
+                ? ["browse", "watch", "login", "unsupported"]
+                : ["browse", "login", "unsupported"]
+        ).includes(observed.page as string) ||
+        !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
+        (observed.page !== "watch" && observed.playback !== "unavailable") ||
+        (hasRow &&
+          (observed.provider !== "netflix" ||
+            observed.page !== "browse" ||
+            typeof observed.horizontalScrollAvailable !== "boolean")) ||
+        (hasRows &&
+          (observed.provider !== "netflix" ||
+            observed.page !== "browse" ||
+            !Array.isArray(observed.rows) ||
+            observed.rows.length > 8 ||
+            observed.rows.some((raw) => {
+              const row = raw as Record<string, unknown>;
+              try {
+                exactObject(row, ["id", "label"]);
+                browserIdentifier(row.id);
+                if (
+                  !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                    row.id as string,
+                  )
+                )
+                  return true;
+                boundedText(row.label, 100);
+                return false;
+              } catch {
+                return true;
+              }
+            }) ||
+            new Set(observed.rows.map((row: { id: string }) => row.id)).size !==
+              observed.rows.length)) ||
+        (hasSearchControl &&
+          (() => {
+            if (
+              !(
+                (observed.provider === "netflix" &&
+                  (observed.page === "browse" || observed.page === "results")) ||
+                (observed.provider === "youtube" &&
+                  (observed.page === "home" || observed.page === "results"))
+              )
+            )
+              return true;
+            try {
+              const control = exactObject(observed.searchControl, ["id", "label"]);
+              browserIdentifier(control.id);
+              if (
+                !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+                  control.id as string,
+                )
+              )
+                return true;
+              boundedText(control.label, 100);
+              return false;
+            } catch {
+              return true;
+            }
+          })()) ||
+        (hasTime &&
+          (observed.page !== "watch" ||
+            !["playing", "paused"].includes(observed.playback as string) ||
+            typeof observed.currentTimeSeconds !== "number" ||
+            !Number.isFinite(observed.currentTimeSeconds) ||
+            observed.currentTimeSeconds < 0 ||
+            observed.currentTimeSeconds > 86_400))
+      )
+        throw new Error("Invalid browser operation result.");
+      site = observed as BrowserView["site"];
+    }
+    if (site?.provider === "youtube" && site.searchControl && browser.source !== "companion")
+      throw new Error("Invalid browser operation result.");
+    if (
+      browser.source === "companion" &&
+      site?.provider !== "netflix" &&
+      site?.provider !== "youtube" &&
+      site?.provider !== "youtube_tv" &&
+      site?.provider !== "disneyplus"
+    )
+      throw new Error("Invalid browser operation result.");
     return {
       ok: body.ok,
       message,
@@ -449,12 +604,18 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
           ...(view.title === undefined ? {} : { title: boundedText(view.title, 500) }),
           ...(view.summary === undefined ? {} : { summary: boundedText(view.summary, 2000) }),
           items,
+          ...(axScrollDirections === undefined ? {} : { axScrollDirections }),
+          ...(site === undefined ? {} : { site }),
         },
       },
     };
   }
   exactObject(browser, ["source", "operation", "status", "revision"]);
-  if (browser.source !== "webmcp" && browser.source !== "accessibility")
+  if (
+    browser.source !== "webmcp" &&
+    browser.source !== "accessibility" &&
+    browser.source !== "companion"
+  )
     throw new Error("Invalid browser operation result.");
   if (
     browser.operation !== "command" ||

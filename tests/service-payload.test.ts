@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  cp,
+  link,
   mkdir,
   mkdtemp,
   readFile,
@@ -15,7 +17,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createReleaseArchive,
   extractVerifiedNode,
+  MAXIMUM_PAYLOAD_FILES,
   nativeArchitecture,
   prepareDependencies,
   stageApplication,
@@ -23,8 +27,11 @@ import {
   verifyManifest,
   verifyStagedLifeRuntime,
 } from "../scripts/build-service-payload.mjs";
+// @ts-expect-error The archive preflight remains directly executable JavaScript.
+import { zipEntries } from "../scripts/test-packaged-runtime.mjs";
 
 const digest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+const companionSource = new URL("../apps/browser-media-extension/", import.meta.url).pathname;
 
 function manifest(files: object[]) {
   return {
@@ -66,6 +73,34 @@ async function temporary(t: test.TestContext, prefix: string): Promise<string> {
   t.after(() => rm(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test(
+  "release ZIP omits AppleDouble metadata while preserving manifested file modes",
+  {
+    skip: process.platform !== "darwin",
+  },
+  async (t) => {
+    const directory = await temporary(t, "ellie-payload-zip-");
+    const release = join(directory, "EllieServices-test");
+    await mkdir(release);
+    const executable = join(release, "helper");
+    await writeFile(executable, "fixture\n", { mode: 0o755 });
+    execFileSync("/usr/bin/xattr", ["-w", "com.ellie.test.fixture", "metadata", executable]);
+    const archive = join(directory, "release.zip");
+
+    createReleaseArchive(release, archive);
+
+    const entries = zipEntries(await readFile(archive), "EllieServices-test") as Array<{
+      name: string;
+      mode: number;
+    }>;
+    assert.deepEqual(
+      entries.map((entry) => entry.name),
+      ["EllieServices-test/", "EllieServices-test/helper"],
+    );
+    assert.equal(entries[1]!.mode & 0o777, 0o755);
+  },
+);
 
 test("extracts only a checksum-verified target Node runtime and its license", async (t) => {
   const directory = await temporary(t, "ellie-node-archive-");
@@ -135,6 +170,7 @@ test("materializes the finite production workspace closure and complete license 
   await writeFile(join(source, "LICENSE"), "Ellie fixture license\n");
   await writeFile(join(source, "package.json"), '{"name":"fixture"}\n');
   await writeFile(join(source, "bun.lock"), "fixture-lock\n");
+  await cp(companionSource, join(source, "apps/browser-media-extension"), { recursive: true });
   for (const name of ["cli", "node", "server"]) {
     await packageFile(join(source, "apps", name), {
       name: `@ellie/${name}`,
@@ -238,6 +274,154 @@ test("materializes the finite production workspace closure and complete license 
   );
   await symlink(join(directory, "ellie-license"), join(source, "packages/protocol/linked.ts"));
   await assert.rejects(stageApplication(source, join(directory, "linked")), /symbolic link/);
+});
+
+test("supplies only the pinned provider-utils upstream license when its npm package omits one", async (t) => {
+  const directory = await temporary(t, "ellie-provider-utils-license-");
+  const source = join(directory, "source");
+  const packageDirectory = join(source, "node_modules/@ai-sdk/provider-utils");
+  const license = join(source, "scripts/licenses/provider-utils-5.0.43.LICENSE");
+  const packageJson = join(packageDirectory, "package.json");
+  const lock = join(source, "bun.lock");
+  const integrity =
+    "sha512-gw/bcNseOGSs59TMtV4H1KwqXXe24NHgx+uBYr98pa4Fg6Uvp8hPPxjuckVnfFFyIxHCDew8so0ujpvcSuyMZA==";
+  const lockText = (value: string) =>
+    `{\n  "packages": {\n    "@ai-sdk/provider-utils": ["@ai-sdk/provider-utils@5.0.43", "", {}, "${value}"],\n  },\n}\n`;
+  const packageValue = {
+    name: "@ai-sdk/provider-utils",
+    version: "5.0.43",
+    license: "Apache-2.0",
+  };
+  for (const name of ["cli", "node", "server"]) {
+    const root = join(source, "apps", name);
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, "index.ts"), "export {};\n");
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({
+        name: `@ellie/${name}`,
+        exports: "./index.ts",
+        dependencies: name === "cli" ? { "@ai-sdk/provider-utils": "5.0.43" } : {},
+      }),
+    );
+  }
+  await mkdir(join(source, "packages"));
+  for (const area of [
+    "apps/command-center/dist",
+    "apps/life-ui/dist",
+    "scripts/licenses",
+    "node_modules/@ai-sdk/provider-utils",
+  ])
+    await mkdir(join(source, area), { recursive: true });
+  await writeFile(join(source, "apps/command-center/dist/index.html"), "fixture\n");
+  await writeFile(join(source, "apps/life-ui/dist/index.html"), "fixture\n");
+  await writeFile(join(source, "LICENSE"), "Ellie fixture license\n");
+  await writeFile(join(source, "package.json"), '{"name":"fixture"}\n');
+  await cp(companionSource, join(source, "apps/browser-media-extension"), { recursive: true });
+  await writeFile(lock, lockText(integrity));
+  await writeFile(packageJson, JSON.stringify(packageValue));
+  await writeFile(join(packageDirectory, "index.js"), "export {};\n");
+  const upstream = await readFile(
+    new URL("../scripts/licenses/provider-utils-5.0.43.LICENSE", import.meta.url),
+  );
+  await writeFile(license, upstream);
+  const stage = async (name: string) => {
+    const payload = join(directory, name);
+    await mkdir(join(payload, "LICENSES"), { recursive: true });
+    return { payload, components: await stageApplication(source, payload) };
+  };
+
+  const { payload, components } = await stage("exact");
+  assert.deepEqual(components, [
+    {
+      name: "@ai-sdk/provider-utils",
+      version: "5.0.43",
+      license: "Apache-2.0",
+      files: ["LICENSE"],
+    },
+  ]);
+  assert.deepEqual(
+    await readFile(join(payload, "lib/ellie/node_modules/@ai-sdk/provider-utils/LICENSE")),
+    upstream,
+  );
+  assert.match(
+    await readFile(join(payload, "LICENSES/THIRD-PARTY-NOTICES.txt"), "utf8"),
+    /@ai-sdk\/provider-utils@5\.0\.43 \(Apache-2\.0\)/,
+  );
+  assert.match(
+    await readFile(join(payload, "LICENSES/components.spdx.json"), "utf8"),
+    /"name": "@ai-sdk\/provider-utils"/,
+  );
+
+  for (const [field, value] of [
+    ["name", "@ai-sdk/other"],
+    ["version", "5.0.44"],
+    ["license", "MIT"],
+  ] as const) {
+    await writeFile(packageJson, JSON.stringify({ ...packageValue, [field]: value }));
+    await assert.rejects(stage(`wrong-${field}`), /incomplete license metadata/);
+  }
+  await writeFile(packageJson, JSON.stringify(packageValue));
+  await writeFile(lock, lockText(`sha512-${"A".repeat(88)}`));
+  await assert.rejects(stage("wrong-integrity"), /incomplete license metadata/);
+  await writeFile(
+    lock,
+    lockText(integrity).replace("@ai-sdk/provider-utils@5.0.43", "@ai-sdk/provider-utils@5.0.44"),
+  );
+  await assert.rejects(stage("wrong-lock-version"), /incomplete license metadata/);
+  await writeFile(lock, lockText(integrity));
+  const tampered = Buffer.from(upstream);
+  const firstByte = tampered[0];
+  assert.ok(firstByte !== undefined);
+  tampered[0] = firstByte ^ 1;
+  await writeFile(license, tampered);
+  await assert.rejects(stage("tampered-notice"), /does not match its upstream source/);
+  await rm(license);
+  await assert.rejects(stage("missing-notice"), { code: "ENOENT" });
+  await symlink(join(source, "LICENSE"), license);
+  await assert.rejects(stage("linked-notice"), { code: "ELOOP" });
+  await rm(license);
+  await mkdir(license);
+  await assert.rejects(stage("nonregular-notice"), /bounded regular file/);
+  await rm(license, { recursive: true });
+  await writeFile(license, upstream);
+  await link(license, join(source, "second-license-link"));
+  await assert.rejects(stage("hardlinked-notice"), /bounded regular file/);
+  await rm(join(source, "second-license-link"));
+  await rm(license);
+
+  await writeFile(join(packageDirectory, "LICENSE"), "Package supplied license\n");
+  const preferred = await stage("package-license-preferred");
+  assert.equal(
+    await readFile(
+      join(preferred.payload, "lib/ellie/node_modules/@ai-sdk/provider-utils/LICENSE"),
+      "utf8",
+    ),
+    "Package supplied license\n",
+  );
+  await rm(join(packageDirectory, "LICENSE"));
+  await writeFile(license, upstream);
+  await writeFile(
+    join(source, "apps/cli/package.json"),
+    JSON.stringify({
+      name: "@ellie/cli",
+      exports: "./index.ts",
+      dependencies: { "@ai-sdk/provider-utils": "5.0.43", unlicensed: "1.0.0" },
+    }),
+  );
+  await mkdir(join(source, "node_modules/unlicensed"));
+  await writeFile(
+    join(source, "node_modules/unlicensed/package.json"),
+    JSON.stringify({
+      name: "unlicensed",
+      version: "1.0.0",
+      license: "MIT",
+    }),
+  );
+  await assert.rejects(
+    stage("other-missing-license"),
+    /Production dependency unlicensed has incomplete license metadata/,
+  );
 });
 
 test("restricts payload architecture to the current supported Mac host", () => {
@@ -394,6 +578,49 @@ test("manifest verification rejects any payload mutation", async (t) => {
   await writeFile(runtime, "fixture", { mode: 0o755 });
   await chmod(runtime, 0o4755);
   await assert.rejects(verifyManifest(release), /unsafe mode/);
+});
+
+test("builder admits the finite native file limit and rejects files, entries, and depth beyond it", async (t) => {
+  const directory = await temporary(t, "ellie-payload-inventory-limits-");
+  const release = join(directory, "release");
+  const payload = join(release, "payload");
+  await mkdir(payload, { recursive: true, mode: 0o755 });
+  const bytes = Buffer.from("x");
+  const files = [];
+  for (let index = 0; index < MAXIMUM_PAYLOAD_FILES; index++) {
+    const name = `f${String(index).padStart(4, "0")}`;
+    await writeFile(join(payload, name), bytes, { mode: 0o644 });
+    files.push({ path: name, mode: 0o644, size: 1, sha256: digest(bytes) });
+  }
+  await writeFile(join(release, "SOURCE.txt"), sourceRecord());
+  await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest(files))}\n`);
+  const acceptedFiles = (await verifyManifest(release)).files;
+  assert.ok(Array.isArray(acceptedFiles));
+  assert.equal(acceptedFiles.length, 3_072);
+
+  const extra = join(payload, "f3072");
+  await writeFile(extra, bytes, { mode: 0o644 });
+  await assert.rejects(verifyManifest(release), /file or byte limit/);
+  await writeFile(
+    join(release, "manifest.json"),
+    `${JSON.stringify(manifest([...files, { path: "f3072", mode: 0o644, size: 1, sha256: digest(bytes) }]))}\n`,
+  );
+  await assert.rejects(verifyManifest(release), /unsupported shape/);
+  await rm(extra);
+  await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest(files))}\n`);
+
+  for (let index = 0; index < 1_025; index++)
+    await mkdir(join(payload, `d${String(index).padStart(4, "0")}`));
+  await assert.rejects(verifyManifest(release), /entry or depth limit/);
+  for (let index = 0; index < 1_025; index++)
+    await rm(join(payload, `d${String(index).padStart(4, "0")}`), { recursive: true });
+
+  let nested = payload;
+  for (let index = 0; index < 17; index++) {
+    nested = join(nested, `n${index}`);
+    await mkdir(nested);
+  }
+  await assert.rejects(verifyManifest(release), /entry or depth limit/);
 });
 
 test("manifest verification rejects linked release roots and mismatched source metadata", async (t) => {

@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { LifeStore } from "../packages/life-core/src/index.ts";
-import { ConnectorBroker, type CredentialVault } from "../packages/life-connectors/src/broker.ts";
+import {
+  ConnectorBroker,
+  type ConnectedOAuth,
+  type CredentialVault,
+} from "../packages/life-connectors/src/broker.ts";
 import { ConnectorStore } from "../packages/life-connectors/src/store.ts";
 import type {
   LifeProviderAdapter,
@@ -153,6 +157,30 @@ test("connector pages advance stable cursors atomically and stay actor-private",
       false,
     );
 
+    assert.throws(() => store.selectCalendar("actor-b", created.id, connected.generation, "other"));
+    const selected = store.selectCalendar("actor-a", created.id, connected.generation, "other");
+    assert.equal(selected.selectedCalendarId, "other");
+    assert.equal(selected.cursor, undefined);
+    assert.equal(selected.lastSyncAt, undefined);
+    assert.deepEqual(store.observations("actor-a", created.id), []);
+    assert.throws(
+      () =>
+        store.ingest(
+          "actor-a",
+          created.id,
+          connected.generation,
+          {
+            accountId: "account-a",
+            items: [event("late-old-calendar")],
+            cursor: "late",
+            complete: true,
+          },
+          15,
+        ),
+      "an old calendar pull cannot repopulate after selection changes",
+    );
+    assert.deepEqual(store.observations("actor-a", created.id), []);
+
     store.revoke("actor-a", created.id);
     assert.equal(store.get("actor-a", created.id)?.state, "revoked");
     assert.equal(
@@ -207,6 +235,272 @@ class CalendarFixture implements LifeProviderAdapter {
     };
   }
 }
+
+test("calendar listing refreshes an expired credential but cannot revive a revoked connection", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ellie-calendar-picker-"));
+  const life = new LifeStore(join(directory, "life.sqlite"));
+  const store = new ConnectorStore(join(directory, "connectors.sqlite"));
+  const tasks = new TaskRuntime({
+    directory: join(directory, "tasks"),
+    capabilityResolver: () => ["life.connections.read", "life.connections.write"],
+  });
+  const vault = new MemoryVault();
+  let seenToken = "";
+  let refreshGate: Promise<void> | undefined;
+  let refreshCount = 0;
+  let releaseRefresh: (() => void) | undefined;
+  let refreshStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => {
+    refreshStarted = resolve;
+  });
+  const oauth: ConnectedOAuth = {
+    begin() {
+      throw new Error("not used");
+    },
+    async complete() {
+      throw new Error("not used");
+    },
+    async refreshCredential(credential) {
+      refreshCount++;
+      if (refreshCount === 2) refreshStarted?.();
+      await refreshGate;
+      return { ...credential, accessToken: "refreshed-token", expiresAt: Date.now() + 3_600_000 };
+    },
+  };
+  const provider: LifeProviderAdapter = {
+    id: "google-calendar",
+    async identity() {
+      return { accountId: "owner", label: "Fixture calendar" };
+    },
+    async calendars(credential) {
+      seenToken = credential.accessToken;
+      return [{ id: "primary", label: "Primary", primary: true }];
+    },
+    async pull() {
+      throw new Error("not used");
+    },
+  };
+  const broker = new ConnectorBroker({ store, life, vault, providers: [provider], tasks, oauth });
+  try {
+    const connection = await broker.connect(
+      "owner",
+      "google-calendar",
+      {
+        accessToken: "expired-token",
+        clientId: "fixture-client",
+        refreshToken: "fixture-refresh",
+        expiresAt: Date.now() - 1,
+        grantedScopes: ["calendar.readonly"],
+      },
+      "observe",
+    );
+    assert.equal((await broker.calendars("owner", connection.id)).calendars.length, 1);
+    assert.equal(seenToken, "refreshed-token");
+    vault.put(`account-${connection.id}`, {
+      accessToken: "expired-again",
+      clientId: "fixture-client",
+      refreshToken: "fixture-refresh",
+      expiresAt: Date.now() - 1,
+      grantedScopes: ["calendar.readonly"],
+    });
+    refreshGate = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const late = broker.calendars("owner", connection.id);
+    await started;
+    await broker.revoke("owner", connection.id);
+    releaseRefresh?.();
+    await assert.rejects(late);
+    assert.equal(vault.get(`account-${connection.id}`), undefined);
+    assert.equal(store.get("owner", connection.id)?.state, "revoked");
+  } finally {
+    releaseRefresh?.();
+    await broker.close();
+    await tasks.close();
+    store.close();
+    life.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("explicit Gmail detail refreshes credentials and cannot outlive actor or revocation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ellie-gmail-detail-"));
+  const life = new LifeStore(join(directory, "life.sqlite"));
+  const store = new ConnectorStore(join(directory, "connectors.sqlite"));
+  const tasks = new TaskRuntime({
+    directory: join(directory, "tasks"),
+    capabilityResolver: () => ["life.connections.read", "life.connections.write"],
+  });
+  const vault = new MemoryVault();
+  let seenToken = "";
+  let reads = 0;
+  let releaseRead: (() => void) | undefined;
+  let releaseRefresh: (() => void) | undefined;
+  let refreshStarted: (() => void) | undefined;
+  let holdRefresh: Promise<void> | undefined;
+  let readStarted: (() => void) | undefined;
+  let holdRead: Promise<void> | undefined;
+  const started = new Promise<void>((resolve) => {
+    readStarted = resolve;
+  });
+  const oauth: ConnectedOAuth = {
+    begin() {
+      throw new Error("not used");
+    },
+    async complete() {
+      throw new Error("not used");
+    },
+    async refreshCredential(credential) {
+      if (holdRefresh) {
+        refreshStarted?.();
+        await holdRefresh;
+      }
+      return { ...credential, accessToken: "fresh-token", expiresAt: Date.now() + 3_600_000 };
+    },
+  };
+  const provider: LifeProviderAdapter = {
+    id: "gmail",
+    async identity() {
+      return { accountId: "owner@example.test" };
+    },
+    async pull() {
+      throw new Error("not used");
+    },
+    async readMessageText(_id, credential) {
+      reads++;
+      seenToken = credential.accessToken;
+      if (holdRead) {
+        readStarted?.();
+        await holdRead;
+      }
+      return { status: "plain", text: "Transient private body." };
+    },
+  };
+  const created = store.create("actor-a", "gmail", "observe");
+  const connected = store.update(
+    "actor-a",
+    created.id,
+    created.generation,
+    {
+      state: "connected",
+      accountId: "owner@example.test",
+      label: "Inbox",
+      grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    },
+    true,
+  );
+  store.ingest(
+    "actor-a",
+    created.id,
+    connected.generation,
+    {
+      accountId: "owner@example.test",
+      complete: true,
+      cursor: "cursor-1",
+      items: [
+        {
+          sourceKey: "message_1",
+          sourceRevision: "v1",
+          observedAt: 1,
+          title: "Subject",
+          kind: "message",
+          data: {
+            sentAt: 1,
+            from: "sender@example.test",
+            to: ["owner@example.test"],
+            subject: "Subject",
+            direction: "incoming",
+          },
+        },
+      ],
+    },
+    Date.now(),
+  );
+  vault.put(`account-${created.id}`, {
+    accessToken: "expired-token",
+    clientId: "client",
+    refreshToken: "refresh",
+    expiresAt: Date.now() - 1,
+    grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+  });
+  const broker = new ConnectorBroker({ store, life, vault, providers: [provider], tasks, oauth });
+  try {
+    await assert.rejects(broker.messageDetail("actor-b", created.id, "message_1"));
+    await assert.rejects(broker.messageDetail("actor-a", created.id, "unobserved"));
+    assert.equal(reads, 0);
+    const detail = await broker.messageDetail("actor-a", created.id, "message_1");
+    assert.equal(detail.text, "Transient private body.");
+    assert.equal(seenToken, "fresh-token");
+    assert.equal(
+      JSON.stringify(store.observations("actor-a", created.id)).includes(detail.text!),
+      false,
+    );
+    holdRefresh = new Promise<void>((resolve) => {
+      releaseRefresh = resolve;
+    });
+    const refreshing = new Promise<void>((resolve) => {
+      refreshStarted = resolve;
+    });
+    vault.put(`account-${created.id}`, {
+      accessToken: "expired-again",
+      clientId: "client",
+      refreshToken: "refresh",
+      expiresAt: Date.now() - 1,
+      grantedScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+    });
+    const stale = broker.messageDetail("actor-a", created.id, "message_1");
+    await refreshing;
+    store.ingest(
+      "actor-a",
+      created.id,
+      connected.generation,
+      {
+        accountId: "owner@example.test",
+        complete: true,
+        cursor: "cursor-2",
+        items: [
+          {
+            sourceKey: "message_1",
+            sourceRevision: "v2",
+            observedAt: 2,
+            title: "Changed subject",
+            kind: "message",
+            data: {
+              sentAt: 2,
+              from: "sender@example.test",
+              to: ["owner@example.test"],
+              subject: "Changed subject",
+              direction: "incoming",
+            },
+          },
+        ],
+      },
+      Date.now(),
+    );
+    releaseRefresh?.();
+    await assert.rejects(stale, /Imported message changed/);
+    assert.equal(reads, 1, "changed observation never dispatches a full body request");
+    holdRefresh = undefined;
+    holdRead = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const late = broker.messageDetail("actor-a", created.id, "message_1");
+    await started;
+    await broker.revoke("actor-a", created.id);
+    releaseRead?.();
+    await assert.rejects(late);
+    assert.equal(store.get("actor-a", created.id)?.state, "revoked");
+    assert.equal(reads, 2);
+  } finally {
+    releaseRefresh?.();
+    releaseRead?.();
+    await broker.close();
+    await tasks.close();
+    store.close();
+    life.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 async function until(check: () => boolean, tick: () => Promise<void>) {
   for (let attempt = 0; attempt < 200; attempt++) {
@@ -378,6 +672,8 @@ test("broker sync publishes private preparation once and preserves user correcti
       () => provider.pulls > pullsBeforeEdit + 1,
       async () => {},
     );
+    await assert.rejects(broker.revoke("another-actor", connection.id));
+    assert.equal(store.get(actor.userId, connection.id)?.state, "connected");
     const revoking = broker.revoke(actor.userId, connection.id);
     releaseGate();
     await revoking;

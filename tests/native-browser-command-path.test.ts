@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { createServer as createNetServer } from "node:net";
 import { request as httpsRequest } from "node:https";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -13,6 +14,7 @@ import { BrowserNodeExecutor } from "../apps/node/src/browser-executor.ts";
 import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
 import { BrowserWebMCPOperations } from "../apps/node/src/browser-operations.ts";
 import { BrowserAccessibilityRuntime } from "../apps/node/src/browser-accessibility-runtime.ts";
+import { BrowserCompanionOperations } from "../apps/node/src/browser-companion-operations.ts";
 import { runNode } from "../apps/node/src/index.ts";
 import { BrowserAuth } from "../apps/server/src/browser-auth.ts";
 import { createBrowserRemote } from "../apps/server/src/browser-remote.ts";
@@ -68,6 +70,13 @@ test("native browser route reaches unavailable status and a preselected syntheti
   let accessibility: BrowserAccessibilityRuntime | undefined;
   let helperRoot: string | undefined;
   let bridgeRequests = 0;
+  const bridgeTypes: string[] = [];
+  const companionCommands: string[] = [];
+  const submittedSearches: { controlId: string; query: string }[] = [];
+  const selectedCandidates: string[] = [];
+  const searchControlId = randomUUID();
+  const resultId = randomUUID();
+  let watchInspections = 0;
   let webActionCalls = 0;
   let desktopCalls = 0;
   let binding: "unavailable" | { bindingId: string; documentId: string; url: string } =
@@ -94,7 +103,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     session = 'session-1'; documentRevision = value.documentRevision;
     console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision}));
   } else if (value.type === 'read') {
-    console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision,title:'Synthetic public video page',items:documentRevision === 'results-document' ? [{id:'observed-video-1',label:'Synthetic public video'}] : [],operation:'read'}));
+    console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision,title:'Synthetic public video page',items:[],operation:'read'}));
   } else {
     console.log(JSON.stringify({id:value.id,status:'dispatchedUnverified',sessionID:session,documentRevision,operation:value.operation}));
   }
@@ -114,6 +123,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       {
         request: async (request) => {
           bridgeRequests++;
+          bridgeTypes.push(request.type);
           if (request.type !== "binding.status") {
             webActionCalls++;
             throw new Error("WebMCP must not execute a site action after AX selection.");
@@ -134,6 +144,54 @@ for await (const line of createInterface({ input: process.stdin })) {
       (signal, refresh) => (refresh ? webmcp.bindingRefresh(signal) : webmcp.bindingStatus(signal)),
       webmcp,
       accessibility,
+      new BrowserCompanionOperations({
+        async request(request) {
+          assert.equal(request.type, "media.execute");
+          if (binding === "unavailable") throw new Error("No selected page.");
+          companionCommands.push(request.command.type);
+          if (request.command.type === "searchObserved") {
+            submittedSearches.push({
+              controlId: request.command.controlId,
+              query: request.command.query,
+            });
+            return browserWebMCPResultFor(request.id, "unknown");
+          }
+          if (request.command.type === "open") {
+            selectedCandidates.push(request.command.candidateId);
+            return browserWebMCPResultFor(request.id, "unknown");
+          }
+          assert.equal(request.command.type, "inspect");
+          const page =
+            binding.documentId === "watch-document"
+              ? "watch"
+              : binding.documentId === "results-document"
+                ? "results"
+                : "home";
+          if (page === "watch") watchInspections++;
+          const site = {
+            provider: "youtube",
+            page,
+            playback:
+              page === "watch" ? (watchInspections === 1 ? "paused" : "playing") : "unavailable",
+            ...(page === "watch"
+              ? {}
+              : { searchControl: { id: searchControlId, label: "Search" } }),
+          };
+          return browserWebMCPResultFor(request.id, "ok", {
+            bindingId: binding.bindingId,
+            documentId: binding.documentId,
+            url: binding.url,
+            value: {
+              snapshotId: randomUUID(),
+              candidates:
+                page === "results" ? [{ id: resultId, title: "Synthetic public video" }] : [],
+              playback: { available: false },
+              ...(page === "watch" ? {} : { searchControl: site.searchControl }),
+              site,
+            },
+          });
+        },
+      }),
     );
     let registered!: () => void;
     const ready = new Promise<void>((resolve) => (registered = resolve));
@@ -305,8 +363,14 @@ for await (const line of createInterface({ input: process.stdin })) {
         initialReadBrowser.status,
         initialReadBrowser.revision,
       ],
-      ["accessibility", "read", "completed", initialRevision],
+      ["companion", "read", "completed", initialRevision],
     );
+    assert.deepEqual(record(record(initialReadBrowser.view).site), {
+      provider: "youtube",
+      page: "home",
+      playback: "unavailable",
+      searchControl: { id: searchControlId, label: "Search" },
+    });
     const query = "Blender official Big Buck Bunny";
     const search = await nativeRequest(
       "/native/v1/commands",
@@ -353,12 +417,18 @@ for await (const line of createInterface({ input: process.stdin })) {
         resultsReadBrowser.status,
         resultsReadBrowser.revision,
       ],
-      ["accessibility", "read", "completed", resultsRevision],
+      ["companion", "read", "completed", resultsRevision],
     );
     const resultsView = resultsReadBrowser.view;
+    assert.deepEqual(record(record(resultsView).site), {
+      provider: "youtube",
+      page: "results",
+      playback: "unavailable",
+      searchControl: { id: searchControlId, label: "Search" },
+    });
     const resultsItems = record(resultsView).items;
     assert.ok(Array.isArray(resultsItems));
-    assert.deepEqual(resultsItems, [{ id: "observed-video-1", label: "Synthetic public video" }]);
+    assert.deepEqual(resultsItems, [{ id: resultId, label: "Synthetic public video" }]);
     const observedItemId = record(resultsItems[0]).id;
     assert.equal(typeof observedItemId, "string");
     const selection = await nativeRequest(
@@ -405,8 +475,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         watchReadBrowser.status,
         watchReadBrowser.revision,
       ],
-      ["accessibility", "read", "completed", watchRevision],
+      ["companion", "read", "completed", watchRevision],
     );
+    assert.deepEqual(record(record(watchReadBrowser.view).site), {
+      provider: "youtube",
+      page: "watch",
+      playback: "paused",
+    });
     const play = await nativeRequest(
       "/native/v1/commands",
       {
@@ -433,8 +508,13 @@ for await (const line of createInterface({ input: process.stdin })) {
         secondWatchReadBrowser.status,
         secondWatchReadBrowser.revision,
       ],
-      ["accessibility", "read", "completed", watchRevision],
+      ["companion", "read", "completed", watchRevision],
     );
+    assert.deepEqual(record(record(secondWatchReadBrowser.view).site), {
+      provider: "youtube",
+      page: "watch",
+      playback: "playing",
+    });
     const pause = await nativeRequest(
       "/native/v1/commands",
       {
@@ -462,10 +542,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     assert.deepEqual(helperRequests, [
       { type: "bind" },
       { type: "read" },
-      { type: "perform", operation: "search", query: "Blender official Big Buck Bunny" },
       { type: "bind" },
       { type: "read" },
-      { type: "perform", operation: "select", itemID: "observed-video-1" },
       { type: "bind" },
       { type: "read" },
       { type: "perform", operation: "playback", action: "play" },
@@ -473,7 +551,20 @@ for await (const line of createInterface({ input: process.stdin })) {
       { type: "perform", operation: "playback", action: "pause" },
     ]);
     assert.equal(bridgeRequests, 12, "each explicit operation requires one fresh binding check");
-    assert.equal(webActionCalls, 0, "AX dispatch must never switch to WebMCP after selection");
+    assert.deepEqual(bridgeTypes, Array(12).fill("binding.status"));
+    assert.deepEqual(companionCommands, [
+      "inspect",
+      "searchObserved",
+      "inspect",
+      "open",
+      "inspect",
+      "inspect",
+    ]);
+    assert.deepEqual(submittedSearches, [
+      { controlId: searchControlId, query: "Blender official Big Buck Bunny" },
+    ]);
+    assert.deepEqual(selectedCandidates, [resultId]);
+    assert.equal(webActionCalls, 0, "AX and companion dispatch must never switch to WebMCP");
     assert.equal(desktopCalls, 0);
     const allJobs = coordinator.jobStore.list(target, 20);
     assert.equal(allJobs.length, 12, "unknown operations must not generate replay jobs");

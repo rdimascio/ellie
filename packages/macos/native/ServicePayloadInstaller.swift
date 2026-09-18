@@ -40,7 +40,7 @@ let maximumSourceBytes = 16 * 1024
     return .rejected
   }
 #else
-  let maximumPayloadFiles = 2_048
+  let maximumPayloadFiles = 3_072
   let maximumPayloadEntries = 4_096
   private func diagnosticCheckpoint(_ stage: String, category: String = "validation") {}
 
@@ -1165,7 +1165,7 @@ private func stage(
         failLifecycleCommand(error)
       }
     }
-    if arguments.first == "select" || arguments.first == "recover" {
+    if arguments.first == "select" || arguments.first == "unselect" || arguments.first == "recover" {
       do {
         try runSelectionCommand(arguments)
       } catch {

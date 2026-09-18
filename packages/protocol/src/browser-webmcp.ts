@@ -21,6 +21,8 @@ const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const requestTypes = [
   "binding.status",
   "binding.refresh",
+  "page.inspect",
+  "media.execute",
   "tools.list",
   "tool.execute",
   "cancel",
@@ -40,9 +42,50 @@ export const BROWSER_WEBMCP_STATUSES = [
 ] as const;
 
 export type BrowserWebMCPStatus = (typeof BROWSER_WEBMCP_STATUSES)[number];
+export type BrowserCompanionCommand =
+  | { type: "inspect"; actionId: string }
+  | { type: "scrollViewport"; actionId: string; direction: "up" | "down" }
+  | {
+      type: "scrollRow";
+      actionId: string;
+      snapshotId: string;
+      candidateId: string;
+      direction: "left" | "right";
+    }
+  | {
+      type: "scrollSelectedRow";
+      actionId: string;
+      snapshotId: string;
+      rowId: string;
+      direction: "left" | "right";
+    }
+  | {
+      type: "searchObserved";
+      actionId: string;
+      snapshotId: string;
+      controlId: string;
+      query: string;
+    }
+  | { type: "open"; actionId: string; snapshotId: string; candidateId: string }
+  | { type: "play" | "pause"; actionId: string };
 export type BrowserWebMCPRequest =
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.status" }
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.refresh" }
+  | {
+      protocol: typeof BROWSER_WEBMCP_PROTOCOL;
+      id: string;
+      type: "page.inspect";
+      bindingId: string;
+      documentId: string;
+    }
+  | {
+      protocol: typeof BROWSER_WEBMCP_PROTOCOL;
+      id: string;
+      type: "media.execute";
+      bindingId: string;
+      documentId: string;
+      command: BrowserCompanionCommand;
+    }
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "tools.list" }
   | {
       protocol: typeof BROWSER_WEBMCP_PROTOCOL;
@@ -90,6 +133,73 @@ function identifier(value: unknown): string {
   )
     throw new Error("Invalid message.");
   return value;
+}
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+function companionCommand(value: unknown): BrowserCompanionCommand {
+  const body = record(value);
+  const actionId = identifier(body.actionId);
+  if (!uuidPattern.test(actionId)) throw new Error("Invalid message.");
+  if (body.type === "inspect" || body.type === "play" || body.type === "pause") {
+    exactKeys(body, ["type", "actionId"]);
+    return { type: body.type, actionId };
+  }
+  if (body.type === "scrollViewport") {
+    exactKeys(body, ["type", "actionId", "direction"]);
+    if (body.direction !== "up" && body.direction !== "down") throw new Error("Invalid message.");
+    return { type: "scrollViewport", actionId, direction: body.direction };
+  }
+  if (body.type === "open" || body.type === "scrollRow") {
+    exactKeys(
+      body,
+      body.type === "open"
+        ? ["type", "actionId", "snapshotId", "candidateId"]
+        : ["type", "actionId", "snapshotId", "candidateId", "direction"],
+    );
+    const snapshotId = identifier(body.snapshotId);
+    const targetId = identifier(body.candidateId);
+    if (!uuidPattern.test(snapshotId) || !uuidPattern.test(targetId))
+      throw new Error("Invalid message.");
+    if (body.type === "open") return { type: "open", actionId, snapshotId, candidateId: targetId };
+    if (body.direction !== "left" && body.direction !== "right")
+      throw new Error("Invalid message.");
+    return {
+      type: "scrollRow",
+      actionId,
+      snapshotId,
+      candidateId: targetId,
+      direction: body.direction,
+    };
+  }
+  if (body.type === "scrollSelectedRow") {
+    exactKeys(body, ["type", "actionId", "snapshotId", "rowId", "direction"]);
+    const snapshotId = identifier(body.snapshotId);
+    const rowId = identifier(body.rowId);
+    if (
+      !uuidPattern.test(snapshotId) ||
+      !uuidPattern.test(rowId) ||
+      (body.direction !== "left" && body.direction !== "right")
+    )
+      throw new Error("Invalid message.");
+    return { type: "scrollSelectedRow", actionId, snapshotId, rowId, direction: body.direction };
+  }
+  if (body.type === "searchObserved") {
+    exactKeys(body, ["type", "actionId", "snapshotId", "controlId", "query"]);
+    const snapshotId = identifier(body.snapshotId);
+    const controlId = identifier(body.controlId);
+    if (!uuidPattern.test(snapshotId) || !uuidPattern.test(controlId))
+      throw new Error("Invalid message.");
+    if (
+      typeof body.query !== "string" ||
+      !body.query ||
+      body.query !== body.query.trim() ||
+      body.query.length > 200 ||
+      Buffer.byteLength(body.query) > 512 ||
+      /\p{C}/u.test(body.query)
+    )
+      throw new Error("Invalid message.");
+    return { type: "searchObserved", actionId, snapshotId, controlId, query: body.query };
+  }
+  throw new Error("Invalid message.");
 }
 
 function boundedJson(value: unknown, maximumBytes: number, requireObject = false): unknown {
@@ -146,6 +256,25 @@ export function browserWebMCPRequest(value: unknown): BrowserWebMCPRequest {
   if (body.type === "cancel") {
     exactKeys(body, ["protocol", "id", "type", "targetId"]);
     return { ...base, type: "cancel", targetId: identifier(body.targetId) };
+  }
+  if (body.type === "page.inspect") {
+    exactKeys(body, ["protocol", "id", "type", "bindingId", "documentId"]);
+    return {
+      ...base,
+      type: "page.inspect",
+      bindingId: identifier(body.bindingId),
+      documentId: identifier(body.documentId),
+    };
+  }
+  if (body.type === "media.execute") {
+    exactKeys(body, ["protocol", "id", "type", "bindingId", "documentId", "command"]);
+    return {
+      ...base,
+      type: "media.execute",
+      bindingId: identifier(body.bindingId),
+      documentId: identifier(body.documentId),
+      command: companionCommand(body.command),
+    };
   }
   exactKeys(body, ["protocol", "id", "type", "bindingId", "documentId", "toolHandle", "args"]);
   return {

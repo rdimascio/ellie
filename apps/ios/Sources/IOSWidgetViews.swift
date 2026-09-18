@@ -8,7 +8,9 @@ extension WidgetKind {
 }
 
 struct IOSWidgetCard: View {
-    let widget: DashboardWidget; let editing: Bool; let edit: () -> Void; let earlier: () -> Void; let later: () -> Void; let remove: () -> Void; let isFirst: Bool; let isLast: Bool
+    let widget: DashboardWidget; @ObservedObject var choresStore: ChoresStore; @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: IOSGoogleAgendaStore; @ObservedObject var enrollment: NativeEnrollmentStore
+    let editing: Bool; let edit: () -> Void; let earlier: () -> Void; let later: () -> Void; let remove: () -> Void; let isFirst: Bool; let isLast: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Label(widget.title, systemImage: widget.type.iosSymbol).font(.headline); Spacer() }
@@ -20,6 +22,14 @@ struct IOSWidgetCard: View {
                         .frame(maxWidth: .infinity, minHeight: 80, alignment: .topLeading)
                         .multilineTextAlignment(.leading)
                 }.buttonStyle(.plain).accessibilityIdentifier("note-\(widget.id)")
+            } else if widget.type == .playlist {
+                IOSPlaylistWidget(widget: widget, configure: edit)
+            } else if widget.type == .chores {
+                IOSChoresWidget(store: choresStore)
+            } else if widget.type == .weather {
+                IOSWeatherWidget(store: weatherStore, configure: edit)
+            } else if widget.type == .calendar {
+                IOSGoogleAgendaWidget(store: agendaStore, enrollment: enrollment)
             } else { ContentUnavailableView("Not connected", systemImage: widget.type.iosSymbol, description: Text("This widget is ready for a future provider connection.")) }
             if editing {
                 HStack {
@@ -31,7 +41,7 @@ struct IOSWidgetCard: View {
                 }.labelStyle(.iconOnly)
             }
         }
-        .padding().background(widget.type == .clock ? Color(red: 0.105, green: 0.12, blue: 0.15) : Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 20))
+        .ellieCard()
         .foregroundStyle(widget.type == .clock ? Color.white : Color.primary)
         .accessibilityElement(children: .contain)
     }
@@ -57,7 +67,7 @@ struct IOSWidgetGallery: View {
         NavigationStack {
             List(WidgetKind.allCases, id: \.self) { kind in
                 Button { add(kind) } label: { Label("Add \(kind.iosName)", systemImage: kind.iosSymbol) }
-            }.navigationTitle("Add a widget").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
+            }.ellieScreen().navigationTitle("Add a widget").toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } } }
         }.presentationDetents([.medium, .large])
     }
 }
@@ -65,10 +75,17 @@ struct IOSWidgetGallery: View {
 struct IOSWidgetEditor: View {
     @Environment(\.dismiss) private var dismiss
     let widget: DashboardWidget; let save: (String, WidgetSize, [String: String]) -> Void
-    @State private var title: String; @State private var size: WidgetSize; @State private var note: String; @State private var zone: String
-    init(widget: DashboardWidget, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
+    @ObservedObject var weatherStore: WeatherStore
+    @State private var title: String; @State private var size: WidgetSize; @State private var note: String; @State private var zone: String; @State private var playlist: String
+    @State private var weatherEnabled: Bool; @State private var placeName: String; @State private var latitude: String; @State private var longitude: String
+    init(widget: DashboardWidget, weatherStore: WeatherStore, save: @escaping (String, WidgetSize, [String: String]) -> Void) {
         self.widget = widget; self.save = save
-        _title = State(initialValue: widget.title); _size = State(initialValue: widget.size); _note = State(initialValue: widget.config["text"] ?? ""); _zone = State(initialValue: widget.config["timeZone"] ?? "")
+        self.weatherStore = weatherStore
+        _title = State(initialValue: widget.title); _size = State(initialValue: widget.size); _note = State(initialValue: widget.config["text"] ?? ""); _zone = State(initialValue: widget.config["timeZone"] ?? ""); _playlist = State(initialValue: widget.config["youtubePlaylistID"] ?? "")
+        _weatherEnabled = State(initialValue: weatherStore.state.enabled)
+        _placeName = State(initialValue: weatherStore.state.place?.name ?? "")
+        _latitude = State(initialValue: weatherStore.state.place.map { String($0.latitude) } ?? "")
+        _longitude = State(initialValue: weatherStore.state.place.map { String($0.longitude) } ?? "")
     }
     var body: some View {
         NavigationStack {
@@ -77,12 +94,61 @@ struct IOSWidgetEditor: View {
                 Picker("Size", selection: $size) { Text("Small").tag(WidgetSize.small); Text("Wide").tag(WidgetSize.wide) }.pickerStyle(.segmented)
                 if widget.type == .note { Section("Note") { TextEditor(text: $note).frame(minHeight: 180); Text("\(note.count) of 2,000 characters").font(.caption).foregroundStyle(.secondary) } }
                 if widget.type == .clock { Section("Time zone") { TextField("Europe/London", text: $zone).textInputAutocapitalization(.never).autocorrectionDisabled(); Text("Leave blank for this iPhone’s time zone.") } }
+                if widget.type == .playlist {
+                    Section("YouTube playlist") {
+                        TextField("Playlist URL or ID", text: $playlist)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .accessibilityIdentifier("playlist-input")
+                        Text("Use a public playlist URL or ID. Ellie stores only its playlist ID; playback starts when you open the player.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                if widget.type == .weather {
+                    Section("Forecast") {
+                        Toggle("Use Open-Meteo forecasts", isOn: $weatherEnabled)
+                            .accessibilityIdentifier("ios-weather-enable")
+                        if weatherEnabled {
+                            TextField("Place name", text: $placeName)
+                                .accessibilityIdentifier("ios-weather-name")
+                            TextField("Latitude", text: $latitude)
+                                .keyboardType(.numbersAndPunctuation).accessibilityIdentifier("ios-weather-latitude")
+                            TextField("Longitude", text: $longitude)
+                                .keyboardType(.numbersAndPunctuation).accessibilityIdentifier("ios-weather-longitude")
+                            Text("Ellie sends these coordinates to Open-Meteo only when enabled. It never requests this iPhone’s location. Settings apply to every weather widget.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            Text("Weather stays off. Disabling deletes the saved place and forecast.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if let message = weatherStore.message {
+                            Text(message).font(.caption).foregroundStyle(.red)
+                                .accessibilityIdentifier("ios-weather-settings-error")
+                        }
+                    }
+                }
             }
+            .accessibilityIdentifier("ios-widget-editor-form")
+            .ellieScreen()
             .navigationTitle("Edit \(widget.type.iosName)").navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
-                ToolbarItem(placement: .confirmationAction) { Button("Save") { guard let config = try? DashboardModel.configAfterEditing(widget, note: note, timeZone: zone) else { return }; save(title, size, config) }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.utf16.count > 80 || note.utf16.count > 2_000 || (widget.type == .clock && !zone.isEmpty && TimeZone(identifier: zone) == nil)) }
+                ToolbarItem(placement: .confirmationAction) { Button("Save") {
+                    guard let config = try? DashboardModel.configAfterEditing(widget, note: note, timeZone: zone,
+                        playlist: widget.type == .playlist ? playlist : nil) else { return }
+                    if widget.type == .weather {
+                        let saved = weatherEnabled
+                            ? weatherStore.configure(name: placeName, latitudeText: latitude, longitudeText: longitude)
+                            : weatherStore.disable()
+                        guard saved else { return }
+                    }
+                    save(title, size, config)
+                }.disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.utf16.count > 80 || note.utf16.count > 2_000 || (widget.type == .clock && !zone.isEmpty && TimeZone(identifier: zone) == nil) || (widget.type == .playlist && !playlist.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && YouTubePlaylist.parse(playlist) == nil) || (widget.type == .weather && weatherEnabled && !validWeatherPlace)) }
             }
         }
+    }
+
+    private var validWeatherPlace: Bool {
+        guard let latitude = Double(latitude), let longitude = Double(longitude) else { return false }
+        return (try? WeatherPlace.validated(name: placeName, latitude: latitude, longitude: longitude)) != nil
     }
 }

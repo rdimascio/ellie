@@ -43,6 +43,16 @@ final class ChoresStore: ObservableObject {
         mutate { $0.chores.append(Chore(id: UUID().uuidString.lowercased(), title: title, member: member, body: body, dueDay: dueDay)) }
     }
 
+    func update(id: String, title: String, member: String, body: String = "", dueDay: ChoreDay) {
+        mutate { state in
+            guard let index = state.chores.firstIndex(where: { $0.id == id }) else { throw ChoresModelError.unknownChore }
+            state.chores[index].title = title
+            state.chores[index].member = member
+            state.chores[index].body = body
+            state.chores[index].dueDay = dueDay
+        }
+    }
+
     func setCompleted(id: String, completed: Bool, now: Date = Date()) {
         mutate { state in
             guard let index = state.chores.firstIndex(where: { $0.id == id }) else { throw ChoresModelError.unknownChore }

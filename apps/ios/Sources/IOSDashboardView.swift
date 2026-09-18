@@ -5,6 +5,40 @@ import UniformTypeIdentifiers
 struct IOSDashboardList: View {
     @ObservedObject var store: DashboardStore
     @ObservedObject var enrollment: NativeEnrollmentStore
+    @StateObject private var choresStore: ChoresStore
+    @StateObject private var weatherStore: WeatherStore
+    @StateObject private var agendaStore: IOSGoogleAgendaStore
+    @StateObject private var quietStore: IOSQuietSessionsStore
+    #if DEBUG
+    var uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)? = nil
+    #endif
+
+    init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil,
+         weatherStore: WeatherStore? = nil) {
+        self.store = store
+        self.enrollment = enrollment
+        _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
+        _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
+        _agendaStore = StateObject(wrappedValue: IOSGoogleAgendaStore())
+        _quietStore = StateObject(wrappedValue: IOSQuietSessionsStore())
+    }
+
+    #if DEBUG
+    init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil,
+         weatherStore: WeatherStore? = nil, agendaStore: IOSGoogleAgendaStore? = nil,
+         uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)?,
+         quietStore: IOSQuietSessionsStore? = nil) {
+        self.store = store
+        self.enrollment = enrollment
+        _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
+        _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
+        _agendaStore = StateObject(wrappedValue: agendaStore ?? IOSGoogleAgendaStore())
+        _quietStore = StateObject(wrappedValue: quietStore ?? IOSQuietSessionsStore())
+        self.uiTestLifeDestination = uiTestLifeDestination
+    }
+    #endif
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @State private var creating = false
     @State private var name = ""
     @State private var importing = false
@@ -15,23 +49,96 @@ struct IOSDashboardList: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ForEach(store.state.dashboards) { dashboard in
-                        NavigationLink {
-                            IOSDashboardDetail(store: store, dashboardID: dashboard.id)
-                        } label: {
-                            Label(dashboard.name, systemImage: dashboard.id == store.state.dashboards.first?.id ? "house" : "rectangle.3.group")
+            GeometryReader { geometry in
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 26) {
+                        if case .enrolled(let credential) = enrollment.phase {
+                            IOSQuietSessionsHome(store: quietStore, credential: credential)
                         }
-                        .accessibilityIdentifier("dashboard-\(dashboard.id)")
-                    }
-                } header: { Text("Dashboards") }
-                footer: { Text("Layouts and notes stay on this iPhone until you export them.") }
-                Section("Coordinator") {
-                    NavigationLink { NativeEnrollmentView(store: enrollment, dashboards: store) } label: { Label("Pair this iPhone", systemImage: "link") }
+                        if dynamicTypeSize.isAccessibilitySize {
+                            if case .enrolled(let credential) = enrollment.phase {
+                                lifeEntry(for: credential)
+                            }
+                        } else {
+                            homeInvitation(compact: geometry.size.width < 390)
+                        }
+                        HStack {
+                            Text("Your dashboards").font(.headline)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !dynamicTypeSize.isAccessibilitySize {
+                                Spacer()
+                                Image(systemName: "square.grid.2x2").foregroundStyle(ElliePalette.muted)
+                            }
+                        }
+                        VStack(spacing: 12) {
+                            ForEach(store.state.dashboards) { dashboard in
+                                NavigationLink {
+                                    IOSDashboardDetail(store: store, choresStore: choresStore,
+                                        weatherStore: weatherStore, agendaStore: agendaStore,
+                                        enrollment: enrollment, dashboardID: dashboard.id)
+                                } label: {
+                                    HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 16) {
+                                        if !dynamicTypeSize.isAccessibilitySize {
+                                            Image(systemName: dashboard.id == store.state.dashboards.first?.id ? "house" : "rectangle.3.group")
+                                                .font(.title3)
+                                                .foregroundStyle(ElliePalette.accent)
+                                                .frame(width: 44, height: 44)
+                                                .background(ElliePalette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                                        }
+                                        VStack(alignment: .leading, spacing: 5) {
+                                            Text(dashboard.name).font(.headline).foregroundStyle(ElliePalette.foreground)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                            Text("\(dashboard.widgets.count) widgets")
+                                                .font(.caption).foregroundStyle(ElliePalette.muted)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        if !dynamicTypeSize.isAccessibilitySize {
+                                            Spacer(minLength: 8)
+                                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                        }
+                                    }
+                                    .ellieCard()
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(dashboard.name)
+                                .accessibilityIdentifier("dashboard-\(dashboard.id)")
+                            }
+                        }
+                        NavigationLink {
+                            NativeEnrollmentView(store: enrollment, dashboards: store)
+                        } label: {
+                            HStack(spacing: dynamicTypeSize.isAccessibilitySize ? 0 : 14) {
+                                if !dynamicTypeSize.isAccessibilitySize {
+                                    Image(systemName: "link").foregroundStyle(ElliePalette.accent)
+                                }
+                                VStack(alignment: .leading, spacing: 5) {
+                                    Text(coordinatorTitle).font(.subheadline.weight(.semibold)).foregroundStyle(ElliePalette.foreground)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                    Text("Your devices, working together")
+                                        .font(.caption).foregroundStyle(ElliePalette.muted)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                if !dynamicTypeSize.isAccessibilitySize {
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                }
+                            }
+                            .ellieCard()
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(coordinatorTitle)
                         .accessibilityIdentifier("coordinator-enrollment")
+                        Label("Layouts and notes stay on this iPhone until you export or sync them.", systemImage: "lock")
+                            .font(.caption).foregroundStyle(ElliePalette.muted)
+                            .padding(.horizontal, 4)
+                    }
+                    .padding(20)
                 }
+                .accessibilityIdentifier("dashboard-list")
             }
+            .ellieScreen()
             .navigationTitle("Ellie")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -86,6 +193,98 @@ struct IOSDashboardList: View {
         } message: {
             Text("Importing replaces every dashboard and note saved on this iPhone.")
         }
+        .onAppear { agendaStore.bind(activeCredential) }
+        .onChange(of: enrollment.phase) { _, _ in
+            agendaStore.bind(activeCredential)
+            quietStore.bind(activeCredential)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { quietStore.background() }
+        }
+    }
+
+    private var activeCredential: NativeEnrollmentCredential? {
+        if case .enrolled(let credential) = enrollment.phase { return credential }
+        return nil
+    }
+
+    private var coordinatorTitle: String {
+        if case .enrolled = enrollment.phase { return "Your coordinator" }
+        return "Pair this iPhone"
+    }
+
+    private func homeInvitation(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if compact {
+                EllieNativePresence().frame(width: 96, height: 100)
+                invitationCopy
+            } else {
+                HStack(spacing: 12) {
+                    invitationCopy.frame(maxWidth: .infinity, alignment: .leading)
+                    EllieNativePresence().frame(width: 110, height: 125)
+                }
+            }
+            if case .enrolled(let credential) = enrollment.phase {
+                lifeEntry(for: credential)
+            } else {
+                Text("Connect your coordinator to bring Ellie with you.")
+                    .font(.caption).foregroundStyle(ElliePalette.accent)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(20)
+        .background(LinearGradient(colors: [ElliePalette.surface, Color(red: 0.12, green: 0.14, blue: 0.26)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 28))
+        .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(ElliePalette.violet.opacity(0.3), lineWidth: 1))
+    }
+
+    private func lifeEntry(for credential: NativeEnrollmentCredential) -> some View {
+        NavigationLink {
+            lifeDestination(for: credential)
+        } label: {
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    Text("Open Ellie Life")
+                } else {
+                    Label("Open Ellie Life", systemImage: "sparkle")
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            .padding(.vertical, 12).padding(.horizontal, 16)
+            .foregroundStyle(ElliePalette.background)
+            .background(ElliePalette.accent, in: RoundedRectangle(cornerRadius: 13))
+        }
+        .accessibilityIdentifier("open-ellie-life")
+    }
+
+    private var invitationCopy: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("A little more\nheadspace.")
+                .font(.largeTitle.weight(.medium))
+                .tracking(-1)
+                .foregroundStyle(ElliePalette.foreground)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("home-invitation-title")
+            Text("Your spaces. Your devices.\nAll a little closer.")
+                .font(.subheadline).foregroundStyle(ElliePalette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private func lifeDestination(for credential: NativeEnrollmentCredential) -> some View {
+        #if DEBUG
+        if let uiTestLifeDestination {
+            uiTestLifeDestination(credential).id(credential.client.id)
+        } else {
+            LifeWebView(credential: LifeWebCredential(enrollment: credential))
+                .id(credential.client.id)
+        }
+        #else
+        LifeWebView(credential: LifeWebCredential(enrollment: credential))
+            .id(credential.client.id)
+        #endif
     }
 
     private func prepareExport() {
@@ -98,6 +297,10 @@ struct IOSDashboardList: View {
 private struct IOSDashboardDetail: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var store: DashboardStore
+    @ObservedObject var choresStore: ChoresStore
+    @ObservedObject var weatherStore: WeatherStore
+    @ObservedObject var agendaStore: IOSGoogleAgendaStore
+    @ObservedObject var enrollment: NativeEnrollmentStore
     let dashboardID: String
     @State private var editing = false
     @State private var adding = false
@@ -113,7 +316,8 @@ private struct IOSDashboardDetail: View {
             LazyVStack(spacing: 16) {
                 if let dashboard {
                     ForEach(dashboard.widgets) { widget in
-                        IOSWidgetCard(widget: widget, editing: editing,
+                        IOSWidgetCard(widget: widget, choresStore: choresStore, weatherStore: weatherStore,
+                            agendaStore: agendaStore, enrollment: enrollment, editing: editing,
                             edit: { editedWidget = widget },
                             earlier: { select(); store.moveWidget(id: widget.id, offset: -1) },
                             later: { select(); store.moveWidget(id: widget.id, offset: 1) },
@@ -129,7 +333,8 @@ private struct IOSDashboardDetail: View {
             }
             .padding()
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .accessibilityIdentifier("ios-dashboard-detail-scroll")
+        .ellieScreen()
         .navigationTitle(dashboard?.name ?? "Dashboard")
         .navigationBarTitleDisplayMode(.large)
         .onAppear(perform: select)
@@ -147,7 +352,7 @@ private struct IOSDashboardDetail: View {
         }
         .sheet(isPresented: $adding) { IOSWidgetGallery { select(); store.addWidget(kind: $0); adding = false } }
         .sheet(item: $editedWidget) { widget in
-            IOSWidgetEditor(widget: widget) { title, size, config in
+            IOSWidgetEditor(widget: widget, weatherStore: weatherStore) { title, size, config in
                 select(); store.updateWidget(id: widget.id, title: title, size: size, config: config)
                 if store.error == nil { editedWidget = nil }
             }

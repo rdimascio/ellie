@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import {
   ConnectorBroker,
   type ConnectedOAuth,
@@ -92,15 +92,19 @@ const adapter = (id: ProviderId, items: ProviderObservation[]): LifeProviderAdap
   },
 });
 
+let latestOAuthState = "";
+let tokenExchanges = 0;
 const oauth: ConnectedOAuth = {
   begin({ actorId: owner, provider, redirectUri }) {
+    latestOAuthState = `fixture-${provider}-${owner}`;
     const target = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     target.searchParams.set("client_id", "fixture-client.apps.googleusercontent.com");
     target.searchParams.set("redirect_uri", redirectUri);
-    target.searchParams.set("state", `fixture-${provider}-${owner}`);
-    return { authorizationUrl: target.href, state: `fixture-${provider}-${owner}` };
+    target.searchParams.set("state", latestOAuthState);
+    return { authorizationUrl: target.href, state: latestOAuthState };
   },
   async complete() {
+    tokenExchanges++;
     return {
       actorId,
       provider: "gmail" as const,
@@ -127,8 +131,49 @@ const tasks = new TaskRuntime({
 });
 const connectorStore = new ConnectorStore(join(root, "connectors.sqlite"));
 const vault = new MemoryVault();
-const calendar = adapter("google-calendar", calendarItems);
-const gmail = adapter("gmail", []);
+const selectedItems = [event("selected-only", "Selected calendar visit", now + 4 * 86_400_000)];
+const calendar: LifeProviderAdapter = {
+  ...adapter("google-calendar", calendarItems),
+  async calendars() {
+    return [
+      { id: "primary", label: "Primary fixture", primary: true },
+      { id: "selected@example.test", label: "Selected fixture", primary: false },
+    ];
+  },
+  async pull(input) {
+    return {
+      accountId: "google-calendar-fixture-account",
+      items: input.resourceId === "selected@example.test" ? selectedItems : calendarItems,
+      cursor: "fixture-cursor",
+      complete: true,
+    };
+  },
+};
+let explicitFullReads = 0;
+const gmail: LifeProviderAdapter = {
+  ...adapter("gmail", [
+    {
+      sourceKey: "fixture-message",
+      sourceRevision: "fixture-v1",
+      observedAt: now,
+      title: "Private fixture subject",
+      kind: "message",
+      data: {
+        sentAt: now,
+        from: "sender@example.test",
+        to: ["owner@example.test"],
+        subject: "Private fixture subject",
+        snippet: "Bounded fixture snippet",
+        direction: "incoming",
+      },
+    },
+  ]),
+  async readMessageText(messageId) {
+    explicitFullReads++;
+    assert.equal(messageId, "fixture-message");
+    return { status: "plain", text: "Private fixture body, fetched only after selection." };
+  },
+};
 const plaid = adapter(
   "plaid",
   [61, 31, 1].map((days): ProviderObservation => ({
@@ -169,6 +214,7 @@ const harness = createLifeHarness({
     },
   },
 });
+let openExternally = true;
 const server = createLifeServer({
   stateDir: root,
   assetsDir: resolve("apps/life-ui/dist"),
@@ -182,6 +228,7 @@ const server = createLifeServer({
   userName: "Connected E2E",
   timeZone: "America/Los_Angeles",
   now: () => now,
+  openAuthorizationUrl: async () => openExternally,
 });
 const browser = await chromium.launch({ headless: true });
 
@@ -301,8 +348,45 @@ try {
   await page.getByRole("heading", { name: "Connected accounts", exact: true }).waitFor();
   const openSettings = async () => {
     const mobile = page.getByLabel("Settings", { exact: true });
-    if (await mobile.isVisible()) await mobile.click();
-    else await page.locator("aside .settings-link").click();
+    await expect(mobile).toBeVisible();
+    await mobile.click();
+  };
+  const holdNextConnectionsList = async () => {
+    let capture!: () => void;
+    let release!: () => void;
+    let delivered!: () => void;
+    const captured = new Promise<void>((resolve) => (capture = resolve));
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const finished = new Promise<void>((resolve) => (delivered = resolve));
+    let held = false;
+    const routePattern = "**/api/connections";
+    const handler = async (route: import("@playwright/test").Route) => {
+      if (held || route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      held = true;
+      const stale = await route.fetch();
+      capture();
+      await gate;
+      await route.fulfill({ response: stale });
+      delivered();
+    };
+    await page.route(routePattern, handler);
+    await Promise.race([
+      captured,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for the owned status poll.")), 7_000),
+      ),
+    ]);
+    return async () => {
+      release();
+      await finished;
+      await page.unroute(routePattern, handler);
+      await page.evaluate(
+        () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+      );
+    };
   };
   await page.getByText("Private fixture calendar").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
@@ -333,31 +417,79 @@ try {
         ?.mode === "prepare"
     );
   });
-
-  const startRoute = "**/api/connections/start";
-  await page.route(startRoute, (route) =>
+  const calendarArticle = page
+    .locator(".connection-list article")
+    .filter({ hasText: "Private fixture calendar" });
+  const refreshRoute = "**/api/connections/*/refresh";
+  await page.route(refreshRoute, (route) =>
     route.fulfill({
-      status: 200,
+      status: 503,
       contentType: "application/json",
-      body: JSON.stringify({
-        authorizationUrl: "https://accounts.google.com/o/oauth2/v2/auth?state=host-opened-fixture",
-        openedExternally: true,
-      }),
+      body: JSON.stringify({ error: "Calendar refresh is unavailable." }),
     }),
   );
+  await calendarArticle.getByRole("button", { name: "Refresh" }).click();
+  await page.getByRole("alert").getByText("Calendar refresh is unavailable.").waitFor();
+  await page.getByText(/Google Calendar · Connected/).waitFor();
+  await page.unroute(refreshRoute);
+  await calendarArticle.getByRole("button", { name: "Refresh" }).click();
+  await page.getByText(/Google Calendar · Connected/).waitFor();
+
   const ellieUrl = page.url();
   const gmailConnect = () =>
     page
       .locator(".provider-list article")
       .filter({ hasText: "Gmail" })
       .getByRole("button", { name: "Connect" });
+  await expect(gmailConnect()).toBeEnabled();
+  const deliverPreStartList = await holdNextConnectionsList();
   await gmailConnect().click();
   await page
     .getByRole("status")
     .getByText("Finish connecting in your browser. Ellie will update here when it’s ready.")
     .waitFor();
   assert.equal(page.url(), ellieUrl, "host-opened OAuth keeps the Ellie WebView in place");
-  await page.unroute(startRoute);
+  assert.equal(await gmailConnect().count(), 0, "pending setup cannot create a duplicate");
+  await deliverPreStartList();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "a delayed pre-start list must not clear the current setup",
+  );
+  const cancelRoute = "**/api/connections/*/revoke";
+  await page.route(cancelRoute, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Connection cancellation is unavailable." }),
+    }),
+  );
+  await page.getByRole("button", { name: "Stop setup" }).click();
+  await page.getByRole("alert").getByText("Connection cancellation is unavailable.").waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "failed cancellation must retain the pending setup and its recovery control",
+  );
+  await page.unroute(cancelRoute);
+  await expect(page.getByRole("button", { name: "Stop setup" })).toBeEnabled();
+  const deliverPreStopList = await holdNextConnectionsList();
+  await page.getByRole("button", { name: "Stop setup" }).click();
+  await page
+    .getByRole("status")
+    .getByText("Google connection setup did not finish. You can start again.")
+    .waitFor();
+  await deliverPreStopList();
+  assert.equal(await page.getByRole("button", { name: "Stop setup" }).count(), 0);
+  await page.getByText(/Gmail · Disconnected/).waitFor();
+  const stoppedCallback = await fetch(
+    `${listening.url}/api/connections/callback?state=${encodeURIComponent(latestOAuthState)}&code=late-synthetic-code`,
+    { redirect: "manual" },
+  );
+  assert.equal(stoppedCallback.status, 400);
+  assert.equal(tokenExchanges, 0, "stopped setup never reaches the token exchange");
+  await gmailConnect().waitFor();
+  openExternally = false;
   await page.reload();
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await openSettings();
@@ -383,9 +515,122 @@ try {
   const callback = `${listening.url}/api/connections/callback?state=${encodeURIComponent(authorization.searchParams.get("state")!)}&code=fixture-code`;
   const completed = await fetch(callback, { redirect: "manual" });
   assert.equal(completed.status, 303, "OAuth callback does not require the browser session cookie");
-  assert.equal(completed.headers.get("location"), "/?connected=1");
+  assert.equal(tokenExchanges, 1, "only the explicitly completed setup exchanges a token");
+  assert.equal(completed.headers.get("location"), "/connections/complete");
   const replay = await fetch(callback, { redirect: "manual" });
   assert.equal(replay.status, 400, "OAuth callback state is one-use");
+  await page.reload();
+  await openSettings();
+  const gmailArticle = page
+    .locator(".connection-list article")
+    .filter({ hasText: "Private fixture inbox" });
+  await gmailArticle.getByRole("button", { name: "View imported activity" }).click();
+  await gmailArticle.getByText(/Private fixture subject/).waitFor();
+  await gmailArticle.getByText(/Bounded fixture snippet/).waitFor();
+  assert.equal(explicitFullReads, 0, "preview must not fetch any message body");
+  await gmailArticle
+    .getByRole("button", { name: /Private fixture subject.*sender@example.test/ })
+    .click();
+  await gmailArticle
+    .getByRole("region", { name: "Selected Gmail message" })
+    .getByText("Private fixture body, fetched only after selection.")
+    .waitFor();
+  assert.equal(explicitFullReads, 1);
+  await calendarArticle.getByRole("button", { name: "View imported activity" }).click();
+  assert.equal(
+    await gmailArticle.getByText("Private fixture body, fetched only after selection.").count(),
+    0,
+  );
+  const gmailId = connectorStore
+    .list(actorId)
+    .find((item) => item.provider === "gmail" && item.state === "connected")!.id;
+  const otherStateDir = join(root, "other-actor");
+  await mkdir(otherStateDir, { mode: 0o700 });
+  const otherServer = createLifeServer({
+    stateDir: otherStateDir,
+    assetsDir: resolve("apps/life-ui/dist"),
+    store: life,
+    plugins,
+    tasks,
+    harness,
+    connectors,
+    port: 0,
+    userId: "different-fixture-actor",
+    userName: "Other fixture actor",
+    timeZone: "America/Los_Angeles",
+    now: () => now,
+  });
+  try {
+    const otherListening = await otherServer.listen();
+    const otherContext = await browser.newContext();
+    try {
+      const otherPage = await otherContext.newPage();
+      await otherPage.goto(otherListening.launchUrl);
+      const deniedMessage = await otherPage.evaluate(
+        async ({ id }) =>
+          fetch(`/api/connections/${encodeURIComponent(id)}/messages/fixture-message`).then(
+            (response) => response.status,
+          ),
+        { id: gmailId },
+      );
+      assert.notEqual(deniedMessage, 200, "another actor cannot open imported mail");
+      assert.equal(explicitFullReads, 1, "cross-actor denial must precede provider access");
+    } finally {
+      await otherContext.close();
+    }
+  } finally {
+    await otherServer.close();
+  }
+  let releaseGmailRead!: () => void;
+  let captureGmailRead!: () => void;
+  let deliveredGmailRead!: () => void;
+  const heldGmail = new Promise<void>((resolve) => {
+    captureGmailRead = resolve;
+  });
+  const gmailGate = new Promise<void>((resolve) => {
+    releaseGmailRead = resolve;
+  });
+  const deliveredGmail = new Promise<void>((resolve) => {
+    deliveredGmailRead = resolve;
+  });
+  const gmailPreviewRoute = async (route: import("@playwright/test").Route) => {
+    if (!route.request().url().endsWith(`/api/connections/${gmailId}/preview`)) {
+      await route.continue();
+      return;
+    }
+    const stale = await route.fetch();
+    captureGmailRead();
+    await gmailGate;
+    await route.fulfill({ response: stale });
+    deliveredGmailRead();
+  };
+  await page.route("**/api/connections/*/preview", gmailPreviewRoute);
+  try {
+    await gmailArticle.getByRole("button", { name: "View imported activity" }).click();
+    await Promise.race([
+      heldGmail,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for held Gmail preview.")), 7_000),
+      ),
+    ]);
+    await calendarArticle.getByRole("button", { name: "View imported activity" }).click();
+    assert.equal(
+      await calendarArticle.getByText(/Private fixture subject/).count(),
+      0,
+      "the second account must never display the first account's preview",
+    );
+    releaseGmailRead();
+    await deliveredGmail;
+  } finally {
+    releaseGmailRead();
+    await page.unroute("**/api/connections/*/preview", gmailPreviewRoute);
+  }
+  await calendarArticle.getByText("Doctor appointment").waitFor();
+  assert.equal(
+    await calendarArticle.getByText(/Private fixture subject/).count(),
+    0,
+    "a late first-account response cannot overwrite the selected account",
+  );
 
   await page.goto(listening.url);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
@@ -409,6 +654,121 @@ try {
 
   await openSettings();
   await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  await calendarArticle.getByRole("button", { name: "View imported activity" }).click();
+  await calendarArticle.getByText("Doctor appointment").waitFor();
+  const rejectedCalendar = await page.evaluate(
+    async (id) =>
+      fetch(`/api/connections/${id}/calendar`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ calendarId: "not-in-the-account" }),
+      }).then((response) => response.status),
+    connection.id,
+  );
+  assert.notEqual(rejectedCalendar, 200);
+  assert.equal(connectorStore.get(actorId, connection.id)?.selectedCalendarId, undefined);
+  assert.equal(
+    connectorStore
+      .observations(actorId, connection.id)
+      .some((item) => item.title === "Doctor appointment"),
+    true,
+  );
+  await calendarArticle.getByLabel("Calendar to read").selectOption("selected@example.test");
+  await calendarArticle.getByText("Selected calendar visit").waitFor();
+  assert.equal(
+    await calendarArticle.getByText("Doctor appointment").count(),
+    0,
+    "switching calendars replaces only this connection's imported evidence",
+  );
+  const selectedRead = await page.evaluate(async (id) => {
+    const response = await fetch(`/api/connections/${id}/preview`);
+    return response.json();
+  }, connection.id);
+  assert.deepEqual(
+    selectedRead.items.map((item: { title: string }) => item.title),
+    ["Selected calendar visit"],
+  );
+  await gmailArticle.getByRole("button", { name: "View imported activity" }).click();
+  await gmailArticle.getByText(/Private fixture subject/).waitFor();
+  let releaseMessageRead!: () => void;
+  let messageReadCaptured!: () => void;
+  const heldMessageRead = new Promise<void>((resolve) => {
+    messageReadCaptured = resolve;
+  });
+  const messageReadGate = new Promise<void>((resolve) => {
+    releaseMessageRead = resolve;
+  });
+  let messageRouteSettled!: () => void;
+  const routeSettled = new Promise<void>((resolve) => {
+    messageRouteSettled = resolve;
+  });
+  const messageRoute = async (route: import("@playwright/test").Route) => {
+    try {
+      const response = await route.fetch();
+      messageReadCaptured();
+      await messageReadGate;
+      try {
+        await route.fulfill({ response });
+      } catch (error) {
+        if (!(error instanceof Error) || !/Route is already handled/.test(error.message))
+          throw error;
+      }
+    } finally {
+      messageRouteSettled();
+    }
+  };
+  await page.route("**/api/connections/*/messages/*", messageRoute);
+  try {
+    await gmailArticle
+      .getByRole("button", { name: /Private fixture subject.*sender@example.test/ })
+      .click();
+    await Promise.race([
+      heldMessageRead,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Timed out waiting for held message read.")), 7_000),
+      ),
+    ]);
+    assert.equal(explicitFullReads, 2);
+    assert.equal(
+      await page.evaluate(
+        (id) =>
+          fetch(`/api/connections/${id}/revoke`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: "{}",
+          }).then((response) => response.status),
+        gmailId,
+      ),
+      200,
+    );
+    await page
+      .locator(".provider-list article")
+      .filter({ hasText: "Gmail" })
+      .getByRole("button", { name: "Connect" })
+      .waitFor({ timeout: 10_000 });
+  } finally {
+    releaseMessageRead();
+    await Promise.race([
+      routeSettled,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Held message route did not settle.")), 7_000),
+      ),
+    ]);
+    await page.unroute("**/api/connections/*/messages/*", messageRoute);
+  }
+  assert.equal(
+    await page
+      .locator(".connections")
+      .getByText(/Bounded fixture snippet/)
+      .count(),
+    0,
+    "a polled revocation clears the previously opened private preview",
+  );
+  assert.equal(
+    await page.getByText("Private fixture body, fetched only after selection.").count(),
+    0,
+    "a late message response cannot restore private body after revocation",
+  );
   if (artifactDir) {
     await page
       .getByRole("heading", { name: "Connected accounts", exact: true })
@@ -434,20 +794,66 @@ try {
   assert.match(archive, /ellie-connectors-v1/);
   assert.match(archive, /Doctor appointment/);
   assert.doesNotMatch(archive, /browser-fixture-secret/);
+  assert.doesNotMatch(archive, /Private fixture body, fetched only after selection/);
 
-  await page
-    .locator(".connection-list article")
-    .filter({ hasText: "Private fixture calendar" })
-    .getByRole("button", { name: "Disconnect" })
-    .click();
+  await page.route(cancelRoute, (route) =>
+    route.fulfill({
+      status: 503,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "Calendar disconnect is unavailable." }),
+    }),
+  );
+  await calendarArticle.getByRole("button", { name: "Disconnect" }).click();
+  await page.getByRole("alert").getByText("Calendar disconnect is unavailable.").waitFor();
+  await page.getByText(/Google Calendar · Connected/).waitFor();
+  await page.unroute(cancelRoute);
+  await calendarArticle.getByRole("button", { name: "Disconnect" }).click();
   await page
     .locator(".provider-list article")
     .filter({ hasText: "Google Calendar" })
     .getByRole("button", { name: "Connect" })
     .waitFor();
   assert.equal(
+    await page.evaluate(
+      (id) => fetch(`/api/connections/${id}/preview`).then((response) => response.status),
+      connection.id,
+    ),
+    404,
+  );
+  assert.equal(
     [...vault.values.values()].some((value) => value.accessToken === "browser-fixture-secret"),
     false,
+  );
+  await page
+    .locator(".provider-list article")
+    .filter({ hasText: "Google Calendar" })
+    .getByRole("button", { name: "Connect" })
+    .click();
+  const cancelledLink = await page
+    .getByRole("link", {
+      name: "Open Google sign-in in an external browser",
+    })
+    .getAttribute("href");
+  assert.ok(cancelledLink);
+  const cancelledState = new URL(cancelledLink).searchParams.get("state");
+  assert.ok(cancelledState);
+  const denied = await fetch(
+    `${listening.url}/api/connections/callback?state=${encodeURIComponent(cancelledState)}&error=access_denied`,
+    { redirect: "manual" },
+  );
+  assert.equal(denied.status, 303);
+  await page
+    .getByRole("status")
+    .getByText("Google connection setup did not finish. You can start again.")
+    .waitFor({ timeout: 10_000 });
+  assert.equal(
+    await page
+      .getByRole("link", {
+        name: "Open Google sign-in in an external browser",
+      })
+      .count(),
+    0,
+    "a denied OAuth link must no longer be offered",
   );
   await page.getByRole("button", { name: "Refresh summary" }).click();
   await page.getByRole("button", { name: "Review reset" }).waitFor();

@@ -38,10 +38,25 @@ const MAX_COMMAND_OUTPUT = 1024 * 1024;
 const MAX_NODE_BINARY = 128 * 1024 * 1024;
 const MAX_NODE_LICENSE = 2 * 1024 * 1024;
 const MAX_NODE_ARCHIVE = 64 * 1024 * 1024;
+export const MAXIMUM_PAYLOAD_FILES = 3_072;
+const MAXIMUM_PAYLOAD_ENTRIES = 4_096;
+const MAXIMUM_PAYLOAD_DEPTH = 16;
+const MAXIMUM_PAYLOAD_FILE_BYTES = 128 * 1024 * 1024;
+const MAXIMUM_PAYLOAD_BYTES = 512 * 1024 * 1024;
+const MAXIMUM_MANIFEST_BYTES = 4 * 1024 * 1024;
 const SOURCE_AREAS = ["apps/cli", "apps/node", "apps/server", "packages"];
 const RELEASE = /^node-(v24\.\d+\.\d+)-darwin-(arm64|x64)\.tar\.xz$/;
 const PACKAGE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 const MINIMUM_MACOS = "14.0";
+const providerUtilsLicense = {
+  name: "@ai-sdk/provider-utils",
+  version: "5.0.43",
+  license: "Apache-2.0",
+  integrity:
+    "sha512-gw/bcNseOGSs59TMtV4H1KwqXXe24NHgx+uBYr98pa4Fg6Uvp8hPPxjuckVnfFFyIxHCDew8so0ujpvcSuyMZA==",
+  sha256: "b4f9adb7c568904834d0dd6cc98d16c390d21ca32fc17ae7a267715269bd5529",
+  source: "scripts/licenses/provider-utils-5.0.43.LICENSE",
+};
 const policyCompilerNames = [
   "EllieActivationPolicyBlob.h",
   "module.modulemap",
@@ -159,6 +174,66 @@ async function copyTree(source, destination) {
   await mkdir(dirname(destination), { recursive: true, mode: 0o755 });
   await cp(source, destination, { preserveTimestamps: false });
   await chmod(destination, info.mode & 0o111 ? 0o755 : 0o644);
+}
+
+/** Verify every literal relative extension script transitively from its manifest entrypoints. */
+export async function verifyBrowserCompanionClosure(directory) {
+  const manifestPath = join(directory, "manifest.json");
+  const manifestInfo = await lstat(manifestPath);
+  if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || manifestInfo.size > 64 * 1024)
+    throw new Error("Browser companion manifest is unavailable.");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  const entrypoints = [manifest?.background?.service_worker, manifest?.action?.default_popup];
+  if (!entrypoints.every((value) => typeof value === "string"))
+    throw new Error("Browser companion manifest has incomplete entrypoints.");
+  const pending = [...entrypoints];
+  const collect = (value) => {
+    if (typeof value === "string" && /\.(?:js|mjs|html)$/.test(value)) pending.push(value);
+    else if (Array.isArray(value)) value.forEach(collect);
+    else if (value && typeof value === "object") Object.values(value).forEach(collect);
+  };
+  collect(manifest);
+  const seen = new Set();
+  const validRelative = (value) =>
+    typeof value === "string" &&
+    /^(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.(?:js|mjs|html)$/.test(value) &&
+    value.split("/").every((part) => part !== "." && part !== "..");
+  while (pending.length) {
+    const relative = pending.pop();
+    if (!validRelative(relative)) throw new Error("Browser companion script path is unsafe.");
+    if (seen.has(relative)) continue;
+    if (seen.size >= 64) throw new Error("Browser companion script closure is too large.");
+    seen.add(relative);
+    const path = join(directory, relative);
+    let info;
+    try {
+      info = await lstat(path);
+    } catch {
+      throw new Error(`Browser companion script is missing: ${relative}`);
+    }
+    if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || info.size > 1024 * 1024)
+      throw new Error(`Browser companion script is unsafe: ${relative}`);
+    const source = await readFile(path, "utf8");
+    for (const match of source.matchAll(/["'`]((?:\.\/)?[A-Za-z0-9._/-]+\.(?:js|mjs))["'`]/g)) {
+      const referenced = match[1].startsWith("./")
+        ? join(dirname(relative), match[1].slice(2))
+        : match[1];
+      if (!validRelative(referenced)) throw new Error("Browser companion script path is unsafe.");
+      pending.push(referenced);
+    }
+  }
+  return [...seen].sort();
+}
+
+export async function stageBrowserCompanion(source, destination) {
+  const input = join(source, "apps/browser-media-extension");
+  const output = join(destination, "lib/ellie/apps/browser-media-extension");
+  const expected = await verifyBrowserCompanionClosure(input);
+  await copyTree(input, output);
+  const actual = await verifyBrowserCompanionClosure(output);
+  if (JSON.stringify(actual) !== JSON.stringify(expected))
+    throw new Error("Browser companion script closure changed during staging.");
+  return output;
 }
 
 async function extractNodeMember(archive, member, destination, maximum, mode) {
@@ -592,6 +667,81 @@ function licenseNames(names) {
   return names.filter((name) => /^(?:licen[cs]e|copying|notice)(?:[-.].*)?$/i.test(name)).sort();
 }
 
+function pinnedProviderUtilsLockEntry(lock) {
+  const lines = lock.split("\n");
+  const start = lines.indexOf('  "packages": {');
+  if (start < 0 || lines.indexOf('  "packages": {', start + 1) >= 0) return false;
+  const end = lines.findIndex((line, index) => index > start && /^  },?$/.test(line));
+  if (end < 0) return false;
+  const entries = lines
+    .slice(start + 1, end)
+    .filter((line) => line.startsWith('    "@ai-sdk/provider-utils": '));
+  if (entries.length !== 1) return false;
+  const match = entries[0].match(/^    "@ai-sdk\/provider-utils": (\[.*\]),?$/);
+  if (!match) return false;
+  let entry;
+  try {
+    entry = JSON.parse(match[1]);
+  } catch {
+    return false;
+  }
+  return (
+    Array.isArray(entry) &&
+    entry.length === 4 &&
+    entry[0] === `${providerUtilsLicense.name}@${providerUtilsLicense.version}` &&
+    entry[1] === "" &&
+    entry[2] !== null &&
+    typeof entry[2] === "object" &&
+    !Array.isArray(entry[2]) &&
+    entry[3] === providerUtilsLicense.integrity
+  );
+}
+
+async function pinnedProviderUtilsLicenseBytes(source) {
+  const path = join(source, providerUtilsLicense.source);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const [named, info] = await Promise.all([lstat(path), handle.stat()]);
+    if (
+      named.isSymbolicLink() ||
+      !info.isFile() ||
+      info.nlink !== 1 ||
+      named.dev !== info.dev ||
+      named.ino !== info.ino ||
+      info.size !== 552
+    )
+      throw new Error("Pinned @ai-sdk/provider-utils license is not one bounded regular file.");
+    const bytes = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const read = await handle.read(bytes, offset, bytes.length - offset, offset);
+      if (!read.bytesRead) throw new Error("Pinned @ai-sdk/provider-utils license ended early.");
+      offset += read.bytesRead;
+    }
+    const final = await handle.stat();
+    if (final.size !== info.size || final.mtimeMs !== info.mtimeMs || final.ino !== info.ino)
+      throw new Error("Pinned @ai-sdk/provider-utils license changed while it was read.");
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+async function verifiedProviderUtilsLicense(source, name, value) {
+  if (
+    name !== providerUtilsLicense.name ||
+    value.name !== providerUtilsLicense.name ||
+    value.version !== providerUtilsLicense.version ||
+    value.license !== providerUtilsLicense.license ||
+    !pinnedProviderUtilsLockEntry(await readFile(join(source, "bun.lock"), "utf8"))
+  )
+    throw new Error(`Production dependency ${name} has incomplete license metadata.`);
+  const bytes = await pinnedProviderUtilsLicenseBytes(source);
+  if (sha256(bytes) !== providerUtilsLicense.sha256)
+    throw new Error("Pinned @ai-sdk/provider-utils license does not match its upstream source.");
+  return bytes;
+}
+
 export async function stageApplication(source, destination, metadata = {}) {
   const closure = await productionClosure(source);
   const root = join(destination, "lib/ellie");
@@ -600,6 +750,7 @@ export async function stageApplication(source, destination, metadata = {}) {
     if (area === "packages") continue;
     await copyTree(join(source, area), join(root, area));
   }
+  await stageBrowserCompanion(source, destination);
   await copyTree(join(source, "apps/command-center/dist"), join(root, "apps/command-center/dist"));
   await copyTree(join(source, "apps/life-ui/dist"), join(root, "apps/life-ui/dist"));
   await copyTree(join(source, "package.json"), join(root, "package.json"));
@@ -619,11 +770,22 @@ export async function stageApplication(source, destination, metadata = {}) {
     const sourcePackage = packagePath(source, name);
     const value = await json(join(sourcePackage, "package.json"));
     const licenses = licenseNames(await readdir(sourcePackage));
-    if (!licenses.length || typeof value.version !== "string" || typeof value.license !== "string")
+    if (typeof value.version !== "string" || typeof value.license !== "string")
       throw new Error(`Production dependency ${name} has incomplete license metadata.`);
+    const fallback = licenses.length
+      ? undefined
+      : await verifiedProviderUtilsLicense(source, name, value);
     await copyTree(sourcePackage, packagePath(root, name));
     const texts = [];
     for (const file of licenses) texts.push(await readFile(join(sourcePackage, file), "utf8"));
+    if (fallback) {
+      await writeFile(join(packagePath(root, name), "LICENSE"), fallback, {
+        mode: 0o644,
+        flag: "wx",
+      });
+      licenses.push("LICENSE");
+      texts.push(fallback.toString("utf8"));
+    }
     components.push({
       name,
       version: value.version,
@@ -670,20 +832,34 @@ export async function stageApplication(source, destination, metadata = {}) {
   return components;
 }
 
-async function entries(root, current = root) {
+async function entries(root, current = root, budget = { entries: 0, files: 0, bytes: 0 }) {
   const result = [];
   for (const name of (await readdir(current)).sort()) {
     const path = join(current, name);
     const relativePath = relative(root, path).split(sep).join("/");
     if (!safePayloadRelative(relativePath)) throw new Error("Unsafe payload path.");
+    budget.entries += 1;
+    if (
+      budget.entries > MAXIMUM_PAYLOAD_ENTRIES ||
+      relativePath.split("/").length > MAXIMUM_PAYLOAD_DEPTH
+    )
+      throw new Error("Payload inventory exceeds the native inspector entry or depth limit.");
     const info = await lstat(path);
     if (info.isSymbolicLink()) throw new Error("Payload contains a symbolic link.");
     if (info.isDirectory()) {
       if ((info.mode & 0o7777) !== 0o755) throw new Error("Payload directory has an unsafe mode.");
-      result.push(...(await entries(root, path)));
+      result.push(...(await entries(root, path, budget)));
     } else if (info.isFile() && info.nlink === 1) {
       const mode = info.mode & 0o7777;
       if (mode !== 0o644 && mode !== 0o755) throw new Error("Payload file has an unsafe mode.");
+      budget.files += 1;
+      budget.bytes += info.size;
+      if (
+        budget.files > MAXIMUM_PAYLOAD_FILES ||
+        info.size > MAXIMUM_PAYLOAD_FILE_BYTES ||
+        budget.bytes > MAXIMUM_PAYLOAD_BYTES
+      )
+        throw new Error("Payload inventory exceeds the native inspector file or byte limit.");
       result.push({
         path: relativePath,
         mode,
@@ -833,7 +1009,11 @@ export async function verifyManifest(release) {
     (payloadInfo.mode & 0o7777) !== 0o755
   )
     throw new Error("Payload root must be a safe directory.");
-  const manifestBytes = await regularFile(join(release, "manifest.json"), 0o644, 4 * 1024 * 1024);
+  const manifestBytes = await regularFile(
+    join(release, "manifest.json"),
+    0o644,
+    MAXIMUM_MANIFEST_BYTES,
+  );
   const sourceBytes = await regularFile(join(release, "SOURCE.txt"), 0o644, 16 * 1024);
   const manifest = JSON.parse(manifestBytes.toString("utf8"));
   if (
@@ -854,14 +1034,26 @@ export async function verifyManifest(release) {
           minimumOS: MINIMUM_MACOS,
         })),
       ) ||
-    !Array.isArray(manifest.files)
+    !Array.isArray(manifest.files) ||
+    manifest.files.length > MAXIMUM_PAYLOAD_FILES
   )
     throw new Error("Payload manifest has an unsupported shape.");
   if (sourceBytes.toString("utf8") !== sourceRecord(manifest))
     throw new Error("SOURCE.txt does not match the payload manifest.");
   const actual = await entries(payload);
+  if (actual.length === 0) throw new Error("Payload manifest has an unsupported shape.");
   if (JSON.stringify(actual) !== JSON.stringify(manifest.files))
     throw new Error("Payload manifest does not match its files.");
+  // Earlier releases predate the companion bundle. New releases carry a closed
+  // extension tree whose relative scripts must all be present before selection.
+  const companion = join(payload, "lib/ellie/apps/browser-media-extension");
+  try {
+    await lstat(companion);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+    return manifest;
+  }
+  await verifyBrowserCompanionClosure(companion);
   return manifest;
 }
 
@@ -894,6 +1086,17 @@ function assertClean(root) {
     cwd: root,
   }).trim();
   if (status) throw new Error("Refusing to build from modified or untracked source.");
+}
+
+export function createReleaseArchive(release, archive) {
+  // Payload identity is entirely file-backed. Resource forks, xattrs, quarantine,
+  // and ACLs are neither manifested nor used by the shipped installer, and
+  // sequestering them would add unbounded AppleDouble entries to the ZIP.
+  command(
+    "/usr/bin/ditto",
+    ["-c", "-k", "--norsrc", "--noextattr", "--noqtn", "--noacl", "--keepParent", release, archive],
+    { stdio: "ignore" },
+  );
 }
 
 export async function buildServicePayload(options) {
@@ -1171,6 +1374,7 @@ export async function buildServicePayload(options) {
     if (!/platform MACOS/.test(installerBuild) || !minimumPattern.test(installerBuild))
       throw new Error("Native installer minimum macOS version does not match the payload.");
     const lockSha256 = await fileSha256(join(buildSource, "bun.lock"));
+    const payloadFiles = await entries(payload);
     const manifest = {
       version: 1,
       productVersion: "0.1.0",
@@ -1190,9 +1394,12 @@ export async function buildServicePayload(options) {
       },
       launchers,
       components,
-      files: await entries(payload),
+      files: payloadFiles,
     };
-    await writeFile(join(release, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, {
+    const manifestBytes = `${JSON.stringify(manifest, null, 2)}\n`;
+    if (Buffer.byteLength(manifestBytes) > MAXIMUM_MANIFEST_BYTES)
+      throw new Error("Payload manifest exceeds the native inspector byte limit.");
+    await writeFile(join(release, "manifest.json"), manifestBytes, {
       mode: 0o644,
     });
     await writeFile(join(release, "SOURCE.txt"), sourceRecord(manifest), {
@@ -1207,9 +1414,7 @@ export async function buildServicePayload(options) {
     const originalSource = await regularFile(join(release, "SOURCE.txt"), 0o644, 16 * 1024);
     const archiveName = `${name}.zip`;
     const archive = join(stagedOutput, archiveName);
-    command("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", release, archive], {
-      stdio: "ignore",
-    });
+    createReleaseArchive(release, archive);
     const roundTrip = join(scratch, "round-trip");
     await mkdir(roundTrip, { mode: 0o700 });
     command("/usr/bin/ditto", ["-x", "-k", archive, roundTrip], {

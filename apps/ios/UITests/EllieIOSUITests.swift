@@ -1,6 +1,490 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testQuietVoiceReviewRequiresExplicitSendAndNeverReplaysUnknown() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-quiet-voice-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        func tap(_ identifier: String) {
+            revealBrowserButton(identifier, in: app, forTap: true).tap()
+        }
+        func waitLabel(_ element: XCUIElement, _ label: String) {
+            let observed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label == %@", label), object: element)
+            XCTAssertEqual(XCTWaiter.wait(for: [observed], timeout: 5), .completed, label)
+        }
+        let sends = app.staticTexts["quiet-voice-fixture-sends"]
+        XCTAssertEqual(sends.label, "Fixture sends: 0")
+        tap("speech-check")
+        tap("speech-record")
+        tap("speech-stop")
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 0", "transcription cannot send itself")
+        tap("speech-life-send")
+        waitLabel(app.staticTexts["speech-life-reply"], "Read-only reply 1.")
+        XCTAssertEqual(sends.label, "Fixture sends: 1")
+        tap("New message")
+        tap("speech-record")
+        tap("speech-stop")
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 1")
+        tap("speech-life-send")
+        waitLabel(app.staticTexts["speech-life-reply"], "Read-only reply 2.")
+        XCTAssertEqual(app.staticTexts["quiet-voice-fixture-follow-up"].label,
+            "Fixture follow-up bound: true")
+        tap("New message")
+        tap("speech-record")
+        tap("speech-stop")
+        tap("speech-life-send")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
+            "The message may have reached Life")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 3")
+        tap("speech-life-check-status")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
+            "Life access was revoked")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["quiet-voice-fixture-status"].label,
+            "Fixture status reads: 1")
+        XCTAssertEqual(sends.label, "Fixture sends: 3", "status never resends an unknown request")
+    }
+
+    func testQuietRecentSessionsReviewUsesDistinctLinkedWorkAndRevocationClearsIt() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-quiet-session-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.buttons["quiet-session-trip_session"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["quiet-session-photo_session"].exists)
+        XCTAssertTrue(app.buttons["quiet-see-all"].exists)
+        XCTAssertTrue(app.buttons["quiet-voice"].exists)
+        XCTAssertEqual(app.textFields.count, 0, "Quiet review must not add a text composer")
+        let home = XCTAttachment(screenshot: app.screenshot())
+        home.name = "Quiet home fixture"
+        home.lifetime = .keepAlways
+        add(home)
+        app.buttons["quiet-session-trip_session"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-turn-turn_trip_session").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_trip_session").firstMatch.exists)
+        XCTAssertFalse(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_photo_session").firstMatch.exists)
+        let session = XCTAttachment(screenshot: app.screenshot())
+        session.name = "Quiet session fixture"
+        session.lifetime = .keepAlways
+        add(session)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["quiet-session-photo_session"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_photo_session").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_trip_session").firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        let seeAll = app.buttons["quiet-see-all"]
+        for _ in 0..<4 where !seeAll.isHittable { app.swipeUp() }
+        XCTAssertTrue(seeAll.isHittable)
+        seeAll.tap()
+        let allPhoto = app.buttons["quiet-all-session-photo_session"]
+        XCTAssertTrue(allPhoto.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["quiet-all-session-trip_session"].exists)
+        allPhoto.tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_photo_session").firstMatch.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any).matching(
+            identifier: "quiet-activity-task_trip_session").firstMatch.exists)
+        app.navigationBars.buttons.firstMatch.tap()
+        app.navigationBars.buttons.firstMatch.tap()
+        let voice = app.buttons["quiet-voice"]
+        for _ in 0..<4 where !voice.isHittable { app.swipeUp() }
+        XCTAssertTrue(voice.isHittable)
+        voice.tap()
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 5),
+            "Voice entry must expose its existing explicit availability and review flow")
+        XCTAssertFalse(app.buttons["speech-record"].exists,
+            "Opening Voice controls must not start recording")
+        app.navigationBars.buttons.firstMatch.tap()
+        app.buttons["quiet-fixture-revoke"].tap()
+        let notice = app.staticTexts["quiet-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertTrue(notice.label.contains("access was removed"))
+        XCTAssertFalse(app.buttons["quiet-session-photo_session"].exists)
+    }
+
+    func testGmailRequiresExplicitBodyReadAndCancelsLateOrRevokedResults() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-gmail-read-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        let reads = app.staticTexts["ios-gmail-fixture-reads"]
+        XCTAssertEqual(reads.label, "Fixture body reads: 0")
+        app.buttons["ios-gmail-refresh"].tap()
+        let account = app.buttons["ios-gmail-account-fixture_gmail"]
+        XCTAssertTrue(account.waitForExistence(timeout: 5))
+        account.tap()
+        let message = app.buttons["ios-gmail-message-fixture_message"]
+        XCTAssertTrue(message.waitForExistence(timeout: 5))
+        XCTAssertEqual(reads.label, "Fixture body reads: 0",
+            "listing and preview must not fetch full message bodies")
+        app.buttons["Hold next body"].tap()
+        message.tap()
+        let oneRead = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture body reads: 1"), object: reads)
+        XCTAssertEqual(XCTWaiter.wait(for: [oneRead], timeout: 5), .completed)
+        app.buttons["ios-gmail-cancel"].tap()
+        app.buttons["Release held body"].tap()
+        let bodies = app.descendants(matching: .any).matching(identifier: "ios-gmail-body")
+        for _ in 0..<4 { app.swipeUp() }
+        let cancelledBody = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == true"), object: bodies.firstMatch)
+        cancelledBody.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [cancelledBody], timeout: 1), .completed,
+            "cancelled response must not restore private body")
+        XCTAssertEqual(bodies.count, 0)
+        for _ in 0..<4 where !message.isHittable { app.swipeDown() }
+        XCTAssertTrue(message.isHittable)
+        message.tap()
+        for _ in 0..<4 where bodies.count == 0 { app.swipeUp() }
+        XCTAssertTrue(bodies.firstMatch.waitForExistence(timeout: 5),
+            "An explicit second read must expose the body in the lazy Gmail Form")
+        XCTAssertEqual(bodies.count, 1)
+        XCTAssertEqual(bodies.firstMatch.label, "Transient fixture message body")
+        app.buttons["Hold next body"].tap()
+        for _ in 0..<4 where !message.isHittable { app.swipeDown() }
+        XCTAssertTrue(message.isHittable)
+        message.tap()
+        let thirdRead = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture body reads: 3"), object: reads)
+        XCTAssertEqual(XCTWaiter.wait(for: [thirdRead], timeout: 5), .completed)
+        app.buttons["Revoke fixture"].tap()
+        for _ in 0..<4 { app.swipeDown() }
+        let notice = app.staticTexts["ios-gmail-notice"]
+        XCTAssertTrue(notice.waitForExistence(timeout: 5))
+        XCTAssertTrue(notice.label.contains("access was removed"))
+        for _ in 0..<4 { app.swipeUp() }
+        XCTAssertFalse(bodies.firstMatch.exists)
+        XCTAssertFalse(message.exists)
+    }
+
+    func testCalendarRequiresExplicitReadAndKeepsFailedReadVisiblyCached() throws {
+        let app = XCUIApplication()
+        let session = UUID().uuidString
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-calendar-session", session]
+        defer {
+            app.terminate()
+            app.launchArguments.append("--ellie-ui-calendar-cleanup")
+            app.launch()
+            app.terminate()
+        }
+        app.launch()
+        let calls = app.staticTexts["home-fixture-agenda-calls"]
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 0")
+        app.buttons["home-fixture-load-pairing"].tap()
+        openDashboard(named: "Home", in: app)
+        let refresh = try revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app)
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 0",
+            "Opening the native calendar widget must not read an account")
+        refresh.tap()
+        XCTAssertTrue(app.buttons["ios-agenda-account"].waitForExistence(timeout: 5))
+        try revealWeatherControl(app.buttons["ios-agenda-account"], in: app).tap()
+        app.buttons["Fixture Google account"].tap()
+        try revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app).tap()
+        XCTAssertTrue(app.staticTexts["Fixture calendar event"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 3")
+        app.buttons["home-fixture-agenda-fail-next"].tap()
+        try revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app).tap()
+        XCTAssertTrue(app.staticTexts["ios-agenda-message"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ios-agenda-message"].label.contains("Offline"))
+        XCTAssertTrue(app.staticTexts["Fixture calendar event"].exists,
+            "A failed read retains the same-session snapshot with a cached label")
+        app.terminate()
+        app.launch()
+        app.buttons["home-fixture-load-pairing"].tap()
+        openDashboard(named: "Home", in: app)
+        XCTAssertEqual(calls.label, "Fixture agenda requests: 0")
+        XCTAssertFalse(app.staticTexts["Fixture calendar event"].exists,
+            "A relaunch must not redisplay old private event data before explicit Refresh")
+    }
+
+    func testWeatherRequiresOptInUsesChosenPlaceAndCanBeDisabled() throws {
+        let app = XCUIApplication()
+        let weatherSession = UUID().uuidString
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-weather-session", weatherSession]
+        defer {
+            app.terminate()
+            app.launchArguments.append("--ellie-ui-weather-cleanup")
+            app.launch()
+            app.terminate()
+        }
+        app.launch()
+        let calls = app.staticTexts["home-fixture-weather-calls"]
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0")
+        openDashboard(named: "Home", in: app)
+        try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0")
+        app.buttons["Cancel"].tap()
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "Opening and cancelling setup must not opt in")
+        try revealWeatherControl(app.buttons["ios-weather-setup"], in: app).tap()
+        try setWeatherEnable(in: app, expectedValue: "1")
+        try typeTextReliably("London QA", into: revealWeatherControl(app.textFields["ios-weather-name"], in: app, editor: true), in: app)
+        try typeTextReliably("51.5074", into: revealWeatherControl(app.textFields["ios-weather-latitude"], in: app, editor: true), in: app)
+        try typeTextReliably("-0.1278", into: revealWeatherControl(app.textFields["ios-weather-longitude"], in: app, editor: true), in: app)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-place"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertTrue(app.staticTexts["Partly cloudy"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture weather requests: 1")
+        app.buttons["home-fixture-weather-fail-next"].tap()
+        let refresh = try revealWeatherControl(app.buttons["ios-weather-refresh"], in: app)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "enabled == true"), object: refresh)], timeout: 5), .completed)
+        refresh.tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-error"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].label.contains("Cached forecast"),
+            "A failed refresh must keep the prior value and mark it cached")
+        XCTAssertEqual(calls.label, "Fixture weather requests: 2")
+        app.terminate()
+        app.launch()
+        openDashboard(named: "Home", in: app)
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertTrue(app.staticTexts["Partly cloudy"].exists,
+            "The private cache should survive an app relaunch")
+        XCTAssertTrue(app.staticTexts["ios-weather-freshness"].label.contains("Cached forecast"),
+            "A restored value must identify itself as cached even when less than 30 minutes old")
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "Fresh persisted weather must not cause an implicit second request")
+        returnToDashboardList(from: "Home", in: app)
+        let other = "Weather QA \(UUID().uuidString.prefix(8))"
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(other, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: other, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Weather"].tap()
+        XCTAssertTrue(app.staticTexts["ios-weather-place"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["ios-weather-place"].label, "London QA")
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "A second dashboard must reuse the same fresh cached forecast")
+        try revealWeatherControl(app.buttons["ios-weather-settings"], in: app).tap()
+        try setWeatherEnable(in: app, expectedValue: "0")
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5))
+        XCTAssertEqual(calls.label, "Fixture weather requests: 0",
+            "Disabling must not send another forecast request")
+        returnToDashboardList(from: other, in: app)
+        openDashboard(named: "Home", in: app)
+        XCTAssertTrue(app.buttons["ios-weather-setup"].waitForExistence(timeout: 5),
+            "Disabling shared weather must clear the first dashboard too")
+    }
+
+    private enum WeatherControlError: Error { case unavailable }
+
+    private func setWeatherEnable(in app: XCUIApplication, expectedValue: String) throws {
+        let row = try revealWeatherControl(app.switches["ios-weather-enable"], in: app, editor: true)
+        let toggle = row.switches.firstMatch
+        guard toggle.waitForExistence(timeout: 5), toggle.isHittable else {
+            throw weatherControlFailure("Physical weather opt-in switch was not reachable in the open editor", in: app)
+        }
+        toggle.tap()
+        let value = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "value == %@", expectedValue), object: row)
+        guard XCTWaiter.wait(for: [value], timeout: 5) == .completed else {
+            throw weatherControlFailure("Weather opt-in switch did not reach value \(expectedValue) in the open editor", in: app)
+        }
+    }
+
+    private func weatherControlFailure(_ message: String, in app: XCUIApplication) -> WeatherControlError {
+        let screenshot = XCTAttachment(screenshot: app.screenshot())
+        screenshot.name = "weather-control-first-unmet-screenshot"
+        screenshot.lifetime = .keepAlways
+        add(screenshot)
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "weather-control-first-unmet-hierarchy"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
+        XCTFail(message)
+        return .unavailable
+    }
+
+    private func revealWeatherControl(_ element: XCUIElement, in app: XCUIApplication,
+                                      editor: Bool = false) throws -> XCUIElement {
+        let navigation = app.navigationBars["Edit Weather"]
+        let container = editor
+            ? app.descendants(matching: .any).matching(identifier: "ios-widget-editor-form").firstMatch
+            : app.scrollViews["ios-dashboard-detail-scroll"]
+        guard container.waitForExistence(timeout: 5), !editor || navigation.exists else {
+            throw weatherControlFailure("Expected the active weather editor or dashboard scroll container", in: app)
+        }
+        for _ in 0..<4 {
+            if element.exists && element.isHittable { return element }
+            guard !editor || (navigation.exists && container.exists) else {
+                throw weatherControlFailure("Weather editor disappeared before its control was reachable", in: app)
+            }
+            container.swipeUp()
+        }
+        if !editor {
+            for _ in 0..<4 {
+                if element.exists && element.isHittable { return element }
+                container.swipeDown()
+            }
+        }
+        guard element.exists && element.isHittable, !editor || (navigation.exists && container.exists) else {
+            throw weatherControlFailure("Expected weather control \(element.identifier) in the active \(editor ? "editor" : "dashboard")", in: app)
+        }
+        return element
+    }
+
+    func testHomeLifeEntryRequiresExplicitTapAndFollowsEnrollment() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-home-appearance-fixture"]
+        app.launch()
+
+        let life = app.buttons["open-ellie-life"]
+        let opens = app.staticTexts["home-fixture-life-opens"]
+        let reads = app.staticTexts["home-fixture-vault-reads"]
+        let transport = app.staticTexts["home-fixture-transport-calls"]
+        XCTAssertTrue(opens.waitForExistence(timeout: 5))
+        XCTAssertEqual(opens.label, "Fixture Life opens: 0")
+        XCTAssertEqual(reads.label, "Fixture vault reads: 0")
+        XCTAssertEqual(transport.label, "Fixture transport calls: 0")
+        XCTAssertFalse(life.exists)
+        keepHomeScreenshot(app, name: "native-home-normal")
+
+        app.buttons["home-fixture-load-pairing"].tap()
+        XCTAssertTrue(life.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons.matching(identifier: "open-ellie-life").count, 1)
+        XCTAssertEqual(reads.label, "Fixture vault reads: 1")
+        XCTAssertEqual(opens.label, "Fixture Life opens: 0")
+        XCTAssertFalse(app.staticTexts["home-fixture-life-destination"].exists)
+        fullyExposeHomeControl(life, in: app)
+        keepHomeScreenshot(app, name: "native-home-normal-life-entry")
+        life.tap()
+        let destination = app.staticTexts["home-fixture-life-destination"]
+        XCTAssertTrue(destination.waitForExistence(timeout: 5))
+        XCTAssertEqual(destination.label, "Synthetic Life destination: home-fixture-phone")
+        let opened = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture Life opens: 1"), object: opens)
+        XCTAssertEqual(XCTWaiter.wait(for: [opened], timeout: 5), .completed)
+        XCTAssertEqual(transport.label, "Fixture transport calls: 0")
+
+        returnToDashboardList(from: "Fixture Life", in: app)
+        app.buttons["home-fixture-remove-pairing"].tap()
+        let removed = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: life)
+        XCTAssertEqual(XCTWaiter.wait(for: [removed], timeout: 5), .completed)
+        XCTAssertEqual(opens.label, "Fixture Life opens: 1")
+        XCTAssertEqual(transport.label, "Fixture transport calls: 0")
+    }
+
+    func testNarrowHomeKeepsNavigationReachableAtRegularAndAccessibilitySizes() {
+        let app = XCUIApplication()
+        for accessibility in [false, true] {
+            app.launchArguments = ["--ellie-ui-home-appearance-fixture", "--ellie-ui-home-narrow"]
+            if accessibility { app.launchArguments.append("--ellie-ui-home-accessibility") }
+            app.launch()
+            let appearance = accessibility ? "accessibility5" : "regular"
+
+            let scroll = app.scrollViews["dashboard-list"]
+            XCTAssertTrue(scroll.waitForExistence(timeout: 5))
+            XCTAssertEqual(scroll.frame.width, 320, accuracy: 1)
+            let title = app.staticTexts["home-invitation-title"]
+            if accessibility {
+                XCTAssertFalse(title.exists, "Promotional copy must not push accessibility navigation below the fold")
+                XCTAssertTrue(homeViewport(in: app).contains(app.buttons["dashboard-home"].frame),
+                    "The first dashboard must be fully visible without scrolling at accessibility size 5")
+            } else {
+                XCTAssertTrue(title.waitForExistence(timeout: 5))
+                XCTAssertTrue(title.label.contains("A little more"))
+                XCTAssertTrue(title.label.contains("headspace."))
+                XCTAssertGreaterThanOrEqual(title.frame.minX, scroll.frame.minX)
+                XCTAssertLessThanOrEqual(title.frame.maxX, scroll.frame.maxX)
+            }
+            keepHomeScreenshot(app, name: "native-home-320-\(appearance)-\(accessibility ? "overview" : "invitation")")
+
+            for identifier in ["dashboard-home", "coordinator-enrollment"] {
+                let control = app.buttons[identifier]
+                fullyExposeHomeControl(control, in: app)
+                XCTAssertGreaterThanOrEqual(control.frame.height, 44)
+                XCTAssertGreaterThanOrEqual(control.frame.minX, scroll.frame.minX)
+                XCTAssertLessThanOrEqual(control.frame.maxX, scroll.frame.maxX)
+                if identifier == "dashboard-home" {
+                    XCTAssertEqual(control.label, "Home")
+                    if accessibility {
+                        XCTAssertLessThan(control.frame.height, scroll.frame.width * 0.75,
+                            "A short Home label and widget count must not form the tall, character-wrapped card seen in the failed capture")
+                    }
+                    keepHomeScreenshot(app, name: "native-home-320-\(appearance)-dashboard")
+                } else {
+                    XCTAssertEqual(control.label, "Pair this iPhone")
+                }
+            }
+            keepHomeScreenshot(app, name: "native-home-320-\(appearance)-navigation")
+            app.buttons["coordinator-enrollment"].tap()
+            XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
+            XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
+            XCTAssertEqual(app.staticTexts["home-fixture-vault-reads"].label, "Fixture vault reads: 0")
+            XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+            if accessibility {
+                returnToDashboardList(from: "Coordinator", in: app)
+                app.buttons["home-fixture-load-pairing"].tap()
+                let life = app.buttons["open-ellie-life"]
+                XCTAssertTrue(life.waitForExistence(timeout: 5))
+                fullyExposeHomeControl(life, in: app)
+                XCTAssertEqual(life.label, "Open Ellie Life")
+                XCTAssertEqual(app.staticTexts["home-fixture-life-opens"].label, "Fixture Life opens: 0")
+                XCTAssertEqual(app.staticTexts["home-fixture-transport-calls"].label, "Fixture transport calls: 0")
+                keepHomeScreenshot(app, name: "native-home-320-accessibility5-life-entry")
+            }
+            app.terminate()
+        }
+    }
+
+    private func keepHomeScreenshot(_ app: XCUIApplication, name: String) {
+        guard app.launchArguments.contains("--ellie-ui-home-appearance-fixture") else {
+            XCTFail("Appearance screenshots require the isolated home fixture")
+            return
+        }
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+
+    private func homeViewport(in app: XCUIApplication) -> CGRect {
+        let scroll = app.scrollViews["dashboard-list"].frame
+        let footer = app.descendants(matching: .any)["home-fixture-controls"]
+        XCTAssertTrue(footer.exists)
+        let top = max(scroll.minY, app.navigationBars["Ellie"].frame.maxY)
+        let bottom = min(scroll.maxY, footer.frame.minY)
+        XCTAssertGreaterThan(bottom, top)
+        return CGRect(x: scroll.minX, y: top, width: scroll.width, height: max(0, bottom - top))
+            .insetBy(dx: 1, dy: 4)
+    }
+
+    private func fullyExposeHomeControl(_ control: XCUIElement, in app: XCUIApplication) {
+        let scroll = app.scrollViews["dashboard-list"]
+        XCTAssertTrue(control.waitForExistence(timeout: 5))
+        for _ in 0..<12 {
+            let viewport = homeViewport(in: app)
+            let frame = control.frame
+            if viewport.contains(frame) && control.isHittable { break }
+            guard frame.height <= viewport.height else { break }
+            let upward = frame.maxY > viewport.maxY
+            let distance = min(max(upward ? frame.maxY - viewport.maxY : viewport.minY - frame.minY, 20),
+                viewport.height * 0.5)
+            let startY = upward ? viewport.maxY - 20 : viewport.minY + 20
+            let endY = startY + (upward ? -distance : distance)
+            let origin = scroll.coordinate(withNormalizedOffset: CGVector(dx: 0, dy: 0))
+            let start = origin.withOffset(CGVector(dx: viewport.midX - scroll.frame.minX, dy: startY - scroll.frame.minY))
+            let end = origin.withOffset(CGVector(dx: viewport.midX - scroll.frame.minX, dy: endY - scroll.frame.minY))
+            start.press(forDuration: 0.05, thenDragTo: end)
+        }
+        XCTAssertTrue(control.isHittable)
+        XCTAssertTrue(homeViewport(in: app).contains(control.frame),
+            "The complete target card must be below the navigation bar and above the fixture controls before capture")
+    }
+
     func testScannerSheetDismissalKeepsDecodedReviewUntilExplicitCancel() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-native-scanner-sheet-fixture"]
@@ -234,6 +718,622 @@ final class EllieIOSUITests: XCTestCase {
             object: mutationCount)
         noReplay.isInverted = true
         XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+
+        let recoveryRead = app.buttons["Read current page"]
+        XCTAssertTrue(recoveryRead.waitForExistence(timeout: 5))
+        recoveryRead.tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
+        XCTAssertEqual(mutationCount.label, "Fixture mutations: 2")
+        XCTAssertTrue(app.buttons["Play"].isEnabled)
+    }
+
+    func testReviewedNetflixVoiceScrollRequiresExplicitRowChoiceAndRun() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-netflix-voice-rows"
+        ]
+        app.launch()
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        func reviewScroll() {
+            let check = app.buttons["speech-check"]
+            if check.exists { check.tap() }
+            let record = app.buttons["speech-record"]
+            XCTAssertTrue(record.waitForExistence(timeout: 5))
+            record.tap()
+            let stop = app.buttons["speech-stop"]
+            XCTAssertTrue(stop.waitForExistence(timeout: 5))
+            stop.tap()
+            let transcript = app.textViews["speech-transcript"]
+            XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+            XCTAssertEqual(transcript.value as? String, "Scroll right")
+        }
+        func row(_ index: Int) -> XCUIElement {
+            revealSpeechReviewButton("speech-netflix-row-\(index)", in: app, forTap: true)
+        }
+        reviewScroll()
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        XCTAssertTrue(row(2).waitForExistence(timeout: 5))
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled)
+        row(2).tap()
+        XCTAssertTrue(app.staticTexts["speech-netflix-row-review"].label.contains(
+            "Row 2: New on Fixture Mac A"))
+        XCTAssertTrue(revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).tap()
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["speech-netflix-row-2"].exists)
+
+        reviewScroll()
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled,
+                       "the old row choice cannot authorize a later turn")
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        XCTAssertTrue(row(1).waitForExistence(timeout: 5))
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled,
+                       "a fresh read still needs an explicit row choice")
+        XCTAssertEqual(count.label, "Fixture mutations: 1")
+    }
+
+    func testReviewedNetflixVoiceSearchNeedsObservedFieldThenFreshResultsRead() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-complete-actions",
+            "--ellie-ui-browser-netflix-voice-search"
+        ]
+        app.launch()
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        XCTAssertEqual(app.textViews["speech-transcript"].value as? String,
+                       "Search for public video")
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        app.buttons["speech-browser-read"].tap()
+        let review = app.staticTexts["speech-netflix-search-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertTrue(review.label.contains("Search field on Fixture Mac A"))
+        XCTAssertTrue(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        run.tap()
+        waitForFixtureMutations(1, in: app)
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 5))
+        updatedRead.tap()
+        let continueButton = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 5))
+        continueButton.tap()
+        XCTAssertTrue(app.staticTexts["browser-observed-site"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["browser-observed-site"].label,
+                       "Observed Netflix search results")
+        let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
+        result.tap()
+        waitForFixtureMutations(2, in: app)
+    }
+
+    func testReviewedYouTubeVoiceSearchUsesObservedFieldAndNeverReplaysUnknown() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-youtube-voice-search"
+        ]
+        app.launch()
+        let synthetic = app.staticTexts["browser-fixture-synthetic-label"]
+        XCTAssertTrue(synthetic.waitForExistence(timeout: 5))
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        let history = app.staticTexts["browser-fixture-action-history"]
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for public")
+        // A center tap in the mostly empty TextEditor places the caret at the start.
+        // Tap to the right of its first line and require the exact edited transcript.
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.12)).tap()
+        transcript.typeText(" video")
+        guard transcript.value as? String == "Search for public video" else {
+            XCTFail("The edited spoken search must be exact before reviewing a command")
+            return
+        }
+        let done = app.buttons["speech-transcript-done"]
+        guard done.waitForExistence(timeout: 5) else {
+            XCTFail("Reviewing an edited transcript must offer keyboard Done")
+            return
+        }
+        done.tap()
+        let keyboardGone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+        guard XCTWaiter.wait(for: [keyboardGone], timeout: 5) == .completed else {
+            XCTFail("Done must dismiss the keyboard without sending the transcript")
+            return
+        }
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
+        XCTAssertFalse(run.isEnabled, "A spoken search requires an observed selected document")
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled)
+        let unavailable = app.staticTexts["speech-youtube-search-unavailable"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 5))
+        XCTAssertTrue(unavailable.label.contains("No search was sent"))
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        XCTAssertEqual(history.label, "Fixture actions: read.home")
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        XCTAssertTrue(revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).isEnabled)
+        let review = app.staticTexts["speech-youtube-search-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertTrue(review.label.contains("Search field on Fixture Mac A"))
+        XCTAssertFalse(unavailable.exists)
+        XCTAssertTrue(run.isEnabled)
+        XCTAssertEqual(history.label, "Fixture actions: read.home,read.home")
+        revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).tap()
+        waitForFixtureMutations(1, in: app)
+        XCTAssertEqual(history.label, "Fixture actions: read.home,read.home,search.public video")
+        XCTAssertFalse(run.exists, "Run consumes the reviewed transcript")
+        let noReplay = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", "Fixture mutations: 1"), object: count)
+        noReplay.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 5))
+        updatedRead.tap()
+        let continuation = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continuation.waitForExistence(timeout: 5))
+        continuation.tap()
+        let site = app.staticTexts["browser-observed-site"]
+        XCTAssertTrue(site.waitForExistence(timeout: 5))
+        XCTAssertEqual(site.label, "Observed YouTube results page")
+        XCTAssertEqual(history.label,
+                       "Fixture actions: read.home,read.home,search.public video,read.results")
+        let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
+        XCTAssertTrue(result.isEnabled)
+        result.tap()
+        waitForFixtureMutations(2, in: app)
+        waitForFixturePageToClear(in: app)
+        XCTAssertEqual(history.label,
+                       "Fixture actions: read.home,read.home,search.public video,read.results,select")
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertEqual(site.label, "Observed YouTube watch page")
+        XCTAssertEqual(history.label,
+                       "Fixture actions: read.home,read.home,search.public video,read.results,select,read.watch")
+        XCTAssertEqual(count.label, "Fixture mutations: 2")
+    }
+
+    func testReviewedVoiceRequiresFreshPageBetweenSearchSelectionAndPlayback() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-complete-actions"
+        ]
+        app.launch()
+
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["Cancel recording"].waitForExistence(timeout: 5))
+        app.buttons["Cancel recording"].tap()
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.textViews["speech-transcript"].exists)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        revealSpeechReviewButton("speech-discard", in: app, forTap: true).tap()
+        // Return to the top of the lazy Form: an off-screen TextEditor alone is not proof
+        // that Discard changed the turn back to the recordable state.
+        let recordAfterDiscard = revealSpeechReviewButton("speech-record", in: app, forTap: true)
+        guard recordAfterDiscard.exists && recordAfterDiscard.isHittable else { return }
+        let discarded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.textViews["speech-transcript"])
+        guard XCTWaiter.wait(for: [discarded], timeout: 5) == .completed else {
+            XCTFail("Discard must remove the reviewed transcript before another recording")
+            return
+        }
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+
+        // A separate reviewed turn is required after discard. Its transcript remains inert
+        // until the page has been observed and the person taps Run.
+        recordAfterDiscard.tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for public video")
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        let runEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: run)
+        guard XCTWaiter.wait(for: [runEnabled], timeout: 5) == .completed else {
+            XCTFail("A fresh page read must enable the reviewed search before Run")
+            return
+        }
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).tap()
+        let updatedRead = revealSpeechReviewButton("speech-browser-read-updated", in: app)
+        guard updatedRead.exists else { return }
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["speech-browser-continue"].exists)
+
+        let updatedReadEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: updatedRead)
+        guard XCTWaiter.wait(for: [updatedReadEnabled], timeout: 5) == .completed else {
+            XCTFail("The separate updated Read must become available before continuing")
+            return
+        }
+        revealSpeechReviewButton("speech-browser-read-updated", in: app, forTap: true).tap()
+        let continuation = revealSpeechReviewButton("speech-browser-continue", in: app, forTap: true)
+        guard continuation.exists && continuation.isHittable else { return }
+        continuation.tap()
+        XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
+        let observedSite = app.staticTexts["browser-observed-site"]
+        let observedPlayback = app.staticTexts["browser-observed-playback"]
+        XCTAssertEqual(observedSite.label, "Observed Netflix search results")
+        XCTAssertFalse(observedPlayback.exists)
+        XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
+        XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
+        let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
+        XCTAssertTrue(result.isEnabled)
+        result.tap()
+        waitForFixturePageToClear(in: app)
+        waitForFixtureMutations(2, in: app)
+        XCTAssertFalse(app.buttons["Play"].exists)
+        XCTAssertFalse(observedSite.exists)
+
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertEqual(observedSite.label, "Observed Netflix watch page")
+        XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
+        let play = revealBrowserButton("Play", in: app, forTap: true)
+        XCTAssertTrue(play.isEnabled)
+        XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
+        play.tap()
+        waitForFixturePageToClear(in: app)
+        waitForFixtureMutations(3, in: app)
+        XCTAssertFalse(app.buttons["Pause"].exists)
+
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertEqual(observedPlayback.label, "Observed playback: playing")
+        let pause = revealBrowserButton("Pause", in: app, forTap: true)
+        XCTAssertTrue(pause.isEnabled)
+        XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
+        pause.tap()
+        waitForFixturePageToClear(in: app)
+        waitForFixtureMutations(4, in: app)
+        XCTAssertFalse(observedPlayback.exists)
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertTrue(observedPlayback.waitForExistence(timeout: 5))
+        XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
+        XCTAssertTrue(revealBrowserButton("Play", in: app).isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 4")
+    }
+
+    func testComposedSyntheticVoiceUsesPinnedBrowserAndNeverReplaysCancelledScroll() throws {
+        guard let identifier = Bundle(for: type(of: self))
+            .object(forInfoDictionaryKey: "EllieComposedBrowserFixtureID") as? String,
+            UUID(uuidString: identifier)?.uuidString.lowercased() == identifier
+        else { throw XCTSkip("Requires the owned composed browser fixture ID") }
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-composed-fixture", identifier]
+        app.launch()
+        defer { app.terminate() }
+        XCTAssertTrue(app.staticTexts["browser-composed-synthetic-label"].waitForExistence(timeout: 5),
+            "The owned credential file must survive the test launch before any request")
+
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 10))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for owned synthetic video")
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled, "A reviewed voice intent needs a separately observed page")
+        app.buttons["speech-browser-read"].tap()
+        let runEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: run)
+        XCTAssertEqual(XCTWaiter.wait(for: [runEnabled], timeout: 15), .completed)
+        run.tap()
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 15))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: updatedRead)], timeout: 15),
+            .completed)
+        updatedRead.tap()
+        let continueButton = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continueButton.waitForExistence(timeout: 15))
+        continueButton.tap()
+
+        let result = revealBrowserButton("browser-result-2", in: app, forTap: true)
+        XCTAssertTrue(result.waitForExistence(timeout: 15))
+        XCTAssertTrue(result.label.contains("Owned synthetic video"))
+        result.tap()
+        let freshRead = revealBrowserButton("Read current page", in: app, forTap: true)
+        XCTAssertTrue(freshRead.waitForExistence(timeout: 15))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: freshRead)], timeout: 15),
+            .completed)
+        freshRead.tap()
+        let play = revealBrowserButton("Play", in: app, forTap: true)
+        XCTAssertTrue(play.waitForExistence(timeout: 15))
+        XCTAssertTrue(play.isEnabled)
+        play.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 15), "A lost completion proof must stay unknown")
+        let afterPlayRead = revealBrowserButton("Read current page", in: app, forTap: true)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: afterPlayRead)], timeout: 15),
+            .completed)
+        afterPlayRead.tap()
+        let summary = app.staticTexts.containing(NSPredicate(
+            format: "label CONTAINS %@", "watch: owned synthetic video: playing")).firstMatch
+        XCTAssertTrue(summary.waitForExistence(timeout: 15))
+
+        let down = revealBrowserButton("Down", in: app, forTap: true)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: down)], timeout: 15),
+            .completed)
+        down.tap()
+        let cancel = revealBrowserButton("browser-stop-waiting", in: app, forTap: true)
+        guard cancel.exists && cancel.isHittable else {
+            XCTFail("The in-flight browser cancel button was not reachable in the bounded form")
+            return
+        }
+        cancel.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 15))
+        let afterCancelRead = revealBrowserButton("Read current page", in: app, forTap: true)
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: afterCancelRead)], timeout: 15),
+            .completed)
+        afterCancelRead.tap()
+        XCTAssertTrue(summary.waitForExistence(timeout: 15))
+    }
+
+    func testReadOnlyBrowserPageDoesNotOfferEnabledMutationControls() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-read-only-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+        XCTAssertFalse(app.buttons["Search"].exists)
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.descendants(matching: .any)["browser-read-only-grant-warning"].exists)
+        for label in ["Search", "Up", "Down", "Left", "Right", "Play", "Pause"] {
+            XCTAssertFalse(revealBrowserButton(label, in: app).isEnabled,
+                "\(label) requires browser.control")
+        }
+        XCTAssertFalse(revealBrowserButton("browser-result-1", in: app).isEnabled)
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+    }
+
+    func testUnavailableObservedPlaybackDisablesMediaActionsWithoutDispatch() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-unavailable-playback-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let browserEnabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [browserEnabled], timeout: 5), .completed)
+        browser.tap()
+        app.buttons["Read current page"].tap()
+        let observed = app.staticTexts["browser-observed-playback"]
+        XCTAssertTrue(observed.waitForExistence(timeout: 5))
+        XCTAssertEqual(observed.label, "Playback state is unavailable")
+        XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
+        XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+    }
+
+    func testNetflixRowsRequireExplicitChoiceBeforeHorizontalScroll() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-netflix-rows-fixture"]
+        app.launch()
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        let enabled = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)
+        XCTAssertEqual(XCTWaiter.wait(for: [enabled], timeout: 5), .completed)
+        browser.tap()
+        app.buttons["Read current page"].tap()
+        XCTAssertTrue(app.staticTexts["Mac A page"].waitForExistence(timeout: 5))
+        XCTAssertFalse(revealBrowserButton("Right", in: app).isEnabled)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+        let row = revealBrowserButton("browser-netflix-row-2", in: app, forTap: true)
+        XCTAssertTrue(row.label.contains("Row 2: New"))
+        row.tap()
+        let right = revealBrowserButton("Right", in: app, forTap: true)
+        XCTAssertTrue(right.isEnabled)
+        right.tap()
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["Right"].exists)
+        XCTAssertFalse(app.buttons["browser-netflix-row-2"].exists)
+    }
+
+    func testBrowserFormRowButtonsDispatchOnlyTheTappedAction() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-row-actions-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)], timeout: 5),
+            .completed)
+        browser.tap()
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+
+        let up = revealBrowserButton("Up", in: app)
+        let down = revealBrowserButton("Down", in: app, forTap: true)
+        XCTAssertTrue(up.isEnabled, "An enabled adjacent button must not dispatch")
+        XCTAssertTrue(down.isEnabled)
+        down.tap()
+        let actions = app.staticTexts["browser-fixture-action-history"]
+        XCTAssertTrue(actions.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Actions: scroll.down"),
+            object: actions)], timeout: 5), .completed)
+        XCTAssertEqual(actions.label, "Actions: scroll.down")
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 1")
+
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        let play = revealBrowserButton("Play", in: app)
+        let pause = revealBrowserButton("Pause", in: app, forTap: true)
+        XCTAssertFalse(play.isEnabled, "The adjacent media action is intentionally disabled")
+        XCTAssertTrue(pause.isEnabled)
+        pause.tap()
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Actions: scroll.down,playback.pause"),
+            object: actions)], timeout: 5), .completed)
+        XCTAssertEqual(actions.label, "Actions: scroll.down,playback.pause")
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 2")
+    }
+
+    func testSyntheticAXFallbackOffersOnlyOneObservedScrollUntilFreshRead() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-ax-scroll-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)], timeout: 5),
+            .completed)
+        browser.tap()
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertTrue(app.staticTexts["browser-observed-ax-scroll"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["browser-fixture-synthetic-ax"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 0")
+        for unavailable in ["Up", "Left", "Right", "Search", "Play", "Pause",
+                            "1. Read-only item"] {
+            XCTAssertFalse(revealBrowserButton(unavailable, in: app).isEnabled,
+                "Only the observed Down direction may be sent")
+        }
+        let down = revealBrowserButton("Down", in: app, forTap: true)
+        XCTAssertTrue(down.isEnabled)
+        down.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 5))
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["Down"].exists,
+            "The observed AX control is consumed before an uncertain response")
+        XCTAssertEqual(app.staticTexts["browser-fixture-action-history"].label,
+            "Actions: scroll.down")
+
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertTrue(app.staticTexts["browser-observed-ax-scroll"].waitForExistence(timeout: 5))
+        XCTAssertTrue(revealBrowserButton("Down", in: app).isEnabled)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 1")
+        XCTAssertEqual(app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a,ui-fixture-mac-a")
+    }
+
+    private func waitForFixtureMutations(_ expected: Int, in app: XCUIApplication) {
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        XCTAssertTrue(count.waitForExistence(timeout: 5))
+        let observed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture mutations: \(expected)"),
+            object: count)
+        XCTAssertEqual(XCTWaiter.wait(for: [observed], timeout: 5), .completed)
+    }
+
+    private func revealBrowserButton(_ identifier: String, in app: XCUIApplication,
+                                     forTap: Bool = false) -> XCUIElement {
+        let button = app.buttons[identifier]
+        let list = app.collectionViews.firstMatch
+        let visible = { button.exists && (!forTap || button.isHittable) }
+        if !visible() {
+            XCTAssertTrue(list.exists, "Expected the browser form's scrollable list")
+            for _ in 0..<4 {
+                if visible() { break }
+                list.swipeUp()
+            }
+            for _ in 0..<4 {
+                if visible() { break }
+                list.swipeDown()
+            }
+        }
+        XCTAssertTrue(visible(), "Expected browser control \(identifier) in the bounded form")
+        return button
+    }
+
+    private func revealSpeechReviewButton(_ identifier: String, in app: XCUIApplication,
+                                          forTap: Bool = false) -> XCUIElement {
+        let button = app.buttons[identifier]
+        let list = app.collectionViews.firstMatch
+        let window = app.windows.firstMatch
+        let keyboard = app.keyboards.firstMatch
+        let fullyVisible = { () -> Bool in
+            guard button.exists, list.exists, window.exists,
+                  !forTap || button.isHittable else { return false }
+            let frame = button.frame
+            let top = max(list.frame.minY + 8, window.frame.minY + 44)
+            var bottom = min(list.frame.maxY - 8, window.frame.maxY - 48)
+            if keyboard.exists { bottom = min(bottom, keyboard.frame.minY - 8) }
+            return frame.width > 0 && frame.height > 0 &&
+                frame.minY >= top && frame.maxY <= bottom
+        }
+        if !fullyVisible() {
+            XCTAssertTrue(list.exists, "Expected the voice form's scrollable list")
+            for _ in 0..<4 {
+                if fullyVisible() { break }
+                list.swipeUp()
+            }
+            for _ in 0..<4 {
+                if fullyVisible() { break }
+                list.swipeDown()
+            }
+        }
+        XCTAssertTrue(fullyVisible(), "Expected voice control \(identifier) fully inside the usable form")
+        return button
+    }
+
+    private func waitForFixturePageToClear(in app: XCUIApplication) {
+        // Return to the top of the lazy form so absence is about page invalidation,
+        // not merely an off-screen row that UIKit has not materialized.
+        _ = revealBrowserButton("Read current page", in: app, forTap: true)
+        let page = app.staticTexts["Mac A page"]
+        let cleared = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: page)
+        XCTAssertEqual(XCTWaiter.wait(for: [cleared], timeout: 5), .completed)
     }
 
     func testChangingMacThroughPhoneControlClearsObservedBrowserPage() {
@@ -289,6 +1389,7 @@ final class EllieIOSUITests: XCTestCase {
         app.launch()
         let coordinator = app.buttons["coordinator-enrollment"]
         XCTAssertTrue(coordinator.waitForExistence(timeout: 5))
+        revealHomeControl(coordinator, in: app)
         coordinator.tap()
         XCTAssertTrue(app.navigationBars["Coordinator"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Scan enrollment code"].waitForExistence(timeout: 5))
@@ -335,12 +1436,271 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Kitchen Notes"].exists)
     }
 
+    func testPlaylistSetupPersistsAndKeepsPlaybackAttended() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let name = "Playlist \(UUID().uuidString.prefix(8))"
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(name, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: name, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Playlist"].tap()
+        let setup = app.buttons.matching(NSPredicate(
+            format: "identifier BEGINSWITH %@", "playlist-setup-")).firstMatch
+        XCTAssertTrue(setup.waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Play Playlist"].exists, "An unconfigured widget must not open media")
+        setup.tap()
+        let playlist = app.textFields["playlist-input"]
+        let identifier = "PLC77007E23FF423C6"
+        try typeTextReliably("https://www.youtube.com/playlist?list=\(identifier)",
+            into: playlist, in: app)
+        app.buttons["Save"].tap()
+        XCTAssertTrue(app.buttons["Play Playlist"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["Close"].exists, "Saving must not start the player")
+
+        app.terminate()
+        app.launch()
+        openDashboard(named: name, in: app)
+        XCTAssertTrue(app.buttons["Play Playlist"].waitForExistence(timeout: 5))
+        returnToDashboardList(from: name, in: app)
+        openDashboard(named: name, in: app)
+        app.buttons["dashboard-options"].tap()
+        app.buttons["Delete Dashboard"].tap()
+        app.buttons["Delete dashboard"].tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
+    }
+
+    func testSyntheticHouseholdChoreReviewCancelAndUnknownNeverReplay() throws {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-household-chores-fixture"]
+        app.launch()
+        defer { app.terminate() }
+
+        let puts = app.staticTexts["household-chores-fixture-puts"]
+        let reads = app.staticTexts["household-chores-fixture-reads"]
+        XCTAssertTrue(puts.waitForExistence(timeout: 5))
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 0")
+        app.buttons["ios-household-chores-access"].tap()
+        let read = app.buttons["ios-household-chores-read"]
+        XCTAssertTrue(read.waitForExistence(timeout: 5))
+        revealHouseholdControl(read, in: app).tap()
+        let fetched = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore GETs: 1"), object: reads)
+        XCTAssertEqual(XCTWaiter.wait(for: [fetched], timeout: 5), .completed)
+        let chart = app.otherElements["ios-household-chores-week-chart"]
+        XCTAssertTrue(chart.waitForExistence(timeout: 5),
+            "The fetched shared copy should expose its own weekly completion chart")
+        XCTAssertTrue(app.staticTexts["Last observed household copy · revision 7 · UTC"].exists)
+        let chore = app.staticTexts["Household laundry"]
+        XCTAssertTrue(revealHouseholdControl(chore, in: app).exists)
+
+        let edit = app.buttons["ios-household-chore-edit-11111111-1111-4111-8111-111111111111"]
+        revealHouseholdControl(edit, in: app).tap()
+        try typeTextReliably("Take blue basket", into: app.descendants(matching: .any)["ios-household-chore-details"], in: app)
+        app.buttons["ios-household-chore-prepare"].tap()
+        XCTAssertTrue(app.staticTexts["Changed household chore"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["Take blue basket"].exists,
+            "The review must show the edited details before any PUT")
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        revealHouseholdControl(app.buttons["Cancel Prepared Change"], in: app).tap()
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        XCTAssertFalse(app.staticTexts["Changed household chore"].exists)
+
+        revealHouseholdControl(app.buttons["ios-household-chores-read"], in: app).tap()
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 2",
+            "Discard requires a fresh household read before another edit")
+        revealHouseholdControl(edit, in: app).tap()
+        try typeTextReliably("Take blue basket", into: app.descendants(matching: .any)["ios-household-chore-details"], in: app)
+        app.buttons["ios-household-chore-prepare"].tap()
+        XCTAssertTrue(app.staticTexts["Take blue basket"].waitForExistence(timeout: 5))
+        revealHouseholdControl(app.buttons["ios-household-chores-save"], in: app).tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore PUTs: 1"), object: puts)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 5), .completed)
+        revealHouseholdControl(app.buttons["ios-household-chores-cancel"], in: app).tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "save outcome is unknown")).firstMatch.waitForExistence(timeout: 5))
+        app.buttons["household-chores-fixture-release"].tap()
+        let revision = app.staticTexts["household-chores-fixture-revision"]
+        let committed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore revision: 8"), object: revision)
+        XCTAssertEqual(XCTWaiter.wait(for: [committed], timeout: 5), .completed)
+        revealHouseholdControl(app.buttons["ios-household-chores-check-result"], in: app).tap()
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(
+            format: "label CONTAINS %@", "currently matches the prepared copy")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(reads.label, "Fixture chore GETs: 3")
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 1",
+            "Cancellation and recovery must not send the prepared change again")
+        XCTAssertFalse(app.buttons["ios-household-chores-save"].isEnabled)
+    }
+
+    func testSyntheticHouseholdChoreDeleteCancelThenConfirmSendsOnlyOnce() {
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-household-chores-fixture"]
+        app.launch()
+        defer { app.terminate() }
+
+        let puts = app.staticTexts["household-chores-fixture-puts"]
+        XCTAssertTrue(puts.waitForExistence(timeout: 5))
+        app.buttons["ios-household-chores-access"].tap()
+        revealHouseholdControl(app.buttons["ios-household-chores-read"], in: app).tap()
+        let chore = app.staticTexts["Household laundry"]
+        XCTAssertTrue(chore.waitForExistence(timeout: 5))
+
+        let delete = app.buttons["Prepare deletion of Household laundry"]
+        revealHouseholdControl(delete, in: app).tap()
+        XCTAssertTrue(app.buttons["Prepare deletion"].waitForExistence(timeout: 5))
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(chore.exists)
+        XCTAssertFalse(app.staticTexts["Remove Household laundry · Alex"].exists)
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+
+        revealHouseholdControl(delete, in: app).tap()
+        app.buttons["Prepare deletion"].tap()
+        XCTAssertTrue(app.staticTexts["Remove Household laundry · Alex"].waitForExistence(timeout: 5),
+            "The chosen deletion must be reviewable before a shared write")
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 0")
+        revealHouseholdControl(app.buttons["ios-household-chores-save"], in: app).tap()
+        let sent = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture chore PUTs: 1"), object: puts)
+        XCTAssertEqual(XCTWaiter.wait(for: [sent], timeout: 5), .completed)
+        app.buttons["household-chores-fixture-release"].tap()
+        XCTAssertTrue(app.staticTexts["No household chores yet"].waitForExistence(timeout: 5))
+        XCTAssertFalse(chore.exists)
+        XCTAssertEqual(puts.label, "Fixture chore PUTs: 1")
+    }
+
+    private func revealHouseholdControl(_ control: XCUIElement, in app: XCUIApplication) -> XCUIElement {
+        let list = app.collectionViews.firstMatch.exists
+            ? app.collectionViews.firstMatch : app.scrollViews.firstMatch
+        XCTAssertTrue(list.waitForExistence(timeout: 5))
+        for _ in 0..<6 {
+            if control.exists && control.isHittable { return control }
+            list.swipeUp()
+        }
+        for _ in 0..<6 {
+            if control.exists && control.isHittable { return control }
+            list.swipeDown()
+        }
+        XCTAssertTrue(control.exists && control.isHittable,
+            "Expected the synthetic household chore control to be reachable")
+        return control
+    }
+
+    func testLocalChoresAddCancelEditCompleteRelaunchAndDelete() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let dashboardName = "Chores \(UUID().uuidString.prefix(8))"
+        let secondDashboard = "Shared chores \(UUID().uuidString.prefix(8))"
+        let task = "Bins \(UUID().uuidString.prefix(8))"
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(dashboardName, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Chores"].tap()
+        XCTAssertTrue(app.staticTexts["Saved on this iPhone only · Not synced"].waitForExistence(timeout: 5))
+        app.buttons["ios-manage-chores"].tap()
+        app.buttons["ios-chore-add"].tap()
+        try typeTextReliably(task + " ", into: app.textFields["ios-chore-title"], in: app)
+        try typeTextReliably("Sam", into: app.textFields["ios-chore-assignee"], in: app)
+        app.buttons["ios-chore-save"].tap()
+
+        let edit = app.buttons["Edit \(task)"]
+        XCTAssertTrue(edit.waitForExistence(timeout: 5))
+        let id = edit.identifier.replacingOccurrences(of: "ios-chore-edit-", with: "")
+        XCTAssertFalse(id.isEmpty)
+        edit.tap()
+        try typeTextReliably(" Jr", into: app.textFields["ios-chore-assignee"], in: app, startingWith: "Sam")
+        app.buttons["Cancel"].tap()
+        XCTAssertTrue(app.buttons["Edit \(task)"].waitForExistence(timeout: 5), "Cancelling must keep the saved task")
+        XCTAssertTrue((app.buttons["Edit \(task)"].value as? String)?.hasPrefix("Sam · Due ") == true,
+            "Cancelling must not change the saved assignee or due day")
+        app.buttons["Done"].tap()
+        returnToDashboardList(from: dashboardName, in: app)
+
+        app.buttons["new-dashboard"].tap()
+        try typeTextReliably(secondDashboard, into: app.textFields["Name"], in: app)
+        app.buttons["Create"].tap()
+        openDashboard(named: secondDashboard, in: app)
+        app.buttons["Add widget"].tap()
+        app.buttons["Add Chores"].tap()
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertTrue(app.buttons["Edit \(task)"].waitForExistence(timeout: 5),
+            "A second dashboard must show the same local chore")
+        app.buttons["Edit \(task)"].tap()
+        try typeTextReliably(" Jr", into: app.textFields["ios-chore-assignee"], in: app, startingWith: "Sam")
+        app.buttons["ios-chore-save"].tap()
+        XCTAssertTrue((app.buttons["Edit \(task)"].value as? String)?.hasPrefix("Sam Jr · Due ") == true)
+        let toggle = app.buttons["ios-chore-toggle-\(id)"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+        XCTAssertGreaterThanOrEqual(toggle.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(toggle.frame.height, 44)
+        let delete = app.buttons["ios-chore-delete-\(id)"]
+        XCTAssertGreaterThanOrEqual(delete.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(delete.frame.height, 44)
+        toggle.tap()
+        XCTAssertEqual(toggle.label, "Undo completion of \(task)")
+        XCTAssertTrue(app.otherElements["ios-chores-week-chart"].exists)
+        app.buttons["Done"].tap()
+        returnToDashboardList(from: secondDashboard, in: app)
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertTrue((app.buttons["Edit \(task)"].value as? String)?.hasPrefix("Sam Jr · Due ") == true,
+            "Changes from the second dashboard must be visible in the first without relaunch")
+        app.buttons["Done"].tap()
+
+        app.terminate()
+        app.launch()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertTrue(app.buttons["Edit \(task)"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.buttons["ios-chore-toggle-\(id)"].label, "Undo completion of \(task)")
+        app.buttons["ios-chore-delete-\(id)"].tap()
+        app.buttons["Delete chore"].tap()
+        let removed = app.buttons["Edit \(task)"]
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: removed)], timeout: 5), .completed,
+            "Confirming deletion must remove the chore")
+        app.buttons["Done"].tap()
+        app.terminate()
+        app.launch()
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["ios-manage-chores"].tap()
+        XCTAssertFalse(app.buttons["Edit \(task)"].exists,
+            "A deleted chore must stay absent after relaunch")
+        app.buttons["Done"].tap()
+        returnToDashboardList(from: dashboardName, in: app)
+        openDashboard(named: dashboardName, in: app)
+        app.buttons["dashboard-options"].tap()
+        app.buttons["Delete Dashboard"].tap()
+        app.buttons["Delete dashboard"].tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
+        openDashboard(named: secondDashboard, in: app)
+        app.buttons["dashboard-options"].tap()
+        app.buttons["Delete Dashboard"].tap()
+        app.buttons["Delete dashboard"].tap()
+        XCTAssertTrue(app.navigationBars["Ellie"].waitForExistence(timeout: 5))
+    }
+
     private func openDashboard(named name: String, identifiedBy identifier: String? = nil, in app: XCUIApplication) {
         let link = identifier.map { app.buttons[$0] }
             ?? app.buttons.matching(NSPredicate(format: "label == %@", name)).firstMatch
         XCTAssertTrue(link.waitForExistence(timeout: 5), "Expected the \(name) dashboard link")
+        revealHomeControl(link, in: app)
         link.tap()
         XCTAssertTrue(app.navigationBars[name].waitForExistence(timeout: 5), "Expected the \(name) dashboard detail")
+    }
+
+    private func revealHomeControl(_ control: XCUIElement, in app: XCUIApplication) {
+        let scroll = app.scrollViews["dashboard-list"]
+        for _ in 0..<12 {
+            if control.isHittable { break }
+            scroll.swipeUp()
+        }
+        XCTAssertTrue(control.isHittable, "Expected the home control to remain reachable by scrolling")
     }
 
     private func returnToDashboardList(from title: String, in app: XCUIApplication) {
@@ -366,10 +1726,15 @@ final class EllieIOSUITests: XCTestCase {
             let chunk = String(characters[start ..< min(start + 4, characters.count)])
             element.typeText(chunk)
             expected += chunk
-            let actual = element.value as? String
-            guard actual == expected else {
-                XCTFail("Expected input value \(expected); observed \(String(describing: actual))")
-                throw InputFailure.valueMismatch
+            let committedValue = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", expected), object: element)
+            let observation = XCTWaiter.wait(for: [committedValue], timeout: 2)
+            if observation != .completed {
+                let actual = element.value as? String
+                guard observation == .timedOut && actual == expected else {
+                    XCTFail("Expected input value \(expected); observed \(String(describing: actual))")
+                    throw InputFailure.valueMismatch
+                }
             }
         }
     }

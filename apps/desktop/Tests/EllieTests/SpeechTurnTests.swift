@@ -122,6 +122,198 @@ final class SpeechTurnTests: XCTestCase {
     XCTAssertFalse(directoryExists)
   }
 
+  @MainActor
+  func testCredentialChangeBlocksStillValidOldCredentialAndClearsReviewedText() async {
+    let old = credential()
+    let recorder = SpeechFakeRecorder()
+    let transport = SpeechFakeTransport(text: "Private reviewed words")
+    let store = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { store.phase == .reviewing }
+    XCTAssertEqual(store.transcript, "Private reviewed words")
+
+    store.credentialDidChange()
+    XCTAssertEqual(store.phase, .credentialChanged)
+    XCTAssertEqual(store.transcript, "")
+    store.cancelAndDiscard() // A later scene-background callback must not re-enable the old store.
+    store.checkAvailability()
+    store.record()
+    store.stop()
+    XCTAssertEqual(store.phase, .credentialChanged)
+    let availabilityTokens = await transport.availabilityTokens
+    let transcriptionTokens = await transport.transcriptionTokens
+    let startCalls = await recorder.startCalls
+    XCTAssertEqual(availabilityTokens, [old.token, old.token])
+    XCTAssertEqual(transcriptionTokens, [old.token])
+    XCTAssertEqual(startCalls, 1)
+  }
+
+  @MainActor
+  func testCredentialChangeDuringAvailabilityRejectsLateResultAndNewOldTokenUse() async {
+    let old = credential()
+    let recorder = SpeechFakeRecorder()
+    let transport = SpeechFakeTransport(suspendAvailability: true)
+    let store = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { await transport.availabilityCalls == 1 }
+
+    store.credentialDidChange()
+    XCTAssertEqual(store.phase, .cancelling)
+    store.checkAvailability()
+    store.record()
+    await transport.finishAvailability()
+    await eventually { store.phase == .credentialChanged }
+    store.checkAvailability()
+    store.cancelAndDiscard()
+    XCTAssertEqual(store.phase, .credentialChanged)
+    XCTAssertEqual(store.transcript, "")
+    let availabilityTokens = await transport.availabilityTokens
+    let startCalls = await recorder.startCalls
+    XCTAssertEqual(availabilityTokens, [old.token])
+    XCTAssertEqual(startCalls, 0)
+  }
+
+  @MainActor
+  func testCredentialChangeBeforeQueuedAvailabilityOrRecordStartsMakesNoOldRequest() async {
+    let old = credential()
+    let initialTransport = SpeechFakeTransport()
+    let initial = SpeechTurnStore(credential: old, recorder: SpeechFakeRecorder(),
+      transport: initialTransport)
+    initial.checkAvailability()
+    initial.credentialDidChange() // Same main-actor turn, before the queued task can start.
+    await eventually { initial.phase == .credentialChanged }
+    let initialCalls = await initialTransport.availabilityTokens
+    XCTAssertTrue(initialCalls.isEmpty)
+
+    let recorder = SpeechFakeRecorder()
+    let transport = SpeechFakeTransport()
+    let ready = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    ready.checkAvailability()
+    await eventually { ready.phase == .ready }
+    ready.record()
+    ready.credentialDidChange() // The recording task has not started.
+    await eventually { ready.phase == .credentialChanged }
+    let calls = await transport.availabilityTokens
+    let starts = await recorder.startCalls
+    XCTAssertEqual(calls, [old.token])
+    XCTAssertEqual(starts, 0)
+  }
+
+  @MainActor
+  func testCredentialChangeWhileRecorderStopsDisposesLateArtifactBeforeTranscription() async {
+    let old = credential()
+    let recorder = SpeechFakeRecorder(holdStop: true)
+    let transport = SpeechFakeTransport()
+    let store = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { await recorder.stopPending }
+
+    store.credentialDidChange()
+    await recorder.finishStop()
+    await eventually { store.phase == .credentialChanged }
+    XCTAssertEqual(store.transcript, "")
+    let transcriptions = await transport.transcriptionTokens
+    let disposals = await recorder.disposals
+    let directoryExists = await recorder.directoryExists
+    XCTAssertTrue(transcriptions.isEmpty)
+    XCTAssertEqual(disposals, 1)
+    XCTAssertFalse(directoryExists)
+  }
+
+  @MainActor
+  func testLateArtifactDisposalFailureKeepsChangedCredentialBlockedForCleanup() async {
+    let recorder = SpeechFakeRecorder(holdStop: true)
+    let transport = SpeechFakeTransport()
+    let store = SpeechTurnStore(credential: credential(), recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { await recorder.stopPending }
+
+    await recorder.setFailDispose(true)
+    store.credentialDidChange()
+    await eventually { await recorder.cancelCalls == 1 }
+    await recorder.finishStop() // stop() creates a new artifact after cancel() succeeded.
+    await eventually { store.phase == .cleanupRequired }
+    let directoryExists = await recorder.directoryExists
+    let transcriptions = await transport.transcriptionTokens
+    XCTAssertTrue(directoryExists, "late private audio must not be treated as removed")
+    XCTAssertTrue(transcriptions.isEmpty)
+    store.checkAvailability()
+    XCTAssertEqual(store.phase, .cleanupRequired)
+
+    store.retryCleanup()
+    await eventually { store.phase == .credentialChanged }
+    let remainingDirectory = await recorder.directoryExists
+    XCTAssertFalse(remainingDirectory)
+  }
+
+  @MainActor
+  func testCredentialChangeDuringTranscriptionDisposesAudioWithoutLatePrivateText() async {
+    let old = credential()
+    let recorder = SpeechFakeRecorder()
+    let transport = SpeechFakeTransport(text: "Late private text", suspendTranscription: true)
+    let store = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { await transport.transcriptionCalls == 1 }
+
+    store.credentialDidChange()
+    await transport.finishTranscription()
+    await eventually { store.phase == .credentialChanged }
+    XCTAssertEqual(store.transcript, "")
+    let directoryExists = await recorder.directoryExists
+    XCTAssertFalse(directoryExists)
+    store.checkAvailability()
+    let availabilityTokens = await transport.availabilityTokens
+    let transcriptionTokens = await transport.transcriptionTokens
+    XCTAssertEqual(availabilityTokens, [old.token, old.token])
+    XCTAssertEqual(transcriptionTokens, [old.token])
+  }
+
+  @MainActor
+  func testCredentialChangeCannotReenableOldCredentialAfterCleanupRetry() async {
+    let old = credential()
+    let recorder = SpeechFakeRecorder()
+    let transport = SpeechFakeTransport()
+    let store = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    await recorder.setFailCleanup(true)
+
+    store.credentialDidChange()
+    await eventually { store.phase == .cleanupRequired }
+    store.checkAvailability()
+    store.record()
+    let beforeRetry = await transport.availabilityTokens
+    XCTAssertEqual(beforeRetry, [old.token, old.token])
+
+    await recorder.setFailCleanup(false)
+    store.retryCleanup()
+    await eventually { store.phase == .credentialChanged }
+    store.checkAvailability()
+    store.record()
+    let afterRetry = await transport.availabilityTokens
+    XCTAssertEqual(afterRetry, beforeRetry)
+    let directoryExists = await recorder.directoryExists
+    XCTAssertFalse(directoryExists)
+  }
+
   func testWAVValidationEnforcesPCMShapeDurationAndBounds() throws {
     let directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "ellie-speech-wav-test-\(UUID().uuidString)", isDirectory: true)
@@ -246,10 +438,16 @@ private actor SpeechFakeRecorder: SpeechRecording {
   let file: URL
   var startCalls = 0
   var disposals = 0
+  var cancelCalls = 0
   var failCleanup = false
+  private var failDispose = false
+  private let holdStop: Bool
+  private var stopContinuation: CheckedContinuation<Void, Never>?
+  var stopPending: Bool { stopContinuation != nil }
   var directoryExists: Bool { FileManager.default.fileExists(atPath: directory.path) }
 
-  init() {
+  init(holdStop: Bool = false) {
+    self.holdStop = holdStop
     directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "ellie-speech-fake-\(UUID().uuidString)", isDirectory: true)
     file = directory.appendingPathComponent("turn.wav")
@@ -260,14 +458,31 @@ private actor SpeechFakeRecorder: SpeechRecording {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
     try Data("synthetic".utf8).write(to: file)
   }
-  func stop() async throws -> SpeechAudioArtifact { SpeechAudioArtifact(id: UUID(), url: file) }
-  func cancel() async throws { try cleanup() }
+  func stop() async throws -> SpeechAudioArtifact {
+    if holdStop {
+      await withCheckedContinuation { stopContinuation = $0 }
+      // Model a recorder that finishes its owned artifact after cancellation.
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try Data("synthetic".utf8).write(to: file)
+    }
+    return SpeechAudioArtifact(id: UUID(), url: file)
+  }
+  func finishStop() {
+    stopContinuation?.resume()
+    stopContinuation = nil
+  }
+  func cancel() async throws {
+    cancelCalls += 1
+    try cleanup()
+  }
   func dispose(_ artifact: SpeechAudioArtifact) async throws {
     guard artifact.url.standardizedFileURL == file.standardizedFileURL else { return }
     disposals += 1
+    if failDispose { throw SpeechTurnFailure.cleanupFailed }
     try cleanup()
   }
   func setFailCleanup(_ value: Bool) { failCleanup = value }
+  func setFailDispose(_ value: Bool) { failDispose = value }
   private func cleanup() throws {
     if failCleanup { throw SpeechTurnFailure.cleanupFailed }
     try? FileManager.default.removeItem(at: file)
@@ -279,6 +494,8 @@ private actor SpeechFakeTransport: SpeechTransporting {
   var availabilityCalls = 0
   var transcriptionCalls = 0
   var cancelCalls = 0
+  var availabilityTokens: [String] = []
+  var transcriptionTokens: [String] = []
   private let text: String
   private let availabilityFailure: SpeechTurnFailure?
   private let suspendAvailability: Bool
@@ -298,6 +515,7 @@ private actor SpeechFakeTransport: SpeechTransporting {
 
   func availability(for credential: NativeEnrollmentCredential) async throws {
     availabilityCalls += 1
+    availabilityTokens.append(credential.token)
     if suspendAvailability {
       await withCheckedContinuation { availabilityContinuation = $0 }
     }
@@ -307,6 +525,7 @@ private actor SpeechFakeTransport: SpeechTransporting {
     _ artifact: SpeechAudioArtifact, turnID: UUID, credential: NativeEnrollmentCredential
   ) async throws -> String {
     transcriptionCalls += 1
+    transcriptionTokens.append(credential.token)
     if suspendTranscription {
       await withCheckedContinuation { transcriptionContinuation = $0 }
     }

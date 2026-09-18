@@ -171,6 +171,35 @@ test("browser remote projects configured nodes with bounded freshness and app ca
   ]);
 });
 
+test("remote projects only the coordinator's explicit cancelled-command settlement flag", async () => {
+  const now = Date.now();
+  const remote = createBrowserRemote(
+    {
+      async call() {
+        return [
+          {
+            id: "living-room-mini",
+            lastSeen: now,
+            executionCapabilities: ["browser.read"],
+            cancellationSettling: true,
+            privateJob: "not for native inventory",
+          },
+        ];
+      },
+    },
+    [{ id: "living-room-mini", label: "Living room" }],
+  );
+  assert.deepEqual(await remote.nodes(), [
+    {
+      id: "living-room-mini",
+      label: "Living room",
+      online: true,
+      capabilities: ["browser.read"],
+      cancellationSettling: true,
+    },
+  ]);
+});
+
 test("native bridge forwards cancellation to both pinned discovery and command requests", async () => {
   const controller = new AbortController();
   const calls: { timeoutMs?: number; signal?: AbortSignal }[] = [];

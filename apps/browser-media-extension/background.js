@@ -1,7 +1,26 @@
-const productionOrigins = new Set(["https://www.netflix.com", "https://www.youtube.com"]);
+const productionOrigins = new Set([
+  "https://www.netflix.com",
+  "https://www.youtube.com",
+  "https://tv.youtube.com",
+  "https://www.disneyplus.com",
+]);
 const accessibilityBindingOrigins = new Set(["https://www.youtube.com"]);
+const companionBindingOrigins = new Set([
+  "https://www.netflix.com",
+  "https://tv.youtube.com",
+  "https://www.disneyplus.com",
+]);
 const mutationLedgers = new Map();
-const mutationTypes = new Set(["scrollViewport", "scrollRow", "open", "play", "pause", "seek"]);
+const mutationTypes = new Set([
+  "scrollViewport",
+  "scrollRow",
+  "scrollSelectedRow",
+  "searchObserved",
+  "open",
+  "play",
+  "pause",
+  "seek",
+]);
 const actionPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const nativeProtocol = "ellie.browser-webmcp.v1";
 const nativeHost = "org.ellie.browser_webmcp";
@@ -49,9 +68,15 @@ function supportedNativeRequest(request) {
   return (
     request?.protocol === nativeProtocol &&
     typeof request.id === "string" &&
-    ["cancel", "binding.status", "binding.refresh", "tools.list", "tool.execute"].includes(
-      request.type,
-    )
+    [
+      "cancel",
+      "binding.status",
+      "binding.refresh",
+      "page.inspect",
+      "media.execute",
+      "tools.list",
+      "tool.execute",
+    ].includes(request.type)
   );
 }
 
@@ -65,14 +90,82 @@ function nativeHostMissing(message) {
 
 function allowedOrigin(url) {
   try {
-    return productionOrigins.has(new URL(url).origin);
+    const parsed = new URL(url);
+    return !parsed.username && !parsed.password && productionOrigins.has(parsed.origin);
   } catch {
     return false;
   }
 }
 
-async function dispatch(tabId, command) {
+async function livePopupSearch(sender, selectedWindowId) {
+  if (
+    sender?.id !== chrome.runtime.id ||
+    sender.url !== chrome.runtime.getURL("popup.html") ||
+    (sender.documentId !== undefined &&
+      (typeof sender.documentId !== "string" || !sender.documentId)) ||
+    sender.tab ||
+    !Number.isInteger(selectedWindowId) ||
+    selectedWindowId < 0
+  )
+    return false;
+  const contexts = await chrome.runtime.getContexts({
+    documentUrls: [chrome.runtime.getURL("popup.html")],
+  });
+  return (
+    contexts.length === 1 &&
+    contexts[0].contextType === "POPUP" &&
+    typeof contexts[0].documentId === "string" &&
+    Boolean(contexts[0].documentId) &&
+    (sender.documentId === undefined || contexts[0].documentId === sender.documentId) &&
+    contexts[0].documentUrl === chrome.runtime.getURL("popup.html") &&
+    contexts[0].tabId === -1 &&
+    contexts[0].windowId === -1
+  );
+}
+
+async function selectedPopupBindingTab(sender, tab, browserWindow) {
+  if (
+    browserWindow.id !== tab.windowId ||
+    browserWindow.type !== "normal" ||
+    !(await livePopupSearch(sender, tab.windowId))
+  )
+    return false;
+  // The toolbar popup can own focus while its parent normal window reports
+  // focused=false. Chrome, not the message payload, supplies the last selected tab.
+  const selected = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return (
+    selected.length === 1 &&
+    selected[0].id === tab.id &&
+    selected[0].windowId === tab.windowId &&
+    selected[0].url === tab.url &&
+    selected[0].active === true &&
+    selected[0].status === "complete"
+  );
+}
+
+async function dispatch(
+  tabId,
+  command,
+  expectedBinding,
+  authorizeEffect,
+  effectStarted,
+  popupSearch,
+) {
   const deadline = Date.now() + 2000;
+  const before = await chrome.tabs.get(tabId);
+  if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
+  const youtubeSearch =
+    command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com";
+  if (
+    youtubeSearch &&
+    (before.active !== true ||
+      before.status !== "complete" ||
+      (expectedBinding
+        ? !(await chrome.windows.get(before.windowId)).focused
+        : before.windowId !== popupSearch?.selectedWindowId ||
+          !(await livePopupSearch(popupSearch?.sender, popupSearch?.selectedWindowId))))
+  )
+    throw new Error("page_changed");
   if (mutationTypes.has(command?.type)) {
     if (!actionPattern.test(command?.actionId)) throw new Error("invalid_command");
     let ledger = mutationLedgers.get(tabId);
@@ -81,14 +174,45 @@ async function dispatch(tabId, command) {
     if (ledger.size >= 256) throw new Error("action_ledger_full");
     ledger.add(command.actionId);
   }
-  const before = await chrome.tabs.get(tabId);
-  if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
+  const controllerFile =
+    new URL(before.url).origin === "https://tv.youtube.com"
+      ? "youtube-tv-controller.js"
+      : new URL(before.url).origin === "https://www.disneyplus.com"
+        ? "disneyplus-controller.js"
+        : "media-controller.js";
+  if (
+    expectedBinding &&
+    (before.url !== expectedBinding.url ||
+      before.windowId !== expectedBinding.windowId ||
+      before.active !== true ||
+      before.status !== "complete" ||
+      !(await chrome.windows.get(expectedBinding.windowId)).focused)
+  )
+    throw new Error("page_changed");
   const installed = await chrome.scripting.executeScript({
     target: { tabId },
-    files: ["media-controller.js"],
+    files: [controllerFile],
   });
   const documentId = installed[0]?.documentId;
   if (!documentId) throw new Error("page_changed");
+  if (expectedBinding && documentId !== expectedBinding.documentId) throw new Error("page_changed");
+  if (expectedBinding || youtubeSearch) {
+    const armed = await chrome.tabs.get(tabId);
+    if (
+      armed.url !== (expectedBinding?.url ?? before.url) ||
+      armed.windowId !== (expectedBinding?.windowId ?? before.windowId) ||
+      armed.active !== true ||
+      armed.status !== "complete" ||
+      (expectedBinding
+        ? !(await chrome.windows.get(expectedBinding.windowId)).focused
+        : !(await livePopupSearch(popupSearch?.sender, popupSearch?.selectedWindowId)))
+    )
+      throw new Error("page_changed");
+  }
+  // All arming awaits are complete. No asynchronous work may separate this check
+  // from the effect request: cancellation or replacement must stop pre-dispatch.
+  authorizeEffect?.();
+  effectStarted?.();
   const execution = chrome.scripting.executeScript({
     target: { tabId, documentIds: [documentId] },
     func: async (value, expectedUrl, deadline) => {
@@ -108,10 +232,28 @@ async function dispatch(tabId, command) {
     new Promise((_, reject) => setTimeout(() => reject(new Error("command_timeout")), 2500)),
   ]);
   const after = await chrome.tabs.get(tabId);
+  const observedYoutubeResults = (() => {
+    if (!youtubeSearch || !after.url) return false;
+    const url = new URL(after.url);
+    return (
+      url.origin === new URL(before.url).origin &&
+      url.pathname === "/results" &&
+      !url.hash &&
+      url.searchParams.size === 1 &&
+      url.searchParams.getAll("search_query").length === 1 &&
+      url.searchParams.get("search_query") === command.query
+    );
+  })();
   if (
     !after.url ||
     !allowedOrigin(after.url) ||
-    (command.type !== "open" && after.url !== before.url)
+    (youtubeSearch && (!observedYoutubeResults || after.url === before.url)) ||
+    (!youtubeSearch && command.type !== "open" && after.url !== before.url) ||
+    (youtubeSearch &&
+      (after.windowId !== before.windowId ||
+        after.active !== true ||
+        after.status !== "complete" ||
+        (expectedBinding && !(await chrome.windows.get(before.windowId)).focused)))
   )
     throw new Error("page_changed");
   if (command.type === "open" && new URL(after.url).origin !== new URL(before.url).origin)
@@ -171,7 +313,9 @@ function bindingAvailability(origin) {
     ? "webmcp"
     : accessibilityBindingOrigins.has(origin)
       ? "accessibility"
-      : undefined;
+      : companionBindingOrigins.has(origin)
+        ? "companion"
+        : undefined;
 }
 
 function clearWebMCPSelection() {
@@ -246,7 +390,7 @@ async function currentWebMCPDocument(binding) {
   return binding;
 }
 
-async function bindWebMCP(tabId) {
+async function bindWebMCP(tabId, popupSender) {
   if (activeWebMCP || pendingWebMCPBind) throw new Error("busy");
   const initial = await chrome.tabs.get(tabId);
   if (
@@ -259,7 +403,12 @@ async function bindWebMCP(tabId) {
     throw new Error("unsupported_page");
   }
   const browserWindow = await chrome.windows.get(initial.windowId);
-  if (browserWindow.id !== initial.windowId || browserWindow.focused !== true) {
+  if (
+    browserWindow.id !== initial.windowId ||
+    (popupSender
+      ? !(await selectedPopupBindingTab(popupSender, initial, browserWindow))
+      : browserWindow.focused !== true)
+  ) {
     throw new Error("unsupported_page");
   }
   const tab = initial;
@@ -296,7 +445,9 @@ async function bindWebMCP(tabId) {
       after.status !== "complete" ||
       after.url !== binding.url ||
       afterWindow.id !== tab.windowId ||
-      afterWindow.focused !== true
+      (popupSender
+        ? !(await selectedPopupBindingTab(popupSender, after, afterWindow))
+        : afterWindow.focused !== true)
     )
       throw new Error("page_changed");
     webMCPSelection = {
@@ -401,6 +552,135 @@ async function listWebMCPTools() {
     documentId: binding.documentId,
     tools: result,
   };
+}
+
+async function inspectSelectedPage(request, controller) {
+  if (
+    Object.keys(request).sort().join() !== "bindingId,documentId,id,protocol,type" ||
+    typeof request.bindingId !== "string" ||
+    typeof request.documentId !== "string"
+  )
+    throw new Error("invalid_arguments");
+  const binding = liveBinding();
+  const selection = liveSelection();
+  if (
+    selection.tabId !== binding.tabId ||
+    selection.windowId !== binding.windowId ||
+    binding.availability !== "accessibility" ||
+    binding.origin !== "https://www.youtube.com" ||
+    request.bindingId !== binding.bindingId ||
+    request.documentId !== binding.documentId
+  )
+    throw new Error("page_changed");
+  const navigationGeneration = selection.navigationGeneration;
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const before = await selectedAnchorTab(selection);
+  await currentWebMCPDocument(binding);
+  if (before.url !== binding.url || controller.signal.aborted) throw new Error("page_changed");
+  const site = await dispatch(binding.tabId, { type: "observe", actionId: crypto.randomUUID() });
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const after = await selectedAnchorTab(selection);
+  await currentWebMCPDocument(binding);
+  if (
+    webMCPSelection !== selection ||
+    webMCPBinding !== binding ||
+    selection.navigationGeneration !== navigationGeneration ||
+    after.url !== before.url ||
+    Date.now() >= binding.expiresAt ||
+    request.bindingId !== binding.bindingId ||
+    request.documentId !== binding.documentId
+  )
+    throw new Error("page_changed");
+  return { bindingId: binding.bindingId, documentId: binding.documentId, url: binding.url, site };
+}
+
+async function executeCompanion(request, controller) {
+  if (
+    Object.keys(request).sort().join() !== "bindingId,command,documentId,id,protocol,type" ||
+    typeof request.bindingId !== "string" ||
+    typeof request.documentId !== "string" ||
+    !request.command ||
+    typeof request.command !== "object" ||
+    ![
+      "inspect",
+      "scrollViewport",
+      "scrollSelectedRow",
+      "searchObserved",
+      "open",
+      "play",
+      "pause",
+    ].includes(request.command.type)
+  )
+    throw new Error("invalid_arguments");
+  const binding = liveBinding();
+  const selection = liveSelection();
+  const youtubeObserved =
+    binding.availability === "accessibility" && binding.origin === "https://www.youtube.com";
+  if (
+    !(
+      (binding.availability === "companion" && companionBindingOrigins.has(binding.origin)) ||
+      youtubeObserved
+    ) ||
+    (youtubeObserved && !["inspect", "searchObserved", "open"].includes(request.command.type)) ||
+    selection.tabId !== binding.tabId ||
+    selection.windowId !== binding.windowId ||
+    request.bindingId !== binding.bindingId ||
+    request.documentId !== binding.documentId
+  )
+    throw new Error("page_changed");
+  const navigationGeneration = selection.navigationGeneration;
+  const nativeGeneration = nativePortGeneration;
+  if (controller.signal.aborted) throw new Error("cancelled");
+  const before = await selectedAnchorTab(selection);
+  await currentWebMCPDocument(binding);
+  if (
+    controller.signal.aborted ||
+    before.url !== binding.url ||
+    webMCPSelection !== selection ||
+    webMCPBinding !== binding ||
+    selection.navigationGeneration !== navigationGeneration
+  )
+    throw new Error("page_changed");
+  const mutates = request.command.type !== "inspect";
+  // Once a mutation is admitted, the old binding cannot authorize another operation.
+  if (mutates) webMCPBinding = undefined;
+  let effectStarted = false;
+  const authorizeEffect = () => {
+    if (controller.signal.aborted) throw new Error("cancelled");
+    if (
+      !nativePort ||
+      nativePortGeneration !== nativeGeneration ||
+      webMCPSelection !== selection ||
+      selection.navigationGeneration !== navigationGeneration ||
+      (mutates ? webMCPBinding !== undefined : webMCPBinding !== binding) ||
+      activeWebMCP?.controller !== controller ||
+      Date.now() >= binding.expiresAt
+    )
+      throw new Error("page_changed");
+  };
+  let value;
+  try {
+    value = await dispatch(binding.tabId, request.command, binding, authorizeEffect, () => {
+      effectStarted = true;
+    });
+  } catch (error) {
+    if (mutates && effectStarted) throw new Error("unknown");
+    throw error;
+  }
+  if (controller.signal.aborted) throw new Error(mutates ? "unknown" : "cancelled");
+  if (!mutates) {
+    const after = await selectedAnchorTab(selection);
+    await currentWebMCPDocument(binding);
+    if (
+      webMCPSelection !== selection ||
+      webMCPBinding !== binding ||
+      selection.navigationGeneration !== navigationGeneration ||
+      before.url !== after.url ||
+      after.url !== binding.url
+    )
+      throw new Error("page_changed");
+  }
+  return { bindingId: binding.bindingId, documentId: binding.documentId, url: binding.url, value };
 }
 
 async function executeWebMCP(request, controller) {
@@ -522,6 +802,8 @@ async function handleNativeRequest(request) {
       };
     }
     if (request.type === "tools.list") return await listWebMCPTools();
+    if (request.type === "page.inspect") return await inspectSelectedPage(request, controller);
+    if (request.type === "media.execute") return await executeCompanion(request, controller);
     if (request.type === "tool.execute") return await executeWebMCP(request, controller);
     throw new Error("unavailable");
   } finally {
@@ -575,16 +857,28 @@ function connectNativeHost() {
   return nativeConnectionStatus;
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const messageKeys =
     message && typeof message === "object" ? Object.keys(message).sort().join() : "";
   if (
-    messageKeys !== "command,protocol,tabId" ||
+    (messageKeys !== "command,protocol,tabId" &&
+      messageKeys !== "command,protocol,tabId,windowId") ||
     message.protocol !== "ellie.media.v1" ||
     !Number.isInteger(message.tabId) ||
     message.tabId < 0
   )
     return;
+  const popupSearch = message.command?.type === "searchObserved";
+  if (
+    (popupSearch &&
+      (messageKeys !== "command,protocol,tabId,windowId" ||
+        !Number.isInteger(message.windowId) ||
+        message.windowId < 0)) ||
+    (!popupSearch && messageKeys !== "command,protocol,tabId")
+  ) {
+    sendResponse({ ok: false, error: "invalid_command" });
+    return;
+  }
   if (message.command?.type === "discoverWebMCP" || message.command?.type === "bindWebMCP") {
     const keys = Object.keys(message.command).sort().join();
     if (
@@ -599,10 +893,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   const operation =
     message.command?.type === "bindWebMCP"
-      ? bindWebMCP(message.tabId)
+      ? bindWebMCP(message.tabId, sender || {})
       : message.command?.type === "discoverWebMCP"
         ? discoverWebMCP(message.tabId)
-        : dispatch(message.tabId, message.command);
+        : dispatch(
+            message.tabId,
+            message.command,
+            undefined,
+            undefined,
+            undefined,
+            popupSearch ? { sender, selectedWindowId: message.windowId } : undefined,
+          );
   const fixed = new Set([
     "unsupported_page",
     "page_changed",

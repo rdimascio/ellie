@@ -9,6 +9,7 @@ import {
   type BrowserWebMCPRequest,
   type BrowserWebMCPResult,
   type BrowserWebMCPOperationResult,
+  type BrowserView,
 } from "@ellie/protocol";
 import type {
   ReviewedBrowserBinding,
@@ -27,7 +28,7 @@ export type BrowserBinding = {
   origin: string;
   url: string;
   expiresAt: number;
-  availability: "webmcp" | "accessibility";
+  availability: "webmcp" | "accessibility" | "companion";
 };
 type Tool = { handle: string; name: string; inputSchema: unknown };
 const exact = (value: unknown, keys: readonly string[]): Record<string, unknown> => {
@@ -111,13 +112,26 @@ export class BrowserWebMCPOperations {
       ...(hasAvailability ? ["availability"] : []),
     ]);
     const availability = hasAvailability ? value.availability : "webmcp";
-    if (availability !== "webmcp" && availability !== "accessibility") throw new Error();
+    if (
+      availability !== "webmcp" &&
+      availability !== "accessibility" &&
+      availability !== "companion"
+    )
+      throw new Error();
     if (typeof value.origin !== "string" || typeof value.url !== "string") throw new Error();
     const origin = new URL(value.origin);
     const url = new URL(value.url);
     if (origin.origin !== value.origin || origin.pathname !== "/" || origin.protocol !== "https:")
       throw new Error();
     if (url.origin !== origin.origin || url.username || url.password) throw new Error();
+    if (
+      (availability === "companion" &&
+        origin.origin !== "https://www.netflix.com" &&
+        origin.origin !== "https://tv.youtube.com" &&
+        origin.origin !== "https://www.disneyplus.com") ||
+      (availability === "accessibility" && origin.origin !== "https://www.youtube.com")
+    )
+      throw new Error();
     if (!Number.isSafeInteger(value.expiresAt) || Number(value.expiresAt) <= Date.now())
       throw new Error();
     const checked: BrowserBinding = {
@@ -133,7 +147,7 @@ export class BrowserWebMCPOperations {
       this.observed.clear();
       this.currentRevision = nextRevision;
     }
-    if (availability === "accessibility") {
+    if (availability === "accessibility" || availability === "companion") {
       this.observed.clear();
       this.currentRevision = undefined;
     }
@@ -144,6 +158,46 @@ export class BrowserWebMCPOperations {
   }
   async bindingRefresh(signal: AbortSignal): Promise<BrowserBinding | "unbound" | "unsupported"> {
     return this.binding("binding.refresh", signal);
+  }
+  /** Read-only companion observation, pinned to the selected accessibility document. */
+  async inspectSelectedPage(
+    binding: BrowserBinding,
+    signal: AbortSignal,
+  ): Promise<NonNullable<BrowserView["site"]>> {
+    if (binding.availability !== "accessibility" || binding.origin !== "https://www.youtube.com")
+      throw new Error("Browser page observation is unsupported.");
+    const response = await this.call(
+      {
+        protocol: BROWSER_WEBMCP_PROTOCOL,
+        id: randomUUID(),
+        type: "page.inspect",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+      },
+      signal,
+    );
+    if (response.status !== "ok") throw new Error("Browser page changed during observation.");
+    const value = exact(response.value, ["bindingId", "documentId", "url", "site"]);
+    if (
+      value.bindingId !== binding.bindingId ||
+      value.documentId !== binding.documentId ||
+      value.url !== binding.url
+    )
+      throw new Error("Browser page changed during observation.");
+    const checked = browserWebMCPOperationResult({
+      ok: true,
+      message: "Browser site observed.",
+      browser: {
+        source: "accessibility",
+        operation: "read",
+        status: "completed",
+        revision: browserBindingRevision(binding),
+        view: { items: [], site: value.site },
+      },
+    });
+    if (checked.browser.operation !== "read" || !checked.browser.view.site)
+      throw new Error("Invalid browser page observation.");
+    return checked.browser.view.site;
   }
   private reviewed(
     origin: string,
@@ -235,7 +289,7 @@ export class BrowserWebMCPOperations {
           typeof binding === "object" && binding.availability === "webmcp"
             ? "Browser tab connected."
             : binding === "unsupported" ||
-                (typeof binding === "object" && binding.availability === "accessibility")
+                (typeof binding === "object" && binding.availability !== "webmcp")
               ? "The connected page does not offer reviewed WebMCP tools."
               : "No reviewed browser tab is connected.",
         browser:
@@ -259,6 +313,8 @@ export class BrowserWebMCPOperations {
       browserBindingRevision(binding) !== action.revision
     )
       throw new Error("Browser page changed before the requested action.");
+    if (action.tool === "browser.scrollRow")
+      throw new Error("Observed row scrolling requires the Netflix companion.");
     const operation = action.tool.slice("browser.".length) as ReviewedBrowserBinding["operation"];
     const key = action.tool === "browser.read" ? action.view : operation;
     const reviewed = this.reviewed(binding.origin, operation, key);

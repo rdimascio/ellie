@@ -1,4 +1,5 @@
 let snapshot;
+let searchControl;
 let selectedTab;
 let pending;
 let nativeConnectionStatus = "idle";
@@ -7,8 +8,10 @@ const status = document.querySelector("#status");
 const connectionStatus = document.querySelector("#connection-status");
 const titles = document.querySelector("#titles");
 const stop = document.querySelector("#stop");
+const observedSearch = document.querySelector("#observed-search");
+const searchQuery = document.querySelector("#search-query");
 const actionId = () => crypto.randomUUID();
-async function send(command) {
+async function send(command, selectedWindowId) {
   if (pending) throw new Error("busy");
   const own = actionId();
   pending = own;
@@ -24,6 +27,7 @@ async function send(command) {
       protocol: "ellie.media.v1",
       tabId: selectedTab,
       command: { actionId: own, ...command },
+      ...(command.type === "searchObserved" ? { windowId: selectedWindowId } : {}),
     });
     if (!response?.ok) throw new Error(response?.error || "command_failed");
     status.textContent = response.value?.outcome || "Done";
@@ -33,17 +37,20 @@ async function send(command) {
     stop.disabled = !pending;
   }
 }
-async function run(command) {
+async function run(command, selectedWindowId) {
   try {
-    return await send(command);
+    return await send(command, selectedWindowId);
   } catch (error) {
     const friendly = {
-      unsupported_page: "Open Netflix or YouTube first.",
+      unsupported_page: "Open a supported Netflix, YouTube, YouTube TV, or Disney+ tab first.",
       stale_snapshot: "Inspect titles again.",
       ambiguous_video: "More than one visible video.",
       busy: "Another action is still running.",
     };
-    status.textContent = friendly[error.message] || "The action could not be verified.";
+    status.textContent =
+      command.type === "searchObserved"
+        ? "Search outcome unverified. Inspect the current page before another action."
+        : friendly[error.message] || "The action could not be verified.";
   }
 }
 stop.onclick = async () => {
@@ -64,6 +71,8 @@ document.querySelector("#inspect").onclick = async () => {
   const result = await run({ type: "inspect" });
   if (!result) return;
   snapshot = result.snapshotId;
+  searchControl = result.searchControl?.id;
+  observedSearch.hidden = !searchControl;
   titles.replaceChildren(
     ...result.candidates.map((candidate) => {
       const item = document.createElement("li");
@@ -84,6 +93,41 @@ document.querySelector("#inspect").onclick = async () => {
       return item;
     }),
   );
+};
+document.querySelector("#search-submit").onclick = async () => {
+  if (!snapshot || !searchControl) return;
+  const focusedAtClick = document.hasFocus();
+  const [tab] = focusedAtClick
+    ? await chrome.tabs.query({ active: true, currentWindow: true })
+    : [];
+  if (
+    !focusedAtClick ||
+    !document.hasFocus() ||
+    !tab ||
+    tab.id !== selectedTab ||
+    !Number.isInteger(tab.windowId) ||
+    tab.windowId < 0 ||
+    tab.active !== true ||
+    tab.status !== "complete"
+  ) {
+    snapshot = undefined;
+    searchControl = undefined;
+    observedSearch.hidden = true;
+    titles.replaceChildren();
+    status.textContent = "Page selection changed. Inspect the current page before another action.";
+    return;
+  }
+  const command = {
+    type: "searchObserved",
+    snapshotId: snapshot,
+    controlId: searchControl,
+    query: searchQuery.value,
+  };
+  snapshot = undefined;
+  searchControl = undefined;
+  observedSearch.hidden = true;
+  titles.replaceChildren();
+  await run(command, tab.windowId);
 };
 document.querySelector("#up").onclick = () => run({ type: "scrollViewport", direction: "up" });
 document.querySelector("#down").onclick = () => run({ type: "scrollViewport", direction: "down" });

@@ -16,6 +16,8 @@ import {
 } from "@ellie/protocol";
 import type { Context, Job, InferenceJob, Result, NodeInfo } from "@ellie/protocol";
 import { route } from "@ellie/router";
+import { decideDesktop } from "@ellie/router/decision";
+import type { DecisionProvider } from "@ellie/decisions";
 import { authorize } from "@ellie/permissions";
 import { readJson } from "@ellie/transport";
 import { selectWorker } from "@ellie/compute";
@@ -51,6 +53,15 @@ interface Session {
   context: Context;
   poll?: { response: ServerResponse; timer: NodeJS.Timeout };
   pending?: Pending;
+  routing?: AbortController;
+}
+
+export interface DecisionRoutingOptions {
+  provider: DecisionProvider;
+  mode: "shadow" | "execute";
+  timeoutMs?: number;
+  minProbability?: number;
+  minMargin?: number;
 }
 function send(res: ServerResponse, status: number, body: unknown): void {
   if (!res.destroyed && !res.writableEnded)
@@ -70,6 +81,7 @@ export function createEllieServer(options: {
   jobStore: JobStore;
   browser?: BrowserControl;
   commandTimeout?: number;
+  decisionRouting?: DecisionRoutingOptions;
 }) {
   const sessions = new Map<string, Session>();
   const auth = options.auth;
@@ -295,6 +307,7 @@ export function createEllieServer(options: {
           const id = identifier(record(await readJson(req)).id);
           await auth.revoke(id);
           const session = sessions.get(id);
+          session?.routing?.abort();
           if (session?.poll) {
             clearTimeout(session.poll.timer);
             send(session.poll.response, 403, { error: "Node revoked." });
@@ -337,7 +350,14 @@ export function createEllieServer(options: {
             200,
             [...sessions.values()]
               .filter((s) => identity.role === "controller" || s.info.id === identity.id)
-              .map((s) => s.info),
+              .map((s) => ({
+                ...s.info,
+                ...(s.pending?.delivered &&
+                s.pending.cancelRequested &&
+                options.jobStore.get(s.pending.job.id)?.state === "cancellation_requested"
+                  ? { cancellationSettling: true as const }
+                  : {}),
+              })),
           );
         if (req.method === "POST" && path === "/v1/register" && identity.role === "node") {
           const body = record(await readJson(req));
@@ -361,6 +381,8 @@ export function createEllieServer(options: {
             };
             sessions.set(identity.id, session);
           } else {
+            // A reconnect may change capabilities and invalidate the context used by a decision.
+            session.routing?.abort();
             session.info.capabilities = granted;
             session.info.lastSeen = Date.now();
           }
@@ -449,7 +471,9 @@ export function createEllieServer(options: {
           const selected = selectWorker(
             [...sessions.values()].map((s) => s.info),
             request.model,
-            new Set([...sessions.values()].filter((s) => s.pending).map((s) => s.info.id)),
+            new Set(
+              [...sessions.values()].filter((s) => s.pending || s.routing).map((s) => s.info.id),
+            ),
           );
           if (!selected)
             return send(res, 409, {
@@ -489,7 +513,7 @@ export function createEllieServer(options: {
             return send(res, 409, {
               error: "Node is registered but offline or stale. Start its node service.",
             });
-          if (node.pending)
+          if (node.pending || node.routing)
             return send(res, 409, { error: "Node is busy. Wait for the current command." });
           const suppliedAction = Object.hasOwn(body, "action") ? actions([body.action]) : undefined;
           if (suppliedAction && !suppliedAction[0]!.tool.startsWith("browser."))
@@ -499,9 +523,70 @@ export function createEllieServer(options: {
             (!suppliedAction && (Object.keys(body).length !== 2 || Object.hasOwn(body, "action")))
           )
             return send(res, 400, { error: "Command request rejected." });
-          const plan = suppliedAction
+          const text = suppliedAction ? "" : string(body.text, 500);
+          let plan = suppliedAction
             ? { actions: suppliedAction, nextContext: node.context }
-            : route(string(body.text, 500), node.context, options.preferences);
+            : route(text, node.context, options.preferences);
+          const routing = options.decisionRouting;
+          if (!plan && routing) {
+            const abort = new AbortController();
+            node.routing = abort;
+            const cancel = () => abort.abort();
+            const onClose = () => {
+              if (!res.writableEnded) cancel();
+            };
+            res.once("close", onClose);
+            const timer = setTimeout(cancel, routing.timeoutMs ?? 3000);
+            let rejectAbort: (() => void) | undefined;
+            try {
+              if (res.destroyed || stopped) abort.abort();
+              abort.signal.throwIfAborted();
+              const decision = await Promise.race([
+                decideDesktop(text, { ...node.context }, options.preferences, routing.provider, {
+                  signal: abort.signal,
+                  minProbability: routing.minProbability,
+                  minMargin: routing.minMargin,
+                }),
+                new Promise<never>((_resolve, reject) => {
+                  rejectAbort = () => reject(new Error("Decision cancelled."));
+                  abort.signal.addEventListener("abort", rejectAbort, { once: true });
+                  if (abort.signal.aborted) rejectAbort();
+                }),
+              ]);
+              abort.signal.throwIfAborted();
+              if (res.destroyed || stopped) return;
+              if (
+                sessions.get(target) !== node ||
+                !auth.authenticate(req.headers.authorization) ||
+                Date.now() - node.info.lastSeen > 60_000
+              )
+                return send(res, 409, {
+                  error:
+                    "Node changed or disconnected while interpreting the request. No action was sent.",
+                });
+              if (decision.kind !== "plan")
+                return send(res, 200, { ok: false, message: decision.message });
+              const proposed = actions(decision.plan.actions);
+              authorize(proposed, node.info.capabilities, options.preferences);
+              if (routing.mode === "shadow")
+                return send(res, 200, {
+                  ok: false,
+                  message: `Shadow mode proposed ${JSON.stringify(proposed)}. No action was executed.`,
+                });
+              plan = decision.plan;
+            } catch {
+              return send(res, 200, {
+                ok: false,
+                message:
+                  "Decision routing was unavailable, cancelled, or could not produce an allowed action. No action was sent. Try an explicit command such as “open Arc”.",
+              });
+            } finally {
+              clearTimeout(timer);
+              res.off("close", onClose);
+              if (rejectAbort) abort.signal.removeEventListener("abort", rejectAbort);
+              if (node.routing === abort) delete node.routing;
+            }
+          }
           if (!plan)
             return send(res, 200, {
               ok: false,
@@ -543,6 +628,7 @@ export function createEllieServer(options: {
     if (stopped) return;
     stopped = true;
     for (const session of sessions.values()) {
+      session.routing?.abort();
       if (session.poll) {
         clearTimeout(session.poll.timer);
         send(session.poll.response, 503, { error: "Server stopping." });

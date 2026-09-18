@@ -314,6 +314,8 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var page: BrowserPhonePage?
+  @Published private(set) var credentialChanged = false
+  @Published private(set) var selectedRowID: String?
   @Published private(set) var hasPendingBrowserCommand = false
   @Published private(set) var pendingBrowserWarningError: String?
   private let credential: NativeEnrollmentCredential
@@ -354,9 +356,11 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   func clearIfTargetChanged(to nodeID: String?) {
+    guard !credentialChanged else { return }
     guard selectedTargetID != nodeID else { return }
     selectedTargetID = nodeID
     page = nil
+    selectedRowID = nil
     hasPendingBrowserCommand = false
     pendingBrowserWarningError = nil
     if task != nil {
@@ -368,17 +372,22 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   func canRefresh(on node: PhoneControlNode?) -> Bool {
-    task == nil && node?.online == true && node?.capabilities.contains("browser.read") == true
+    !credentialChanged && task == nil && node?.online == true
+      && node?.capabilities.contains("browser.read") == true
   }
 
   func canPerform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node, node.online else { return false }
+    guard !credentialChanged, task == nil, let node, node.online else { return false }
     if intent == .inspect || intent == .refresh {
       return node.capabilities.contains("browser.read")
     }
     guard node.capabilities.contains("browser.control"), let page, page.nodeID == node.id else {
       return false
     }
+    guard Self.observedSiteAllows(intent, on: page) else { return false }
+    if case .scroll(let direction) = intent,
+      (direction == .left || direction == .right), page.site?.provider == .netflix,
+      page.site?.rows?.contains(where: { $0.id == selectedRowID }) != true { return false }
     switch intent {
     case .search(let query):
       return query == query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -392,13 +401,28 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   @discardableResult
+  func selectObservedRow(_ rowID: String, on node: PhoneControlNode?) -> Bool {
+    guard !credentialChanged, task == nil, let node, node.online,
+      node.capabilities.contains("browser.control"), let page, page.nodeID == node.id,
+      page.site?.provider == .netflix, page.site?.page == .browse,
+      page.site?.rows?.contains(where: { $0.id == rowID }) == true
+    else { return false }
+    selectedRowID = rowID
+    return true
+  }
+
+  @discardableResult
   func refresh(on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node, node.online, node.capabilities.contains("browser.read") else {
+    guard !credentialChanged, task == nil, let node, node.online,
+      node.capabilities.contains("browser.read")
+    else {
+      if credentialChanged { return false }
       if node != nil { phase = .failed("The selected Mac does not allow browser reading.") }
       return false
     }
     if selectedTargetID != node.id { clearIfTargetChanged(to: node.id) }
     page = nil
+    selectedRowID = nil
     phase = .checking
     launch(targetID: node.id, mayDispatch: false) {
       let scope = try browserMutationUncertaintyScope(
@@ -408,12 +432,19 @@ final class BrowserPhoneControlStore: ObservableObject {
       self.pendingBrowserWarningError = nil
       let status = try await self.transport.execute(
         .refresh, nodeID: node.id, credential: self.credential)
+      try Task.checkCancellation()
+      guard !self.credentialChanged else { throw CancellationError() }
       guard case .status(let source, true, let revision?) = status else {
         throw PhoneControlFailure.rejected
       }
       let read = try await self.transport.execute(
         .read(revision: revision), nodeID: node.id, credential: self.credential)
-      guard case .page(let page) = read, page.nodeID == node.id, page.source == source,
+      guard case .page(let page) = read, page.nodeID == node.id,
+        (page.source == source ||
+          (source == .accessibility && page.source == .companion
+            && page.site?.provider == .youtube) ||
+          (source == .companion && page.source == .accessibility && page.site == nil
+            && page.axScrollDirections != nil)),
         page.revision == revision
       else { throw PhoneControlFailure.invalidResponse }
       try Task.checkCancellation()
@@ -433,7 +464,7 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @discardableResult
   func perform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node else { return false }
+    guard !credentialChanged, task == nil, let node else { return false }
     if intent == .inspect || intent == .refresh { return refresh(on: node) }
     guard node.online, node.capabilities.contains("browser.control"), let page,
       page.nodeID == node.id
@@ -441,11 +472,16 @@ final class BrowserPhoneControlStore: ObservableObject {
       phase = .failed("Read the current browser page on the selected Mac first.")
       return false
     }
+    guard Self.observedSiteAllows(intent, on: page) else {
+      phase = .failed("The observed page does not offer that browser command.")
+      return false
+    }
     let scope: String
     do {
       scope = try browserMutationUncertaintyScope(credential: credential, targetID: node.id)
       if try uncertainty.pendingToken(for: scope) != nil {
         self.page = nil
+        self.selectedRowID = nil
         hasPendingBrowserCommand = true
         pendingBrowserWarningError = nil
         phase = .unknown(
@@ -455,12 +491,21 @@ final class BrowserPhoneControlStore: ObservableObject {
       pendingBrowserWarningError = nil
     } catch {
       self.page = nil
+      self.selectedRowID = nil
       phase = .failed(BrowserMutationUncertaintyFailure.unavailable.localizedDescription)
       return false
     }
     let action: BrowserPhoneAction
     switch intent {
-    case .scroll(let direction): action = .scroll(direction, revision: page.revision)
+    case .scroll(let direction):
+      if page.site?.provider == .netflix && (direction == .left || direction == .right) {
+        guard let rowID = selectedRowID,
+          page.site?.rows?.contains(where: { $0.id == rowID }) == true else {
+          phase = .failed("Choose a row from the current Netflix page first.")
+          return false
+        }
+        action = .scrollRow(rowID, direction, revision: page.revision)
+      } else { action = .scroll(direction, revision: page.revision) }
     case .search(let query):
       guard query == query.trimmingCharacters(in: .whitespacesAndNewlines),
         !query.isEmpty, query.utf16.count <= 200, query.utf8.count <= 512,
@@ -484,6 +529,10 @@ final class BrowserPhoneControlStore: ObservableObject {
     }
     let label = intent.displayLabel
     let token = operationToken()
+    // The reviewed handles belong to the pre-command document. Hide them as soon as this
+    // mutation is admitted; even a slow or lost response must not expose stale controls.
+    self.page = nil
+    self.selectedRowID = nil
     phase = .sending(label)
     launch(targetID: node.id, mayDispatch: true) {
       guard try self.uncertainty.recordIfClear(token: token, for: scope) else {
@@ -495,7 +544,11 @@ final class BrowserPhoneControlStore: ObservableObject {
         action, nodeID: node.id, credential: self.credential)
       try Task.checkCancellation()
       guard case .command(let source, let status, let revision) = response,
-        source == page.source, revision == page.revision
+        (source == page.source ||
+          (page.site?.provider == .youtube && page.source == .companion
+            && source == .accessibility
+            && (action.isYouTubeAccessibilityControl))),
+        revision == page.revision
       else { throw PhoneControlFailure.invalidResponse }
       switch status {
       case .completed:
@@ -524,7 +577,16 @@ final class BrowserPhoneControlStore: ObservableObject {
   func cancel() {
     guard task != nil else { return }
     page = nil
+    selectedRowID = nil
     invalidateActiveOperation()
+  }
+
+  func credentialDidChange() {
+    guard !credentialChanged else { return }
+    credentialChanged = true
+    cancel()
+    page = nil
+    selectedRowID = nil
   }
 
   private func invalidateActiveOperation() {
@@ -584,10 +646,12 @@ final class BrowserPhoneControlStore: ObservableObject {
         if expected == generation, activeTargetID == targetID {
           phase = result.0
           page = result.1
+          selectedRowID = nil
         }
       } catch {
         guard expected == generation else { return }
         page = nil
+        selectedRowID = nil
         if mayDispatch && dispatched {
           phase = .unknown("The result is unknown. Read the page before trying again.")
         } else if error as? BrowserMutationUncertaintyFailure == .unresolved {
@@ -606,6 +670,58 @@ final class BrowserPhoneControlStore: ObservableObject {
               ?? PhoneControlFailure.unavailable.localizedDescription)
         }
       }
+    }
+  }
+
+  private static func observedSiteAllows(_ intent: BrowserVoiceIntent, on page: BrowserPhonePage)
+    -> Bool
+  {
+    if let directions = page.axScrollDirections, page.site == nil {
+      guard page.source == .accessibility else { return false }
+      if case .scroll(let direction) = intent {
+        return (direction == .up || direction == .down) && directions.contains(direction)
+      }
+      return false
+    }
+    guard let site = page.site else { return true }
+    guard site.page != .login, site.page != .unsupported else { return false }
+    if site.provider == .disneyplus {
+      switch intent {
+      case .openResult: return site.page == .browse
+      case .scroll(let direction):
+        return site.page == .browse && (direction == .up || direction == .down)
+      default: return false
+      }
+    }
+    if site.provider == .youtubeTV {
+      switch intent {
+      case .search, .openResult: return false
+      case .scroll(let direction): return (direction == .up || direction == .down) && site.page == .browse
+      default: break
+      }
+    }
+    if site.provider == .netflix {
+      switch intent {
+      case .search:
+        return (site.page == .browse || site.page == .results) && site.searchControl != nil
+      case .openResult: return site.page == .browse || site.page == .results
+      case .scroll(let direction) where direction == .left || direction == .right:
+        return site.page == .browse && site.rows?.isEmpty == false
+      default: break
+      }
+    }
+    if site.provider == .youtube {
+      switch intent {
+      case .search:
+        return (site.page == .home || site.page == .results) && site.searchControl != nil
+      case .openResult: return site.page == .results
+      default: break
+      }
+    }
+    switch intent {
+    case .play: return site.page == .watch && site.playback == .paused
+    case .pause: return site.page == .watch && site.playback == .playing
+    case .inspect, .refresh, .search, .scroll, .openResult, .back: return true
     }
   }
 }

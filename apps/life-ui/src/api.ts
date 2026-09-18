@@ -52,6 +52,35 @@ export interface ConnectorConnection {
   lastSyncAt?: number;
   mode: ConnectorMode;
   error?: string;
+  selectedCalendarId?: string;
+}
+export interface ConnectionPreview {
+  state: ConnectorState;
+  lastSyncAt?: number;
+  error?: string;
+  items: (
+    | { kind: "event"; title: string; startAt?: number; startDate?: string }
+    | {
+        kind: "message";
+        messageId: string;
+        subject: string;
+        from: string;
+        to: string[];
+        snippet?: string;
+        sentAt: number;
+      }
+  )[];
+}
+export interface GmailMessageDetail {
+  messageId: string;
+  subject: string;
+  from: string;
+  to: string[];
+  sentAt: number;
+  snippet?: string;
+  status: "plain" | "truncated" | "unavailable";
+  text?: string;
+  additionalPartsOmitted?: true;
 }
 export interface ConnectorProvider {
   id: ConnectorProviderId;
@@ -127,10 +156,13 @@ export const api = {
         "/api/connections",
       ),
     start: (provider: ConnectorProviderId, mode: ConnectorMode) =>
-      request<{ authorizationUrl: string; openedExternally?: boolean }>("/api/connections/start", {
-        method: "POST",
-        body: JSON.stringify({ provider, mode }),
-      }),
+      request<{ authorizationUrl: string; connectionId: string; openedExternally?: boolean }>(
+        "/api/connections/start",
+        {
+          method: "POST",
+          body: JSON.stringify({ provider, mode }),
+        },
+      ),
     refresh: (id: string) =>
       request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/refresh`, {
         method: "POST",
@@ -146,6 +178,22 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ mode }),
       }),
+    calendars: (id: string) =>
+      request<{
+        selectedCalendarId: string;
+        calendars: { id: string; label: string; primary: boolean }[];
+      }>(`/api/connections/${encodeURIComponent(id)}/calendars`),
+    selectCalendar: (id: string, calendarId: string) =>
+      request<{ ok: true }>(`/api/connections/${encodeURIComponent(id)}/calendar`, {
+        method: "POST",
+        body: JSON.stringify({ calendarId }),
+      }),
+    preview: (id: string) =>
+      request<ConnectionPreview>(`/api/connections/${encodeURIComponent(id)}/preview`),
+    message: (id: string, messageId: string) =>
+      request<GmailMessageDetail>(
+        `/api/connections/${encodeURIComponent(id)}/messages/${encodeURIComponent(messageId)}`,
+      ),
   },
   groups: {
     list: () => request<{ groups: Group[] }>("/api/life/groups"),
