@@ -845,10 +845,10 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
         app.buttons["speech-stop"].tap()
         XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
-        revealBrowserButton("speech-discard", in: app, forTap: true).tap()
+        revealSpeechReviewButton("speech-discard", in: app, forTap: true).tap()
         // Return to the top of the lazy Form: an off-screen TextEditor alone is not proof
         // that Discard changed the turn back to the recordable state.
-        let recordAfterDiscard = revealBrowserButton("speech-record", in: app, forTap: true)
+        let recordAfterDiscard = revealSpeechReviewButton("speech-record", in: app, forTap: true)
         guard recordAfterDiscard.exists && recordAfterDiscard.isHittable else { return }
         let discarded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"),
@@ -1151,6 +1151,37 @@ final class EllieIOSUITests: XCTestCase {
             }
         }
         XCTAssertTrue(visible(), "Expected browser control \(identifier) in the bounded form")
+        return button
+    }
+
+    private func revealSpeechReviewButton(_ identifier: String, in app: XCUIApplication,
+                                          forTap: Bool = false) -> XCUIElement {
+        let button = app.buttons[identifier]
+        let list = app.collectionViews.firstMatch
+        let window = app.windows.firstMatch
+        let keyboard = app.keyboards.firstMatch
+        let fullyVisible = { () -> Bool in
+            guard button.exists, list.exists, window.exists,
+                  !forTap || button.isHittable else { return false }
+            let frame = button.frame
+            let top = max(list.frame.minY + 8, window.frame.minY + 44)
+            var bottom = min(list.frame.maxY - 8, window.frame.maxY - 48)
+            if keyboard.exists { bottom = min(bottom, keyboard.frame.minY - 8) }
+            return frame.width > 0 && frame.height > 0 &&
+                frame.minY >= top && frame.maxY <= bottom
+        }
+        if !fullyVisible() {
+            XCTAssertTrue(list.exists, "Expected the voice form's scrollable list")
+            for _ in 0..<4 {
+                if fullyVisible() { break }
+                list.swipeUp()
+            }
+            for _ in 0..<4 {
+                if fullyVisible() { break }
+                list.swipeDown()
+            }
+        }
+        XCTAssertTrue(fullyVisible(), "Expected voice control \(identifier) fully inside the usable form")
         return button
     }
 
