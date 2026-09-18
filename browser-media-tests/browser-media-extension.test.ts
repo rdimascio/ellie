@@ -699,7 +699,8 @@ test("YouTube popup search accepts only exact results on its selected active tab
   const query = "NASA Artemis official launch";
   const exactResults = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
   const cases = [
-    { name: "exact result", afterUrl: exactResults, allowed: true },
+    { name: "exact result", afterUrl: exactResults, omitSenderDocumentId: true, allowed: true },
+    { name: "matching supplied document", afterUrl: exactResults, allowed: true },
     { name: "wrong query", afterUrl: "https://www.youtube.com/results?search_query=other" },
     { name: "extra parameter", afterUrl: `${exactResults}&sp=other` },
     { name: "changed origin", afterUrl: "https://elsewhere.example/results?search_query=NASA" },
@@ -728,6 +729,12 @@ test("YouTube popup search accepts only exact results on its selected active tab
       noInjection: true,
     },
     {
+      name: "absent extension sender ID",
+      afterUrl: exactResults,
+      omitSenderId: true,
+      noInjection: true,
+    },
+    {
       name: "wrong popup URL",
       afterUrl: exactResults,
       senderUrl: "chrome-extension://ellie-test-extension/other.html",
@@ -747,10 +754,29 @@ test("YouTube popup search accepts only exact results on its selected active tab
     },
     { name: "closed popup", afterUrl: exactResults, popupClosed: true, noInjection: true },
     { name: "tab-hosted popup", afterUrl: exactResults, popupType: "TAB", noInjection: true },
+    { name: "sender from a tab", afterUrl: exactResults, senderTab: true, noInjection: true },
     {
       name: "duplicate popup contexts",
       afterUrl: exactResults,
       duplicatePopup: true,
+      noInjection: true,
+    },
+    {
+      name: "popup and tab contexts",
+      afterUrl: exactResults,
+      popupAndTab: true,
+      noInjection: true,
+    },
+    {
+      name: "popup context has no document ID",
+      afterUrl: exactResults,
+      contextDocumentId: "",
+      noInjection: true,
+    },
+    {
+      name: "popup context has a browser window",
+      afterUrl: exactResults,
+      contextWindowId: 3,
       noInjection: true,
     },
     {
@@ -782,22 +808,31 @@ test("YouTube popup search accepts only exact results on its selected active tab
     const runtimeMessages = extensionEvent();
     const popupContext = {
       contextType: scenario.popupType ?? "POPUP",
-      documentId: "popup-document",
+      documentId: scenario.contextDocumentId ?? "popup-document",
       documentUrl: "chrome-extension://ellie-test-extension/popup.html",
       tabId: scenario.popupType === "TAB" ? 7 : -1,
-      windowId: -1,
+      windowId: scenario.contextWindowId ?? -1,
     };
     const context: Record<string, any> = {
       chrome: {
         runtime: {
           id: "ellie-test-extension",
           getURL: (path: string) => `chrome-extension://ellie-test-extension/${path}`,
-          getContexts: async () =>
-            popupClosed
+          getContexts: async (filter: any) => {
+            assert.equal(
+              JSON.stringify(filter),
+              JSON.stringify({
+                documentUrls: ["chrome-extension://ellie-test-extension/popup.html"],
+              }),
+            );
+            return popupClosed
               ? []
               : scenario.duplicatePopup
                 ? [popupContext, popupContext]
-                : [popupContext],
+                : scenario.popupAndTab
+                  ? [popupContext, { ...popupContext, contextType: "TAB", tabId: 7 }]
+                  : [popupContext];
+          },
           onMessage: runtimeMessages,
         },
         tabs: {
@@ -849,9 +884,12 @@ test("YouTube popup search accepts only exact results on its selected active tab
       context,
     );
     const sender = {
-      id: scenario.senderId ?? "ellie-test-extension",
+      ...(scenario.omitSenderId ? {} : { id: scenario.senderId ?? "ellie-test-extension" }),
       url: scenario.senderUrl ?? "chrome-extension://ellie-test-extension/popup.html",
-      documentId: scenario.senderDocumentId ?? "popup-document",
+      ...(scenario.omitSenderDocumentId
+        ? {}
+        : { documentId: scenario.senderDocumentId ?? "popup-document" }),
+      ...(scenario.senderTab ? { tab: { id: 7 } } : {}),
     };
     const command = { type: "searchObserved", actionId: crypto.randomUUID(), query };
     const perform =

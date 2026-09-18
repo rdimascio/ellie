@@ -101,23 +101,25 @@ async function livePopupSearch(sender, selectedWindowId) {
   if (
     sender?.id !== chrome.runtime.id ||
     sender.url !== chrome.runtime.getURL("popup.html") ||
-    typeof sender.documentId !== "string" ||
-    !sender.documentId ||
+    (sender.documentId !== undefined &&
+      (typeof sender.documentId !== "string" || !sender.documentId)) ||
     sender.tab ||
     !Number.isInteger(selectedWindowId) ||
     selectedWindowId < 0
   )
     return false;
   const contexts = await chrome.runtime.getContexts({
-    contextTypes: ["POPUP"],
-    documentIds: [sender.documentId],
+    documentUrls: [chrome.runtime.getURL("popup.html")],
   });
   return (
     contexts.length === 1 &&
     contexts[0].contextType === "POPUP" &&
-    contexts[0].documentId === sender.documentId &&
+    typeof contexts[0].documentId === "string" &&
+    Boolean(contexts[0].documentId) &&
+    (sender.documentId === undefined || contexts[0].documentId === sender.documentId) &&
     contexts[0].documentUrl === chrome.runtime.getURL("popup.html") &&
-    contexts[0].tabId === -1
+    contexts[0].tabId === -1 &&
+    contexts[0].windowId === -1
   );
 }
 
