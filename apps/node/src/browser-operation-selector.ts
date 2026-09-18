@@ -143,6 +143,24 @@ export class BrowserOperationSelector {
         await sameSelectedBinding();
         if (epoch !== this.observationEpoch) throw new Error("Browser page changed during read.");
         this.companion?.invalidate();
+        // Status is the helper's read-only bind/rebind entry. A previous AX session
+        // cannot read a newly selected document until this binding is prepared.
+        const axStatus = await this.accessibility.execute(
+          browserWebMCPAction({ tool: "browser.status" }),
+          accessibilityBinding,
+          signal,
+        );
+        await sameSelectedBinding();
+        if (
+          epoch !== this.observationEpoch ||
+          !axStatus.ok ||
+          axStatus.browser.source !== "accessibility" ||
+          axStatus.browser.operation !== "status" ||
+          axStatus.browser.status !== "connected" ||
+          axStatus.browser.revision !== revision ||
+          axStatus.browser.origin !== binding.origin
+        )
+          throw new Error("Browser accessibility binding is unavailable.");
         const axRead = await this.accessibility.execute(
           browserAction,
           accessibilityBinding,
