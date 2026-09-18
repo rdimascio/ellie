@@ -198,6 +198,8 @@ struct SpeechTurnView: View {
       Section("Life reply") {
         Text(outcome.reply ?? "No reply is available.")
           .accessibilityIdentifier("speech-life-reply")
+        Text("Read-only reply. This iPhone made no changes.")
+          .font(.footnote).foregroundStyle(.secondary)
         if outcome.needsMacReview {
           Text("Review the requested action in Ellie Life on your Mac. This iPhone made no change.")
         }
