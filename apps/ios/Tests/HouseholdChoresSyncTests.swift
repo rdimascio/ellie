@@ -4,6 +4,78 @@ import XCTest
 
 @MainActor
 final class HouseholdChoresSyncTests: XCTestCase {
+  func testSharedWeekUsesOnlyObservedRevisionAndHouseholdDay() async throws {
+    let transport = ChoresFixtureTransport()
+    transport.grants = [choreGrant(.read)]
+    let sunday = try ChoreDay("2026-03-08")
+    let monday = try ChoreDay("2026-03-09")
+    let tasks = [
+      Chore(id: UUID().uuidString, title: "Sunday", member: "Alex", dueDay: sunday,
+        completedDay: sunday),
+      Chore(id: UUID().uuidString, title: "Monday", member: "Alex", dueDay: monday,
+        completedDay: monday),
+    ]
+    transport.document = HouseholdChoresDocument(revision: 4,
+      value: ChoresState(householdTimeZone: "America/Los_Angeles", chores: tasks))
+    let store = HouseholdChoresSyncStore(
+      credential: choreCredential(), transport: transport, persistence: ChoresFixturePersistence())
+    let sundayNight = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-09T06:30:00Z"))
+    let mondayMorning = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-03-09T07:30:00Z"))
+    XCTAssertNil(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
+    store.checkAccess()
+    await settle(store)
+    store.readServerCopy()
+    await settle(store)
+    let first = try XCTUnwrap(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
+    XCTAssertEqual(first.revision, 4)
+    XCTAssertEqual(first.timeZoneIdentifier, "America/Los_Angeles")
+    XCTAssertEqual(first.today, sunday)
+    XCTAssertEqual(first.days.map(\.day.value), [
+      "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06",
+      "2026-03-07", "2026-03-08",
+    ])
+    XCTAssertEqual(first.days.map(\.count), [0, 0, 0, 0, 0, 0, 1])
+    let nextWeek = try XCTUnwrap(HouseholdChoresWeek.observed(store.remote, at: mondayMorning))
+    XCTAssertEqual(nextWeek.today, monday)
+    XCTAssertEqual(nextWeek.days.map(\.count), [1, 0, 0, 0, 0, 0, 0])
+
+    transport.document = HouseholdChoresDocument(revision: 5,
+      value: ChoresState(householdTimeZone: "America/Los_Angeles", chores: tasks + [
+        Chore(id: UUID().uuidString, title: "Second Sunday", member: "Sam", dueDay: sunday,
+          completedDay: sunday),
+      ]))
+    store.readServerCopy()
+    XCTAssertNil(HouseholdChoresWeek.observed(store.remote, at: sundayNight),
+      "A new read must remove the old observed chart until it settles")
+    await settle(store)
+    let refreshed = try XCTUnwrap(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
+    XCTAssertEqual(refreshed.revision, 5)
+    XCTAssertEqual(refreshed.days.map(\.count), [0, 0, 0, 0, 0, 0, 2])
+
+    transport.readFailure = .unavailable
+    store.readServerCopy()
+    await settle(store)
+    XCTAssertNil(HouseholdChoresWeek.observed(store.remote, at: sundayNight),
+      "A failed fresh read must not present the previous chart as current")
+
+    transport.grants = []
+    store.checkAccess()
+    XCTAssertNil(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
+    await settle(store)
+    XCTAssertEqual(store.phase, .revoked)
+    XCTAssertNil(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
+    XCTAssertEqual(transport.calls, ["authority", "read", "read", "read", "authority"])
+  }
+
+  func testSharedWeekDisplaysTheValidatedSourceTimeZoneIdentifier() throws {
+    let remote = HouseholdChoresDocument(revision: 7,
+      value: ChoresState(householdTimeZone: "UTC", chores: []))
+    let week = try XCTUnwrap(HouseholdChoresWeek.observed(remote, at: Date()))
+    XCTAssertEqual(week.revision, 7)
+    XCTAssertEqual(week.timeZoneIdentifier, "UTC",
+      "The chart must not relabel a fetched UTC document as Foundation's GMT alias")
+  }
+
   func testExplicitGrantReadPrepareAndSingleConditionalSave() async throws {
     let transport = ChoresFixtureTransport()
     let persistence = ChoresFixturePersistence()
@@ -86,11 +158,14 @@ final class HouseholdChoresSyncTests: XCTestCase {
     store.savePrepared()
     await settle(store)
     XCTAssertEqual(store.phase, .unknown)
+    XCTAssertEqual(HouseholdChoresWeek.observed(store.remote, at: Date())?.revision, 0,
+      "An unknown write cannot advance the observed chart revision")
     XCTAssertNotNil(persistence.saved)
 
     let restored = HouseholdChoresSyncStore(
       credential: choreCredential(), transport: transport, persistence: persistence)
     XCTAssertEqual(restored.phase, .unknown)
+    XCTAssertNil(HouseholdChoresWeek.observed(restored.remote, at: Date()))
     restored.savePrepared()
     restored.checkAccess()
     await settle(restored)
