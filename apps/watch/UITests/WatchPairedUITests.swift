@@ -3,6 +3,11 @@ import XCTest
 /// These tests must run on an installed paired Watch Simulator with the DEBUG Ellie iPhone
 /// fixture already launched. The paired runner rejects skipped or zero-test results.
 final class WatchPairedUITests: XCTestCase {
+  override func setUp() {
+    super.setUp()
+    continueAfterFailure = false
+  }
+
   func testTargetAReadThenOnePlayIsUnknownWithoutReplay() {
     let app = XCUIApplication()
     app.launchArguments = ["--ellie-watch-paired-diagnostic"]
