@@ -746,14 +746,16 @@ final class IOSQuietVoiceStore: ObservableObject {
     }
     func restore() {
         guard !credentialChanged else { phase = .revoked; return }
-        guard operation == nil, let scope else { phase = .storageUnavailable; return }
+        guard operation == nil else { return }
+        guard let scope else { phase = .storageUnavailable; return }
         do {
             pendingRequestID = try journal.pendingToken(for: scope)
             if pendingRequestID != nil { phase = .unknown }
         } catch { phase = .storageUnavailable }
     }
     func sendReviewed(_ message: String, conversationID: String? = nil) {
-        guard canSend, let scope else { phase = .storageUnavailable; return }
+        guard canSend else { return }
+        guard let scope else { phase = .storageUnavailable; return }
         let reviewed = message.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reviewed.isEmpty, reviewed.utf16.count <= 2_000,
               !reviewed.unicodeScalars.contains(where: {
@@ -808,7 +810,8 @@ final class IOSQuietVoiceStore: ObservableObject {
         }
     }
     func reconcile() {
-        guard operation == nil, let scope, let requestID = pendingRequestID else { restore(); return }
+        guard operation == nil else { return }
+        guard let scope, let requestID = pendingRequestID else { restore(); return }
         generation += 1
         let ticket = generation
         phase = .checking
@@ -866,7 +869,8 @@ final class IOSQuietVoiceStore: ObservableObject {
         generation += 1
         operation?.cancel(); operation = nil
         lastConversationID = nil
-        if pendingRequestID != nil { phase = .unknown }
+        if credentialChanged { phase = .revoked }
+        else if pendingRequestID != nil { phase = .unknown }
         else { phase = .idle }
     }
     func credentialDidChange() {
