@@ -250,7 +250,7 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     switch store.phase {
     case .uploading, .checking, .starting, .recording, .cancelling:
       store.cancelAndDiscard()
-    case .idle, .ready, .reviewing, .failed, .revoked, .cleanupRequired:
+    case .idle, .ready, .reviewing, .failed, .revoked, .credentialChanged, .cleanupRequired:
       break
     }
     let deadline = ContinuousClock.now + .seconds(5)
@@ -280,7 +280,7 @@ final class NativeSpeechIntegrationTests: XCTestCase {
   private func isSettledReviewFailure(_ store: SpeechTurnStore) -> Bool {
     guard !store.isBusy else { return false }
     return switch store.phase {
-    case .idle, .ready, .reviewing, .failed, .revoked, .cleanupRequired: true
+    case .idle, .ready, .reviewing, .failed, .revoked, .credentialChanged, .cleanupRequired: true
     case .checking, .starting, .recording, .uploading, .cancelling: false
     }
   }
@@ -298,6 +298,7 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     case .reviewing: "reviewing"
     case .failed: "failed"
     case .revoked: "revoked"
+    case .credentialChanged: "credentialChanged"
     case .cleanupRequired: "cleanupRequired"
     }
   }

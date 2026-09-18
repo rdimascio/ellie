@@ -542,6 +542,38 @@ final class BrowserPhoneControlTests: XCTestCase {
   }
 
   @MainActor
+  func testCredentialChangeRetainsPendingMutationAndBlocksOldBrowserStore() async throws {
+    let oldCredential = credential()
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let transport = BrowserPhoneFakeTransport()
+    let store = BrowserPhoneControlStore(
+      credential: oldCredential, transport: transport, uncertainty: persistence)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    await eventually { await transport.actions.count == 3 }
+
+    store.credentialDidChange()
+    XCTAssertTrue(store.credentialChanged)
+    XCTAssertNil(store.page)
+    XCTAssertFalse(store.canRefresh(on: node))
+    XCTAssertFalse(store.canPerform(.scroll(.down), on: node))
+    await transport.finishCommand()
+    await eventually { !store.isBusy }
+
+    let scope = try browserMutationUncertaintyScope(
+      credential: oldCredential, targetID: node.id)
+    XCTAssertNotNil(try persistence.pendingToken(for: scope))
+    XCTAssertFalse(store.refresh(on: node))
+    XCTAssertFalse(store.perform(.scroll(.down), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions.count, 3, "The old credential must not read or dispatch again")
+  }
+
+  @MainActor
   func testReviewedSearchSelectionAndPlaybackRequireExplicitReadsWithoutReplay() async {
     let transport = BrowserPhoneFakeTransport(commandStatus: .completed)
     let store = BrowserPhoneControlStore(
