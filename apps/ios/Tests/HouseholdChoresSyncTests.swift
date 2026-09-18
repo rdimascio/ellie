@@ -149,11 +149,14 @@ final class HouseholdChoresSyncTests: XCTestCase {
     store.savePrepared()
     await settle(store)
     XCTAssertEqual(store.phase, .unknown)
+    XCTAssertEqual(HouseholdChoresWeek.observed(store.remote, at: Date())?.revision, 0,
+      "An unknown write cannot advance the observed chart revision")
     XCTAssertNotNil(persistence.saved)
 
     let restored = HouseholdChoresSyncStore(
       credential: choreCredential(), transport: transport, persistence: persistence)
     XCTAssertEqual(restored.phase, .unknown)
+    XCTAssertNil(HouseholdChoresWeek.observed(restored.remote, at: Date()))
     restored.savePrepared()
     restored.checkAccess()
     await settle(restored)
