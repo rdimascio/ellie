@@ -103,12 +103,14 @@ struct BrowserControlView: View {
             Button("Right") { browser.perform(.scroll(.right), on: controls.selectedNode) }
               .disabled(!browser.canPerform(.scroll(.right), on: controls.selectedNode))
           }
+          .buttonStyle(.borderless)
           HStack {
             Button("Play") { browser.perform(.play, on: controls.selectedNode) }
               .disabled(!browser.canPerform(.play, on: controls.selectedNode))
             Button("Pause") { browser.perform(.pause, on: controls.selectedNode) }
               .disabled(!browser.canPerform(.pause, on: controls.selectedNode))
           }
+          .buttonStyle(.borderless)
         }
         if !page.items.isEmpty {
           Section("Results") {
@@ -141,7 +143,10 @@ struct BrowserControlView: View {
         }
       }
       if browser.isBusy {
-        Section { Button("Stop waiting", role: .cancel) { browser.cancel() } }
+        Section {
+          Button("Stop waiting", role: .cancel) { browser.cancel() }
+            .accessibilityIdentifier("browser-stop-waiting")
+        }
       }
     }
     .ellieScreen()

@@ -62,6 +62,97 @@ struct BrowserVoiceUITestFixtureView: View {
   }
 }
 
+/// DEBUG-only composition fixture. The runner installs an ephemeral, private credential into
+/// this app's own container; the stores below still use the production HTTPS transports.
+struct BrowserComposedUITestFixture: Decodable {
+  let credential: NativeEnrollmentCredential
+  let target: String
+
+  static func load(identifier: String) -> Self? {
+    guard UUID(uuidString: identifier)?.uuidString.lowercased() == identifier else { return nil }
+    let directory = directoryURL(identifier: identifier)
+    let file = directory.appendingPathComponent("credential.json")
+    var dirInfo = stat()
+    var fileInfo = stat()
+    guard lstat(directory.path, &dirInfo) == 0,
+      (dirInfo.st_mode & S_IFMT) == S_IFDIR, dirInfo.st_uid == getuid(),
+      dirInfo.st_mode & 0o077 == 0,
+      lstat(file.path, &fileInfo) == 0,
+      (fileInfo.st_mode & S_IFMT) == S_IFREG, fileInfo.st_uid == getuid(),
+      fileInfo.st_mode & 0o077 == 0, fileInfo.st_nlink == 1,
+      (1...8_192).contains(fileInfo.st_size),
+      let data = try? Data(contentsOf: file), data.count == Int(fileInfo.st_size),
+      let fixture = try? JSONDecoder().decode(Self.self, from: data),
+      fixture.credential.origin.host == "127.0.0.1",
+      canonicalNativeOrigin(fixture.credential.origin.absoluteString) == fixture.credential.origin,
+      isNativeHexToken(fixture.credential.certificateSha256),
+      isNativeHexToken(fixture.credential.token),
+      fixture.credential.client.role == "native_phone_controller",
+      fixture.credential.client.expiresAt > Int64(Date().timeIntervalSince1970 * 1_000),
+      (try? validateNativeGrants(fixture.credential.client.grants)) != nil,
+      fixture.credential.client.grants.contains(where: {
+        $0.target == fixture.target && $0.capabilities.contains("browser.read")
+          && $0.capabilities.contains("browser.control")
+      })
+    else { return nil }
+    return fixture
+  }
+
+  static func directoryURL(identifier: String) -> URL {
+    let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+    return base.appendingPathComponent("EllieUITests", isDirectory: true)
+      .appendingPathComponent("browser-composed-\(identifier)", isDirectory: true)
+  }
+}
+
+@MainActor
+struct BrowserComposedUITestFixtureView: View {
+  @StateObject private var controls: PhoneControlStore
+  @StateObject private var browser: BrowserPhoneControlStore
+  @StateObject private var speech: SpeechTurnStore
+  private let credential: NativeEnrollmentCredential
+  private let target: String
+
+  init(fixture: BrowserComposedUITestFixture, identifier: String) {
+    credential = fixture.credential
+    target = fixture.target
+    let marker = BrowserComposedUITestFixture.directoryURL(identifier: identifier)
+      .appendingPathComponent("uncertainty.json")
+    _controls = StateObject(wrappedValue: PhoneControlStore(credential: fixture.credential))
+    _browser = StateObject(wrappedValue: BrowserPhoneControlStore(
+      credential: fixture.credential,
+      uncertainty: PrivateBrowserMutationUncertaintyStore(fileURL: marker)))
+    _speech = StateObject(wrappedValue: SpeechTurnStore(
+      credential: fixture.credential, recorder: BrowserVoiceUITestRecorder(),
+      transport: BrowserComposedUITestSpeechTransport()))
+  }
+
+  var body: some View {
+    NavigationStack {
+      SpeechTurnView(credential: credential, controls: controls, browser: browser, speech: speech)
+    }
+    .overlay(alignment: .bottomTrailing) {
+      Text("Synthetic transcript; real pinned browser transport")
+        .font(.caption2).padding(4)
+        .accessibilityIdentifier("browser-composed-synthetic-label")
+    }
+    .onAppear { controls.refresh() }
+    .onChange(of: controls.nodes) { _, nodes in
+      if controls.selectedNodeID == nil && nodes.contains(where: { $0.id == target }) {
+        controls.selectedNodeID = target
+      }
+    }
+  }
+}
+
+private struct BrowserComposedUITestSpeechTransport: SpeechTransporting {
+  func availability(for credential: NativeEnrollmentCredential) async throws {}
+  func transcribe(
+    _ artifact: SpeechAudioArtifact, turnID: UUID, credential: NativeEnrollmentCredential
+  ) async throws -> String { "Search for owned synthetic video" }
+  func cancel(turnID: UUID, credential: NativeEnrollmentCredential) async {}
+}
+
 @MainActor
 struct BrowserTargetUITestFixtureView: View {
   @StateObject private var controls: PhoneControlStore
@@ -69,17 +160,23 @@ struct BrowserTargetUITestFixtureView: View {
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
 
   private let credential: NativeEnrollmentCredential
+  private let rowActions: Bool
 
-  init(readOnly: Bool = false, unavailablePlayback: Bool = false, netflixRows: Bool = false) {
+  init(readOnly: Bool = false, unavailablePlayback: Bool = false,
+       netflixRows: Bool = false, rowActions: Bool = false) {
     let credential = readOnly
       ? BrowserVoiceUITestFixture.readOnlyCredential : BrowserVoiceUITestFixture.credential
     self.credential = credential
+    self.rowActions = rowActions
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
+      completeActions: rowActions,
       source: netflixRows ? .companion : .webmcp,
       siteOverride: unavailablePlayback
         ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil)
-        : netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite : nil)
+        : netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite
+        : rowActions ? BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1)
+        : nil)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport(readOnly: readOnly)))
@@ -101,6 +198,10 @@ struct BrowserTargetUITestFixtureView: View {
           .accessibilityIdentifier("browser-fixture-mutation-count")
         Text("Fixture reads: \(browserTransport.readNodeIDs.joined(separator: ","))")
           .accessibilityIdentifier("browser-fixture-read-history")
+        if rowActions {
+          Text("Actions: \(browserTransport.actionHistory.joined(separator: ","))")
+            .accessibilityIdentifier("browser-fixture-action-history")
+        }
       }
       .font(.caption2)
       .padding(4)
@@ -349,6 +450,7 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
 {
   @Published private(set) var mutationCount = 0
   @Published private(set) var readNodeIDs: [String] = []
+  @Published private(set) var actionHistory: [String] = []
   private var failNextRead: Bool
   private let completeActions: Bool
   private let siteOverride: BrowserPhoneSite?
@@ -406,7 +508,17 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
       }
       return .command(
         source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
-    case .scroll, .scrollRow, .playback:
+    case .scroll(let direction, _):
+      actionHistory.append("scroll.\(direction.rawValue)")
+      mutationCount += 1
+      return .command(
+        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+    case .scrollRow:
+      mutationCount += 1
+      return .command(
+        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+    case .playback(let intent, _):
+      actionHistory.append(intent == .play ? "playback.play" : "playback.pause")
       mutationCount += 1
       return .command(
         source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)

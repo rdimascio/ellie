@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   browserWebMCPOperationResult,
   identifier,
@@ -162,21 +163,53 @@ export class NativeControls {
       }
       reservation = command.nodeId;
       this.busy.add(reservation);
-      const nodes = projectNodes(
-        await bounded(
+      // Discovery plus a cancelled-job settlement wait can exceed the default socket idle timer.
+      // Both phases remain bounded, and the whole request retains its original 40-second budget.
+      response.setTimeout(40_000);
+      const requestDeadline =
+        performance.now() +
+        NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs +
+        NATIVE_CONTROL_CONTRACT.commandDeadlineMs;
+      const recoveryRead =
+        command.action.tool === "browser.refresh" || command.action.tool === "browser.read";
+      let observed = await bounded(
+        () => remote.nodes({ signal: controller.signal }),
+        controller,
+        NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs,
+      );
+      const recoveryDeadline = performance.now() + NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs;
+      while (true) {
+        const nodes = projectNodes(observed);
+        const target = nodes.find((node) => node.id === command.nodeId);
+        if (!target) {
+          reply(404, { error: "The granted device is not configured." });
+          return true;
+        }
+        if (!target.online || !target.capabilities.includes(capability)) {
+          reply(409, { error: "This device is offline or cannot perform this action." });
+          return true;
+        }
+        if (
+          !recoveryRead ||
+          observed.find((node) => node.id === command.nodeId)?.cancellationSettling !== true
+        )
+          break;
+        const remaining = recoveryDeadline - performance.now();
+        if (remaining <= 0) {
+          reply(409, {
+            error: "A previous browser command is still settling. Wait and read again.",
+            code: "browser_read_settling",
+          });
+          return true;
+        }
+        const pause = Math.min(100, remaining);
+        await delay(pause, undefined, { signal: controller.signal });
+        if (performance.now() >= recoveryDeadline) continue;
+        observed = await bounded(
           () => remote.nodes({ signal: controller.signal }),
           controller,
-          NATIVE_CONTROL_CONTRACT.discoveryDeadlineMs,
-        ),
-      );
-      const target = nodes.find((node) => node.id === command.nodeId);
-      if (!target) {
-        reply(404, { error: "The granted device is not configured." });
-        return true;
-      }
-      if (!target.online || !target.capabilities.includes(capability)) {
-        reply(409, { error: "This device is offline or cannot perform this action." });
-        return true;
+          Math.ceil(recoveryDeadline - performance.now()),
+        );
       }
       if (controller.signal.aborted || response.destroyed || this.stopped) return true;
       const nodeId = command.nodeId;
@@ -190,7 +223,14 @@ export class NativeControls {
         return true;
       }
       if (controller.signal.aborted || response.destroyed || this.stopped) return true;
-      response.setTimeout(40_000);
+      const commandBudget = Math.min(
+        NATIVE_CONTROL_CONTRACT.commandDeadlineMs,
+        Math.ceil(requestDeadline - performance.now()),
+      );
+      if (commandBudget <= 0) {
+        reply(503, { error: "Phone controls are unavailable." });
+        return true;
+      }
       dispatched = true;
       const operation = Promise.resolve().then(() => {
         controller.signal.throwIfAborted();
@@ -212,11 +252,7 @@ export class NativeControls {
           if (retainReservation) this.busy.delete(nodeId);
         },
       );
-      const result = await bounded(
-        () => operation,
-        controller,
-        NATIVE_CONTROL_CONTRACT.commandDeadlineMs,
-      );
+      const result = await bounded(() => operation, controller, commandBudget);
       if (!result || typeof result.ok !== "boolean") throw new Error();
       if (Object.hasOwn(result, "browser")) {
         const checked = browserWebMCPOperationResult(result);
