@@ -17,7 +17,7 @@ export async function createIOSHouseholdChoresFixture({ directory, nativeAuth, c
     )
       throw new Error("Synthetic chore grant failed.");
   }
-  const counts = { reads: 0, writes: 0, dropped: 0, held: 0, released: 0, controls: 0 };
+  const counts = { reads: 0, writes: 0, dropped: 0, held: 0, releaseAttempts: 0, controls: 0 };
   let dropNextWrite = false;
   let holdNextRead = false;
   let heldRead;
@@ -48,7 +48,7 @@ export async function createIOSHouseholdChoresFixture({ directory, nativeAuth, c
         if (response.statusCode === 200) {
           counts.held++;
           heldRead = () => {
-            counts.released++;
+            counts.releaseAttempts++;
             if (!response.destroyed) end(...args);
           };
           return response;

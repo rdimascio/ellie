@@ -12,7 +12,8 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
     let token = role == "a" ? String(repeating: "ab", count: 32) : String(repeating: "bc", count: 32)
     return NativeEnrollmentCredential(origin: origin, certificateSha256: pin,
       client: NativeClient(id: "chores-client-\(role)", role: "native_phone_controller",
-        label: "Synthetic chores \(role)", grants: [], createdAt: 1,
+        label: "Synthetic chores \(role)",
+        grants: [NativeGrant(target: "chores-fixture-no-node", capabilities: ["app.open"])], createdAt: 1,
         expiresAt: 9_007_199_254_740_000), token: token)
   }
 
@@ -71,6 +72,7 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
     try await control("arm-drop", a)
     first.savePrepared()
     try await waitFor("dropped response") { first.phase == .unknown }
+    // Reconstruct the store from the same private marker; no app-process restart is simulated.
     let restored = HouseholdChoresSyncStore(credential: a, persistence: pending("first"))
     XCTAssertEqual(restored.phase, .unknown)
     restored.savePrepared() // Recovery cannot replay a possibly committed PUT.
@@ -82,7 +84,8 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
     restored.savePrepared()
 
     // A withheld production 200 must not republish private data after explicit cancellation
-    // and a real grant revocation, even if the old response arrives later.
+    // and a real grant revocation. Release may only attempt delivery because cancellation can
+    // already have closed the URLSession request.
     try await control("arm-hold", a)
     fresh.readServerCopy()
     try await control("held", a)

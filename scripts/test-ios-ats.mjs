@@ -534,7 +534,7 @@ if (audio[44] >= 3) {
   for (const role of ["a", "b"]) {
     const invitation = await nativeAuth.invite({
       label: `Synthetic chores ${role}`,
-      grants: [],
+      grants: [{ target: "chores-fixture-no-node", capabilities: ["app.open"] }],
     });
     choresClients[role] = await nativeAuth.pair(invitation.code, choresTokens[role]);
     if (choresClients[role].id !== `chores-client-${role}`)
@@ -926,13 +926,19 @@ if (audio[44] >= 3) {
     chores.counts.writes !== 3 ||
     chores.counts.dropped !== 1 ||
     chores.counts.held !== 1 ||
-    chores.counts.released !== 1 ||
-    chores.counts.reads < 5
+    chores.counts.releaseAttempts !== 1 ||
+    chores.counts.reads !== 5 ||
+    chores.counts.controls !== 5
   ) {
     throw new Error(
       "The pinned chores fixture did not traverse the expected finite write/read lifecycle.",
     );
   }
+  console.log(
+    `ATS household HTTPS: ${chores.counts.reads} reads, ${chores.counts.writes} conditional PUTs, ` +
+      `${chores.counts.dropped} dropped response, ${chores.counts.held} held response, ` +
+      `${chores.counts.releaseAttempts} canceled-response release attempt.`,
+  );
   enterDiagnosticStage("built-policy");
   const appInfo = JSON.parse(
     await execute(
