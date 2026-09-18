@@ -50,6 +50,8 @@ struct EllieIOSApp: App {
                 BrowserTargetUITestFixtureView(netflixRows: true)
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-row-actions-fixture") {
                 BrowserTargetUITestFixtureView(rowActions: true)
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-ax-scroll-fixture") {
+                BrowserTargetUITestFixtureView(axFallback: true)
             } else if ProcessInfo.processInfo.arguments.contains(
                 "--ellie-ui-browser-read-only-fixture") {
                 BrowserTargetUITestFixtureView(readOnly: true)

@@ -54,7 +54,7 @@ struct BrowserControlView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .disneyplus {
-              Text("Only visible Disney+ title links on this page can be selected. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
+              Text("On an observed Disney+ title page, Up and Down move the page when one viewport scroller is available; read again before selecting a visible title. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
           }
@@ -77,6 +77,19 @@ struct BrowserControlView: View {
                 .disabled(browser.isBusy || controls.selectedNode?.capabilities.contains("browser.control") != true)
               }
             }
+          }
+        }
+        if page.source == .accessibility, page.site == nil,
+          let directions = page.axScrollDirections {
+          Section("Observed accessibility controls") {
+            Text(directions.isEmpty
+              ? "No safe page scroll was observed. Read the page again to check."
+              : "Observed page scrolling: "
+                + directions.map { $0.rawValue.capitalized }.joined(separator: ", ")
+                + ". Read again after one scroll.")
+              .accessibilityIdentifier("browser-observed-ax-scroll")
+            Text("Search, title selection, and playback are unavailable from this page read.")
+              .font(.footnote).foregroundStyle(.secondary)
           }
         }
         if controls.selectedNode?.capabilities.contains("browser.control") != true {
@@ -117,7 +130,8 @@ struct BrowserControlView: View {
           .buttonStyle(.borderless)
         }
         if !page.items.isEmpty {
-          Section("Results") {
+          Section(page.source == .accessibility && page.site == nil
+            && page.axScrollDirections != nil ? "Visible items (read only)" : "Results") {
             ForEach(Array(page.items.enumerated()), id: \.element.id) { index, item in
               Button("\(index + 1). \(item.label)") {
                 browser.perform(.openResult(index: index + 1), on: controls.selectedNode)

@@ -56,10 +56,12 @@ struct BrowserPhonePage: Equatable, Sendable {
   let summary: String?
   let items: [BrowserPhoneItem]
   let site: BrowserPhoneSite?
+  let axScrollDirections: [BrowserScrollDirection]?
 
   init(
     nodeID: String, source: BrowserPhoneSource, revision: String, title: String?,
-    summary: String?, items: [BrowserPhoneItem], site: BrowserPhoneSite? = nil
+    summary: String?, items: [BrowserPhoneItem], site: BrowserPhoneSite? = nil,
+    axScrollDirections: [BrowserScrollDirection]? = nil
   ) {
     self.nodeID = nodeID
     self.source = source
@@ -68,6 +70,7 @@ struct BrowserPhonePage: Equatable, Sendable {
     self.summary = summary
     self.items = items
     self.site = site
+    self.axScrollDirections = axScrollDirections
   }
 }
 enum BrowserPhoneResponse: Equatable, Sendable {
@@ -257,7 +260,7 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     guard status == "completed",
       Set(browser.keys) == Set(["source", "operation", "status", "revision", "view"]),
       let view = browser["view"] as? [String: Any],
-      Set(view.keys).isSubset(of: ["title", "summary", "items", "site"]),
+      Set(view.keys).isSubset(of: ["title", "summary", "items", "site", "axScrollDirections"]),
       view.keys.contains("items"), let rawItems = view["items"] as? [[String: Any]],
       rawItems.count <= 64
     else { throw PhoneControlFailure.invalidResponse }
@@ -289,6 +292,20 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     } else {
       site = nil
     }
+    let axScrollDirections: [BrowserScrollDirection]?
+    if view.keys.contains("axScrollDirections") {
+      guard source == .accessibility,
+        let raw = view["axScrollDirections"] as? [String], raw.count <= 2,
+        raw.allSatisfy({ $0 == "up" || $0 == "down" }),
+        Set(raw).count == raw.count
+      else { throw PhoneControlFailure.invalidResponse }
+      axScrollDirections = raw.compactMap(BrowserScrollDirection.init(rawValue:))
+    } else {
+      axScrollDirections = nil
+    }
+    if axScrollDirections != nil && site != nil && site?.provider != .youtube {
+      throw PhoneControlFailure.invalidResponse
+    }
     if source == .companion && site?.provider != .netflix && site?.provider != .youtubeTV && site?.provider != .disneyplus && site?.provider != .youtube {
       throw PhoneControlFailure.invalidResponse
     }
@@ -298,7 +315,7 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     return .page(
       BrowserPhonePage(
         nodeID: nodeID, source: source, revision: revision, title: title, summary: summary,
-        items: items, site: site))
+        items: items, site: site, axScrollDirections: axScrollDirections))
   }
   guard operation == "command", Set(browser.keys) == Set(["source", "operation", "status", "revision"]),
     let commandStatus = BrowserPhoneCommandStatus(rawValue: status)

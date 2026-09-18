@@ -205,7 +205,7 @@ let session;
 for await (const line of createInterface({ input: process.stdin })) {
   const value = JSON.parse(line);
   if (value.type === 'bind') { session = 'session-1'; console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision:value.documentRevision})); }
-  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],operation:'read'}));
+  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],scrollDirections:['down'],operation:'read'}));
   else console.log(JSON.stringify({id:value.id,status:'dispatchedUnverified',sessionID:session,documentRevision:'document-1',operation:value.operation}));
 }
 `,
@@ -234,6 +234,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     assert.equal(view.browser.source, "accessibility");
     assert.equal(view.browser.operation, "read");
+    if (view.browser.operation !== "read") throw new Error("Expected accessibility read.");
+    assert.deepEqual(view.browser.view.axScrollDirections, ["down"]);
     const mutation = await runtime.execute(
       browserWebMCPAction({ tool: "browser.scroll", direction: "down", revision: "revision-1" }),
       binding,

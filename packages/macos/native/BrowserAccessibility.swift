@@ -52,6 +52,7 @@ struct BrowserAccessibilityObservation: Equatable, Sendable {
   let title: String?
   let summary: String?
   let items: [BrowserAccessibilityItem]
+  let scrollDirections: [String]
 }
 
 final class BrowserAccessibilityElementReference: @unchecked Sendable {
@@ -256,9 +257,11 @@ final class BrowserAccessibilityAdapter {
     }
     let generation = UUID().uuidString.lowercased()
     observed = Observed(generation: generation, page: page, items: retained)
+    let webAreaActions = snapshot.nodes.first { $0.kind == .webArea }?.actions ?? []
+    let scrollDirections = ["up", "down"].filter { webAreaActions.contains("scroll-\($0)") }
     return BrowserAccessibilityObservation(
       generation: generation, documentRevision: page.documentRevision,
-      title: title, summary: summary, items: items)
+      title: title, summary: summary, items: items, scrollDirections: scrollDirections)
   }
 
   func perform(
@@ -1041,6 +1044,10 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     visited.append(element)
     AXUIElementSetMessagingTimeout(element, Self.timeout)
     let role = try string(element, kAXRoleAttribute)
+    // A dialog in the selected window can intercept an otherwise available web-area scroll.
+    guard !browserAccessibilityModallyBlockedRole(role) else {
+      throw BrowserAccessibilityFailure.unavailable
+    }
     let webArea = role == "AXWebArea"
     let addressCandidate = !insideWebArea && browserAccessibilityAddressCandidate(
       role: role, browser: browser)
@@ -1227,6 +1234,10 @@ final class MacBrowserAccessibilityBackend: BrowserAccessibilityBackend {
     guard status == .success else { throw BrowserAccessibilityFailure.unavailable }
     return value.boolValue
   }
+}
+
+func browserAccessibilityModallyBlockedRole(_ role: String?) -> Bool {
+  role == "AXDialog" || role == "AXSheet" || role == "AXAlert"
 }
 
 func browserAccessibilityAddressCandidate(

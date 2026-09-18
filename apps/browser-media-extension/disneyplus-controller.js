@@ -128,6 +128,40 @@
     }
     return entries.filter((entry) => counts.get(entry.href) === 1);
   };
+  const viewportScroll = () => {
+    const root = document.scrollingElement;
+    if (!root || innerWidth < 1 || innerHeight < 1) return { state: "scroll_unavailable" };
+    const rootOverflow = getComputedStyle(root).overflowY;
+    const bodyOverflow = document.body && getComputedStyle(document.body).overflowY;
+    if ([rootOverflow, bodyOverflow].some((value) => value === "hidden" || value === "clip"))
+      return { state: "scroll_unavailable" };
+    const hit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    if (!hit) return { state: "scroll_unavailable" };
+    for (let node = hit; node && node !== root; node = node.parentElement) {
+      if (node.hasAttribute("inert") || node.getAttribute("aria-disabled") === "true")
+        return { state: "scroll_unavailable" };
+      const style = getComputedStyle(node);
+      if (
+        node !== document.body &&
+        ["auto", "scroll"].includes(style.overflowY) &&
+        node.scrollHeight > node.clientHeight + 2
+      )
+        return { state: "scroll_ambiguous" };
+      const bounds = node.getBoundingClientRect();
+      if (
+        style.position === "fixed" &&
+        bounds.width >= innerWidth / 2 &&
+        bounds.height >= innerHeight / 2
+      )
+        return { state: "scroll_unavailable" };
+    }
+    const top = root.scrollTop;
+    const height = root.scrollHeight;
+    const viewport = root.clientHeight;
+    if (![top, height, viewport].every(Number.isFinite) || height <= viewport + 2)
+      return { state: "scroll_unavailable" };
+    return { state: "available", root, top, height, viewport };
+  };
   const valid = (command) => {
     if (!command || !actionId(command.actionId)) return false;
     if (command.type === "observe" || command.type === "inspect")
@@ -141,6 +175,11 @@
         exact(command, ["type", "actionId", "snapshotId", "candidateId"]) &&
         actionId(command.snapshotId) &&
         actionId(command.candidateId)
+      );
+    if (command.type === "scrollViewport")
+      return (
+        exact(command, ["type", "actionId", "direction"]) &&
+        ["up", "down"].includes(command.direction)
       );
     return false;
   };
@@ -166,6 +205,7 @@
         url: location.href,
         created: Date.now(),
         entries: entries.length <= 40 ? entries : [],
+        scroll: observation.page === "browse" ? viewportScroll() : undefined,
         id: snapshotId,
       };
       return {
@@ -175,18 +215,45 @@
         site: observation,
       };
     }
-    if (page() !== "browse") throw new Error("unsupported_page");
     if (mutation) throw new Error("busy");
     mutation = command.actionId;
     try {
+      if (page() !== "browse") throw new Error("unsupported_page");
       if (
         !snapshot ||
-        snapshot.id !== command.snapshotId ||
+        (command.type === "open" && snapshot.id !== command.snapshotId) ||
         snapshot.session !== session ||
         snapshot.url !== location.href ||
         Date.now() - snapshot.created >= 30_000
       )
         throw new Error("stale_snapshot");
+      if (command.type === "scrollViewport") {
+        const current = viewportScroll();
+        if (snapshot.scroll?.state !== "available" || current.state !== "available")
+          throw new Error(
+            current.state === "scroll_ambiguous" ? "scroll_ambiguous" : "scroll_unavailable",
+          );
+        if (
+          current.root !== snapshot.scroll.root ||
+          current.top !== snapshot.scroll.top ||
+          current.height !== snapshot.scroll.height ||
+          current.viewport !== snapshot.scroll.viewport
+        )
+          throw new Error("stale_snapshot");
+        if (
+          (command.direction === "up" && current.top <= 1) ||
+          (command.direction === "down" && current.top >= current.height - current.viewport - 1)
+        )
+          throw new Error("scroll_unavailable");
+        active(command, expectedUrl, deadline);
+        current.root.scrollBy({
+          top: (command.direction === "down" ? 1 : -1) * Math.max(1, innerHeight - 80),
+          behavior: "instant",
+        });
+        return {
+          outcome: current.root.scrollTop === current.top ? "scroll_unverified" : "scrolled",
+        };
+      }
       const entry = snapshot.entries.find((candidate) => candidate.id === command.candidateId);
       if (!entry) throw new Error("stale_candidate");
       const current = observed().filter((candidate) => candidate.href === entry.href);
