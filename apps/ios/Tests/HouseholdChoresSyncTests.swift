@@ -28,7 +28,7 @@ final class HouseholdChoresSyncTests: XCTestCase {
     await settle(store)
     let first = try XCTUnwrap(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
     XCTAssertEqual(first.revision, 4)
-    XCTAssertEqual(first.timeZone.identifier, "America/Los_Angeles")
+    XCTAssertEqual(first.timeZoneIdentifier, "America/Los_Angeles")
     XCTAssertEqual(first.today, sunday)
     XCTAssertEqual(first.days.map(\.day.value), [
       "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06",
@@ -65,6 +65,15 @@ final class HouseholdChoresSyncTests: XCTestCase {
     XCTAssertEqual(store.phase, .revoked)
     XCTAssertNil(HouseholdChoresWeek.observed(store.remote, at: sundayNight))
     XCTAssertEqual(transport.calls, ["authority", "read", "read", "read", "authority"])
+  }
+
+  func testSharedWeekDisplaysTheValidatedSourceTimeZoneIdentifier() throws {
+    let remote = HouseholdChoresDocument(revision: 7,
+      value: ChoresState(householdTimeZone: "UTC", chores: []))
+    let week = try XCTUnwrap(HouseholdChoresWeek.observed(remote, at: Date()))
+    XCTAssertEqual(week.revision, 7)
+    XCTAssertEqual(week.timeZoneIdentifier, "UTC",
+      "The chart must not relabel a fetched UTC document as Foundation's GMT alias")
   }
 
   func testExplicitGrantReadPrepareAndSingleConditionalSave() async throws {

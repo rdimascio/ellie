@@ -9,7 +9,7 @@ struct HouseholdChoresWeek {
   }
 
   let revision: Int64
-  let timeZone: TimeZone
+  let timeZoneIdentifier: String
   let today: ChoreDay
   let days: [DayCount]
 
@@ -23,7 +23,9 @@ struct HouseholdChoresWeek {
         $0 + ($1.completedDay == day ? 1 : 0)
       })
     }
-    return Self(revision: remote.revision, timeZone: timeZone, today: today, days: days)
+    return Self(revision: remote.revision,
+      timeZoneIdentifier: remote.value.householdTimeZone,
+      today: today, days: days)
   }
 }
 
@@ -87,7 +89,7 @@ struct HouseholdChoresView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Observed household completions this week: "
                   + week.days.map { "\($0.day.value), \($0.count)" }.joined(separator: "; "))
-                Text("Last observed household copy · revision \(week.revision) · \(week.timeZone.identifier.replacingOccurrences(of: "_", with: " "))")
+                Text("Last observed household copy · revision \(week.revision) · \(week.timeZoneIdentifier.replacingOccurrences(of: "_", with: " "))")
                   .font(.caption).foregroundStyle(.secondary)
                 Text("Read the household copy again to check for changes.")
                   .font(.caption).foregroundStyle(.secondary)
