@@ -147,6 +147,43 @@ final class NativeSpeechIntegrationTests: XCTestCase {
     }
   }
 
+  func testIntegrationRecorderLateDisposeOnlyAcceptsItsRemovedArtifact() async throws {
+    let recorder = IntegrationSpeechRecorder(marker: 3)
+    try await recorder.start()
+    let removed = try await recorder.stop()
+    try await recorder.cancel()
+    try await recorder.dispose(removed)
+    let absentAfterCancellation = await recorder.hasOwnedArtifact
+    XCTAssertFalse(absentAfterCancellation)
+
+    try await recorder.start()
+    let active = try await recorder.stop()
+    try await recorder.dispose(removed)
+    let activeAfterLateDispose = await recorder.hasOwnedArtifact
+    XCTAssertTrue(activeAfterLateDispose)
+
+    let unknown = SpeechAudioArtifact(id: UUID(), url: active.url)
+    do {
+      try await recorder.dispose(unknown)
+      XCTFail("An unknown artifact bypassed fixture cleanup ownership")
+    } catch {
+      XCTAssertEqual(error as? SpeechTurnFailure, .cleanupFailed)
+    }
+    let mismatchedURL = SpeechAudioArtifact(
+      id: active.id, url: active.url.deletingLastPathComponent().appendingPathComponent("other.wav"))
+    do {
+      try await recorder.dispose(mismatchedURL)
+      XCTFail("A mismatched artifact path bypassed fixture cleanup ownership")
+    } catch {
+      XCTAssertEqual(error as? SpeechTurnFailure, .cleanupFailed)
+    }
+    let activeAfterUnknownDispose = await recorder.hasOwnedArtifact
+    XCTAssertTrue(activeAfterUnknownDispose)
+    try await recorder.dispose(active)
+    let absentAfterOwnedDispose = await recorder.hasOwnedArtifact
+    XCTAssertFalse(absentAfterOwnedDispose)
+  }
+
   func testLostCommittedTranscriptResponseIsFixedFailureAndNeverReplayed() async throws {
     let recorder = IntegrationSpeechRecorder(marker: 0)
     try await recorder.start()
@@ -362,6 +399,7 @@ private actor IntegrationSpeechRecorder: SpeechRecording {
     "ellie-speech-integration-\(UUID().uuidString)", isDirectory: true)
   private let marker: UInt8
   private var artifact: SpeechAudioArtifact?
+  private var removedArtifact: SpeechAudioArtifact?
 
   init(marker: UInt8) { self.marker = marker }
 
@@ -387,8 +425,11 @@ private actor IntegrationSpeechRecorder: SpeechRecording {
   func cancel() async throws { try removeOwnedArtifact() }
 
   func dispose(_ candidate: SpeechAudioArtifact) async throws {
-    guard candidate == artifact else { throw SpeechTurnFailure.cleanupFailed }
-    try removeOwnedArtifact()
+    if candidate == artifact {
+      try removeOwnedArtifact()
+    } else if candidate != removedArtifact {
+      throw SpeechTurnFailure.cleanupFailed
+    }
   }
 
   private func removeOwnedArtifact() throws {
@@ -398,6 +439,7 @@ private actor IntegrationSpeechRecorder: SpeechRecording {
     if rmdir(directory.path) != 0, errno != ENOENT {
       throw SpeechTurnFailure.cleanupFailed
     }
+    if let artifact { removedArtifact = artifact }
     artifact = nil
   }
 
