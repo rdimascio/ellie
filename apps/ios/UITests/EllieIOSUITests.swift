@@ -2,16 +2,13 @@ import XCTest
 
 final class EllieIOSUITests: XCTestCase {
     func testQuietVoiceReviewRequiresExplicitSendAndNeverReplaysUnknown() {
+        continueAfterFailure = false
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-quiet-voice-fixture"]
         app.launch()
         defer { app.terminate() }
         func tap(_ identifier: String) {
-            let button = app.buttons[identifier]
-            XCTAssertTrue(button.waitForExistence(timeout: 5), identifier)
-            for _ in 0..<6 where !button.isHittable { app.swipeUp() }
-            XCTAssertTrue(button.isHittable, identifier)
-            button.tap()
+            revealBrowserButton(identifier, in: app, forTap: true).tap()
         }
         func waitLabel(_ element: XCUIElement, _ label: String) {
             let observed = XCTNSPredicateExpectation(
