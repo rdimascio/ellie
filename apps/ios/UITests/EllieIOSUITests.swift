@@ -846,6 +846,10 @@ final class EllieIOSUITests: XCTestCase {
         app.buttons["speech-stop"].tap()
         XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
         revealBrowserButton("speech-discard", in: app, forTap: true).tap()
+        // Return to the top of the lazy Form: an off-screen TextEditor alone is not proof
+        // that Discard changed the turn back to the recordable state.
+        let recordAfterDiscard = revealBrowserButton("speech-record", in: app, forTap: true)
+        guard recordAfterDiscard.exists && recordAfterDiscard.isHittable else { return }
         let discarded = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"),
             object: app.textViews["speech-transcript"])
@@ -857,8 +861,7 @@ final class EllieIOSUITests: XCTestCase {
 
         // A separate reviewed turn is required after discard. Its transcript remains inert
         // until the page has been observed and the person taps Run.
-        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
-        app.buttons["speech-record"].tap()
+        recordAfterDiscard.tap()
         XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
         app.buttons["speech-stop"].tap()
         let transcript = app.textViews["speech-transcript"]
