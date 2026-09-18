@@ -38,7 +38,8 @@ final class EllieIOSUITests: XCTestCase {
         tap("speech-record")
         tap("speech-stop")
         tap("speech-life-send")
-        XCTAssertTrue(app.buttons["speech-life-check-status"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
+            "The message may have reached Life")).firstMatch.waitForExistence(timeout: 5))
         XCTAssertEqual(sends.label, "Fixture sends: 3")
         tap("speech-life-check-status")
         XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
