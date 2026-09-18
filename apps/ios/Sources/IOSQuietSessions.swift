@@ -722,10 +722,10 @@ final class IOSQuietVoiceStore: ObservableObject {
     private var accessRevoked = false
 
     init(credential: NativeEnrollmentCredential,
-         client: IOSQuietVoiceClient = IOSPinnedQuietVoiceClient(),
+         client: IOSQuietVoiceClient? = nil,
          journal: BrowserMutationUncertaintyPersisting? = nil) {
         self.credential = credential
-        self.client = client
+        self.client = client ?? IOSPinnedQuietVoiceClient()
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         self.journal = journal ?? PrivateBrowserMutationUncertaintyStore(fileURL:
             base.appendingPathComponent("Ellie", isDirectory: true)

@@ -7,6 +7,7 @@ struct SpeechTurnView: View {
   @ObservedObject private var browserStore: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
   @StateObject private var lifeReview: IOSQuietVoiceStore
+  private let credential: NativeEnrollmentCredential
   private let lifeConversationID: String?
 
   init(
@@ -16,6 +17,7 @@ struct SpeechTurnView: View {
     lifeReview: IOSQuietVoiceStore? = nil,
     lifeConversationID: String? = nil
   ) {
+    self.credential = credential
     controlStore = controls
     browserStore = browser
     _speech = StateObject(
