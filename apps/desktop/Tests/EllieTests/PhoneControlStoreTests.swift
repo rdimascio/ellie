@@ -195,6 +195,58 @@ final class PhoneControlStoreTests: XCTestCase {
     XCTAssertEqual(commandCount, 1)
   }
 
+  @MainActor
+  func testCredentialChangePermanentlyBlocksOldStoreAndPreservesUnknownCommand() async {
+    let transport = PhoneControlFakeTransport(nodes: [node("mac-a")], suspendCommand: true)
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = "mac-a"
+    store.send()
+    await eventually { await transport.commandCalls.count == 1 }
+
+    store.credentialDidChange()
+    XCTAssertTrue(store.credentialChanged)
+    XCTAssertFalse(store.canSend)
+    XCTAssertNil(store.selectedNodeID)
+    XCTAssertTrue(store.nodes.isEmpty)
+    await transport.finishCommand(.completed)
+    await eventually { store.phase == .outcome(.unknown, nodeID: "mac-a", app: .safari) }
+
+    store.refresh()
+    store.selectedNodeID = "mac-a"
+    store.send()
+    XCTAssertFalse(store.canSend)
+    let nodeCalls = await transport.nodeCalls
+    let commandCalls = await transport.commandCalls.count
+    XCTAssertEqual(nodeCalls, 1)
+    XCTAssertEqual(commandCalls, 1)
+  }
+
+  @MainActor
+  func testCredentialChangeBeforeQueuedTransportCallsUsesNoOldToken() async {
+    let inventoryTransport = PhoneControlFakeTransport(nodes: [node("mac-a")])
+    let inventory = PhoneControlStore(credential: credential(), transport: inventoryTransport)
+    inventory.refresh()
+    inventory.credentialDidChange()
+    await eventually { inventory.phase == .idle }
+    let inventoryCalls = await inventoryTransport.nodeCalls
+    XCTAssertEqual(inventoryCalls, 0)
+
+    let commandTransport = PhoneControlFakeTransport(nodes: [node("mac-a")])
+    let command = PhoneControlStore(credential: credential(), transport: commandTransport)
+    command.refresh()
+    await eventually { command.phase == .ready }
+    command.selectedNodeID = "mac-a"
+    command.send()
+    command.credentialDidChange()
+    await eventually {
+      command.phase == .outcome(.unknown, nodeID: "mac-a", app: .safari)
+    }
+    let commandCalls = await commandTransport.commandCalls
+    XCTAssertTrue(commandCalls.isEmpty)
+  }
+
   private func credential() -> NativeEnrollmentCredential {
     let grants = [
       NativeGrant(target: "mac-a", capabilities: ["app.open"]),
