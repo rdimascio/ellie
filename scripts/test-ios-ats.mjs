@@ -1014,7 +1014,7 @@ if (audio[44] >= 3) {
   }
   if (
     quietControls !== 20 ||
-    googleLife.quiet.control.nativeChatPosts() !== 1 ||
+    googleLife.quiet.control.nativeChatPosts() !== 2 ||
     googleLife.quiet.control.detailStarted() !== 3 ||
     googleLife.quiet.control.detailSettled() !== 3 ||
     googleLife.quiet.control.chatResponseHeld() !== 1 ||
@@ -1024,7 +1024,7 @@ if (audio[44] >= 3) {
   }
   console.log(
     `ATS Quiet HTTPS: ${quietControls} controls, ${googleLife.quiet.control.detailStarted()} held details, ` +
-      `${googleLife.quiet.control.nativeChatPosts()} reviewed chat POST.`,
+      `${googleLife.quiet.control.nativeChatPosts()} combined Google and Quiet chat POSTs.`,
   );
   if (
     chores.counts.writes !== 3 ||
