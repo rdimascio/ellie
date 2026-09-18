@@ -505,6 +505,9 @@ test("popup reports a failed native connection without claiming page selection",
     "forward",
     "webmcp",
     "bind-webmcp",
+    "observed-search",
+    "search-query",
+    "search-submit",
   ]) {
     elements.set(id, {
       disabled: id === "stop",
@@ -597,6 +600,305 @@ test("popup reports a failed native connection without claiming page selection",
   assert.equal(sent.length, 1);
 });
 
+test("popup submits only the search control from its fresh observed page", async () => {
+  const popup = await readFile(join(source, "popup.js"), "utf8");
+  const sent: any[] = [];
+  let popupFocused = true;
+  const elements = new Map<string, any>();
+  for (const id of [
+    "status",
+    "connection-status",
+    "titles",
+    "stop",
+    "inspect",
+    "up",
+    "down",
+    "play",
+    "pause",
+    "back",
+    "forward",
+    "webmcp",
+    "bind-webmcp",
+    "observed-search",
+    "search-query",
+    "search-submit",
+  ]) {
+    elements.set(id, {
+      disabled: id === "stop",
+      hidden: id === "observed-search",
+      value: "",
+      textContent: "",
+      replaceChildren() {},
+    });
+  }
+  const context: Record<string, any> = {
+    chrome: {
+      tabs: { query: async () => [{ id: 7, windowId: 3, active: true, status: "complete" }] },
+      runtime: {
+        onMessage: extensionEvent(),
+        async sendMessage(value: any) {
+          sent.push(value);
+          if (value.command.type === "inspect")
+            return {
+              ok: true,
+              value: {
+                snapshotId: "observed-snapshot",
+                searchControl: { id: "observed-search", label: "Search" },
+                candidates: [],
+              },
+            };
+          return { ok: false, error: "navigation_not_observed" };
+        },
+      },
+    },
+    document: {
+      hasFocus: () => popupFocused,
+      querySelector(selector: string) {
+        return elements.get(selector.slice(1));
+      },
+      createElement() {
+        return { append() {} };
+      },
+    },
+    crypto,
+    Error,
+    Object,
+    Array,
+    Promise,
+  };
+  runInNewContext(popup, context);
+  await elements.get("inspect").onclick();
+  assert.equal(elements.get("observed-search").hidden, false);
+  elements.get("search-query").value = "NASA Artemis official launch";
+  await elements.get("search-submit").onclick();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].tabId, 7);
+  assert.equal(sent[1].tabId, 7);
+  assert.equal(sent[1].windowId, 3);
+  assert.equal(sent[1].command.type, "searchObserved");
+  assert.equal(sent[1].command.snapshotId, "observed-snapshot");
+  assert.equal(sent[1].command.controlId, "observed-search");
+  assert.equal(sent[1].command.query, "NASA Artemis official launch");
+  assert.equal(elements.get("observed-search").hidden, true);
+  assert.equal(
+    elements.get("status").textContent,
+    "Search outcome unverified. Inspect the current page before another action.",
+  );
+  await elements.get("search-submit").onclick();
+  assert.equal(sent.length, 2, "a consumed observation cannot dispatch a second search");
+  await elements.get("inspect").onclick();
+  popupFocused = false;
+  await elements.get("search-submit").onclick();
+  assert.equal(sent.length, 3, "an unfocused popup cannot spend the new observation");
+  assert.equal(elements.get("observed-search").hidden, true);
+});
+
+test("YouTube popup search accepts only exact results on its selected active tab", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const beforeUrl = "https://www.youtube.com/";
+  const query = "NASA Artemis official launch";
+  const exactResults = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+  const cases = [
+    { name: "exact result", afterUrl: exactResults, allowed: true },
+    { name: "wrong query", afterUrl: "https://www.youtube.com/results?search_query=other" },
+    { name: "extra parameter", afterUrl: `${exactResults}&sp=other` },
+    { name: "changed origin", afterUrl: "https://elsewhere.example/results?search_query=NASA" },
+    { name: "late navigation", afterUrl: beforeUrl },
+    { name: "inactive after dispatch", afterUrl: exactResults, afterActive: false },
+    { name: "changed window", afterUrl: exactResults, afterWindow: 9 },
+    { name: "unfocused parent window", afterUrl: exactResults, afterFocused: false, allowed: true },
+    {
+      name: "inactive before dispatch",
+      afterUrl: exactResults,
+      beforeActive: false,
+      noInjection: true,
+    },
+    { name: "tab changed during injection", afterUrl: exactResults, duringInjection: "inactive" },
+    { name: "window changed during injection", afterUrl: exactResults, duringInjection: "window" },
+    {
+      name: "focus changed during injection",
+      afterUrl: exactResults,
+      duringInjection: "unfocused",
+      allowed: true,
+    },
+    {
+      name: "wrong extension sender",
+      afterUrl: exactResults,
+      senderId: "other",
+      noInjection: true,
+    },
+    {
+      name: "wrong popup URL",
+      afterUrl: exactResults,
+      senderUrl: "chrome-extension://ellie-test-extension/other.html",
+      noInjection: true,
+    },
+    {
+      name: "missing popup document",
+      afterUrl: exactResults,
+      senderDocumentId: "",
+      noInjection: true,
+    },
+    {
+      name: "different popup document",
+      afterUrl: exactResults,
+      senderDocumentId: "other-document",
+      noInjection: true,
+    },
+    { name: "closed popup", afterUrl: exactResults, popupClosed: true, noInjection: true },
+    { name: "tab-hosted popup", afterUrl: exactResults, popupType: "TAB", noInjection: true },
+    {
+      name: "duplicate popup contexts",
+      afterUrl: exactResults,
+      duplicatePopup: true,
+      noInjection: true,
+    },
+    {
+      name: "different selected window",
+      afterUrl: exactResults,
+      selectedWindowId: 9,
+      noInjection: true,
+    },
+    {
+      name: "native binding still requires a focused window",
+      afterUrl: exactResults,
+      beforeFocused: false,
+      expectedBinding: true,
+      noInjection: true,
+    },
+    { name: "popup closed during injection", afterUrl: exactResults, closeDuringInjection: true },
+  ];
+  for (const scenario of cases) {
+    let tab = {
+      id: 7,
+      windowId: 3,
+      active: scenario.beforeActive ?? true,
+      status: "complete",
+      url: beforeUrl,
+    };
+    let focused = scenario.beforeFocused ?? true;
+    let injections = 0;
+    let popupClosed = scenario.popupClosed ?? false;
+    const runtimeMessages = extensionEvent();
+    const popupContext = {
+      contextType: scenario.popupType ?? "POPUP",
+      documentId: "popup-document",
+      documentUrl: "chrome-extension://ellie-test-extension/popup.html",
+      tabId: scenario.popupType === "TAB" ? 7 : -1,
+      windowId: -1,
+    };
+    const context: Record<string, any> = {
+      chrome: {
+        runtime: {
+          id: "ellie-test-extension",
+          getURL: (path: string) => `chrome-extension://ellie-test-extension/${path}`,
+          getContexts: async () =>
+            popupClosed
+              ? []
+              : scenario.duplicatePopup
+                ? [popupContext, popupContext]
+                : [popupContext],
+          onMessage: runtimeMessages,
+        },
+        tabs: {
+          onRemoved: extensionEvent(),
+          onReplaced: extensionEvent(),
+          onUpdated: extensionEvent(),
+          get: async () => ({ ...tab }),
+        },
+        windows: { get: async (id: number) => ({ id, focused }) },
+        scripting: {
+          async executeScript(options: { files?: string[] }) {
+            injections += 1;
+            if (options.files) {
+              if (scenario.duringInjection === "inactive") tab = { ...tab, active: false };
+              if (scenario.duringInjection === "window") tab = { ...tab, windowId: 9 };
+              if (scenario.duringInjection === "unfocused") focused = false;
+              if (scenario.closeDuringInjection) popupClosed = true;
+              return [{ documentId: "selected-document" }];
+            }
+            tab = {
+              ...tab,
+              url: scenario.afterUrl,
+              active: scenario.afterActive ?? true,
+              windowId: scenario.afterWindow ?? 3,
+            };
+            focused = scenario.afterFocused ?? true;
+            return [{ result: { ok: true, value: { outcome: "navigation_observed" } } }];
+          },
+        },
+      },
+      AbortController,
+      URL,
+      Promise,
+      Set,
+      Map,
+      Date,
+      Error,
+      Object,
+      Array,
+      String,
+      Number,
+      RegExp,
+      crypto,
+      setTimeout,
+      clearTimeout,
+    };
+    runInNewContext(
+      `${background}\n;globalThis.__searchDispatch=dispatch;globalThis.__ledgers=mutationLedgers;`,
+      context,
+    );
+    const sender = {
+      id: scenario.senderId ?? "ellie-test-extension",
+      url: scenario.senderUrl ?? "chrome-extension://ellie-test-extension/popup.html",
+      documentId: scenario.senderDocumentId ?? "popup-document",
+    };
+    const command = { type: "searchObserved", actionId: crypto.randomUUID(), query };
+    const perform =
+      scenario.name === "exact result"
+        ? new Promise<any>((resolve, reject) =>
+            runtimeMessages.emit(
+              { protocol: "ellie.media.v1", tabId: 7, windowId: 3, command },
+              sender,
+              (response: any) =>
+                response.ok ? resolve(response.value) : reject(new Error(response.error)),
+            ),
+          )
+        : context.__searchDispatch(
+            7,
+            command,
+            scenario.expectedBinding
+              ? {
+                  url: beforeUrl,
+                  windowId: 3,
+                  documentId: "selected-document",
+                }
+              : undefined,
+            undefined,
+            undefined,
+            {
+              sender,
+              selectedWindowId: scenario.selectedWindowId ?? 3,
+            },
+          );
+    if (scenario.allowed) {
+      assert.equal((await perform).outcome, "navigation_observed", scenario.name);
+    } else {
+      await assert.rejects(perform, /page_changed/, scenario.name);
+    }
+    assert.equal(
+      injections,
+      scenario.noInjection
+        ? 0
+        : (scenario.duringInjection && !scenario.allowed) || scenario.closeDuringInjection
+          ? 1
+          : 2,
+      scenario.name,
+    );
+    if (scenario.noInjection) assert.equal(context.__ledgers.size, 0, scenario.name);
+  }
+});
+
 async function fixture(
   options: {
     accessibilityOnly?: boolean;
@@ -604,6 +906,7 @@ async function fixture(
     stableNativePort?: boolean;
     companionOnly?: boolean;
     companionArming?: boolean;
+    youtubeSearch?: boolean;
     youtubeTVOnly?: boolean;
     disneyOnly?: boolean;
   } = {},
@@ -648,6 +951,9 @@ async function fixture(
   assert.equal(background.split(tabGetNeedle).length - 1, 1);
   const effectNeedle = "  authorizeEffect?.();";
   assert.equal(background.split(effectNeedle).length - 1, 1);
+  const youtubeSearchNeedle =
+    'command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com"';
+  assert.equal(background.split(youtubeSearchNeedle).length - 1, 1);
   await writeFile(
     backgroundPath,
     background
@@ -671,6 +977,12 @@ async function fixture(
         options.companionOnly || options.youtubeTVOnly || options.disneyOnly
           ? 'const companionBindingOrigins = new Set(["http://127.0.0.1:PORT"]);'
           : companionNeedle,
+      )
+      .replace(
+        youtubeSearchNeedle,
+        options.youtubeSearch
+          ? 'command.type === "searchObserved" && new URL(before.url).origin === "http://127.0.0.1:PORT"'
+          : youtubeSearchNeedle,
       )
       .replace(
         'new URL(before.url).origin === "https://tv.youtube.com"',
@@ -1010,10 +1322,10 @@ async function showPlayer(){
 addEventListener('click',e=>{const a=e.target.closest('a');if(a){e.preventDefault();history.pushState({},'',a.href);showPlayer()}});
 </script>`;
 
-async function launch(extension: string, root: string) {
+async function launch(extension: string, root: string, sitePage?: (path: string) => string) {
   const server = createServer((request, response) => {
     response.writeHead(200, { "content-type": "text/html" });
-    response.end(html);
+    response.end(sitePage ? sitePage(request.url ?? "/") : html);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -1077,6 +1389,80 @@ async function command(harness: Page, tabId: number, value: Record<string, unkno
     { tabId, value },
   );
 }
+
+test(
+  "a tab-hosted popup cannot spend a synthetic search observation",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ youtubeSearch: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    const sitePage = (path: string) =>
+      path.startsWith("/results?")
+        ? `<a href="/watch?v=abcdefghijk" title="Observed public title">Observed public title</a>`
+        : `<!doctype html><style>
+      .ytSearchboxComponentInputContainer {display:flex;gap:8px;margin:16px}
+      input,button {width:280px;height:42px}
+    </style><div class="ytSearchboxComponentInputContainer">
+      <div><form action="/results"><input name="search_query" role="combobox" type="text" placeholder="Search"></form></div>
+      <button id="submit" aria-label="Search">Search</button>
+    </div><script>
+      document.querySelector('#submit').addEventListener('click', event => {
+        event.preventDefault();
+        sessionStorage.setItem('searchClicks', String(Number(sessionStorage.getItem('searchClicks') || 0) + 1));
+        location.href = '/results?search_query=' + encodeURIComponent(document.querySelector('input').value);
+      });
+    </script>`;
+    try {
+      const launched = await launch(owned.extension, owned.root, sitePage);
+      ({ context, server } = launched);
+      const initialUrl = launched.page.url();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      const read = await command(launched.harness, tab.id, { type: "inspect" });
+      assert.equal(read.ok, true);
+      assert.ok(read.value.snapshotId);
+      assert.ok(read.value.searchControl?.id);
+      const query = "NASA Artemis official launch";
+      const rejected = await launched.harness.evaluate(
+        async ({ tabId, windowId, snapshotId, controlId, query }) =>
+          globalThis["chrome"].runtime.sendMessage({
+            protocol: "ellie.media.v1",
+            tabId,
+            windowId,
+            command: {
+              type: "searchObserved",
+              actionId: crypto.randomUUID(),
+              snapshotId,
+              controlId,
+              query,
+            },
+          }),
+        {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          snapshotId: read.value.snapshotId,
+          controlId: read.value.searchControl.id,
+          query,
+        },
+      );
+      assert.deepEqual(rejected, { ok: false, error: "page_changed" });
+      assert.equal(launched.page.url(), initialUrl);
+      assert.equal(
+        await launched.page.evaluate(() => sessionStorage.getItem("searchClicks")),
+        null,
+      );
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "companion inspects visible results when body scrolling is propagated to the viewport",
