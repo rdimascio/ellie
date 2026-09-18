@@ -340,7 +340,7 @@ try {
   enterStage("xcode-build-for-testing");
   xcodeStarted = true;
   await execute("xcodebuild", [...xcodeTestTargetArguments, "build-for-testing"], {
-    timeout: 300_000,
+    timeout: 480_000,
     label: "Xcode build for testing",
   });
   enterStage("xcode-test-without-building");
