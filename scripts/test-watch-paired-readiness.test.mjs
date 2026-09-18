@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ownedCleanupTargets } from "./watch-paired-owned-process.mjs";
-import { parsePhoneReadiness, waitForPhoneReadiness } from "./watch-paired-readiness.mjs";
+import {
+  parsePhoneReadiness,
+  phoneFixtureContinuity,
+  waitForPhoneReadiness,
+} from "./watch-paired-readiness.mjs";
 
 const phone = "11111111-1111-1111-1111-111111111111";
 const watch = "22222222-2222-2222-2222-222222222222";
 const state = (overrides = {}) =>
   JSON.stringify({
-    version: 2,
+    version: 3,
     activation: "activated",
     paired: true,
     watchAppInstalled: true,
@@ -15,6 +19,8 @@ const state = (overrides = {}) =>
     foreground: true,
     enabledTarget: "watch-fixture-mac-a",
     recordedAtMilliseconds: 1_789_683_600_000,
+    processInstance: "12345678-1234-4234-8234-123456789abc",
+    writeSequence: 1,
     messagesReceived: 0,
     messagesDecoded: 0,
     replyHandlersInvoked: 0,
@@ -73,6 +79,8 @@ test("malformed or foreign readiness cannot authorize a paired Watch test", asyn
     state({ version: true }),
     state({ enabledTarget: "another-mac" }),
     state({ extra: "not admitted" }),
+    state({ processInstance: "not-a-process" }),
+    state({ writeSequence: 0 }),
     state({ messagesReceived: 0, messagesDecoded: 1 }),
     state({ messagesReceived: 1, replyHandlersInvoked: 2 }),
     state({ messagesReceived: 1, replyHandlersInvoked: 1, lastReplyState: "arbitrary" }),
@@ -97,4 +105,35 @@ test("malformed or foreign readiness cannot authorize a paired Watch test", asyn
     ).lastReplyState,
     "observed",
   );
+});
+
+test("fixture pulse distinguishes continued process from stale or replaced readiness", () => {
+  const before = parsePhoneReadiness(state());
+  const observedAt = before.recordedAtMilliseconds + 3_000;
+  assert.deepEqual(
+    phoneFixtureContinuity(
+      before,
+      parsePhoneReadiness(
+        state({
+          writeSequence: 4,
+          recordedAtMilliseconds: observedAt - 500,
+        }),
+      ),
+      observedAt,
+    ),
+    { sameProcessInstance: true, writeSequenceAdvanced: true, snapshotAgeMs: 500 },
+  );
+  assert.deepEqual(phoneFixtureContinuity(before, before, observedAt), {
+    sameProcessInstance: true,
+    writeSequenceAdvanced: false,
+    snapshotAgeMs: 3_000,
+  });
+  const replaced = parsePhoneReadiness(
+    state({
+      processInstance: "87654321-1234-4234-8234-123456789abc",
+      writeSequence: 10,
+    }),
+  );
+  assert.equal(phoneFixtureContinuity(before, replaced, observedAt).writeSequenceAdvanced, false);
+  assert.equal(phoneFixtureContinuity(before, replaced, observedAt).sameProcessInstance, false);
 });

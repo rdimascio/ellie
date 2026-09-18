@@ -9,7 +9,7 @@ import WatchConnectivity
 @MainActor
 enum WatchPairedUITestReadiness {
   private struct Snapshot: Encodable {
-    let version = 2
+    let version = 3
     let activation: String
     let paired: Bool
     let watchAppInstalled: Bool
@@ -21,8 +21,12 @@ enum WatchPairedUITestReadiness {
     let messagesDecoded: Int
     let replyHandlersInvoked: Int
     let lastReplyState: String
+    let processInstance: String
+    let writeSequence: Int
   }
 
+  private static let processInstance = UUID().uuidString.lowercased()
+  private static var writeSequence = 0
   private static var messagesReceived = 0
   private static var messagesDecoded = 0
   private static var replyHandlersInvoked = 0
@@ -52,6 +56,7 @@ enum WatchPairedUITestReadiness {
     guard let marker = arguments.firstIndex(of: "--ellie-ui-watch-paired-fixture"),
           arguments.indices.contains(marker + 1),
           UUID(uuidString: arguments[marker + 1]) != nil else { return }
+    writeSequence = min(writeSequence + 1, 1_000_000)
     let activation: String
     switch session.activationState {
     case .activated: activation = "activated"
@@ -66,7 +71,9 @@ enum WatchPairedUITestReadiness {
       foreground: UIApplication.shared.applicationState == .active,
       recordedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
       messagesReceived: messagesReceived, messagesDecoded: messagesDecoded,
-      replyHandlersInvoked: replyHandlersInvoked, lastReplyState: lastReplyState)
+      replyHandlersInvoked: replyHandlersInvoked, lastReplyState: lastReplyState,
+      processInstance: processInstance,
+      writeSequence: writeSequence)
     let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     let directory = support.appendingPathComponent("Ellie/WatchPaired")
     let file = directory.appendingPathComponent("\(arguments[marker + 1]).readiness.json")
@@ -139,7 +146,14 @@ struct WatchPairedUITestFixtureView: View {
         .accessibilityIdentifier("watch-fixture-authority")
     }
     .padding()
-    .task { configure() }
+    .task {
+      configure()
+      // This diagnostic pulse observes fixture process continuity; it does not authorize Watch actions.
+      while !Task.isCancelled {
+        bridge.recordPairedFixtureReadiness()
+        try? await Task.sleep(for: .seconds(1))
+      }
+    }
     .onChange(of: bridge.available) { _, available in
       if available { configure() }
     }

@@ -9,14 +9,17 @@ const keys = [
   "messagesDecoded",
   "messagesReceived",
   "paired",
+  "processInstance",
   "reachable",
   "recordedAtMilliseconds",
   "replyHandlersInvoked",
   "version",
   "watchAppInstalled",
+  "writeSequence",
 ];
 const targets = new Set(["", "watch-fixture-mac-a", "watch-fixture-mac-b"]);
 const replyStates = new Set(["none", "observed", "unknown", "unavailable", "blocked", "stale"]);
+const processInstance = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export function parsePhoneReadiness(value) {
   const row = JSON.parse(value);
@@ -25,7 +28,7 @@ export function parsePhoneReadiness(value) {
     typeof row !== "object" ||
     Array.isArray(row) ||
     Object.keys(row).sort().join() !== keys.slice().sort().join() ||
-    row.version !== 2 ||
+    row.version !== 3 ||
     !["activated", "inactive", "not_activated", "unknown"].includes(row.activation) ||
     !targets.has(row.enabledTarget) ||
     !["paired", "watchAppInstalled", "reachable", "foreground"].every(
@@ -33,6 +36,11 @@ export function parsePhoneReadiness(value) {
     ) ||
     !Number.isSafeInteger(row.recordedAtMilliseconds) ||
     row.recordedAtMilliseconds <= 0 ||
+    typeof row.processInstance !== "string" ||
+    !processInstance.test(row.processInstance) ||
+    !Number.isSafeInteger(row.writeSequence) ||
+    row.writeSequence < 1 ||
+    row.writeSequence > 1_000_000 ||
     !["messagesReceived", "messagesDecoded", "replyHandlersInvoked"].every(
       (key) => Number.isSafeInteger(row[key]) && row[key] >= 0 && row[key] <= 128,
     ) ||
@@ -60,6 +68,18 @@ export function phoneReady(row, target) {
 export function phoneReadinessSummary(row) {
   if (!row) return "missing";
   return `activation=${row.activation} paired=${row.paired} watchAppInstalled=${row.watchAppInstalled} reachable=${row.reachable} foreground=${row.foreground} enabledTarget=${row.enabledTarget || "none"}`;
+}
+
+export function phoneFixtureContinuity(before, after, observedAtMilliseconds = Date.now()) {
+  const sameProcessInstance = before.processInstance === after.processInstance;
+  return {
+    sameProcessInstance,
+    writeSequenceAdvanced: sameProcessInstance && after.writeSequence > before.writeSequence,
+    snapshotAgeMs: Math.min(
+      999_999,
+      Math.max(0, observedAtMilliseconds - after.recordedAtMilliseconds),
+    ),
+  };
 }
 
 export async function waitForPhoneReadiness(

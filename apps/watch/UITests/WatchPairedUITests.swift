@@ -9,8 +9,10 @@ final class WatchPairedUITests: XCTestCase {
     app.launch()
     let read = app.buttons["watch-read"]
     XCTAssertTrue(read.waitForExistence(timeout: 15))
-    XCTAssertTrue(waitForEnabled(read, timeout: 25),
-                  "WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
+    guard waitForEnabled(read, timeout: 25) else {
+      XCTFail("WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
+      return
+    }
     read.tap()
     let title = app.staticTexts["watch-observed-title"]
     XCTAssertTrue(title.waitForExistence(timeout: 15),
@@ -34,8 +36,10 @@ final class WatchPairedUITests: XCTestCase {
     app.launch()
     let read = app.buttons["watch-read"]
     XCTAssertTrue(read.waitForExistence(timeout: 15))
-    XCTAssertTrue(waitForEnabled(read, timeout: 25),
-                  "WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
+    guard waitForEnabled(read, timeout: 25) else {
+      XCTFail("WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
+      return
+    }
     XCTAssertFalse(app.buttons["watch-play"].isEnabled)
     read.tap()
     let title = app.staticTexts["watch-observed-title"]

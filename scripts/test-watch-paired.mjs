@@ -16,7 +16,11 @@ import {
   requireOwnedPairState,
   ownedDeviceCleanupState,
 } from "./watch-paired-install-readiness.mjs";
-import { parsePhoneReadiness, waitForPhoneReadiness } from "./watch-paired-readiness.mjs";
+import {
+  parsePhoneReadiness,
+  phoneFixtureContinuity,
+  waitForPhoneReadiness,
+} from "./watch-paired-readiness.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const project = join(root, "apps/ios/EllieIOS.xcodeproj");
@@ -442,11 +446,20 @@ try {
   receipt.events = events;
   receipt.status = "passed-synthetic-backend-real-paired-ui-wcsession";
 } catch (error) {
-  if (readinessPath && existsSync(readinessPath)) {
-    try {
-      receipt.phoneReadinessAtFailure = parsePhoneReadiness(readFileSync(readinessPath, "utf8"));
-    } catch {
-      receipt.phoneReadinessAtFailure = "invalid";
+  if (readinessPath) {
+    if (!existsSync(readinessPath)) receipt.phoneReadinessAtFailure = "missing";
+    else {
+      try {
+        receipt.phoneReadinessAtFailure = parsePhoneReadiness(readFileSync(readinessPath, "utf8"));
+        if (receipt.phoneReadiness) {
+          receipt.phoneFixtureContinuity = phoneFixtureContinuity(
+            receipt.phoneReadiness,
+            receipt.phoneReadinessAtFailure,
+          );
+        }
+      } catch {
+        receipt.phoneReadinessAtFailure = "invalid";
+      }
     }
   }
   primary = error;
