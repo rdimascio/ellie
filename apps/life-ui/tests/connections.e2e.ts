@@ -79,7 +79,12 @@ const adapter = (id: ProviderId, items: ProviderObservation[]): LifeProviderAdap
   async identity() {
     return {
       accountId: `${id}-fixture-account`,
-      label: id === "google-calendar" ? "Private fixture calendar" : "Private fixture inbox",
+      label:
+        id === "google-calendar"
+          ? "Private fixture calendar"
+          : id === "plaid"
+            ? "Private fixture bank"
+            : "Private fixture inbox",
     };
   },
   async pull() {
@@ -169,11 +174,28 @@ const gmail: LifeProviderAdapter = {
     return { status: "plain", text: "Private fixture body, fetched only after selection." };
   },
 };
+const plaid = adapter(
+  "plaid",
+  [61, 31, 1].map((days): ProviderObservation => ({
+    sourceKey: `charge-${days}`,
+    sourceRevision: "settled-v1",
+    observedAt: now - 60_000,
+    title: "Fixture Streaming",
+    kind: "transaction",
+    data: {
+      postedAt: now - days * 86_400_000,
+      amountDecimal: "12.00",
+      currency: "USD",
+      merchant: "Fixture Streaming",
+      pending: false,
+    },
+  })),
+);
 const connectors = new ConnectorBroker({
   store: connectorStore,
   life,
   vault,
-  providers: [calendar, gmail],
+  providers: [calendar, gmail, plaid],
   tasks,
   oauth,
   now: () => now,
@@ -228,6 +250,35 @@ try {
       throw new Error("Connected research did not durably publish a preparation plan.");
     await new Promise((resolveWait) => setTimeout(resolveWait, 25));
   }
+  const bank = await connectors.connect(
+    actorId,
+    "plaid",
+    { accessToken: "bank-fixture-secret" },
+    "observe",
+    [],
+  );
+  const financialRecord = () =>
+    life
+      .listRecords(
+        { userId: actorId },
+        {
+          scope: { type: "user", id: actorId },
+          kinds: ["memory"],
+        },
+      )
+      .find(
+        (record) =>
+          record.data.type === "connected-insight-v1" && record.title.includes("Fixture Streaming"),
+      );
+  const financialDeadline = Date.now() + 10_000;
+  while (!financialRecord()) {
+    if (Date.now() >= financialDeadline)
+      throw new Error("Plaid broker did not publish its financial insight.");
+    await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+  }
+  const financialInsight = financialRecord()!;
+  assert.equal(financialInsight.provenance[0]?.sourceId, `connected-source-${bank.id}`);
+  assert.equal(financialInsight.provenance[0]?.derived, true);
   const listening = await server.listen();
   const unauthorized = await fetch(`${listening.url}/api/connections`);
   assert.equal(unauthorized.status, 401, "connected metadata requires a local session");
@@ -243,6 +294,52 @@ try {
   await page.goto(listening.launchUrl);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await page.getByRole("button", { name: "Talk to Ellie", exact: true }).waitFor();
+  const forgedTitle = "A manual memory is not an account insight";
+  const forged = await page.evaluate(
+    async ({ actorId, bankId, now, title }) => {
+      const response = await fetch("/api/life/records", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind: "memory",
+          title,
+          scope: { type: "user", id: actorId },
+          data: {
+            type: "connected-insight-v1",
+            connected: { connectionId: bankId, expiresAt: now + 60_000 },
+          },
+        }),
+      });
+      return { status: response.status, record: await response.json() };
+    },
+    { actorId, bankId: bank.id, now, title: forgedTitle },
+  );
+  assert.equal(forged.status, 201);
+  assert.deepEqual(forged.record.provenance, []);
+  await page.reload();
+  const bootstrapRecord = await page.evaluate(async (id) => {
+    const response = await fetch("/api/life/bootstrap");
+    const value = await response.json();
+    return value.records.find((record: { id: string }) => record.id === id);
+  }, financialInsight.id);
+  assert.equal(bootstrapRecord.provenance, undefined);
+  assert.equal(bootstrapRecord.data.connected, undefined);
+  const detail = page.waitForResponse((response) =>
+    response.url().endsWith(`/api/life/records/${financialInsight.id}`),
+  );
+  await page.locator(".bottom").getByRole("button", { name: "Finances", exact: true }).click();
+  assert.equal((await detail).status(), 200);
+  await page
+    .locator(".finance-insights")
+    .getByRole("heading", { name: financialInsight.title, exact: true })
+    .waitFor();
+  assert.equal(
+    await page.locator(".finance-insights").getByText(forgedTitle, { exact: true }).count(),
+    0,
+  );
+  console.log(
+    "Finances accepts broker-produced Plaid detail provenance and rejects signed-in user-created lookalikes.",
+  );
   await page.goto(`${listening.url}/?section=connections&view=settings`);
   await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
   await page.goto(`${listening.url}/?view=settings&section=connections`);
@@ -298,7 +395,10 @@ try {
     true,
   );
   assert.match((await page.locator(".connections").textContent()) ?? "", /read-only connection/);
-  const mode = page.locator(".connection-list select").first();
+  const mode = page
+    .locator(".connection-list article")
+    .filter({ hasText: "Private fixture calendar" })
+    .locator("select");
   await mode.selectOption("observe");
   await page.waitForFunction(async () => {
     const response = await fetch("/api/connections");

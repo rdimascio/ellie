@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Ellie · Mobile design preview</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family:
+          "Avenir Next",
+          -apple-system,
+          sans-serif;
+        color: #eef4ff;
+        background: #080d19;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100svh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: clamp(40px, 8vw, 140px);
+        padding: 40px;
+        background: radial-gradient(ellipse at 75% 50%, #20264166, transparent 60%);
+      }
+      main {
+        width: 330px;
+      }
+      .mark {
+        display: block;
+        font-size: 38px;
+        color: #a2d5f8;
+        margin-bottom: 44px;
+      }
+      h1 {
+        font-size: 64px;
+        line-height: 1.04;
+        font-weight: 500;
+        letter-spacing: -3px;
+        margin: 0 0 24px;
+      }
+      p {
+        color: #9aaac2;
+        line-height: 1.7;
+        font-size: 14px;
+        max-width: 290px;
+      }
+      .controls {
+        margin-top: 38px;
+        display: flex;
+        align-items: center;
+        gap: 16px;
+        font-size: 12px;
+        color: #a5b6cf;
+      }
+      select {
+        font: inherit;
+        background: #152138;
+        border: 1px solid #344665;
+        color: #edf4ff;
+        border-radius: 10px;
+        padding: 11px;
+      }
+      a {
+        display: inline-block;
+        font-size: 12px;
+        color: #a2d5f8;
+        text-underline-offset: 5px;
+        margin-top: 25px;
+      }
+      .note {
+        font-size: 11px;
+        margin-top: 48px;
+        max-width: 275px;
+      }
+      .device {
+        --phone-width: 390px;
+        padding: 8px;
+        border: 1px solid #516078;
+        border-radius: 42px;
+        background: #151d2d;
+        box-shadow:
+          0 35px 90px #0007,
+          inset 0 0 0 3px #0d1421;
+      }
+      iframe {
+        display: block;
+        width: var(--phone-width);
+        height: min(844px, calc(100svh - 98px));
+        min-height: 560px;
+        border: 0;
+        border-radius: 34px;
+        background: #080d19;
+      }
+      :focus-visible {
+        outline: 2px solid #a2d5f8;
+        outline-offset: 4px;
+      }
+      @media (max-width: 800px) {
+        body {
+          padding: 25px 10px;
+          flex-direction: column;
+          gap: 28px;
+        }
+        main {
+          width: min(390px, 100%);
+        }
+        .mark,
+        .note,
+        main > p {
+          display: none;
+        }
+        h1 {
+          font-size: 32px;
+          letter-spacing: -1px;
+          margin: 0;
+        }
+        .controls {
+          margin-top: 18px;
+        }
+        a {
+          margin-top: 15px;
+        }
+        .device {
+          max-width: 100%;
+        }
+        iframe {
+          max-width: calc(100vw - 40px);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="mark" aria-hidden="true">✧</span>
+      <h1>Ellie,<br />after dark.</h1>
+      <p>A calmer space for your day. A little light for what comes next.</p>
+      <div class="controls">
+        <label for="viewport">Phone size</label
+        ><select id="viewport">
+          <option value="320">Compact · 320</option>
+          <option value="390" selected>Standard · 390</option>
+          <option value="430">Large · 430</option>
+        </select>
+      </div>
+      <a href="/" target="_blank" rel="noopener">Open full app preview</a>
+      <p class="note">
+        Interactive design preview with sample data. Requests and saving are disabled. Explore the
+        tabs, open Ellie, and try a draft.
+      </p>
+    </main>
+    <div class="device"><iframe src="/" title="Interactive Ellie mobile design"></iframe></div>
+    <script>
+      document.getElementById("viewport").addEventListener("change", (event) => {
+        document
+          .querySelector(".device")
+          .style.setProperty("--phone-width", `${event.target.value}px`);
+      });
+    </script>
+  </body>
+</html>
