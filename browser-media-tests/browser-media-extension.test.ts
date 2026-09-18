@@ -701,6 +701,13 @@ test("YouTube search accepts only the exact observed result on the same active f
       beforeActive: false,
       noInjection: true,
     },
+    { name: "tab changed during injection", afterUrl: exactResults, duringInjection: "inactive" },
+    { name: "window changed during injection", afterUrl: exactResults, duringInjection: "window" },
+    {
+      name: "focus changed during injection",
+      afterUrl: exactResults,
+      duringInjection: "unfocused",
+    },
   ];
   for (const scenario of cases) {
     let tab = {
@@ -725,7 +732,12 @@ test("YouTube search accepts only the exact observed result on the same active f
         scripting: {
           async executeScript(options: { files?: string[] }) {
             injections += 1;
-            if (options.files) return [{ documentId: "selected-document" }];
+            if (options.files) {
+              if (scenario.duringInjection === "inactive") tab = { ...tab, active: false };
+              if (scenario.duringInjection === "window") tab = { ...tab, windowId: 9 };
+              if (scenario.duringInjection === "unfocused") focused = false;
+              return [{ documentId: "selected-document" }];
+            }
             tab = {
               ...tab,
               url: scenario.afterUrl,
@@ -764,7 +776,11 @@ test("YouTube search accepts only the exact observed result on the same active f
     } else {
       await assert.rejects(perform, /page_changed/, scenario.name);
     }
-    assert.equal(injections, scenario.noInjection ? 0 : 2, scenario.name);
+    assert.equal(
+      injections,
+      scenario.noInjection ? 0 : scenario.duringInjection ? 1 : 2,
+      scenario.name,
+    );
   }
 });
 

@@ -140,14 +140,14 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
   const documentId = installed[0]?.documentId;
   if (!documentId) throw new Error("page_changed");
   if (expectedBinding && documentId !== expectedBinding.documentId) throw new Error("page_changed");
-  if (expectedBinding) {
+  if (expectedBinding || youtubeSearch) {
     const armed = await chrome.tabs.get(tabId);
     if (
-      armed.url !== expectedBinding.url ||
-      armed.windowId !== expectedBinding.windowId ||
+      armed.url !== (expectedBinding?.url ?? before.url) ||
+      armed.windowId !== (expectedBinding?.windowId ?? before.windowId) ||
       armed.active !== true ||
       armed.status !== "complete" ||
-      !(await chrome.windows.get(expectedBinding.windowId)).focused
+      !(await chrome.windows.get(expectedBinding?.windowId ?? before.windowId)).focused
     )
       throw new Error("page_changed");
   }
