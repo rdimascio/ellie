@@ -677,8 +677,12 @@ final class BrowserPhoneControlStore: ObservableObject {
     guard let site = page.site else { return true }
     guard site.page != .login, site.page != .unsupported else { return false }
     if site.provider == .disneyplus {
-      if case .openResult = intent { return site.page == .browse }
-      return false
+      switch intent {
+      case .openResult: return site.page == .browse
+      case .scroll(let direction):
+        return site.page == .browse && (direction == .up || direction == .down)
+      default: return false
+      }
     }
     if site.provider == .youtubeTV {
       switch intent {
