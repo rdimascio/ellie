@@ -184,6 +184,10 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"youtube","page":"home","playback":"unavailable","searchControl":{"id":"input","label":"Search"}}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
+    let home = #"{"provider":"youtube","page":"home","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#
+    for source in ["accessibility", "webmcp"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(home, source: source), nodeID: "mac"))
+    }
   }
 
   func testDisneyPlusCompanionObservationExcludesPlaybackAndSearchControls() throws {

@@ -568,6 +568,8 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         throw new Error("Invalid browser operation result.");
       site = observed as BrowserView["site"];
     }
+    if (site?.provider === "youtube" && site.searchControl && browser.source !== "companion")
+      throw new Error("Invalid browser operation result.");
     if (
       browser.source === "companion" &&
       site?.provider !== "netflix" &&

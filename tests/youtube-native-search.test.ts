@@ -158,6 +158,15 @@ test("YouTube search control is accepted only on home/results and no other provi
     ["disneyplus", "browse"],
   ] as [string, string][])
     assert.throws(() => browserWebMCPOperationResult(site(provider, page)));
+  for (const source of ["accessibility", "webmcp"]) {
+    const observed = site("youtube", "home");
+    assert.throws(() =>
+      browserWebMCPOperationResult({
+        ...observed,
+        browser: { ...observed.browser, source },
+      }),
+    );
+  }
   const companion = new BrowserCompanionOperations({
     async request() {
       throw new Error("must not dispatch");
