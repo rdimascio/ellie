@@ -23,6 +23,7 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
         createdAt: 1, expiresAt: 9_007_199_254_740_000), token: token)
   }
 
+  @MainActor
   func testPinnedNativeLifeQuestionUsesSeparateGrantAndDurableReadOnlyStatus() async throws {
     let allowed = try credential("allowed")
     let client = IOSPinnedQuietVoiceClient()
