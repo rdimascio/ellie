@@ -67,8 +67,18 @@ test(
   async () => {
     await withPage(async (page) => {
       const read = await dispatch(page, { type: "inspect", actionId: id() });
-      assert.deepEqual(read.site, { provider: "youtube", page: "home", playback: "unavailable" });
+      assert.deepEqual(Object.keys(read.searchControl).sort(), ["id", "label"]);
+      assert.match(
+        read.searchControl.id,
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
       assert.equal(read.searchControl.label, "Search");
+      assert.deepEqual(read.site, {
+        provider: "youtube",
+        page: "home",
+        playback: "unavailable",
+        searchControl: read.searchControl,
+      });
       const command = {
         type: "searchObserved",
         actionId: id(),
