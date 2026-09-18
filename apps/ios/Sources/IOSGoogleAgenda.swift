@@ -283,12 +283,16 @@ final class IOSGoogleAgendaStore: ObservableObject {
                     let result = try await client.agenda(credential, id: id)
                     try Task.checkCancellation()
                     guard self.generation == ticket, self.scope == scope, self.selectedID == id else { return }
-                    self.snapshot = result
-                    self.refreshedAt = Date()
-                    self.message = !result.complete
-                        ? "The Mac has not completed its first calendar import."
-                        : result.state == "connected" ? nil
-                        : "The Mac account is \(result.state). Showing its last completed import."
+                    if result.selectedCalendarId == self.connections.first(where: { $0.id == id })?.selectedCalendarId {
+                        self.snapshot = result
+                        self.refreshedAt = Date()
+                        self.message = !result.complete
+                            ? "The Mac has not completed its first calendar import."
+                            : result.state == "connected" ? nil
+                            : "The Mac account is \(result.state). Showing its last completed import."
+                    } else {
+                        self.message = "The selected calendar changed during this read. Tap Refresh to check the Mac again."
+                    }
                 } else {
                     self.message = self.connections.isEmpty
                         ? "Connect Google Calendar in Ellie Life on your Mac, then refresh here."

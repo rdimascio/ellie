@@ -172,6 +172,40 @@ final class IOSGoogleAgendaTests: XCTestCase {
         XCTAssertNil(store.selectedID, "a connection absent from a fresh actor listing must be forgotten")
     }
 
+    @MainActor
+    func testAgendaForDifferentSelectedCalendarDoesNotReplaceLastMatchingRead() async throws {
+        let client = AgendaFixtureClient()
+        let original = snapshot()
+        await client.configure([account], result: original)
+        let suite = "ellie-agenda-test-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = IOSGoogleAgendaStore(client: client, defaults: defaults)
+        store.bind(credential())
+        store.refresh(); await eventually { !store.isRefreshing }
+        store.select(account.id)
+        store.refresh(); await eventually { !store.isRefreshing }
+        XCTAssertEqual(store.snapshot, original)
+        let priorReadAt = store.refreshedAt
+
+        await client.configure([account], holdAgenda: true)
+        store.refresh()
+        for _ in 0..<100 {
+            if await client.awaitingAgenda() { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let waiting = await client.awaitingAgenda()
+        XCTAssertTrue(waiting)
+        await client.release(snapshot(selectedCalendar: "changed-on-mac"))
+        await eventually { !store.isRefreshing }
+        XCTAssertEqual(store.snapshot, original, "a mismatched fresh read must not replace the last matching snapshot")
+        XCTAssertEqual(store.refreshedAt, priorReadAt)
+        XCTAssertTrue(store.message?.contains("changed during this read") == true)
+        let requests = await client.requestLog()
+        XCTAssertEqual(requests,
+            ["list", "list", "agenda:calendar_123", "list", "agenda:calendar_123"])
+    }
+
     func testWireRejectsForeignIdentityAndUnknownOrOversizedEvents() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let start = Int(now.timeIntervalSince1970 * 1_000)
