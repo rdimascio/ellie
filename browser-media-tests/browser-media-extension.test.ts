@@ -603,6 +603,7 @@ test("popup reports a failed native connection without claiming page selection",
 test("popup submits only the search control from its fresh observed page", async () => {
   const popup = await readFile(join(source, "popup.js"), "utf8");
   const sent: any[] = [];
+  let popupFocused = true;
   const elements = new Map<string, any>();
   for (const id of [
     "status",
@@ -632,7 +633,7 @@ test("popup submits only the search control from its fresh observed page", async
   }
   const context: Record<string, any> = {
     chrome: {
-      tabs: { query: async () => [{ id: 7 }] },
+      tabs: { query: async () => [{ id: 7, windowId: 3, active: true, status: "complete" }] },
       runtime: {
         onMessage: extensionEvent(),
         async sendMessage(value: any) {
@@ -651,6 +652,7 @@ test("popup submits only the search control from its fresh observed page", async
       },
     },
     document: {
+      hasFocus: () => popupFocused,
       querySelector(selector: string) {
         return elements.get(selector.slice(1));
       },
@@ -672,6 +674,7 @@ test("popup submits only the search control from its fresh observed page", async
   assert.equal(sent.length, 2);
   assert.equal(sent[0].tabId, 7);
   assert.equal(sent[1].tabId, 7);
+  assert.equal(sent[1].windowId, 3);
   assert.equal(sent[1].command.type, "searchObserved");
   assert.equal(sent[1].command.snapshotId, "observed-snapshot");
   assert.equal(sent[1].command.controlId, "observed-search");
@@ -683,9 +686,14 @@ test("popup submits only the search control from its fresh observed page", async
   );
   await elements.get("search-submit").onclick();
   assert.equal(sent.length, 2, "a consumed observation cannot dispatch a second search");
+  await elements.get("inspect").onclick();
+  popupFocused = false;
+  await elements.get("search-submit").onclick();
+  assert.equal(sent.length, 3, "an unfocused popup cannot spend the new observation");
+  assert.equal(elements.get("observed-search").hidden, true);
 });
 
-test("YouTube search accepts only the exact observed result on the same active focused tab", async () => {
+test("YouTube popup search accepts only exact results on its selected active tab", async () => {
   const background = await readFile(join(source, "background.js"), "utf8");
   const beforeUrl = "https://www.youtube.com/";
   const query = "NASA Artemis official launch";
@@ -698,7 +706,7 @@ test("YouTube search accepts only the exact observed result on the same active f
     { name: "late navigation", afterUrl: beforeUrl },
     { name: "inactive after dispatch", afterUrl: exactResults, afterActive: false },
     { name: "changed window", afterUrl: exactResults, afterWindow: 9 },
-    { name: "unfocused after dispatch", afterUrl: exactResults, afterFocused: false },
+    { name: "unfocused parent window", afterUrl: exactResults, afterFocused: false, allowed: true },
     {
       name: "inactive before dispatch",
       afterUrl: exactResults,
@@ -711,7 +719,54 @@ test("YouTube search accepts only the exact observed result on the same active f
       name: "focus changed during injection",
       afterUrl: exactResults,
       duringInjection: "unfocused",
+      allowed: true,
     },
+    {
+      name: "wrong extension sender",
+      afterUrl: exactResults,
+      senderId: "other",
+      noInjection: true,
+    },
+    {
+      name: "wrong popup URL",
+      afterUrl: exactResults,
+      senderUrl: "chrome-extension://ellie-test-extension/other.html",
+      noInjection: true,
+    },
+    {
+      name: "missing popup document",
+      afterUrl: exactResults,
+      senderDocumentId: "",
+      noInjection: true,
+    },
+    {
+      name: "different popup document",
+      afterUrl: exactResults,
+      senderDocumentId: "other-document",
+      noInjection: true,
+    },
+    { name: "closed popup", afterUrl: exactResults, popupClosed: true, noInjection: true },
+    { name: "tab-hosted popup", afterUrl: exactResults, popupType: "TAB", noInjection: true },
+    {
+      name: "duplicate popup contexts",
+      afterUrl: exactResults,
+      duplicatePopup: true,
+      noInjection: true,
+    },
+    {
+      name: "different selected window",
+      afterUrl: exactResults,
+      selectedWindowId: 9,
+      noInjection: true,
+    },
+    {
+      name: "native binding still requires a focused window",
+      afterUrl: exactResults,
+      beforeFocused: false,
+      expectedBinding: true,
+      noInjection: true,
+    },
+    { name: "popup closed during injection", afterUrl: exactResults, closeDuringInjection: true },
   ];
   for (const scenario of cases) {
     let tab = {
@@ -721,11 +776,30 @@ test("YouTube search accepts only the exact observed result on the same active f
       status: "complete",
       url: beforeUrl,
     };
-    let focused = true;
+    let focused = scenario.beforeFocused ?? true;
     let injections = 0;
+    let popupClosed = scenario.popupClosed ?? false;
+    const runtimeMessages = extensionEvent();
+    const popupContext = {
+      contextType: scenario.popupType ?? "POPUP",
+      documentId: "popup-document",
+      documentUrl: "chrome-extension://ellie-test-extension/popup.html",
+      tabId: scenario.popupType === "TAB" ? 7 : -1,
+      windowId: -1,
+    };
     const context: Record<string, any> = {
       chrome: {
-        runtime: { onMessage: extensionEvent() },
+        runtime: {
+          id: "ellie-test-extension",
+          getURL: (path: string) => `chrome-extension://ellie-test-extension/${path}`,
+          getContexts: async () =>
+            popupClosed
+              ? []
+              : scenario.duplicatePopup
+                ? [popupContext, popupContext]
+                : [popupContext],
+          onMessage: runtimeMessages,
+        },
         tabs: {
           onRemoved: extensionEvent(),
           onReplaced: extensionEvent(),
@@ -740,6 +814,7 @@ test("YouTube search accepts only the exact observed result on the same active f
               if (scenario.duringInjection === "inactive") tab = { ...tab, active: false };
               if (scenario.duringInjection === "window") tab = { ...tab, windowId: 9 };
               if (scenario.duringInjection === "unfocused") focused = false;
+              if (scenario.closeDuringInjection) popupClosed = true;
               return [{ documentId: "selected-document" }];
             }
             tab = {
@@ -769,12 +844,43 @@ test("YouTube search accepts only the exact observed result on the same active f
       setTimeout,
       clearTimeout,
     };
-    runInNewContext(`${background}\n;globalThis.__searchDispatch=dispatch;`, context);
-    const perform = context.__searchDispatch(7, {
-      type: "searchObserved",
-      actionId: crypto.randomUUID(),
-      query,
-    });
+    runInNewContext(
+      `${background}\n;globalThis.__searchDispatch=dispatch;globalThis.__ledgers=mutationLedgers;`,
+      context,
+    );
+    const sender = {
+      id: scenario.senderId ?? "ellie-test-extension",
+      url: scenario.senderUrl ?? "chrome-extension://ellie-test-extension/popup.html",
+      documentId: scenario.senderDocumentId ?? "popup-document",
+    };
+    const command = { type: "searchObserved", actionId: crypto.randomUUID(), query };
+    const perform =
+      scenario.name === "exact result"
+        ? new Promise<any>((resolve, reject) =>
+            runtimeMessages.emit(
+              { protocol: "ellie.media.v1", tabId: 7, windowId: 3, command },
+              sender,
+              (response: any) =>
+                response.ok ? resolve(response.value) : reject(new Error(response.error)),
+            ),
+          )
+        : context.__searchDispatch(
+            7,
+            command,
+            scenario.expectedBinding
+              ? {
+                  url: beforeUrl,
+                  windowId: 3,
+                  documentId: "selected-document",
+                }
+              : undefined,
+            undefined,
+            undefined,
+            {
+              sender,
+              selectedWindowId: scenario.selectedWindowId ?? 3,
+            },
+          );
     if (scenario.allowed) {
       assert.equal((await perform).outcome, "navigation_observed", scenario.name);
     } else {
@@ -782,9 +888,14 @@ test("YouTube search accepts only the exact observed result on the same active f
     }
     assert.equal(
       injections,
-      scenario.noInjection ? 0 : scenario.duringInjection ? 1 : 2,
+      scenario.noInjection
+        ? 0
+        : (scenario.duringInjection && !scenario.allowed) || scenario.closeDuringInjection
+          ? 1
+          : 2,
       scenario.name,
     );
+    if (scenario.noInjection) assert.equal(context.__ledgers.size, 0, scenario.name);
   }
 });
 
@@ -1280,7 +1391,7 @@ async function command(harness: Page, tabId: number, value: Record<string, unkno
 }
 
 test(
-  "popup search survives full synthetic results navigation with one click and a fresh read",
+  "a tab-hosted popup cannot spend a synthetic search observation",
   { timeout: 30_000 },
   async () => {
     const owned = await fixture({ youtubeSearch: true });
@@ -1306,42 +1417,45 @@ test(
       const launched = await launch(owned.extension, owned.root, sitePage);
       ({ context, server } = launched);
       const initialUrl = launched.page.url();
-      await launched.harness.evaluate(async () => {
-        await (document.querySelector("#inspect") as HTMLButtonElement).onclick?.(
-          new MouseEvent("click"),
-        );
-      });
-      assert.equal(await launched.harness.locator("#observed-search").isVisible(), true);
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      const read = await command(launched.harness, tab.id, { type: "inspect" });
+      assert.equal(read.ok, true);
+      assert.ok(read.value.snapshotId);
+      assert.ok(read.value.searchControl?.id);
       const query = "NASA Artemis official launch";
-      const navigation = launched.page.waitForURL(
-        new RegExp(`/results\\?search_query=${encodeURIComponent(query)}$`),
-        { waitUntil: "domcontentloaded" },
+      const rejected = await launched.harness.evaluate(
+        async ({ tabId, windowId, snapshotId, controlId, query }) =>
+          globalThis["chrome"].runtime.sendMessage({
+            protocol: "ellie.media.v1",
+            tabId,
+            windowId,
+            command: {
+              type: "searchObserved",
+              actionId: crypto.randomUUID(),
+              snapshotId,
+              controlId,
+              query,
+            },
+          }),
+        {
+          tabId: tab.id,
+          windowId: tab.windowId,
+          snapshotId: read.value.snapshotId,
+          controlId: read.value.searchControl.id,
+          query,
+        },
       );
-      await launched.harness.evaluate(async (value) => {
-        (document.querySelector("#search-query") as HTMLInputElement).value = value;
-        await (document.querySelector("#search-submit") as HTMLButtonElement).onclick?.(
-          new MouseEvent("click"),
-        );
-      }, query);
-      await navigation;
-      assert.notEqual(launched.page.url(), initialUrl);
-      assert.equal(await launched.page.evaluate(() => sessionStorage.getItem("searchClicks")), "1");
+      assert.deepEqual(rejected, { ok: false, error: "page_changed" });
+      assert.equal(launched.page.url(), initialUrl);
       assert.equal(
-        await launched.harness.locator("#status").textContent(),
-        "Search outcome unverified. Inspect the current page before another action.",
-        "destroying the dispatched page context leaves the original action outcome unknown",
+        await launched.page.evaluate(() => sessionStorage.getItem("searchClicks")),
+        null,
       );
-      assert.equal(await launched.harness.locator("#observed-search").isVisible(), false);
-      await launched.harness.evaluate(async () => {
-        await (document.querySelector("#inspect") as HTMLButtonElement).onclick?.(
-          new MouseEvent("click"),
-        );
-      });
-      assert.deepEqual(
-        await launched.harness.locator("#titles li button:first-child").allTextContents(),
-        ["Observed public title"],
-      );
-      assert.equal(await launched.page.evaluate(() => sessionStorage.getItem("searchClicks")), "1");
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server.close(() => resolve()));

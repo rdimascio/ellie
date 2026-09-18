@@ -11,7 +11,7 @@ const stop = document.querySelector("#stop");
 const observedSearch = document.querySelector("#observed-search");
 const searchQuery = document.querySelector("#search-query");
 const actionId = () => crypto.randomUUID();
-async function send(command) {
+async function send(command, selectedWindowId) {
   if (pending) throw new Error("busy");
   const own = actionId();
   pending = own;
@@ -27,6 +27,7 @@ async function send(command) {
       protocol: "ellie.media.v1",
       tabId: selectedTab,
       command: { actionId: own, ...command },
+      ...(command.type === "searchObserved" ? { windowId: selectedWindowId } : {}),
     });
     if (!response?.ok) throw new Error(response?.error || "command_failed");
     status.textContent = response.value?.outcome || "Done";
@@ -36,9 +37,9 @@ async function send(command) {
     stop.disabled = !pending;
   }
 }
-async function run(command) {
+async function run(command, selectedWindowId) {
   try {
-    return await send(command);
+    return await send(command, selectedWindowId);
   } catch (error) {
     const friendly = {
       unsupported_page: "Open a supported Netflix, YouTube, YouTube TV, or Disney+ tab first.",
@@ -95,6 +96,27 @@ document.querySelector("#inspect").onclick = async () => {
 };
 document.querySelector("#search-submit").onclick = async () => {
   if (!snapshot || !searchControl) return;
+  const focusedAtClick = document.hasFocus();
+  const [tab] = focusedAtClick
+    ? await chrome.tabs.query({ active: true, currentWindow: true })
+    : [];
+  if (
+    !focusedAtClick ||
+    !document.hasFocus() ||
+    !tab ||
+    tab.id !== selectedTab ||
+    !Number.isInteger(tab.windowId) ||
+    tab.windowId < 0 ||
+    tab.active !== true ||
+    tab.status !== "complete"
+  ) {
+    snapshot = undefined;
+    searchControl = undefined;
+    observedSearch.hidden = true;
+    titles.replaceChildren();
+    status.textContent = "Page selection changed. Inspect the current page before another action.";
+    return;
+  }
   const command = {
     type: "searchObserved",
     snapshotId: snapshot,
@@ -105,7 +127,7 @@ document.querySelector("#search-submit").onclick = async () => {
   searchControl = undefined;
   observedSearch.hidden = true;
   titles.replaceChildren();
-  await run(command);
+  await run(command, tab.windowId);
 };
 document.querySelector("#up").onclick = () => run({ type: "scrollViewport", direction: "up" });
 document.querySelector("#down").onclick = () => run({ type: "scrollViewport", direction: "down" });
