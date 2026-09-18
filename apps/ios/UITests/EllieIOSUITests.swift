@@ -1451,6 +1451,14 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(chart.waitForExistence(timeout: 5),
             "The fetched shared copy should expose its own weekly completion chart")
         XCTAssertTrue(app.staticTexts["Last observed household copy · revision 7 · UTC"].exists)
+        let chartScreenshot = XCTAttachment(screenshot: app.screenshot())
+        chartScreenshot.name = "Observed shared chore chart"
+        chartScreenshot.lifetime = .keepAlways
+        add(chartScreenshot)
+        let chartHierarchy = XCTAttachment(string: app.debugDescription)
+        chartHierarchy.name = "Observed shared chore chart accessibility"
+        chartHierarchy.lifetime = .keepAlways
+        add(chartHierarchy)
         let chore = app.staticTexts["Household laundry"]
         XCTAssertTrue(revealHouseholdControl(chore, in: app).exists)
 
