@@ -849,14 +849,22 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(count.label, "Fixture mutations: 0")
 
         app.buttons["speech-browser-read"].tap()
+        let unavailable = app.staticTexts["speech-youtube-search-unavailable"]
+        XCTAssertTrue(unavailable.waitForExistence(timeout: 5))
+        XCTAssertTrue(unavailable.label.contains("No search was sent"))
+        XCTAssertFalse(run.isEnabled)
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        XCTAssertEqual(history.label, "Fixture actions: read.home")
+        revealBrowserButton("speech-browser-read", in: app, forTap: true).tap()
         let review = app.staticTexts["speech-youtube-search-review"]
         XCTAssertTrue(review.waitForExistence(timeout: 5))
         XCTAssertTrue(review.label.contains("Search field on Fixture Mac A"))
+        XCTAssertFalse(unavailable.exists)
         XCTAssertTrue(run.isEnabled)
-        XCTAssertEqual(history.label, "Fixture actions: read.home")
+        XCTAssertEqual(history.label, "Fixture actions: read.home,read.home")
         run.tap()
         waitForFixtureMutations(1, in: app)
-        XCTAssertEqual(history.label, "Fixture actions: read.home,search.public video")
+        XCTAssertEqual(history.label, "Fixture actions: read.home,read.home,search.public video")
         XCTAssertFalse(run.exists, "Run consumes the reviewed transcript")
         let noReplay = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "label != %@", "Fixture mutations: 1"), object: count)
@@ -873,18 +881,18 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(site.waitForExistence(timeout: 5))
         XCTAssertEqual(site.label, "Observed YouTube results page")
         XCTAssertEqual(history.label,
-                       "Fixture actions: read.home,search.public video,read.results")
+                       "Fixture actions: read.home,read.home,search.public video,read.results")
         let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
         XCTAssertTrue(result.isEnabled)
         result.tap()
         waitForFixtureMutations(2, in: app)
         waitForFixturePageToClear(in: app)
         XCTAssertEqual(history.label,
-                       "Fixture actions: read.home,search.public video,read.results,select")
+                       "Fixture actions: read.home,read.home,search.public video,read.results,select")
         revealBrowserButton("Read current page", in: app, forTap: true).tap()
         XCTAssertEqual(site.label, "Observed YouTube watch page")
         XCTAssertEqual(history.label,
-                       "Fixture actions: read.home,search.public video,read.results,select,read.watch")
+                       "Fixture actions: read.home,read.home,search.public video,read.results,select,read.watch")
         XCTAssertEqual(count.label, "Fixture mutations: 2")
     }
 
