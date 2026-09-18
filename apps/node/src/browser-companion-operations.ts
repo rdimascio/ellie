@@ -250,8 +250,16 @@ export class BrowserCompanionOperations {
     const youtube = binding.origin === "https://www.youtube.com";
     if (youtube && action.tool !== "browser.search" && action.tool !== "browser.select")
       throw new Error("YouTube observed controls support only search and title selection.");
-    if (disneyplus && (action.tool !== "browser.select" || observed.site.page !== "browse"))
-      throw new Error("Disney+ exposes only observed title links on this page.");
+    if (
+      disneyplus &&
+      (observed.site.page !== "browse" ||
+        (action.tool !== "browser.select" &&
+          (action.tool !== "browser.scroll" ||
+            (action.direction !== "up" && action.direction !== "down"))))
+    )
+      throw new Error(
+        "Disney+ exposes only observed title links and vertical browsing on this page.",
+      );
     if (
       youtubeTV &&
       (action.tool === "browser.search" ||

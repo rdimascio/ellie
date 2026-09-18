@@ -27,6 +27,11 @@ export class BrowserOperationSelector {
     site: NonNullable<import("@ellie/protocol").BrowserView["site"]>;
   };
   private youtubeCompanionRevision?: string;
+  private axFallback?: {
+    revision: string;
+    url: string;
+    directions: Set<"up" | "down">;
+  };
   private readonly binding: (
     signal: AbortSignal,
     refresh?: boolean,
@@ -72,10 +77,16 @@ export class BrowserOperationSelector {
     const revision = typeof binding === "object" ? browserBindingRevision(binding) : undefined;
     if (this.observedSite?.revision !== revision) this.observedSite = undefined;
     if (this.youtubeCompanionRevision !== revision) this.youtubeCompanionRevision = undefined;
+    if (
+      this.axFallback?.revision !== revision ||
+      (typeof binding === "object" && this.axFallback?.url !== binding.url)
+    )
+      this.axFallback = undefined;
     if (refresh) {
       this.observationEpoch += 1;
       this.observedSite = undefined;
       this.youtubeCompanionRevision = undefined;
+      this.axFallback = undefined;
       this.companion?.invalidate();
     }
     if (
@@ -90,6 +101,107 @@ export class BrowserOperationSelector {
     if (typeof binding !== "object" || binding.availability === "webmcp")
       return this.webmcp.execute(adapterAction, signal);
     if (binding.availability === "companion") {
+      const accessibilityBinding: BrowserAccessibilityBinding = {
+        availability: "accessibility",
+        documentId: binding.documentId,
+        url: binding.url,
+        revision: browserBindingRevision(binding),
+      };
+      const sameSelectedBinding = async () => {
+        if (signal.aborted) throw new Error("Browser request was cancelled.");
+        const current = await this.binding(signal);
+        if (
+          signal.aborted ||
+          typeof current !== "object" ||
+          current.availability !== "companion" ||
+          current.bindingId !== binding.bindingId ||
+          current.documentId !== binding.documentId ||
+          current.origin !== binding.origin ||
+          current.url !== binding.url ||
+          current.expiresAt !== binding.expiresAt ||
+          current.expiresAt <= Date.now()
+        )
+          throw new Error("Browser page changed during read.");
+      };
+      if (browserAction.tool === "browser.read") {
+        this.observationEpoch += 1;
+        const epoch = this.observationEpoch;
+        this.axFallback = undefined;
+        let companionRead: Awaited<ReturnType<BrowserCompanionOperations["execute"]>> | undefined;
+        if (this.companion)
+          companionRead = await this.companion.execute(browserAction, binding, signal);
+        if (
+          companionRead &&
+          (companionRead.ok !== true ||
+            companionRead.browser.operation !== "read" ||
+            companionRead.browser.status !== "completed" ||
+            companionRead.browser.view.site?.page !== "unsupported")
+        )
+          return companionRead;
+        // Only a successful, validated unsupported-page read (or no companion at all)
+        // permits a second read. Failed/unknown companion reads remain terminal.
+        await sameSelectedBinding();
+        if (epoch !== this.observationEpoch) throw new Error("Browser page changed during read.");
+        this.companion?.invalidate();
+        // Status is the helper's read-only bind/rebind entry. A previous AX session
+        // cannot read a newly selected document until this binding is prepared.
+        const axStatus = await this.accessibility.execute(
+          browserWebMCPAction({ tool: "browser.status" }),
+          accessibilityBinding,
+          signal,
+        );
+        await sameSelectedBinding();
+        if (
+          epoch !== this.observationEpoch ||
+          !axStatus.ok ||
+          axStatus.browser.source !== "accessibility" ||
+          axStatus.browser.operation !== "status" ||
+          axStatus.browser.status !== "connected" ||
+          axStatus.browser.revision !== revision ||
+          axStatus.browser.origin !== binding.origin
+        )
+          throw new Error("Browser accessibility binding is unavailable.");
+        const axRead = await this.accessibility.execute(
+          browserAction,
+          accessibilityBinding,
+          signal,
+        );
+        await sameSelectedBinding();
+        if (
+          epoch !== this.observationEpoch ||
+          axRead.browser.operation !== "read" ||
+          axRead.browser.status !== "completed" ||
+          axRead.browser.source !== "accessibility" ||
+          axRead.browser.revision !== revision ||
+          !Array.isArray(axRead.browser.view.axScrollDirections)
+        )
+          throw new Error("Browser accessibility observation is unavailable.");
+        this.axFallback = {
+          revision: revision!,
+          url: binding.url,
+          directions: new Set(axRead.browser.view.axScrollDirections),
+        };
+        return axRead;
+      }
+      if (browserAction.tool === "browser.status")
+        return this.companion
+          ? this.companion.execute(browserAction, binding, signal)
+          : this.accessibility.execute(browserAction, accessibilityBinding, signal);
+      if (this.axFallback) {
+        if (
+          browserAction.tool !== "browser.scroll" ||
+          (browserAction.direction !== "up" && browserAction.direction !== "down") ||
+          !this.axFallback.directions.has(browserAction.direction)
+        )
+          throw new Error("Read the page again for an observed browser control.");
+        // Keep the AX choice, but consume its observed control before dispatch.
+        // An unknown effect cannot fall through to the companion or be replayed.
+        this.axFallback.directions.clear();
+        this.observationEpoch += 1;
+        this.companion?.invalidate();
+        if (signal.aborted) throw new Error("Browser request was cancelled.");
+        return this.accessibility.execute(browserAction, accessibilityBinding, signal);
+      }
       if (!this.companion) throw new Error("Browser companion is unavailable.");
       return this.companion.execute(browserAction, binding, signal);
     }

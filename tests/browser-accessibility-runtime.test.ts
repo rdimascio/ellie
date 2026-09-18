@@ -205,7 +205,7 @@ let session;
 for await (const line of createInterface({ input: process.stdin })) {
   const value = JSON.parse(line);
   if (value.type === 'bind') { session = 'session-1'; console.log(JSON.stringify({id:value.id,status:'bound',sessionID:session,documentRevision:value.documentRevision})); }
-  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],operation:'read'}));
+  else if (value.type === 'read') console.log(JSON.stringify({id:value.id,status:'completed',sessionID:session,generation:'generation-1',documentRevision:'document-1',title:'NASA',items:[{id:'video-1',label:'Earth'}],scrollDirections:['down'],operation:'read'}));
   else console.log(JSON.stringify({id:value.id,status:'dispatchedUnverified',sessionID:session,documentRevision:'document-1',operation:value.operation}));
 }
 `,
@@ -234,6 +234,8 @@ for await (const line of createInterface({ input: process.stdin })) {
     );
     assert.equal(view.browser.source, "accessibility");
     assert.equal(view.browser.operation, "read");
+    if (view.browser.operation !== "read") throw new Error("Expected accessibility read.");
+    assert.deepEqual(view.browser.view.axScrollDirections, ["down"]);
     const mutation = await runtime.execute(
       browserWebMCPAction({ tool: "browser.scroll", direction: "down", revision: "revision-1" }),
       binding,
@@ -269,6 +271,66 @@ for await (const line of createInterface({ input: process.stdin })) {
   } finally {
     if (completed) await rm(root, { recursive: true });
     else t.diagnostic(`Retained browser AX runtime fixture: ${root}`);
+  }
+});
+
+test("AX helper requires read-only rebind before reading a new selected document", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "ellie-browser-ax-rebind-"));
+  let completed = false;
+  let runtime: BrowserAccessibilityRuntime | undefined;
+  try {
+    const helper = join(root, "helper.mjs");
+    await writeFile(
+      helper,
+      `#!${process.execPath}
+import { createInterface } from 'node:readline';
+let revision;
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  if (request.type === 'bind') {
+    revision = request.documentRevision;
+    console.log(JSON.stringify({id:request.id,status:'bound',sessionID:'session-1',documentRevision:revision}));
+  } else if (request.type === 'read') {
+    console.log(JSON.stringify({id:request.id,status:'completed',sessionID:'session-1',generation:'generation-1',documentRevision:revision,items:[],scrollDirections:['down'],operation:'read'}));
+  }
+}
+`,
+    );
+    await chmod(helper, 0o700);
+    runtime = new BrowserAccessibilityRuntime(helper, () => ({
+      browserProcessPid: process.pid,
+      browserStartSeconds: 1,
+      browserStartMicroseconds: 0,
+      browserCodeHash: "00".repeat(20),
+      connectionId: "connection-1",
+      authenticated: true,
+    }));
+    const signal = AbortSignal.timeout(5_000);
+    const first = {
+      availability: "accessibility" as const,
+      documentId: "document-1",
+      url: "https://www.netflix.com/browse",
+      revision: "revision-1",
+    };
+    const second = { ...first, documentId: "document-2", revision: "revision-2" };
+    const status = browserWebMCPAction({ tool: "browser.status" });
+    const read = (revision: string) =>
+      browserWebMCPAction({ tool: "browser.read", view: "summary", revision });
+    assert.equal((await runtime.execute(status, first, signal)).browser.status, "connected");
+    const firstRead = await runtime.execute(read(first.revision), first, signal);
+    if (firstRead.browser.operation !== "read") throw new Error("Expected first AX read.");
+    assert.deepEqual(firstRead.browser.view.axScrollDirections, ["down"]);
+    await assert.rejects(runtime.execute(read(second.revision), second, signal), /page changed/);
+    assert.equal((await runtime.execute(status, second, signal)).browser.status, "connected");
+    const secondRead = await runtime.execute(read(second.revision), second, signal);
+    if (secondRead.browser.operation !== "read") throw new Error("Expected rebound AX read.");
+    assert.deepEqual(secondRead.browser.view.axScrollDirections, ["down"]);
+    await runtime.close();
+    completed = true;
+  } finally {
+    await runtime?.close();
+    if (completed) await rm(root, { recursive: true });
+    else t.diagnostic(`Retained browser AX rebind fixture: ${root}`);
   }
 });
 

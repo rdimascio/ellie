@@ -442,7 +442,9 @@ final class BrowserPhoneControlStore: ObservableObject {
       guard case .page(let page) = read, page.nodeID == node.id,
         (page.source == source ||
           (source == .accessibility && page.source == .companion
-            && page.site?.provider == .youtube)),
+            && page.site?.provider == .youtube) ||
+          (source == .companion && page.source == .accessibility && page.site == nil
+            && page.axScrollDirections != nil)),
         page.revision == revision
       else { throw PhoneControlFailure.invalidResponse }
       try Task.checkCancellation()
@@ -674,11 +676,22 @@ final class BrowserPhoneControlStore: ObservableObject {
   private static func observedSiteAllows(_ intent: BrowserVoiceIntent, on page: BrowserPhonePage)
     -> Bool
   {
+    if let directions = page.axScrollDirections, page.site == nil {
+      guard page.source == .accessibility else { return false }
+      if case .scroll(let direction) = intent {
+        return (direction == .up || direction == .down) && directions.contains(direction)
+      }
+      return false
+    }
     guard let site = page.site else { return true }
     guard site.page != .login, site.page != .unsupported else { return false }
     if site.provider == .disneyplus {
-      if case .openResult = intent { return site.page == .browse }
-      return false
+      switch intent {
+      case .openResult: return site.page == .browse
+      case .scroll(let direction):
+        return site.page == .browse && (direction == .up || direction == .down)
+      default: return false
+      }
     }
     if site.provider == .youtubeTV {
       switch intent {
