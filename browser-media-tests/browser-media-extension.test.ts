@@ -179,6 +179,165 @@ test("native host is connected only after a request and reports a later disconne
   );
 });
 
+test("only a live toolbar popup can bind its exact selected normal-window tab while the popup owns focus", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const scenarios = [
+    { name: "popup-focused parent", allowed: true },
+    { name: "tab-hosted popup", popupType: "TAB" },
+    { name: "sender from a tab", senderTab: true },
+    { name: "foreign sender", senderId: "another-extension" },
+    {
+      name: "other extension page",
+      senderUrl: "chrome-extension://ellie-test-extension/other.html",
+    },
+    { name: "other popup document", senderDocumentId: "other-document" },
+    { name: "closed popup", popupClosed: true },
+    { name: "duplicate popup", duplicatePopup: true },
+    { name: "wrong selected tab", selectedTabId: 8 },
+    { name: "inactive selected tab", selectedActive: false },
+    { name: "unready selected tab", selectedStatus: "loading" },
+    { name: "different selected URL", selectedUrl: "https://www.youtube.com/results" },
+    { name: "other last-focused window", selectedWindowId: 9 },
+    { name: "non-normal parent", windowType: "popup" },
+    { name: "tab changes during arming", afterTabId: 8, afterArm: true },
+    { name: "window changes during arming", afterWindowType: "popup", afterArm: true },
+    { name: "popup closes during arming", closeDuringArm: true, afterArm: true },
+  ] as const;
+  for (const scenario of scenarios) {
+    const runtimeMessages = extensionEvent();
+    const tab = {
+      id: 7,
+      windowId: 3,
+      active: true,
+      status: "complete",
+      url: "https://www.youtube.com/",
+    };
+    let selectedTabId: number = "selectedTabId" in scenario ? scenario.selectedTabId : 7;
+    let popupClosed = "popupClosed" in scenario && scenario.popupClosed;
+    let windowType = "windowType" in scenario ? scenario.windowType : "normal";
+    let injections = 0;
+    let nativeConnections = 0;
+    const popupContext = {
+      contextType: "popupType" in scenario ? scenario.popupType : "POPUP",
+      documentId: "popup-document",
+      documentUrl: "chrome-extension://ellie-test-extension/popup.html",
+      tabId: "popupType" in scenario ? 7 : -1,
+      windowId: -1,
+    };
+    const context: Record<string, any> = {
+      chrome: {
+        runtime: {
+          id: "ellie-test-extension",
+          getURL: (path: string) => `chrome-extension://ellie-test-extension/${path}`,
+          getContexts: async () =>
+            popupClosed
+              ? []
+              : "duplicatePopup" in scenario
+                ? [popupContext, popupContext]
+                : [popupContext],
+          onMessage: runtimeMessages,
+          connectNative() {
+            nativeConnections += 1;
+            return {
+              onDisconnect: extensionEvent(),
+              onMessage: extensionEvent(),
+              postMessage() {},
+            };
+          },
+          sendMessage: async () => undefined,
+        },
+        tabs: {
+          onRemoved: extensionEvent(),
+          onReplaced: extensionEvent(),
+          onUpdated: extensionEvent(),
+          get: async () => ({ ...tab }),
+          query: async (filter: unknown) => {
+            assert.deepEqual(JSON.parse(JSON.stringify(filter)), {
+              active: true,
+              lastFocusedWindow: true,
+            });
+            return [
+              {
+                ...tab,
+                id: selectedTabId,
+                windowId: "selectedWindowId" in scenario ? scenario.selectedWindowId : 3,
+                active: "selectedActive" in scenario ? scenario.selectedActive : true,
+                status: "selectedStatus" in scenario ? scenario.selectedStatus : "complete",
+                url: "selectedUrl" in scenario ? scenario.selectedUrl : tab.url,
+              },
+            ];
+          },
+        },
+        windows: {
+          get: async (id: number) => ({
+            id,
+            type: windowType,
+            focused: false,
+          }),
+        },
+        scripting: {
+          executeScript: async () => {
+            injections += 1;
+            if ("afterTabId" in scenario) selectedTabId = scenario.afterTabId;
+            if ("afterWindowType" in scenario) windowType = scenario.afterWindowType;
+            if ("closeDuringArm" in scenario) popupClosed = true;
+            return [{ documentId: "selected-document" }];
+          },
+        },
+      },
+      AbortController,
+      URL,
+      Promise,
+      Set,
+      Map,
+      Date,
+      Error,
+      Object,
+      Array,
+      String,
+      Number,
+      RegExp,
+      crypto,
+      setTimeout,
+      clearTimeout,
+    };
+    runInNewContext(background, context);
+    const sender = {
+      id: "senderId" in scenario ? scenario.senderId : "ellie-test-extension",
+      url:
+        "senderUrl" in scenario
+          ? scenario.senderUrl
+          : "chrome-extension://ellie-test-extension/popup.html",
+      documentId: "senderDocumentId" in scenario ? scenario.senderDocumentId : "popup-document",
+      ...("senderTab" in scenario ? { tab: { id: 7 } } : {}),
+    };
+    const response = await new Promise<any>((resolve) => {
+      runtimeMessages.emit(
+        {
+          protocol: "ellie.media.v1",
+          tabId: 7,
+          command: { type: "bindWebMCP", actionId: crypto.randomUUID() },
+        },
+        sender,
+        resolve,
+      );
+    });
+    assert.equal(response.ok, "allowed" in scenario, scenario.name);
+    assert.equal(
+      injections,
+      "afterArm" in scenario || "allowed" in scenario ? 1 : 0,
+      scenario.name,
+    );
+    assert.equal(
+      nativeConnections,
+      "afterArm" in scenario || "allowed" in scenario ? 1 : 0,
+      scenario.name,
+    );
+    if ("allowed" in scenario) assert.equal(response.value.availability, "accessibility");
+    else assert.equal(response.error, "afterArm" in scenario ? "page_changed" : "unsupported_page");
+  }
+});
+
 test("explicit refresh renews only the retained same-page selection authority", async () => {
   const background = await readFile(join(source, "background.js"), "utf8");
   const disconnect = extensionEvent();

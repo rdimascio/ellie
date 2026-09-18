@@ -634,6 +634,60 @@ final class BrowserPhoneControlTests: XCTestCase {
   }
 
   @MainActor
+  func testCredentialChangeRetainsPendingMutationAndBlocksOldBrowserStore() async throws {
+    let oldCredential = credential()
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let transport = BrowserPhoneFakeTransport()
+    let store = BrowserPhoneControlStore(
+      credential: oldCredential, transport: transport, uncertainty: persistence)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    await eventually { await transport.actions.count == 3 }
+
+    store.credentialDidChange()
+    XCTAssertTrue(store.credentialChanged)
+    XCTAssertNil(store.page)
+    XCTAssertFalse(store.canRefresh(on: node))
+    XCTAssertFalse(store.canPerform(.scroll(.down), on: node))
+    await transport.finishCommand()
+    await eventually { !store.isBusy }
+
+    let scope = try browserMutationUncertaintyScope(
+      credential: oldCredential, targetID: node.id)
+    XCTAssertNotNil(try persistence.pendingToken(for: scope))
+    XCTAssertFalse(store.refresh(on: node))
+    XCTAssertFalse(store.perform(.scroll(.down), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions.count, 3, "The old credential must not read or dispatch again")
+  }
+
+  @MainActor
+  func testCredentialChangeWhileStatusIsHeldCannotDispatchOldTokenRead() async {
+    let transport = BrowserPhoneFakeTransport(delayStatus: true)
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { await transport.actions.count == 1 }
+
+    store.credentialDidChange()
+    await transport.finishStatus()
+    await eventually { !store.isBusy }
+    XCTAssertTrue(store.credentialChanged)
+    XCTAssertNil(store.page)
+    XCTAssertFalse(store.canRefresh(on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [.refresh], "A late status must not issue a second old-token read")
+  }
+
+  @MainActor
   func testReviewedSearchSelectionAndPlaybackRequireExplicitReadsWithoutReplay() async {
     let transport = BrowserPhoneFakeTransport(commandStatus: .completed)
     let store = BrowserPhoneControlStore(
@@ -1180,6 +1234,7 @@ final class BrowserPhoneControlTests: XCTestCase {
 
 private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   var actions: [BrowserPhoneAction] = []
+  private let delayStatus: Bool
   private let delayRead: Bool
   private let readFailure: PhoneControlFailure?
   private let commandError: Bool
@@ -1189,13 +1244,16 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private let items: [BrowserPhoneItem]
   private let site: BrowserPhoneSite?
   private var commandContinuation: CheckedContinuation<Void, Never>?
+  private var statusContinuation: CheckedContinuation<Void, Never>?
   private var readContinuation: CheckedContinuation<Void, Never>?
   init(
-    delayRead: Bool = false, readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
+    delayStatus: Bool = false, delayRead: Bool = false,
+    readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
     items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)],
     site: BrowserPhoneSite? = nil, statusSource: BrowserPhoneSource? = nil
   ) {
+    self.delayStatus = delayStatus
     self.delayRead = delayRead
     self.readFailure = readFailure
     self.commandError = commandError
@@ -1211,7 +1269,9 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     actions.append(action)
     let revision = String(repeating: "a", count: 64)
     switch action {
-    case .status, .refresh: return .status(source: statusSource ?? source, connected: true, revision: revision)
+    case .status, .refresh:
+      if delayStatus { await withCheckedContinuation { statusContinuation = $0 } }
+      return .status(source: statusSource ?? source, connected: true, revision: revision)
     case .read:
       if delayRead { await withCheckedContinuation { readContinuation = $0 } }
       if let readFailure { throw readFailure }
@@ -1233,6 +1293,10 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   func finishCommand() {
     commandContinuation?.resume()
     commandContinuation = nil
+  }
+  func finishStatus() {
+    statusContinuation?.resume()
+    statusContinuation = nil
   }
   func finishRead() {
     readContinuation?.resume()

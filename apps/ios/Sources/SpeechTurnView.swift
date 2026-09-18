@@ -7,6 +7,7 @@ struct SpeechTurnView: View {
   @ObservedObject private var browserStore: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
   @StateObject private var lifeReview: IOSQuietVoiceStore
+  @FocusState private var transcriptFocused: Bool
   private let credential: NativeEnrollmentCredential
   private let lifeConversationID: String?
 
@@ -58,6 +59,7 @@ struct SpeechTurnView: View {
       if speech.phase == .reviewing {
         Section("Review transcript") {
           TextEditor(text: $speech.transcript)
+            .focused($transcriptFocused)
             .frame(minHeight: 140)
             .accessibilityIdentifier("speech-transcript")
             .onChange(of: speech.transcript) { _, value in
@@ -158,6 +160,15 @@ struct SpeechTurnView: View {
     }
     .ellieScreen()
     .navigationTitle("Voice command")
+    .toolbar {
+      ToolbarItemGroup(placement: .keyboard) {
+        if speech.phase == .reviewing {
+          Spacer()
+          Button("Done") { transcriptFocused = false }
+            .accessibilityIdentifier("speech-transcript-done")
+        }
+      }
+    }
     .onDisappear {
       speech.cancelAndDiscard()
       browserStore.cancel()
@@ -172,7 +183,9 @@ struct SpeechTurnView: View {
       }
     }
     .onChange(of: credential) { _, _ in
-      speech.cancelAndDiscard()
+      speech.credentialDidChange()
+      browserStore.credentialDidChange()
+      controlStore.credentialDidChange()
       lifeReview.credentialDidChange()
     }
   }
@@ -265,7 +278,9 @@ struct SpeechTurnView: View {
   }
 
   @ViewBuilder private var browserContinuation: some View {
-    if speech.phase != .reviewing, showsBrowserContinuation {
+    if speech.phase != .reviewing, speech.phase != .credentialChanged,
+      showsBrowserContinuation
+    {
       Section("Continue in browser") {
         if browserStore.page != nil {
           NavigationLink {
@@ -319,6 +334,8 @@ struct SpeechTurnView: View {
       Button("Check again") { speech.checkAvailability() }
     case .revoked:
       EmptyView()
+    case .credentialChanged:
+      EmptyView()
     case .cleanupRequired:
       Button("Retry removing private recording", role: .destructive) { speech.retryCleanup() }
     }
@@ -338,6 +355,11 @@ struct SpeechTurnView: View {
       Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked:
       Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
+    case .credentialChanged:
+      Section {
+        Label("Pairing changed. Reopen Voice command.", systemImage: "lock.slash")
+          .accessibilityIdentifier("speech-credential-changed")
+      }
     case .cleanupRequired:
       Section {
         Label(SpeechTurnFailure.cleanupFailed.localizedDescription, systemImage: "externaldrive.badge.exclamationmark")
