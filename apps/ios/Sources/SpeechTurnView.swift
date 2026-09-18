@@ -142,6 +142,7 @@ struct SpeechTurnView: View {
               .font(.footnote).foregroundStyle(.secondary)
           }
           Button("Discard transcript", role: .destructive) { speech.discardReview() }
+            .accessibilityIdentifier("speech-discard")
         }
       }
       lifeReviewStatus

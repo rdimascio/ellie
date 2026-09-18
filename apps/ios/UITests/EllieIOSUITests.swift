@@ -750,10 +750,7 @@ final class EllieIOSUITests: XCTestCase {
             XCTAssertEqual(transcript.value as? String, "Scroll right")
         }
         func row(_ index: Int) -> XCUIElement {
-            let target = app.buttons["speech-netflix-row-\(index)"]
-            for _ in 0..<4 where !target.exists { app.swipeUp() }
-            XCTAssertTrue(target.waitForExistence(timeout: 5))
-            return target
+            revealBrowserButton("speech-netflix-row-\(index)", in: app, forTap: true)
         }
         reviewScroll()
         let run = app.buttons["speech-browser-run"]
@@ -762,21 +759,23 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(count.label, "Fixture mutations: 0")
         app.buttons["speech-browser-read"].tap()
         XCTAssertTrue(row(2).waitForExistence(timeout: 5))
-        XCTAssertFalse(run.isEnabled)
+        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled)
         row(2).tap()
         XCTAssertTrue(app.staticTexts["speech-netflix-row-review"].label.contains(
             "Row 2: New on Fixture Mac A"))
-        XCTAssertTrue(run.isEnabled)
+        XCTAssertTrue(revealBrowserButton("speech-browser-run", in: app, forTap: true).isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 0")
         run.tap()
         waitForFixtureMutations(1, in: app)
         XCTAssertFalse(app.buttons["speech-netflix-row-2"].exists)
 
         reviewScroll()
-        XCTAssertFalse(run.isEnabled, "the old row choice cannot authorize a later turn")
+        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled,
+                       "the old row choice cannot authorize a later turn")
         app.buttons["speech-browser-read"].tap()
         XCTAssertTrue(row(1).waitForExistence(timeout: 5))
-        XCTAssertFalse(run.isEnabled, "a fresh read still needs an explicit row choice")
+        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled,
+                       "a fresh read still needs an explicit row choice")
         XCTAssertEqual(count.label, "Fixture mutations: 1")
     }
 
@@ -846,8 +845,14 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
         app.buttons["speech-stop"].tap()
         XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
-        app.buttons["Discard transcript"].tap()
-        XCTAssertFalse(app.textViews["speech-transcript"].exists)
+        revealBrowserButton("speech-discard", in: app, forTap: true).tap()
+        let discarded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.textViews["speech-transcript"])
+        guard XCTWaiter.wait(for: [discarded], timeout: 5) == .completed else {
+            XCTFail("Discard must remove the reviewed transcript before another recording")
+            return
+        }
         XCTAssertEqual(count.label, "Fixture mutations: 0")
 
         // A separate reviewed turn is required after discard. Its transcript remains inert
