@@ -593,7 +593,9 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
 
         app.buttons["Read current page"].tap()
-        XCTAssertTrue(app.staticTexts["The coordinator is unavailable."].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts[
+            "The saved coordinator connection is unavailable. Check its phone listener and network; keep this pairing while you investigate."
+        ].waitForExistence(timeout: 5))
         XCTAssertTrue(app.descendants(matching: .any)["browser-status-pending-warning"]
             .waitForExistence(timeout: 5))
         XCTAssertFalse(app.descendants(matching: .any)["browser-status-unknown"].exists)
