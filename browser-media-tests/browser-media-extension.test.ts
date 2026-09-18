@@ -505,6 +505,9 @@ test("popup reports a failed native connection without claiming page selection",
     "forward",
     "webmcp",
     "bind-webmcp",
+    "observed-search",
+    "search-query",
+    "search-submit",
   ]) {
     elements.set(id, {
       disabled: id === "stop",
@@ -595,6 +598,87 @@ test("popup reports a failed native connection without claiming page selection",
   });
   assert.equal(elements.get("connection-status").textContent, "The Mac connection was lost.");
   assert.equal(sent.length, 1);
+});
+
+test("popup submits only the search control from its fresh observed page", async () => {
+  const popup = await readFile(join(source, "popup.js"), "utf8");
+  const sent: any[] = [];
+  const elements = new Map<string, any>();
+  for (const id of [
+    "status",
+    "connection-status",
+    "titles",
+    "stop",
+    "inspect",
+    "up",
+    "down",
+    "play",
+    "pause",
+    "back",
+    "forward",
+    "webmcp",
+    "bind-webmcp",
+    "observed-search",
+    "search-query",
+    "search-submit",
+  ]) {
+    elements.set(id, {
+      disabled: id === "stop",
+      hidden: id === "observed-search",
+      value: "",
+      textContent: "",
+      replaceChildren() {},
+    });
+  }
+  const context: Record<string, any> = {
+    chrome: {
+      tabs: { query: async () => [{ id: 7 }] },
+      runtime: {
+        onMessage: extensionEvent(),
+        async sendMessage(value: any) {
+          sent.push(value);
+          if (value.command.type === "inspect")
+            return {
+              ok: true,
+              value: {
+                snapshotId: "observed-snapshot",
+                searchControl: { id: "observed-search", label: "Search" },
+                candidates: [],
+              },
+            };
+          return { ok: false, error: "navigation_not_observed" };
+        },
+      },
+    },
+    document: {
+      querySelector(selector: string) {
+        return elements.get(selector.slice(1));
+      },
+      createElement() {
+        return { append() {} };
+      },
+    },
+    crypto,
+    Error,
+    Object,
+    Array,
+    Promise,
+  };
+  runInNewContext(popup, context);
+  await elements.get("inspect").onclick();
+  assert.equal(elements.get("observed-search").hidden, false);
+  elements.get("search-query").value = "NASA Artemis official launch";
+  await elements.get("search-submit").onclick();
+  assert.equal(sent.length, 2);
+  assert.equal(sent[0].tabId, 7);
+  assert.equal(sent[1].tabId, 7);
+  assert.equal(sent[1].command.type, "searchObserved");
+  assert.equal(sent[1].command.snapshotId, "observed-snapshot");
+  assert.equal(sent[1].command.controlId, "observed-search");
+  assert.equal(sent[1].command.query, "NASA Artemis official launch");
+  assert.equal(elements.get("observed-search").hidden, true);
+  await elements.get("search-submit").onclick();
+  assert.equal(sent.length, 2, "a consumed observation cannot dispatch a second search");
 });
 
 async function fixture(

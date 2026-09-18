@@ -1,5 +1,7 @@
 # Browser media control
 
+The public YouTube popup can now search from an inspected home or results page only when one visible search field, its matching button and a same-origin results form are observed. It consumes that observation for one query, then requires a fresh read of the matching results page before selecting a title. The selected page and player must be read again after each unverified mutation. This popup browser path does not establish native phone or Accessibility acceptance. Disney+ playback still lacks an authenticated player DOM and route observation; public entity pages alone do not justify adding one.
+
 Ellie must control content inside streaming websites. Opening a URL does not satisfy this requirement. The first household workflow is: select the Mac and browser tab, move down the catalogue, move right within a row, open a selected title, start playback, then pause. The same interaction should eventually work for Netflix, YouTube, YouTube TV and Disney+. The remote remains native SwiftUI on Mac and iPhone.
 
 ## Current status

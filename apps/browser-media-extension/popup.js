@@ -1,4 +1,5 @@
 let snapshot;
+let searchControl;
 let selectedTab;
 let pending;
 let nativeConnectionStatus = "idle";
@@ -7,6 +8,8 @@ const status = document.querySelector("#status");
 const connectionStatus = document.querySelector("#connection-status");
 const titles = document.querySelector("#titles");
 const stop = document.querySelector("#stop");
+const observedSearch = document.querySelector("#observed-search");
+const searchQuery = document.querySelector("#search-query");
 const actionId = () => crypto.randomUUID();
 async function send(command) {
   if (pending) throw new Error("busy");
@@ -64,6 +67,8 @@ document.querySelector("#inspect").onclick = async () => {
   const result = await run({ type: "inspect" });
   if (!result) return;
   snapshot = result.snapshotId;
+  searchControl = result.searchControl?.id;
+  observedSearch.hidden = !searchControl;
   titles.replaceChildren(
     ...result.candidates.map((candidate) => {
       const item = document.createElement("li");
@@ -84,6 +89,20 @@ document.querySelector("#inspect").onclick = async () => {
       return item;
     }),
   );
+};
+document.querySelector("#search-submit").onclick = async () => {
+  if (!snapshot || !searchControl) return;
+  const command = {
+    type: "searchObserved",
+    snapshotId: snapshot,
+    controlId: searchControl,
+    query: searchQuery.value,
+  };
+  snapshot = undefined;
+  searchControl = undefined;
+  observedSearch.hidden = true;
+  titles.replaceChildren();
+  await run(command);
 };
 document.querySelector("#up").onclick = () => run({ type: "scrollViewport", direction: "up" });
 document.querySelector("#down").onclick = () => run({ type: "scrollViewport", direction: "down" });
