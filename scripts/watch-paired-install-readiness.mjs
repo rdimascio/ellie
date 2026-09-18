@@ -55,6 +55,18 @@ export function requireOwnedPairAbsent(inventory, pairID) {
 }
 
 export function requireOwnedActivePair(output, pairID, watchID, phoneID) {
+  const state = requireOwnedPairState(output, pairID, watchID, phoneID);
+  if (
+    !state.active ||
+    !state.connected ||
+    state.watchState !== "Booted" ||
+    state.phoneState !== "Booted"
+  )
+    throw new Error("Owned Simulator pair is not the active connected booted phone/Watch pair.");
+  return { active: true, connected: true };
+}
+
+export function requireOwnedPairState(output, pairID, watchID, phoneID) {
   if (![pairID, watchID, phoneID].every((id) => typeof id === "string" && uuid.test(id)))
     throw new Error("Owned Simulator pair identifiers are invalid.");
   const rows = output
@@ -75,15 +87,50 @@ export function requireOwnedActivePair(output, pairID, watchID, phoneID) {
     !uuid.test(phone[1]) ||
     pair[1].toLowerCase() !== pairID.toLowerCase() ||
     watch[1].toLowerCase() !== watchID.toLowerCase() ||
-    phone[1].toLowerCase() !== phoneID.toLowerCase() ||
-    pair[2].toLowerCase() !== "active" ||
-    pair[3].toLowerCase() !== "connected" ||
-    watch[2].toLowerCase() !== "booted" ||
-    phone[2].toLowerCase() !== "booted"
+    phone[1].toLowerCase() !== phoneID.toLowerCase()
   ) {
-    throw new Error("Owned Simulator pair is not the active connected booted phone/Watch pair.");
+    throw new Error("Owned Simulator pair state is malformed or belongs to another pair.");
   }
-  return { active: true, connected: true };
+  return {
+    active: pair[2].toLowerCase() === "active",
+    connected: pair[3].toLowerCase() === "connected",
+    watchState: watch[2].toLowerCase() === "booted" ? "Booted" : "Shutdown",
+    phoneState: phone[2].toLowerCase() === "booted" ? "Booted" : "Shutdown",
+  };
+}
+
+export function ownedDeviceCleanupState(inventory, id, runtime, name) {
+  if (
+    !uuid.test(id) ||
+    typeof runtime !== "string" ||
+    typeof name !== "string" ||
+    !inventory ||
+    typeof inventory !== "object" ||
+    Array.isArray(inventory) ||
+    !inventory.devices ||
+    typeof inventory.devices !== "object" ||
+    Array.isArray(inventory.devices)
+  )
+    throw new Error("Owned Simulator cleanup inventory is malformed.");
+  const found = [];
+  for (const [listedRuntime, devices] of Object.entries(inventory.devices)) {
+    if (!Array.isArray(devices)) throw new Error("Owned Simulator cleanup inventory is malformed.");
+    for (const device of devices) {
+      if (!device || typeof device !== "object" || typeof device.udid !== "string")
+        throw new Error("Owned Simulator cleanup inventory is malformed.");
+      if (device.udid.toLowerCase() === id.toLowerCase()) found.push({ listedRuntime, device });
+    }
+  }
+  if (found.length === 0) return "absent";
+  if (
+    found.length !== 1 ||
+    found[0].listedRuntime !== runtime ||
+    found[0].device.name !== name ||
+    found[0].device.isAvailable !== true ||
+    !["Booted", "Shutdown"].includes(found[0].device.state)
+  )
+    throw new Error("Owned Simulator cleanup target changed or has an unknown state.");
+  return found[0].device.state;
 }
 
 export function requireInstalledWatchInfo(info, watchBundle, phoneBundle) {

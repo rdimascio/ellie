@@ -13,6 +13,8 @@ import {
   requireOnlyOwnedPair,
   requireOwnedPairAbsent,
   requireOwnedActivePair,
+  requireOwnedPairState,
+  ownedDeviceCleanupState,
 } from "./watch-paired-install-readiness.mjs";
 import { parsePhoneReadiness, waitForPhoneReadiness } from "./watch-paired-readiness.mjs";
 
@@ -156,6 +158,10 @@ function ownedIDsPresent(inventory, ids) {
   return Object.values(inventory.devices)
     .flat()
     .some((device) => typeof device.udid === "string" && owned.has(device.udid.toLowerCase()));
+}
+function requireShutdownAfterCleanup(state) {
+  if (state !== "Shutdown")
+    throw new Error("Exact owned Simulator did not reach Shutdown after shutdown.");
 }
 function requireEvents(path, target, playCount) {
   const rows = readFileSync(path, "utf8")
@@ -311,7 +317,26 @@ try {
     await simctl("pairs-before-activation", ["list", "pairs", "--json"]),
   );
   requireOnlyOwnedPair(pairsBeforeActivation, pairID);
-  await simctl("activate-owned-pair", ["pair_activate", pairID]);
+  const beforeActivation = requireOwnedPairState(
+    await simctl("owned-pair-state-before-activation", ["list", "pairs"]),
+    pairID,
+    watchID,
+    phoneID,
+  );
+  if (beforeActivation.active) {
+    receipt.stages.push({ name: "owned-pair-already-active", ok: true });
+    persist();
+  } else {
+    await simctl("activate-owned-pair", ["pair_activate", pairID]);
+  }
+  const afterActivation = requireOwnedPairState(
+    await simctl("owned-pair-state-after-activation", ["list", "pairs"]),
+    pairID,
+    watchID,
+    phoneID,
+  );
+  if (!afterActivation.active)
+    throw new Error("Exact owned Simulator pair was not active after activation.");
   await simctl("boot-phone", ["boot", phoneID], { timeout: 45_000 });
   await simctl("boot-watch", ["boot", watchID], { timeout: 45_000 });
   await simctl("ready-phone", ["bootstatus", phoneID, "-b"], { timeout: 120_000 });
@@ -429,6 +454,27 @@ try {
   receipt.status = "failed";
 } finally {
   let cleanupCertain = !creationUncertain && commands.certain && !commands.active;
+  function recordCleanupFailure(name, error) {
+    cleanupCertain = false;
+    receipt.cleanup.push(`${name}-uncertain`);
+    (receipt.cleanupFailures ??= []).push({
+      name,
+      error: String(error?.message ?? error).slice(0, 2_048),
+      childCertain: commands.certain,
+      childActive: commands.active,
+    });
+    primary ??= new Error("Owned Simulator cleanup is uncertain.");
+  }
+  async function cleanupInventory(label) {
+    return JSON.parse(
+      await run("xcrun", ["simctl", "list", "-j"], {
+        label,
+        timeout: 30_000,
+        allowAfterSignal: true,
+        allowAfterDeadline: true,
+      }),
+    );
+  }
   if (pairID && cleanupCertain) {
     if (!uuid.test(pairID)) {
       cleanupCertain = false;
@@ -443,62 +489,82 @@ try {
           allowAfterDeadline: true,
         });
         receipt.cleanup.push("unpair-owned-pair-complete");
-      } catch {
-        cleanupCertain = false;
-        receipt.cleanup.push("unpair-owned-pair-uncertain");
-        primary ??= new Error("Owned Simulator pair cleanup is uncertain.");
+      } catch (error) {
+        recordCleanupFailure("unpair-owned-pair", error);
       }
     }
   }
   for (const [kind, id] of ownedCleanupTargets(watchID, phoneID)) {
     if (!cleanupCertain) break;
-    for (const action of ["shutdown", "delete"]) {
-      if (!commands.certain || commands.active) {
-        cleanupCertain = false;
-        break;
-      }
-      try {
-        await run("xcrun", ["simctl", action, id], {
-          label: `${action}-${kind}`,
+    if (!commands.certain || commands.active) {
+      recordCleanupFailure(`inspect-${kind}`, new Error("Direct child ownership is uncertain."));
+      break;
+    }
+    const runtime = options[`--${kind === "watch" ? "watch" : "ios"}-runtime`];
+    const name = `Ellie paired ${runID} ${kind}`;
+    try {
+      let state = ownedDeviceCleanupState(
+        await cleanupInventory(`inspect-${kind}`),
+        id,
+        runtime,
+        name,
+      );
+      if (state === "absent") {
+        receipt.cleanup.push(`${kind}-already-absent`);
+      } else {
+        if (state === "Booted") {
+          await run("xcrun", ["simctl", "shutdown", id], {
+            label: `shutdown-${kind}`,
+            timeout: 30_000,
+            allowAfterSignal: true,
+            allowAfterDeadline: true,
+          });
+          receipt.cleanup.push(`shutdown-${kind}-complete`);
+          state = ownedDeviceCleanupState(
+            await cleanupInventory(`verify-shutdown-${kind}`),
+            id,
+            runtime,
+            name,
+          );
+          requireShutdownAfterCleanup(state);
+        } else {
+          receipt.cleanup.push(`shutdown-${kind}-already-complete`);
+        }
+        await run("xcrun", ["simctl", "delete", id], {
+          label: `delete-${kind}`,
           timeout: 30_000,
           allowAfterSignal: true,
           allowAfterDeadline: true,
         });
-        receipt.cleanup.push(`${action}-${kind}-complete`);
-      } catch {
-        receipt.cleanup.push(`${action}-${kind}-uncertain`);
-        cleanupCertain = false;
-        primary ??= new Error("Owned Simulator cleanup is uncertain.");
-        break;
+        receipt.cleanup.push(`delete-${kind}-complete`);
       }
+    } catch (error) {
+      recordCleanupFailure(`cleanup-${kind}`, error);
+      break;
     }
   }
   if (cleanupCertain && (phoneID || watchID)) {
     try {
-      const finalInventory = JSON.parse(
-        await run("xcrun", ["simctl", "list", "-j"], {
-          label: "verify-owned-deletion",
-          timeout: 30_000,
-          allowAfterSignal: true,
-          allowAfterDeadline: true,
-        }),
-      );
+      const finalInventory = await cleanupInventory("verify-owned-deletion");
       requireOwnedPairAbsent(finalInventory, pairID);
       if (ownedIDsPresent(finalInventory, [phoneID, watchID].filter(Boolean))) {
-        cleanupCertain = false;
-        primary ??= new Error("Owned Simulator still appears after deletion.");
+        recordCleanupFailure(
+          "verify-owned-deletion",
+          new Error("Owned Simulator still appears after deletion."),
+        );
       } else {
         receipt.cleanup.push("owned-ids-absent-from-final-inventory");
       }
-    } catch {
-      cleanupCertain = false;
-      primary ??= new Error("Owned Simulator deletion could not be verified.");
+    } catch (error) {
+      recordCleanupFailure("verify-owned-deletion", error);
     }
   }
   if (!cleanupCertain) {
     receipt.cleanup.push("owned-ids-retained-for-inspection-after-cleanup-uncertainty");
     primary ??= new Error("A direct child could not be reaped or Simulator cleanup was uncertain.");
   }
+  receipt.cleanupChildState = { certain: commands.certain, active: commands.active };
+  receipt.cleanupCertain = cleanupCertain;
   if (primary) receipt.status = "failed";
   persist();
 }

@@ -6,13 +6,20 @@ import {
   requireOnlyOwnedPair,
   requireOwnedPairAbsent,
   requireOwnedActivePair,
+  requireOwnedPairState,
+  ownedDeviceCleanupState,
 } from "./watch-paired-install-readiness.mjs";
 
 const pair = "11111111-1111-1111-1111-111111111111";
 const watch = "22222222-2222-2222-2222-222222222222";
 const phone = "33333333-3333-3333-3333-333333333333";
-const text = (state = "active, connected", watchID = watch) =>
-  `== Device Pairs ==\n${pair} (${state})\n    Watch: Fixture Watch (${watchID}) (Booted)\n    Phone: Fixture Phone (${phone}) (Booted)\n`;
+const text = (
+  state = "active, connected",
+  watchID = watch,
+  watchState = "Booted",
+  phoneState = "Booted",
+) =>
+  `== Device Pairs ==\n${pair} (${state})\n    Watch: Fixture Watch (${watchID}) (${watchState})\n    Phone: Fixture Phone (${phone}) (${phoneState})\n`;
 
 test("only an empty preflight pair inventory admits owned activation", () => {
   assert.doesNotThrow(() => requireEmptyPairs({ pairs: {} }));
@@ -47,6 +54,79 @@ test("paired readiness requires the exact active connected booted owned pair", (
     "== Device Pairs ==\n",
   ])
     assert.throws(() => requireOwnedActivePair(inventory, pair, watch, phone));
+});
+
+test("already active owned pair skips activation, but inactive exact pair requires it", () => {
+  assert.deepEqual(
+    requireOwnedPairState(
+      text("active, disconnected", watch, "Shutdown", "Shutdown"),
+      pair,
+      watch,
+      phone,
+    ),
+    {
+      active: true,
+      connected: false,
+      watchState: "Shutdown",
+      phoneState: "Shutdown",
+    },
+  );
+  assert.equal(
+    requireOwnedPairState(
+      text("inactive, disconnected", watch, "Shutdown", "Shutdown"),
+      pair,
+      watch,
+      phone,
+    ).active,
+    false,
+  );
+  assert.throws(() =>
+    requireOwnedPairState(text("active, disconnected", phone), pair, watch, phone),
+  );
+  assert.throws(() => requireOwnedPairState(text() + text(), pair, watch, phone));
+});
+
+test("owned cleanup skips shutdown only for the exact already Shutdown device", () => {
+  const fixture = (state, id = watch, name = "Ellie paired run watch") => ({
+    devices: {
+      "com.apple.CoreSimulator.SimRuntime.watchOS-11-2": [
+        { udid: id, name, state, isAvailable: true },
+      ],
+    },
+  });
+  const runtime = "com.apple.CoreSimulator.SimRuntime.watchOS-11-2";
+  assert.equal(
+    ownedDeviceCleanupState(fixture("Shutdown"), watch, runtime, "Ellie paired run watch"),
+    "Shutdown",
+  );
+  assert.equal(
+    ownedDeviceCleanupState(fixture("Booted"), watch, runtime, "Ellie paired run watch"),
+    "Booted",
+  );
+  assert.equal(
+    ownedDeviceCleanupState(fixture("Shutdown", phone), watch, runtime, "Ellie paired run watch"),
+    "absent",
+  );
+  for (const inventory of [
+    fixture("Shutting Down"),
+    fixture("Shutdown", watch, "Other Watch"),
+    {
+      devices: { [runtime]: [{ ...fixture("Shutdown").devices[runtime][0], isAvailable: false }] },
+    },
+    { devices: { [runtime]: [{ udid: 3 }] } },
+    {
+      devices: {
+        [runtime]: [
+          fixture("Shutdown").devices[runtime][0],
+          fixture("Shutdown").devices[runtime][0],
+        ],
+      },
+    },
+    { devices: { other: fixture("Shutdown").devices[runtime] } },
+  ])
+    assert.throws(() =>
+      ownedDeviceCleanupState(inventory, watch, runtime, "Ellie paired run watch"),
+    );
 });
 
 test("installed Watch metadata must bind the exact companion", () => {
