@@ -376,6 +376,8 @@ private enum BrowserVoiceUITestFixture {
     provider: .youtube, page: .home, playback: .unavailable, currentTimeSeconds: nil,
     searchControl: BrowserPhoneSearchControl(
       id: "10000000-0000-4000-8000-000000000005", label: "Search"))
+  static let youtubeHomeWithoutSearch = BrowserPhoneSite(
+    provider: .youtube, page: .home, playback: .unavailable, currentTimeSeconds: nil)
   static let youtubeResultsSite = BrowserPhoneSite(
     provider: .youtube, page: .results, playback: .unavailable, currentTimeSeconds: nil,
     searchControl: BrowserPhoneSearchControl(
@@ -540,7 +542,9 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
           items: stage == "results"
             ? [BrowserPhoneItem(id: "public-video-a", label: "Synthetic public result", state: nil)]
             : [],
-          site: stage == "home" ? BrowserVoiceUITestFixture.youtubeHomeSite
+          site: stage == "home" ? (readNodeIDs.count == 1
+              ? BrowserVoiceUITestFixture.youtubeHomeWithoutSearch
+              : BrowserVoiceUITestFixture.youtubeHomeSite)
             : stage == "results" ? BrowserVoiceUITestFixture.youtubeResultsSite
             : BrowserVoiceUITestFixture.youtubeWatchSite))
       }

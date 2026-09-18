@@ -94,6 +94,12 @@ struct SpeechTurnView: View {
                 .accessibilityIdentifier(
                   site.provider == .netflix ? "speech-netflix-search-review" : "speech-youtube-search-review")
             }
+            if case .search = intent, let site = browserStore.page?.site,
+              site.provider == .youtube, site.searchControl == nil {
+              Text("This YouTube page did not expose a supported search field. No search was sent. Use the browser directly or read another supported page.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("speech-youtube-search-unavailable")
+            }
             if case .scroll(let direction) = intent,
               direction == .left || direction == .right,
               let site = browserStore.page?.site, site.provider == .netflix,
