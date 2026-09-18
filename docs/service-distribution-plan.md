@@ -137,6 +137,15 @@ successful stop means that managed label is disabled and unloaded. These command
 find or stop arbitrary foreground processes. Every successful start or stop prints the same
 redacted observed-state JSON as status so a waiting result is explicit rather than implied ready.
 
+`unselect coordinator|node` removes exactly one stopped, receipt-selected managed role. It takes
+the selection lock, verifies the full installed selection, journals the old and new receipt, and
+removes only that role's verified application and LaunchAgent plist. The other role may remain
+loaded and its receipt and files are unchanged. `recover` restores verified backups if the receipt
+was not committed, or removes verified backups after commit; unexpected or changed files retain
+the journal and require operator reconciliation. An absent role or loaded target is rejected. This
+does not remove staged releases, private configuration, identities, certificates, Keychain items,
+logs, or household data. After a stopped node is unselected, the receipt records `node: null`.
+
 Generate each LaunchAgent with its stable label and release directory as `WorkingDirectory`; its
 program arguments are the corresponding stable role app and fixed `--launch-agent` mode. Preserve the existing per-user
 `gui/<uid>`, Aqua-session,

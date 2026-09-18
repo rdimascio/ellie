@@ -3779,3 +3779,187 @@ test(
     });
   },
 );
+
+test(
+  "native unselect removes only a stopped verified role and recovers before or after receipt commit",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const home = join(root, "unselect-home");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(services, { recursive: true, mode: 0o700 });
+      for (const part of [
+        "Library",
+        "Library/Application Support",
+        "Library/Application Support/Ellie",
+      ])
+        await chmod(join(home, part), 0o700);
+      await mkdir(join(home, "Applications"), { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      await mkdir(join(home, ".ellie"), { mode: 0o700 });
+      const identity = join(home, ".ellie/node.json");
+      await writeFile(identity, "private identity survives\n", { mode: 0o600 });
+      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      const select = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator,node",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(select.status, 0, select.stderr);
+      const receipt = join(services, "receipts/installed.json");
+      const before = await readFile(receipt);
+      const coordinatorPlist = join(
+        home,
+        "Library/LaunchAgents/org.ellie.assistant.coordinator.plist",
+      );
+      const coordinatorBefore = await readFile(coordinatorPlist);
+      const coordinatorApp = join(home, "Applications/Ellie Coordinator.app");
+      const coordinatorAppBefore = await readFile(join(coordinatorApp, "Contents/Info.plist"));
+      const nodeApp = join(home, "Applications/Ellie Node.app");
+      const nodePlist = join(home, "Library/LaunchAgents/org.ellie.assistant.node.plist");
+      const unselect = (...extra: string[]) =>
+        run(installer, ["unselect", "node", "--test-home-root", home, ...extra]);
+      const recover = () => run(installer, ["recover", "--test-home-root", home]);
+      const present = async (path: string) =>
+        lstat(path)
+          .then(() => true)
+          .catch(() => false);
+      const stillSelected = async () => {
+        assert.deepEqual(await readFile(receipt), before);
+        assert.equal(await present(nodeApp), true);
+        assert.equal(await present(nodePlist), true);
+      };
+      const loaded = unselect("--test-loaded", "node");
+      assert.notEqual(loaded.status, 0);
+      await stillSelected();
+      for (const point of [
+        "after-journal",
+        "after-old-app-unseal-node",
+        "after-old-app-backup-node",
+        "after-old-plist-backup-node",
+      ]) {
+        const interrupted = unselect("--test-fault", point);
+        assert.equal(interrupted.status, 86, `${point}: ${interrupted.stderr}`);
+        const restored = recover();
+        assert.equal(restored.status, 0, `${point}: ${restored.stderr}`);
+        await stillSelected();
+      }
+      const committed = unselect("--test-loaded", "coordinator", "--test-fault", "after-receipt");
+      assert.equal(committed.status, 86, committed.stderr);
+      const finished = recover();
+      assert.equal(finished.status, 0, finished.stderr);
+      assert.equal(JSON.parse(await readFile(receipt, "utf8")).node, null);
+      assert.equal(await present(nodeApp), false);
+      assert.equal(await present(nodePlist), false);
+      assert.deepEqual(await readFile(coordinatorPlist), coordinatorBefore);
+      assert.deepEqual(
+        await readFile(join(coordinatorApp, "Contents/Info.plist")),
+        coordinatorAppBefore,
+      );
+      assert.equal(await readFile(identity, "utf8"), "private identity survives\n");
+      assert.notEqual(unselect().status, 0);
+      await symlink(identity, nodePlist);
+      assert.notEqual(unselect().status, 0);
+      assert.equal(await present(nodePlist), true);
+      assert.deepEqual(await readFile(coordinatorPlist), coordinatorBefore);
+      await rm(nodePlist);
+      const removeCoordinator = run(installer, [
+        "unselect",
+        "coordinator",
+        "--test-home-root",
+        home,
+      ]);
+      assert.equal(removeCoordinator.status, 0, removeCoordinator.stderr);
+      assert.deepEqual(JSON.parse(await readFile(receipt, "utf8")), {
+        version: 1,
+        coordinator: null,
+        node: null,
+      });
+      assert.equal(await present(coordinatorApp), false);
+      assert.equal(await present(coordinatorPlist), false);
+      assert.equal(await readFile(identity, "utf8"), "private identity survives\n");
+    });
+  },
+);
+
+test(
+  "native unselect refuses missing managed assets and retains unverified recovery backups",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const home = join(root, "unselect-damage-home");
+      const services = join(home, "Library/Application Support/Ellie/Services");
+      await mkdir(services, { recursive: true, mode: 0o700 });
+      for (const part of [
+        "Library",
+        "Library/Application Support",
+        "Library/Application Support/Ellie",
+      ])
+        await chmod(join(home, part), 0o700);
+      await mkdir(join(home, "Applications"), { mode: 0o700 });
+      await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+      assert.equal(run(installer, ["stage", release, "--test-services-root", services]).status, 0);
+      assert.equal(
+        run(installer, ["select", id, "--roles", "node", "--test-home-root", home]).status,
+        0,
+      );
+      const receipt = join(services, "receipts/installed.json");
+      const before = await readFile(receipt);
+      const nodePlist = join(home, "Library/LaunchAgents/org.ellie.assistant.node.plist");
+      const missingPlist = join(home, "Library/LaunchAgents/missing-node.plist");
+      await rename(nodePlist, missingPlist);
+      assert.notEqual(run(installer, ["unselect", "node", "--test-home-root", home]).status, 0);
+      assert.deepEqual(await readFile(receipt), before);
+      assert.equal(await lstat(missingPlist).then(() => true), true);
+      await rename(missingPlist, nodePlist);
+      const interrupted = run(installer, [
+        "unselect",
+        "node",
+        "--test-home-root",
+        home,
+        "--test-fault",
+        "after-old-app-backup-node",
+      ]);
+      assert.equal(interrupted.status, 86, interrupted.stderr);
+      const journalPath = join(services, "selection-journal.json");
+      const transaction = JSON.parse(await readFile(journalPath, "utf8")).transactionID;
+      const backup = join(home, "Applications", `.ellie-backup-${transaction}-node.app`);
+      const info = join(backup, "Contents/Info.plist");
+      const originalInfo = await readFile(info);
+      await chmod(info, 0o644);
+      await writeFile(info, "damaged managed backup");
+      const refused = run(installer, ["recover", "--test-home-root", home]);
+      assert.notEqual(refused.status, 0);
+      assert.deepEqual(await readFile(receipt), before);
+      assert.equal(await readFile(info, "utf8"), "damaged managed backup");
+      assert.equal(await lstat(journalPath).then(() => true), true);
+      assert.equal(await lstat(backup).then(() => true), true);
+      await writeFile(info, originalInfo);
+      await chmod(info, 0o444);
+      assert.equal(run(installer, ["recover", "--test-home-root", home]).status, 0);
+      assert.deepEqual(await readFile(receipt), before);
+      const committed = run(installer, [
+        "unselect",
+        "node",
+        "--test-home-root",
+        home,
+        "--test-fault",
+        "after-receipt",
+      ]);
+      assert.equal(committed.status, 86, committed.stderr);
+      const nextTransaction = JSON.parse(await readFile(journalPath, "utf8")).transactionID;
+      const nextBackup = join(home, "Applications", `.ellie-backup-${nextTransaction}-node.app`);
+      const nextInfo = join(nextBackup, "Contents/Info.plist");
+      await chmod(nextInfo, 0o644);
+      await writeFile(nextInfo, "damaged committed backup");
+      assert.notEqual(run(installer, ["recover", "--test-home-root", home]).status, 0);
+      assert.equal(JSON.parse(await readFile(receipt, "utf8")).node, null);
+      assert.equal(await readFile(nextInfo, "utf8"), "damaged committed backup");
+      assert.equal(await lstat(nextBackup).then(() => true), true);
+      assert.equal(await lstat(journalPath).then(() => true), true);
+    });
+  },
+);

@@ -1165,7 +1165,7 @@ private func stage(
         failLifecycleCommand(error)
       }
     }
-    if arguments.first == "select" || arguments.first == "recover" {
+    if arguments.first == "select" || arguments.first == "unselect" || arguments.first == "recover" {
       do {
         try runSelectionCommand(arguments)
       } catch {
