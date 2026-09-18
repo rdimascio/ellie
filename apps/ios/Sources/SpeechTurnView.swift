@@ -175,7 +175,9 @@ struct SpeechTurnView: View {
       }
     }
     .onChange(of: credential) { _, _ in
-      speech.cancelAndDiscard()
+      speech.credentialDidChange()
+      browserStore.credentialDidChange()
+      controlStore.credentialDidChange()
       lifeReview.credentialDidChange()
     }
   }
@@ -268,7 +270,9 @@ struct SpeechTurnView: View {
   }
 
   @ViewBuilder private var browserContinuation: some View {
-    if speech.phase != .reviewing, showsBrowserContinuation {
+    if speech.phase != .reviewing, speech.phase != .credentialChanged,
+      showsBrowserContinuation
+    {
       Section("Continue in browser") {
         if browserStore.page != nil {
           NavigationLink {
@@ -322,6 +326,8 @@ struct SpeechTurnView: View {
       Button("Check again") { speech.checkAvailability() }
     case .revoked:
       EmptyView()
+    case .credentialChanged:
+      EmptyView()
     case .cleanupRequired:
       Button("Retry removing private recording", role: .destructive) { speech.retryCleanup() }
     }
@@ -341,6 +347,11 @@ struct SpeechTurnView: View {
       Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked:
       Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
+    case .credentialChanged:
+      Section {
+        Label("Pairing changed. Reopen Voice command.", systemImage: "lock.slash")
+          .accessibilityIdentifier("speech-credential-changed")
+      }
     case .cleanupRequired:
       Section {
         Label(SpeechTurnFailure.cleanupFailed.localizedDescription, systemImage: "externaldrive.badge.exclamationmark")

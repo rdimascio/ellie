@@ -45,7 +45,7 @@ final class SpeechTurnStore: ObservableObject {
   enum Phase: Equatable {
     case idle, checking, ready, starting, recording, uploading, cancelling, reviewing
     case failed(String)
-    case revoked
+    case revoked, credentialChanged
     case cleanupRequired
   }
 
@@ -59,6 +59,8 @@ final class SpeechTurnStore: ObservableObject {
   private var limitTask: Task<Void, Never>?
   private var generation = 0
   private var activeTurnID: UUID?
+  private var credentialInvalidated = false
+  private var cancelledTurnCleanupFailed = false
 
   init(
     credential: NativeEnrollmentCredential, recorder: any SpeechRecording,
@@ -73,20 +75,26 @@ final class SpeechTurnStore: ObservableObject {
   var isBusy: Bool { task != nil || phase == .recording || phase == .cancelling }
 
   func checkAvailability() {
-    guard task == nil, phase != .recording, phase != .cancelling else { return }
+    guard !credentialInvalidated, task == nil,
+      phase != .recording, phase != .cancelling,
+      phase != .revoked, phase != .cleanupRequired else { return }
     phase = .checking
     launch {
+      try Task.checkCancellation()
+      guard !self.credentialInvalidated else { throw CancellationError() }
       try await self.transport.availability(for: self.credential)
       return .ready
     }
   }
 
   func record() {
-    guard task == nil, phase == .ready else { return }
+    guard !credentialInvalidated, task == nil, phase == .ready else { return }
     transcript = ""
     activeTurnID = UUID()
     phase = .checking
     launch {
+      try Task.checkCancellation()
+      guard !self.credentialInvalidated else { throw CancellationError() }
       try await self.transport.availability(for: self.credential)
       guard !Task.isCancelled else { throw CancellationError() }
       self.phase = .starting
@@ -105,7 +113,8 @@ final class SpeechTurnStore: ObservableObject {
   }
 
   func stop() {
-    guard phase == .recording, task == nil, let turnID = activeTurnID else { return }
+    guard !credentialInvalidated, phase == .recording, task == nil,
+      let turnID = activeTurnID else { return }
     limitTask?.cancel()
     limitTask = nil
     phase = .uploading
@@ -113,6 +122,10 @@ final class SpeechTurnStore: ObservableObject {
       let artifact = try await self.recorder.stop()
       let text: String
       do {
+        // stop() may finish after a pairing change. Dispose its artifact even when
+        // transcription must not be admitted under the old credential.
+        try Task.checkCancellation()
+        guard !self.credentialInvalidated else { throw CancellationError() }
         text = try await self.transport.transcribe(
           artifact, turnID: turnID, credential: self.credential)
       } catch {
@@ -139,14 +152,16 @@ final class SpeechTurnStore: ObservableObject {
     switch phase {
     case .idle, .ready, .reviewing, .failed:
       transcript = ""
-      phase = .idle
+      phase = credentialInvalidated ? .credentialChanged : .idle
       return
-    case .revoked:
+    case .revoked, .credentialChanged:
       transcript = ""
+      if credentialInvalidated { phase = .credentialChanged }
       return
     default: break
     }
     guard phase != .cancelling else { return }
+    cancelledTurnCleanupFailed = false
     generation += 1
     let expected = generation
     let active = task
@@ -163,13 +178,19 @@ final class SpeechTurnStore: ObservableObject {
       if let turnID { await transport.cancel(turnID: turnID, credential: credential) }
       _ = await active?.value
       guard generation == expected else { return }
-      if cleanupFailed {
+      if cleanupFailed || cancelledTurnCleanupFailed {
         phase = .cleanupRequired
         return
       }
       activeTurnID = nil
-      phase = .idle
+      phase = credentialInvalidated ? .credentialChanged : .idle
     }
+  }
+
+  func credentialDidChange() {
+    guard !credentialInvalidated else { return }
+    credentialInvalidated = true
+    cancelAndDiscard()
   }
 
   func retryCleanup() {
@@ -179,7 +200,7 @@ final class SpeechTurnStore: ObservableObject {
       do { try await self.recorder.cancel() }
       catch { throw SpeechTurnFailure.cleanupFailed }
       self.activeTurnID = nil
-      return .idle
+      return self.credentialInvalidated ? .credentialChanged : .idle
     }
   }
 
@@ -199,13 +220,21 @@ final class SpeechTurnStore: ObservableObject {
     task = Task {
       defer { if expected == generation { task = nil } }
       do {
+        try Task.checkCancellation()
         let next = try await operation()
         if expected == generation { phase = next }
       } catch {
-        guard expected == generation else { return }
+        guard expected == generation else {
+          // Cancellation waits for this task. Preserve a late artifact-disposal
+          // failure before it decides whether private audio was removed.
+          if phase == .cancelling, error as? SpeechTurnFailure == .cleanupFailed {
+            cancelledTurnCleanupFailed = true
+          }
+          return
+        }
         activeTurnID = nil
         if error is CancellationError || error as? SpeechTurnFailure == .cancelled {
-          phase = .idle
+          phase = credentialInvalidated ? .credentialChanged : .idle
         } else if error as? SpeechTurnFailure == .revoked {
           phase = .revoked
         } else if error as? SpeechTurnFailure == .cleanupFailed {
