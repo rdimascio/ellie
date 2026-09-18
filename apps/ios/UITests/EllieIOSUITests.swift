@@ -1445,6 +1445,9 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(read.waitForExistence(timeout: 5))
         revealHouseholdControl(read, in: app).tap()
         XCTAssertTrue(app.staticTexts["Household laundry"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["ios-household-chores-week-chart"].exists,
+            "The fetched shared copy should expose its own weekly completion chart")
+        XCTAssertTrue(app.staticTexts["Last observed household copy · revision 7 · UTC"].exists)
         XCTAssertEqual(reads.label, "Fixture chore GETs: 1")
 
         let edit = app.buttons["ios-household-chore-edit-11111111-1111-4111-8111-111111111111"]

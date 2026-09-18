@@ -1,4 +1,31 @@
+import Charts
 import SwiftUI
+
+struct HouseholdChoresWeek {
+  struct DayCount: Identifiable {
+    let day: ChoreDay
+    let count: Int
+    var id: ChoreDay { day }
+  }
+
+  let revision: Int64
+  let timeZone: TimeZone
+  let today: ChoreDay
+  let days: [DayCount]
+
+  static func observed(_ remote: HouseholdChoresDocument?, at date: Date) -> Self? {
+    guard let remote, let timeZone = TimeZone(identifier: remote.value.householdTimeZone) else {
+      return nil
+    }
+    let today = ChoreDay.from(date, timeZone: timeZone)
+    let days = ChoresModel.weekDays(containing: today, timeZone: timeZone).map { day in
+      DayCount(day: day, count: remote.value.chores.reduce(0) {
+        $0 + ($1.completedDay == day ? 1 : 0)
+      })
+    }
+    return Self(revision: remote.revision, timeZone: timeZone, today: today, days: days)
+  }
+}
 
 private struct HouseholdChoreForm: Identifiable {
   let id = UUID()
@@ -37,6 +64,38 @@ struct HouseholdChoresView: View {
       }
 
       if let remote = sync.remote {
+        Section("Household completions this week") {
+          TimelineView(.periodic(from: .now, by: 60)) { context in
+            if let week = HouseholdChoresWeek.observed(sync.remote, at: context.date) {
+              VStack(alignment: .leading, spacing: 8) {
+                Chart(week.days) { value in
+                  BarMark(x: .value("Day", value.day.value),
+                    y: .value("Completed", value.count))
+                    .foregroundStyle(value.day == week.today
+                      ? Color.accentColor : Color.secondary.opacity(0.5))
+                }
+                .chartXAxis {
+                  AxisMarks(values: week.days.map(\.day.value)) { mark in
+                    AxisGridLine()
+                    AxisTick()
+                    if let raw = mark.as(String.self), let day = try? ChoreDay(raw) {
+                      AxisValueLabel(weekday(day))
+                    }
+                  }
+                }
+                .frame(height: 130)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Observed household completions this week: "
+                  + week.days.map { "\($0.day.value), \($0.count)" }.joined(separator: "; "))
+                Text("Last observed household copy · revision \(week.revision) · \(week.timeZone.identifier.replacingOccurrences(of: "_", with: " "))")
+                  .font(.caption).foregroundStyle(.secondary)
+                Text("Read the household copy again to check for changes.")
+                  .font(.caption).foregroundStyle(.secondary)
+              }
+              .accessibilityIdentifier("ios-household-chores-week-chart")
+            }
+          }
+        }
         Section("Household copy · revision \(remote.revision)") {
           if remote.value.chores.isEmpty { Text("No household chores yet") }
           ForEach(remote.value.chores.sorted(by: choreOrder)) { chore in
@@ -152,6 +211,16 @@ struct HouseholdChoresView: View {
   private var canPrepare: Bool {
     sync.canWrite && sync.remote != nil && sync.draft == nil && !sync.isBusy
       && sync.phase != .privacyBlocked
+  }
+
+  private func weekday(_ day: ChoreDay) -> String {
+    let zone = TimeZone(secondsFromGMT: 0)!
+    let formatter = DateFormatter()
+    formatter.locale = .current
+    formatter.calendar = Calendar(identifier: .gregorian)
+    formatter.timeZone = zone
+    formatter.setLocalizedDateFormatFromTemplate("EEEEE")
+    return formatter.string(from: day.date(in: zone))
   }
 
   @ViewBuilder private var status: some View {
