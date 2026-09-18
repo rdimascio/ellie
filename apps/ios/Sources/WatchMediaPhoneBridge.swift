@@ -10,7 +10,7 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
 
   @Published private(set) var enabledTargetID: String?
   @Published private(set) var available = false
-  private let controller = WatchMediaPhoneController()
+  private var controller = WatchMediaPhoneController()
   private var activated = false
 
   func activate() {
@@ -29,13 +29,34 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     disable()
     guard available, controller.enable(credential: credential, node: node) else { return false }
     enabledTargetID = node.id
+    recordPairedFixtureReadiness()
     return true
   }
 
   func disable() {
     controller.disable()
     enabledTargetID = nil
+    recordPairedFixtureReadiness()
   }
+
+  #if DEBUG
+  func recordPairedFixtureReadiness() {
+    guard WCSession.isSupported() else { return }
+    WatchPairedUITestReadiness.record(session: WCSession.default, enabledTargetID: enabledTargetID)
+  }
+  #else
+  private func recordPairedFixtureReadiness() {}
+  #endif
+
+  #if DEBUG
+  /// The paired-Simulator fixture changes only the phone's backend. WCSession and this delegate
+  /// remain the installed app's real transport.
+  func installPairedTestController(_ fixture: WatchMediaPhoneController) {
+    guard ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") else { return }
+    disable()
+    controller = fixture
+  }
+  #endif
 
   func retainOnly(_ credential: NativeEnrollmentCredential?) {
     controller.retainOnly(credential)
@@ -50,6 +71,10 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
   }
 
   nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+    Task { @MainActor in self.updateAvailability(session) }
+  }
+
+  nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
     Task { @MainActor in self.updateAvailability(session) }
   }
 
@@ -70,16 +95,28 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     replyHandler: @escaping ([String: Any]) -> Void
   ) {
     Task { @MainActor in
+      #if DEBUG
+      WatchPairedUITestReadiness.noteReceived(enabledTargetID: self.enabledTargetID)
+      #endif
       guard let request = WatchMediaRequest.decode(message) else {
         // A malformed request has no trusted ID or authority; never interpret its action.
         replyHandler(["version": 1, "id": "invalid", "state": "blocked"])
+        #if DEBUG
+        WatchPairedUITestReadiness.noteReply(.blocked, enabledTargetID: self.enabledTargetID)
+        #endif
         return
       }
+      #if DEBUG
+      WatchPairedUITestReadiness.noteDecoded(enabledTargetID: self.enabledTargetID)
+      #endif
       let response = await self.controller.handle(request) {
         session.activationState == .activated && session.isReachable
           && session.isPaired && session.isWatchAppInstalled
       }
       replyHandler(response.message)
+      #if DEBUG
+      WatchPairedUITestReadiness.noteReply(response.state, enabledTargetID: self.enabledTargetID)
+      #endif
     }
   }
 
@@ -87,5 +124,6 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     available = session.activationState == .activated && session.isPaired
       && session.isWatchAppInstalled
     if !available { disable() }
+    recordPairedFixtureReadiness()
   }
 }

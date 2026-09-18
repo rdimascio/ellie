@@ -555,7 +555,11 @@
                     ? { searchControl: { id: searchControl.id, label: searchControl.label } }
                     : {}),
                 }
-              : site,
+              : youtubeOrigins.has(location.origin) &&
+                  (site.page === "home" || site.page === "results") &&
+                  searchControl
+                ? { ...site, searchControl: { id: searchControl.id, label: searchControl.label } }
+                : site,
           ...(rowCandidateId ? { rowCandidateId } : {}),
         };
       }

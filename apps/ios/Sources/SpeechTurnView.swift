@@ -6,17 +6,26 @@ struct SpeechTurnView: View {
   @ObservedObject private var controlStore: PhoneControlStore
   @ObservedObject private var browserStore: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
+  @StateObject private var lifeReview: IOSQuietVoiceStore
+  @FocusState private var transcriptFocused: Bool
+  private let credential: NativeEnrollmentCredential
+  private let lifeConversationID: String?
 
   init(
     credential: NativeEnrollmentCredential, controls: PhoneControlStore,
     browser: BrowserPhoneControlStore,
-    speech: SpeechTurnStore? = nil
+    speech: SpeechTurnStore? = nil,
+    lifeReview: IOSQuietVoiceStore? = nil,
+    lifeConversationID: String? = nil
   ) {
+    self.credential = credential
     controlStore = controls
     browserStore = browser
     _speech = StateObject(
       wrappedValue: speech
         ?? SpeechTurnStore(credential: credential, recorder: IOSSpeechRecorder()))
+    _lifeReview = StateObject(wrappedValue: lifeReview ?? IOSQuietVoiceStore(credential: credential))
+    self.lifeConversationID = lifeConversationID
   }
 
   var body: some View {
@@ -50,6 +59,7 @@ struct SpeechTurnView: View {
       if speech.phase == .reviewing {
         Section("Review transcript") {
           TextEditor(text: $speech.transcript)
+            .focused($transcriptFocused)
             .frame(minHeight: 140)
             .accessibilityIdentifier("speech-transcript")
             .onChange(of: speech.transcript) { _, value in
@@ -61,6 +71,13 @@ struct SpeechTurnView: View {
             }
           Text("\(speech.transcript.utf16.count) of 2,000 characters")
             .font(.caption).foregroundStyle(.secondary)
+          Button("Send reviewed message to Life") {
+            lifeReview.sendReviewed(speech.transcript, conversationID: lifeConversationID)
+          }
+          .accessibilityIdentifier("speech-life-send")
+          .disabled(!lifeReview.canSend || controlsBusy || browserStore.isBusy)
+          Text("Life can answer questions here. Review actions on your Mac; sending this message does not approve one.")
+            .font(.footnote).foregroundStyle(.secondary)
           if let app = speech.reviewedApp {
             Button("Use reviewed \(app.label) command") {
               controlStore.selectedApp = app
@@ -72,10 +89,18 @@ struct SpeechTurnView: View {
               .font(.footnote).foregroundStyle(.secondary)
           } else if let intent = BrowserVoiceIntentParser.parse(speech.transcript) {
             if case .search = intent, let site = browserStore.page?.site,
-              site.provider == .netflix, let control = site.searchControl {
+              (site.provider == .netflix || site.provider == .youtube),
+              let control = site.searchControl {
               Text("Run will use the observed \(control.label) field on \(controlStore.selectedNode?.label ?? "the selected Mac"). Read again to observe any result.")
                 .font(.footnote)
-                .accessibilityIdentifier("speech-netflix-search-review")
+                .accessibilityIdentifier(
+                  site.provider == .netflix ? "speech-netflix-search-review" : "speech-youtube-search-review")
+            }
+            if case .search = intent, let site = browserStore.page?.site,
+              site.provider == .youtube, site.searchControl == nil {
+              Text("This YouTube page did not expose a supported search field. No search was sent. Use the browser directly or read another supported page.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("speech-youtube-search-unavailable")
             }
             if case .scroll(let direction) = intent,
               direction == .left || direction == .right,
@@ -127,21 +152,109 @@ struct SpeechTurnView: View {
               .font(.footnote).foregroundStyle(.secondary)
           }
           Button("Discard transcript", role: .destructive) { speech.discardReview() }
+            .accessibilityIdentifier("speech-discard")
         }
       }
+      lifeReviewStatus
       browserContinuation
     }
     .ellieScreen()
     .navigationTitle("Voice command")
+    .toolbar {
+      ToolbarItemGroup(placement: .keyboard) {
+        if speech.phase == .reviewing {
+          Spacer()
+          Button("Done") { transcriptFocused = false }
+            .accessibilityIdentifier("speech-transcript-done")
+        }
+      }
+    }
     .onDisappear {
       speech.cancelAndDiscard()
       browserStore.cancel()
+      lifeReview.background()
     }
+    .onAppear { lifeReview.restore() }
     .onChange(of: scenePhase) { _, phase in
       if phase != .active {
         speech.cancelAndDiscard()
         browserStore.cancel()
+        lifeReview.background()
       }
+    }
+    .onChange(of: credential) { _, _ in
+      speech.credentialDidChange()
+      browserStore.credentialDidChange()
+      controlStore.credentialDidChange()
+      lifeReview.credentialDidChange()
+    }
+  }
+
+  @ViewBuilder private var lifeReviewStatus: some View {
+    switch lifeReview.phase {
+    case .idle: EmptyView()
+    case .checking: Section("Life") { ProgressView("Checking Life conversation…") }
+    case .sending: Section("Life") { ProgressView("Sending reviewed message…") }
+    case .unknown:
+      Section("Life") {
+        Label("The message may have reached Life. Check its status before sending another.",
+          systemImage: "questionmark.circle")
+        Button("Check message status") { lifeReview.reconcile() }
+          .accessibilityIdentifier("speech-life-check-status")
+        stopTrackingQuestion
+      }
+    case .notFound:
+      Section("Life") {
+        Label("No durable request was found yet. The message may still have reached Life.",
+          systemImage: "questionmark.circle")
+          .accessibilityIdentifier("speech-life-not-found")
+        Button("Check again") { lifeReview.reconcile() }
+        stopTrackingQuestion
+      }
+    case .storageUnavailable:
+      Section("Life") {
+        Label("Private request safety storage is unavailable. Sending is paused.",
+          systemImage: "externaldrive.badge.exclamationmark")
+      }
+    case .revoked:
+      Section("Life") { Label("Life access was revoked.", systemImage: "lock.slash") }
+    case .completed(let outcome):
+      Section("Life reply") {
+        Text(outcome.reply ?? "No reply is available.")
+          .accessibilityIdentifier("speech-life-reply")
+        Text("Read-only reply. This iPhone made no changes.")
+          .font(.footnote).foregroundStyle(.secondary)
+        if outcome.needsMacReview {
+          Text("Review the requested action in Ellie Life on your Mac. This iPhone made no change.")
+        }
+        Button("New message") {
+          speech.discardReview()
+          lifeReview.reset()
+        }
+      }
+    case .interrupted:
+      Section("Life") {
+        Label("This request was interrupted. It was not sent again.",
+          systemImage: "exclamationmark.triangle")
+        Button("New message") {
+          speech.discardReview()
+          lifeReview.reset()
+        }
+      }
+    case .failed(let message):
+      Section("Life") { Label(message, systemImage: "exclamationmark.triangle") }
+    }
+  }
+
+  private var stopTrackingQuestion: some View {
+    VStack(alignment: .leading, spacing: 8) {
+      Text("A reply may still appear in Life. Stopping tracking clears only this iPhone's local request; it does not cancel the Life question.")
+        .font(.footnote).foregroundStyle(.secondary)
+      Button("Stop tracking this question", role: .destructive) {
+        lifeReview.stopTracking()
+        speech.discardReview()
+      }
+      .accessibilityIdentifier("speech-life-stop-tracking")
     }
   }
 
@@ -165,7 +278,9 @@ struct SpeechTurnView: View {
   }
 
   @ViewBuilder private var browserContinuation: some View {
-    if speech.phase != .reviewing, showsBrowserContinuation {
+    if speech.phase != .reviewing, speech.phase != .credentialChanged,
+      showsBrowserContinuation
+    {
       Section("Continue in browser") {
         if browserStore.page != nil {
           NavigationLink {
@@ -219,6 +334,8 @@ struct SpeechTurnView: View {
       Button("Check again") { speech.checkAvailability() }
     case .revoked:
       EmptyView()
+    case .credentialChanged:
+      EmptyView()
     case .cleanupRequired:
       Button("Retry removing private recording", role: .destructive) { speech.retryCleanup() }
     }
@@ -238,6 +355,11 @@ struct SpeechTurnView: View {
       Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked:
       Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
+    case .credentialChanged:
+      Section {
+        Label("Pairing changed. Reopen Voice command.", systemImage: "lock.slash")
+          .accessibilityIdentifier("speech-credential-changed")
+      }
     case .cleanupRequired:
       Section {
         Label(SpeechTurnFailure.cleanupFailed.localizedDescription, systemImage: "externaldrive.badge.exclamationmark")

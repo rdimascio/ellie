@@ -41,6 +41,7 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
   let heldReadStarted = 0;
   let heldReadCompleted = 0;
   let heldHandled = 0;
+  let chatPlans = 0;
   const event = (sourceKey, title, startAt) => ({
     sourceKey,
     sourceRevision: "fixture-v1",
@@ -204,6 +205,12 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
       tasks,
       plugins,
       mlb: new MLBAdapter(),
+      model: {
+        async plan() {
+          chatPlans += 1;
+          return { reply: "Family 👩‍👩‍👧‍👧\r\n日本語 read-only answer.", actions: [] };
+        },
+      },
     });
     server = createLifeServer({
       stateDir: directory,
@@ -241,6 +248,18 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
     },
     connectionIds,
     control: {
+      chatEvidence: () => ({
+        plans: chatPlans,
+        conversations: life.listConversations(
+          { userId: actorId },
+          {
+            scope: { type: "user", id: actorId },
+          },
+        ).items.length,
+        records: life.listRecords({ userId: actorId }, { scope: { type: "user", id: actorId } })
+          .length,
+        tasks: tasks.list({ owner: `user:${actorId}` }).length,
+      }),
       bodyReads: () => Object.fromEntries(reads),
       heldReadStarted: () => heldReadStarted,
       heldReadCompleted: () => heldReadCompleted,

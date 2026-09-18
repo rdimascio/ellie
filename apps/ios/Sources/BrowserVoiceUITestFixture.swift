@@ -10,17 +10,22 @@ struct BrowserVoiceUITestFixtureView: View {
   @StateObject private var controls: PhoneControlStore
   @StateObject private var browser: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
+  @StateObject private var lifeReview: IOSQuietVoiceStore
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
   @State private var backgroundCount = 0
+  private let youtubeSearch: Bool
 
-  init(completeActions: Bool = false, netflixRows: Bool = false, netflixSearch: Bool = false) {
+  init(completeActions: Bool = false, netflixRows: Bool = false, netflixSearch: Bool = false,
+       youtubeSearch: Bool = false) {
+    self.youtubeSearch = youtubeSearch
     let credential = BrowserVoiceUITestFixture.credential
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
       completeActions: completeActions,
-      source: netflixRows || netflixSearch ? .companion : .webmcp,
+      source: netflixRows || netflixSearch || youtubeSearch || completeActions
+        ? .companion : .webmcp,
       siteOverride: netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite : nil,
-      netflixSearch: netflixSearch)
+      netflixSearch: netflixSearch, youtubeSearch: youtubeSearch)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
@@ -32,15 +37,19 @@ struct BrowserVoiceUITestFixtureView: View {
       wrappedValue: SpeechTurnStore(
         credential: credential, recorder: BrowserVoiceUITestRecorder(),
         transport: BrowserVoiceUITestSpeechTransport(
-          transcript: netflixRows ? "Scroll right" : "Search for public video")))
+          transcript: netflixRows ? "Scroll right"
+            : youtubeSearch ? "Search for public" : "Search for public video")))
     _browserTransport = StateObject(wrappedValue: browserTransport)
+    _lifeReview = StateObject(wrappedValue: IOSQuietVoiceStore(
+      credential: credential, client: BrowserVoiceUITestLifeClient(),
+      journal: BrowserVoiceUITestUncertaintyStore()))
   }
 
   var body: some View {
     NavigationStack {
       SpeechTurnView(
         credential: BrowserVoiceUITestFixture.credential, controls: controls, browser: browser,
-        speech: speech)
+        speech: speech, lifeReview: lifeReview)
     }
     .overlay(alignment: .bottomTrailing) {
       VStack(alignment: .trailing, spacing: 2) {
@@ -48,6 +57,12 @@ struct BrowserVoiceUITestFixtureView: View {
           .accessibilityIdentifier("browser-fixture-background-count")
         Text("Fixture mutations: \(browserTransport.mutationCount)")
           .accessibilityIdentifier("browser-fixture-mutation-count")
+        if youtubeSearch {
+          Text("Fixture actions: \(browserTransport.actionHistory.joined(separator: ","))")
+            .accessibilityIdentifier("browser-fixture-action-history")
+          Text("Synthetic audio and selected YouTube page")
+            .accessibilityIdentifier("browser-fixture-synthetic-label")
+        }
       }
       .font(.caption2)
       .padding(4)
@@ -110,6 +125,7 @@ struct BrowserComposedUITestFixtureView: View {
   @StateObject private var controls: PhoneControlStore
   @StateObject private var browser: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
+  @StateObject private var lifeReview: IOSQuietVoiceStore
   private let credential: NativeEnrollmentCredential
   private let target: String
 
@@ -125,11 +141,15 @@ struct BrowserComposedUITestFixtureView: View {
     _speech = StateObject(wrappedValue: SpeechTurnStore(
       credential: fixture.credential, recorder: BrowserVoiceUITestRecorder(),
       transport: BrowserComposedUITestSpeechTransport()))
+    _lifeReview = StateObject(wrappedValue: IOSQuietVoiceStore(
+      credential: fixture.credential, client: BrowserVoiceUITestLifeClient(),
+      journal: BrowserVoiceUITestUncertaintyStore()))
   }
 
   var body: some View {
     NavigationStack {
-      SpeechTurnView(credential: credential, controls: controls, browser: browser, speech: speech)
+      SpeechTurnView(credential: credential, controls: controls, browser: browser,
+        speech: speech, lifeReview: lifeReview)
     }
     .overlay(alignment: .bottomTrailing) {
       Text("Synthetic transcript; real pinned browser transport")
@@ -353,6 +373,18 @@ private enum BrowserVoiceUITestFixture {
     provider: .netflix, page: .results, playback: .unavailable, currentTimeSeconds: nil,
     searchControl: BrowserPhoneSearchControl(
       id: "10000000-0000-4000-8000-000000000004", label: "Search"))
+  static let youtubeHomeSite = BrowserPhoneSite(
+    provider: .youtube, page: .home, playback: .unavailable, currentTimeSeconds: nil,
+    searchControl: BrowserPhoneSearchControl(
+      id: "10000000-0000-4000-8000-000000000005", label: "Search"))
+  static let youtubeHomeWithoutSearch = BrowserPhoneSite(
+    provider: .youtube, page: .home, playback: .unavailable, currentTimeSeconds: nil)
+  static let youtubeResultsSite = BrowserPhoneSite(
+    provider: .youtube, page: .results, playback: .unavailable, currentTimeSeconds: nil,
+    searchControl: BrowserPhoneSearchControl(
+      id: "10000000-0000-4000-8000-000000000006", label: "Search"))
+  static let youtubeWatchSite = BrowserPhoneSite(
+    provider: .youtube, page: .watch, playback: .paused, currentTimeSeconds: 1)
   static let credential = NativeEnrollmentCredential(
     origin: URL(string: "https://127.0.0.1:8444")!,
     certificateSha256: String(repeating: "b", count: 64),
@@ -395,6 +427,21 @@ private final class BrowserVoiceUITestUncertaintyStore: BrowserMutationUncertain
     guard markers[scope] == token else { return .mismatch }
     markers.removeValue(forKey: scope)
     return .cleared
+  }
+}
+
+@MainActor
+private struct BrowserVoiceUITestLifeClient: IOSQuietVoiceClient {
+  func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int {
+    throw IOSQuietFailure.unavailable
+  }
+  func send(_ credential: NativeEnrollmentCredential, body: Data) async throws
+    -> IOSQuietChatOutcome {
+    throw IOSQuietFailure.unavailable
+  }
+  func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws
+    -> IOSQuietChatOutcome {
+    throw IOSQuietFailure.unavailable
   }
 }
 
@@ -455,17 +502,20 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   private let completeActions: Bool
   private let siteOverride: BrowserPhoneSite?
   private let netflixSearch: Bool
+  private let youtubeSearch: Bool
   private let source: BrowserPhoneSource
 
   init(
     failNextRead: Bool = false, completeActions: Bool = false,
     source: BrowserPhoneSource = .webmcp,
-    siteOverride: BrowserPhoneSite? = nil, netflixSearch: Bool = false
+    siteOverride: BrowserPhoneSite? = nil, netflixSearch: Bool = false,
+    youtubeSearch: Bool = false
   ) {
     self.failNextRead = failNextRead
     self.completeActions = completeActions
     self.siteOverride = siteOverride
     self.netflixSearch = netflixSearch
+    self.youtubeSearch = youtubeSearch
     self.source = source
   }
 
@@ -475,7 +525,8 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
     switch action {
     case .status, .refresh:
       return .status(
-        source: source, connected: true, revision: BrowserVoiceUITestFixture.revision)
+        source: youtubeSearch ? .accessibility : source, connected: true,
+        revision: BrowserVoiceUITestFixture.revision)
     case .read:
       readNodeIDs.append(nodeID)
       if failNextRead {
@@ -483,6 +534,21 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
         throw PhoneControlFailure.unavailable
       }
       let isA = nodeID == BrowserVoiceUITestFixture.nodeAID
+      if youtubeSearch {
+        let stage = mutationCount == 0 ? "home" : mutationCount == 1 ? "results" : "watch"
+        actionHistory.append("read.\(stage)")
+        return .page(BrowserPhonePage(
+          nodeID: nodeID, source: source, revision: BrowserVoiceUITestFixture.revision,
+          title: "Synthetic YouTube \(stage)", summary: "Owned fixture observation",
+          items: stage == "results"
+            ? [BrowserPhoneItem(id: "public-video-a", label: "Synthetic public result", state: nil)]
+            : [],
+          site: stage == "home" ? (readNodeIDs.count == 1
+              ? BrowserVoiceUITestFixture.youtubeHomeWithoutSearch
+              : BrowserVoiceUITestFixture.youtubeHomeSite)
+            : stage == "results" ? BrowserVoiceUITestFixture.youtubeResultsSite
+            : BrowserVoiceUITestFixture.youtubeWatchSite))
+      }
       return .page(
         BrowserPhonePage(
           nodeID: nodeID, source: source, revision: BrowserVoiceUITestFixture.revision,
@@ -496,18 +562,22 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
                 ? BrowserVoiceUITestFixture.netflixSearchSite
                 : BrowserVoiceUITestFixture.netflixResultsSite)
             : siteOverride ?? (completeActions ? observedSite : nil)))
-    case .search:
+    case .search(let query, _):
       mutationCount += 1
+      if youtubeSearch { actionHistory.append("search.\(query)") }
       return .command(
-        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+        source: source, status: youtubeSearch ? .unknown : .completed,
+        revision: BrowserVoiceUITestFixture.revision)
     case .select:
       mutationCount += 1
-      if !completeActions {
+      if youtubeSearch { actionHistory.append("select") }
+      if !completeActions && !youtubeSearch {
         do { try await Task.sleep(for: .seconds(30)) }
         catch { throw PhoneControlFailure.cancelled }
       }
       return .command(
-        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+        source: source, status: youtubeSearch ? .unknown : .completed,
+        revision: BrowserVoiceUITestFixture.revision)
     case .scroll(let direction, _):
       actionHistory.append("scroll.\(direction.rawValue)")
       mutationCount += 1
@@ -528,13 +598,15 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   private var observedSite: BrowserPhoneSite {
     switch mutationCount {
     case 0:
-      BrowserPhoneSite(page: .home, playback: .unavailable, currentTimeSeconds: nil)
+      BrowserVoiceUITestFixture.netflixSearchSite
     case 1:
-      BrowserPhoneSite(page: .results, playback: .unavailable, currentTimeSeconds: nil)
+      BrowserVoiceUITestFixture.netflixResultsSite
     case 3:
-      BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1)
+      BrowserPhoneSite(
+        provider: .netflix, page: .watch, playback: .playing, currentTimeSeconds: 1)
     default:
-      BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: 1)
+      BrowserPhoneSite(
+        provider: .netflix, page: .watch, playback: .paused, currentTimeSeconds: 1)
     }
   }
 }

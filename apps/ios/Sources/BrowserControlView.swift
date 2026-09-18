@@ -41,6 +41,10 @@ struct BrowserControlView: View {
               Text("No unambiguous accessible Netflix search field was observed. Search is unavailable on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
+            if site.provider == .youtube && site.searchControl == nil {
+              Text("No unambiguous YouTube search field was observed in the selected browser document. Search is unavailable on this page.")
+                .font(.footnote).foregroundStyle(.secondary)
+            }
             if site.provider == .netflix && site.page == .browse && site.rows?.isEmpty != false {
               Text("No safely identified horizontal rows are available on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
