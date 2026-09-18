@@ -11,6 +11,22 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   #if DEBUG
   @Published private(set) var pairedDiagnostic = "supported=unknown activation=unknown reachable=false foreground=false"
   @Published private(set) var deliveryDiagnostic = "idle"
+  private var deliveryStartedAt: UInt64?
+  private var deliveryEvents: [String] = []
+  private var firstDeliveryTerminal: String?
+
+  private func noteDelivery(_ event: String, terminal: Bool = false, begin: Bool = false) {
+    let now = DispatchTime.now().uptimeNanoseconds
+    if begin {
+      deliveryStartedAt = now
+      deliveryEvents = []
+      firstDeliveryTerminal = nil
+    }
+    let elapsed = min(99_999, Int((now - (deliveryStartedAt ?? now)) / 1_000_000))
+    if deliveryEvents.count < 8 { deliveryEvents.append("\(event)@\(elapsed)") }
+    if terminal && firstDeliveryTerminal == nil { firstDeliveryTerminal = event }
+    deliveryDiagnostic = "first=\(firstDeliveryTerminal ?? "none") trace=\(deliveryEvents.joined(separator: ","))"
+  }
   #endif
 
   private var pendingID: String?
@@ -43,7 +59,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     updatePairedDiagnostic(WCSession.isSupported() ? WCSession.default : nil)
     if let pendingOperation {
       #if DEBUG
-      deliveryDiagnostic = "suspended"
+      noteDelivery("suspended", terminal: true)
       #endif
       finishUncertain(pendingOperation)
     }
@@ -79,7 +95,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     pendingOperation = operation
     waiting = true
     #if DEBUG
-    deliveryDiagnostic = "sent"
+    noteDelivery("sent", begin: true)
     #endif
     status = operation == .read ? "Reading the selected Mac…" : "Command sent; outcome unverified."
     timeout?.cancel()
@@ -87,7 +103,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
       try? await Task.sleep(for: .milliseconds(WatchMediaRequest.lifetimeMilliseconds))
       guard !Task.isCancelled, pendingID == request.id else { return }
       #if DEBUG
-      deliveryDiagnostic = "deadline"
+      noteDelivery("deadline", terminal: true)
       #endif
       finishUncertain(operation)
     }
@@ -97,7 +113,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
       Task { @MainActor in
         guard self.pendingID == request.id else { return }
         #if DEBUG
-        self.deliveryDiagnostic = "send_error"
+        self.noteDelivery("send_error", terminal: true)
         #endif
         self.finishUncertain(operation)
       }
@@ -107,13 +123,13 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   private func receive(_ value: [String: Any], request: WatchMediaRequest) {
     guard pendingID == request.id else {
       #if DEBUG
-      deliveryDiagnostic = "late_reply"
+      noteDelivery("late_reply")
       #endif
       return
     }
     guard foreground, WatchMediaWire.now() < request.expiresAt else {
       #if DEBUG
-      deliveryDiagnostic = "expired_reply"
+      noteDelivery("expired_reply", terminal: true)
       #endif
       finishUncertain(request.operation)
       return
@@ -125,7 +141,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     waiting = false
     guard let reply = WatchMediaReply.decode(value, expectedID: request.id) else {
       #if DEBUG
-      deliveryDiagnostic = "invalid_reply"
+      noteDelivery("invalid_reply", terminal: true)
       #endif
       status = request.operation == .read
         ? "The iPhone returned an invalid observation. Read again."
@@ -133,7 +149,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
       return
     }
     #if DEBUG
-    deliveryDiagnostic = "reply_\(reply.state.rawValue)"
+    noteDelivery("reply_\(reply.state.rawValue)", terminal: true)
     #endif
     switch reply.state {
     case .observed:
@@ -174,7 +190,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
       observation = nil
       if let operation {
         #if DEBUG
-        deliveryDiagnostic = "reachability_lost"
+        noteDelivery("reachability_lost", terminal: true)
         #endif
         finishUncertain(operation)
       }
