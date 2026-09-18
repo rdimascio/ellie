@@ -152,6 +152,7 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTFail("Quiet fixture did not settle")
     }
 
+    @MainActor
     func testPinnedQuietGETAndClosedWire() throws {
         XCTAssertEqual(NativeEnrollmentTransport.lifeQuietMaximumBytes(
             path: "/api/life/native/sessions?limit=3"), 24_000)
