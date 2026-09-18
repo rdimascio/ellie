@@ -61,7 +61,10 @@ enum IOSAgendaWire {
     private static func text(_ value: Any?, maximum: Int) throws -> String {
         guard let value = value as? String, !value.isEmpty,
               value.utf16.count <= maximum, value.utf8.count <= maximum * 4,
-              value.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) })
+              value.unicodeScalars.allSatisfy({ scalar in
+                  !CharacterSet.controlCharacters.contains(scalar) ||
+                      scalar.value == 0x200C || scalar.value == 0x200D
+              })
         else { throw IOSAgendaFailure.invalidResponse }
         return value
     }
