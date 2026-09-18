@@ -1224,6 +1224,48 @@ final class EllieIOSUITests: XCTestCase {
             "Fixture mutations: 2")
     }
 
+    func testSyntheticAXFallbackOffersOnlyOneObservedScrollUntilFreshRead() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-browser-ax-scroll-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        let browser = app.buttons["Control selected Mac browser"]
+        XCTAssertTrue(browser.waitForExistence(timeout: 5))
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "isEnabled == true"), object: browser)], timeout: 5),
+            .completed)
+        browser.tap()
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertTrue(app.staticTexts["browser-observed-ax-scroll"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["browser-fixture-synthetic-ax"].exists)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 0")
+        for unavailable in ["Up", "Left", "Right", "Search", "Play", "Pause",
+                            "1. Read-only item"] {
+            XCTAssertFalse(revealBrowserButton(unavailable, in: app).isEnabled,
+                "Only the observed Down direction may be sent")
+        }
+        let down = revealBrowserButton("Down", in: app, forTap: true)
+        XCTAssertTrue(down.isEnabled)
+        down.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["browser-status-unknown"]
+            .waitForExistence(timeout: 5))
+        waitForFixtureMutations(1, in: app)
+        XCTAssertFalse(app.buttons["Down"].exists,
+            "The observed AX control is consumed before an uncertain response")
+        XCTAssertEqual(app.staticTexts["browser-fixture-action-history"].label,
+            "Actions: scroll.down")
+
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertTrue(app.staticTexts["browser-observed-ax-scroll"].waitForExistence(timeout: 5))
+        XCTAssertTrue(revealBrowserButton("Down", in: app).isEnabled)
+        XCTAssertEqual(app.staticTexts["browser-fixture-mutation-count"].label,
+            "Fixture mutations: 1")
+        XCTAssertEqual(app.staticTexts["browser-fixture-read-history"].label,
+            "Fixture reads: ui-fixture-mac-a,ui-fixture-mac-a")
+    }
+
     private func waitForFixtureMutations(_ expected: Int, in app: XCUIApplication) {
         let count = app.staticTexts["browser-fixture-mutation-count"]
         XCTAssertTrue(count.waitForExistence(timeout: 5))

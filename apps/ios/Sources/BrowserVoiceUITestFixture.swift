@@ -181,22 +181,25 @@ struct BrowserTargetUITestFixtureView: View {
 
   private let credential: NativeEnrollmentCredential
   private let rowActions: Bool
+  private let axFallback: Bool
 
   init(readOnly: Bool = false, unavailablePlayback: Bool = false,
-       netflixRows: Bool = false, rowActions: Bool = false) {
+       netflixRows: Bool = false, rowActions: Bool = false, axFallback: Bool = false) {
     let credential = readOnly
       ? BrowserVoiceUITestFixture.readOnlyCredential : BrowserVoiceUITestFixture.credential
     self.credential = credential
     self.rowActions = rowActions
+    self.axFallback = axFallback
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
       completeActions: rowActions,
-      source: netflixRows ? .companion : .webmcp,
+      source: axFallback ? .accessibility : netflixRows ? .companion : .webmcp,
       siteOverride: unavailablePlayback
         ? BrowserPhoneSite(page: .watch, playback: .unavailable, currentTimeSeconds: nil)
         : netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite
         : rowActions ? BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1)
-        : nil)
+        : nil,
+      axFallback: axFallback)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport(readOnly: readOnly)))
@@ -218,9 +221,13 @@ struct BrowserTargetUITestFixtureView: View {
           .accessibilityIdentifier("browser-fixture-mutation-count")
         Text("Fixture reads: \(browserTransport.readNodeIDs.joined(separator: ","))")
           .accessibilityIdentifier("browser-fixture-read-history")
-        if rowActions {
+        if rowActions || axFallback {
           Text("Actions: \(browserTransport.actionHistory.joined(separator: ","))")
             .accessibilityIdentifier("browser-fixture-action-history")
+        }
+        if axFallback {
+          Text("Synthetic companion status and AX read; no native helper or provider")
+            .accessibilityIdentifier("browser-fixture-synthetic-ax")
         }
       }
       .font(.caption2)
@@ -504,12 +511,13 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   private let netflixSearch: Bool
   private let youtubeSearch: Bool
   private let source: BrowserPhoneSource
+  private let axFallback: Bool
 
   init(
     failNextRead: Bool = false, completeActions: Bool = false,
     source: BrowserPhoneSource = .webmcp,
     siteOverride: BrowserPhoneSite? = nil, netflixSearch: Bool = false,
-    youtubeSearch: Bool = false
+    youtubeSearch: Bool = false, axFallback: Bool = false
   ) {
     self.failNextRead = failNextRead
     self.completeActions = completeActions
@@ -517,6 +525,7 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
     self.netflixSearch = netflixSearch
     self.youtubeSearch = youtubeSearch
     self.source = source
+    self.axFallback = axFallback
   }
 
   func execute(
@@ -525,13 +534,22 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
     switch action {
     case .status, .refresh:
       return .status(
-        source: youtubeSearch ? .accessibility : source, connected: true,
+        source: axFallback ? .companion : youtubeSearch ? .accessibility : source,
+        connected: true,
         revision: BrowserVoiceUITestFixture.revision)
     case .read:
       readNodeIDs.append(nodeID)
       if failNextRead {
         failNextRead = false
         throw PhoneControlFailure.unavailable
+      }
+      if axFallback {
+        return .page(BrowserPhonePage(
+          nodeID: nodeID, source: .accessibility,
+          revision: BrowserVoiceUITestFixture.revision,
+          title: "Synthetic selected web area", summary: "Observed AX scroll only",
+          items: [BrowserPhoneItem(id: "synthetic-item", label: "Read-only item", state: nil)],
+          axScrollDirections: [.down]))
       }
       let isA = nodeID == BrowserVoiceUITestFixture.nodeAID
       if youtubeSearch {
@@ -582,7 +600,8 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
       actionHistory.append("scroll.\(direction.rawValue)")
       mutationCount += 1
       return .command(
-        source: source, status: .completed, revision: BrowserVoiceUITestFixture.revision)
+        source: source, status: axFallback ? .unknown : .completed,
+        revision: BrowserVoiceUITestFixture.revision)
     case .scrollRow:
       mutationCount += 1
       return .command(
