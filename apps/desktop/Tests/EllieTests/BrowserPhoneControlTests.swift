@@ -62,6 +62,46 @@ final class BrowserPhoneControlTests: XCTestCase {
         nodeID: "mac"))
   }
 
+  func testObservedAXScrollDirectionsDecodeOnlyForAccessibility() throws {
+    let revision = String(repeating: "a", count: 64)
+    func read(_ source: String, _ directions: String) -> Data {
+      Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"axScrollDirections":\#(directions)}}}}"#.utf8)
+    }
+    guard case .page(let page) = try decodeBrowserPhoneResponse(
+      read("accessibility", #"["down","up"]"#), nodeID: "mac")
+    else { return XCTFail("Expected observed accessibility page") }
+    XCTAssertNil(page.site)
+    XCTAssertEqual(page.axScrollDirections, [.down, .up])
+    guard case .page(let empty) = try decodeBrowserPhoneResponse(
+      read("accessibility", "[]"), nodeID: "mac")
+    else { return XCTFail("Expected empty observed directions") }
+    XCTAssertEqual(empty.axScrollDirections, [])
+    let youtube = Data(
+      #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"accessibility","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"axScrollDirections":["up"],"site":{"provider":"youtube","page":"watch","playback":"paused"}}}}}"#.utf8)
+    guard case .page(let existingYouTube) = try decodeBrowserPhoneResponse(youtube, nodeID: "mac")
+    else { return XCTFail("Expected existing YouTube accessibility page") }
+    XCTAssertEqual(existingYouTube.site?.provider, .youtube)
+    XCTAssertEqual(existingYouTube.axScrollDirections, [.up])
+    let mismatchedSite = Data(
+      #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"accessibility","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"axScrollDirections":["up"],"site":{"provider":"netflix","page":"browse","playback":"unavailable"}}}}}"#.utf8)
+    XCTAssertThrowsError(try decodeBrowserPhoneResponse(mismatchedSite, nodeID: "mac"))
+    for source in ["webmcp", "companion"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(
+        read(source, #"["down"]"#), nodeID: "mac"))
+    }
+    for invalid in [#"["left"]"#, #"["down","down"]"#, #"["up","down","up"]"#,
+      #""down""#, "null", "[1]"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(
+        read("accessibility", invalid), nodeID: "mac"))
+    }
+    let legacy = Data(
+      #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"accessibility","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]}}}}"#.utf8)
+    guard case .page(let old) = try decodeBrowserPhoneResponse(legacy, nodeID: "mac")
+    else { return XCTFail("Expected prior accessibility wire") }
+    XCTAssertNil(old.axScrollDirections)
+  }
+
   func testOptionalYouTubeObservationIsBoundedAndNeverInferredFromCommandStatus() throws {
     let revision = String(repeating: "a", count: 64)
     func read(_ site: String) -> Data {
@@ -326,6 +366,61 @@ final class BrowserPhoneControlTests: XCTestCase {
     let actions = await transport.actions
     XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
       .scroll(.down, revision: String(repeating: "a", count: 64))])
+  }
+
+  @MainActor
+  func testObservedAXFallbackAdmitsOneVerticalScrollAndNoOtherAction() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let transport = BrowserPhoneFakeTransport(source: .accessibility,
+      commandStatus: .unknown, axScrollDirections: [.down])
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertEqual(store.page?.axScrollDirections, [.down])
+    XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
+    for intent in [BrowserVoiceIntent.scroll(.up), .scroll(.left), .search(query: "video"),
+      .openResult(index: 1), .play, .pause] {
+      XCTAssertFalse(store.canPerform(intent, on: node))
+      XCTAssertFalse(store.perform(intent, on: node))
+    }
+    let before = await transport.actions
+    XCTAssertEqual(before.count, 2,
+      "Unobserved actions must not reach the transport or create uncertainty")
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    XCTAssertNil(store.page, "One admitted scroll consumes the observed page before dispatch")
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.scroll(.down), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [
+      .refresh, .read(revision: String(repeating: "a", count: 64)),
+      .scroll(.down, revision: String(repeating: "a", count: 64)),
+    ])
+
+    let unavailable = BrowserPhoneControlStore(credential: credential(),
+      transport: BrowserPhoneFakeTransport(source: .accessibility,
+        axScrollDirections: []), uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(unavailable.refresh(on: node))
+    await eventually { unavailable.phase == .ready }
+    XCTAssertFalse(unavailable.canPerform(.scroll(.down), on: node))
+    XCTAssertFalse(unavailable.canPerform(.play, on: node))
+
+    let invalidModel = BrowserPhoneControlStore(credential: credential(),
+      transport: BrowserPhoneFakeTransport(source: .accessibility,
+        axScrollDirections: [.left]), uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(invalidModel.refresh(on: node))
+    await eventually { invalidModel.phase == .ready }
+    XCTAssertFalse(invalidModel.canPerform(.scroll(.left), on: node))
+
+    let youtube = BrowserPhoneControlStore(credential: credential(),
+      transport: BrowserPhoneFakeTransport(source: .accessibility,
+        site: BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: nil),
+        axScrollDirections: [.up]), uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(youtube.refresh(on: node))
+    await eventually { youtube.phase == .ready }
+    XCTAssertTrue(youtube.canPerform(.play, on: node),
+      "A current YouTube site observation keeps its reviewed AX player control")
   }
 
   @MainActor
@@ -1271,6 +1366,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private let commandStatus: BrowserPhoneCommandStatus?
   private let items: [BrowserPhoneItem]
   private let site: BrowserPhoneSite?
+  private let axScrollDirections: [BrowserScrollDirection]?
   private var commandContinuation: CheckedContinuation<Void, Never>?
   private var statusContinuation: CheckedContinuation<Void, Never>?
   private var readContinuation: CheckedContinuation<Void, Never>?
@@ -1279,7 +1375,8 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
     items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)],
-    site: BrowserPhoneSite? = nil, statusSource: BrowserPhoneSource? = nil
+    site: BrowserPhoneSite? = nil, statusSource: BrowserPhoneSource? = nil,
+    axScrollDirections: [BrowserScrollDirection]? = nil
   ) {
     self.delayStatus = delayStatus
     self.delayRead = delayRead
@@ -1290,6 +1387,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     self.commandStatus = commandStatus
     self.items = items
     self.site = site
+    self.axScrollDirections = axScrollDirections
   }
   func execute(
     _ action: BrowserPhoneAction, nodeID: String, credential: NativeEnrollmentCredential
@@ -1306,7 +1404,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
       return .page(
         BrowserPhonePage(
           nodeID: nodeID, source: source, revision: revision, title: "Page", summary: nil,
-          items: items, site: site))
+          items: items, site: site, axScrollDirections: axScrollDirections))
     default:
       if commandError { throw PhoneControlFailure.unavailable }
       if let commandStatus {

@@ -674,6 +674,13 @@ final class BrowserPhoneControlStore: ObservableObject {
   private static func observedSiteAllows(_ intent: BrowserVoiceIntent, on page: BrowserPhonePage)
     -> Bool
   {
+    if let directions = page.axScrollDirections, page.site == nil {
+      guard page.source == .accessibility else { return false }
+      if case .scroll(let direction) = intent {
+        return (direction == .up || direction == .down) && directions.contains(direction)
+      }
+      return false
+    }
     guard let site = page.site else { return true }
     guard site.page != .login, site.page != .unsupported else { return false }
     if site.provider == .disneyplus {
