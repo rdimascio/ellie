@@ -100,7 +100,8 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     status = operation == .read ? "Reading the selected Mac…" : "Command sent; outcome unverified."
     timeout?.cancel()
     timeout = Task {
-      try? await Task.sleep(for: .milliseconds(WatchMediaRequest.lifetimeMilliseconds))
+      try? await Task.sleep(for: .milliseconds(
+        WatchMediaRequest.lifetimeMilliseconds(for: request.operation)))
       guard !Task.isCancelled, pendingID == request.id else { return }
       #if DEBUG
       noteDelivery("deadline", terminal: true)

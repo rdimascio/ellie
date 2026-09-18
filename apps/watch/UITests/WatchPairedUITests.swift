@@ -20,7 +20,7 @@ final class WatchPairedUITests: XCTestCase {
     }
     read.tap()
     let title = app.staticTexts["watch-observed-title"]
-    XCTAssertTrue(title.waitForExistence(timeout: 15),
+    XCTAssertTrue(title.waitForExistence(timeout: 25),
                   "Watch transport: \(app.staticTexts["watch-transport-diagnostic"].label); "
                     + "session: \(app.staticTexts["watch-media-status"].value ?? "missing")")
     XCTAssertEqual(title.label, "Fixture film A")
@@ -48,7 +48,7 @@ final class WatchPairedUITests: XCTestCase {
     XCTAssertFalse(app.buttons["watch-play"].isEnabled)
     read.tap()
     let title = app.staticTexts["watch-observed-title"]
-    XCTAssertTrue(title.waitForExistence(timeout: 15))
+    XCTAssertTrue(title.waitForExistence(timeout: 25))
     XCTAssertEqual(title.label, "Fixture film B")
     XCTAssertEqual(app.staticTexts["watch-observed-target"].label, "YouTube · Fixture Mac B")
     XCTAssertFalse(app.buttons["watch-pause"].isEnabled)
