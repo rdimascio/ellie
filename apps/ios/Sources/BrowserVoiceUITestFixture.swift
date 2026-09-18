@@ -10,6 +10,7 @@ struct BrowserVoiceUITestFixtureView: View {
   @StateObject private var controls: PhoneControlStore
   @StateObject private var browser: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
+  @StateObject private var lifeReview: IOSQuietVoiceStore
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
   @State private var backgroundCount = 0
 
@@ -34,13 +35,16 @@ struct BrowserVoiceUITestFixtureView: View {
         transport: BrowserVoiceUITestSpeechTransport(
           transcript: netflixRows ? "Scroll right" : "Search for public video")))
     _browserTransport = StateObject(wrappedValue: browserTransport)
+    _lifeReview = StateObject(wrappedValue: IOSQuietVoiceStore(
+      credential: credential, client: BrowserVoiceUITestLifeClient(),
+      journal: BrowserVoiceUITestUncertaintyStore()))
   }
 
   var body: some View {
     NavigationStack {
       SpeechTurnView(
         credential: BrowserVoiceUITestFixture.credential, controls: controls, browser: browser,
-        speech: speech)
+        speech: speech, lifeReview: lifeReview)
     }
     .overlay(alignment: .bottomTrailing) {
       VStack(alignment: .trailing, spacing: 2) {
@@ -110,6 +114,7 @@ struct BrowserComposedUITestFixtureView: View {
   @StateObject private var controls: PhoneControlStore
   @StateObject private var browser: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
+  @StateObject private var lifeReview: IOSQuietVoiceStore
   private let credential: NativeEnrollmentCredential
   private let target: String
 
@@ -125,11 +130,15 @@ struct BrowserComposedUITestFixtureView: View {
     _speech = StateObject(wrappedValue: SpeechTurnStore(
       credential: fixture.credential, recorder: BrowserVoiceUITestRecorder(),
       transport: BrowserComposedUITestSpeechTransport()))
+    _lifeReview = StateObject(wrappedValue: IOSQuietVoiceStore(
+      credential: fixture.credential, client: BrowserVoiceUITestLifeClient(),
+      journal: BrowserVoiceUITestUncertaintyStore()))
   }
 
   var body: some View {
     NavigationStack {
-      SpeechTurnView(credential: credential, controls: controls, browser: browser, speech: speech)
+      SpeechTurnView(credential: credential, controls: controls, browser: browser,
+        speech: speech, lifeReview: lifeReview)
     }
     .overlay(alignment: .bottomTrailing) {
       Text("Synthetic transcript; real pinned browser transport")
@@ -395,6 +404,21 @@ private final class BrowserVoiceUITestUncertaintyStore: BrowserMutationUncertain
     guard markers[scope] == token else { return .mismatch }
     markers.removeValue(forKey: scope)
     return .cleared
+  }
+}
+
+@MainActor
+private struct BrowserVoiceUITestLifeClient: IOSQuietVoiceClient {
+  func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int {
+    throw IOSQuietFailure.unavailable
+  }
+  func send(_ credential: NativeEnrollmentCredential, body: Data) async throws
+    -> IOSQuietChatOutcome {
+    throw IOSQuietFailure.unavailable
+  }
+  func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws
+    -> IOSQuietChatOutcome {
+    throw IOSQuietFailure.unavailable
   }
 }
 

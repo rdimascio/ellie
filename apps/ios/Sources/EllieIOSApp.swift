@@ -18,6 +18,8 @@ struct EllieIOSApp: App {
                 IOSGmailUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-session-fixture") {
                 IOSQuietSessionsUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-voice-fixture") {
+                IOSQuietVoiceUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(

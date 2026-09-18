@@ -467,3 +467,216 @@ test("a durably authorized personal reset completes as host work after its initi
     await f.close();
   }
 });
+
+test("native voice review binds one durable personal turn without executing model or deterministic actions", async () => {
+  let planned = 0;
+  const model: LifeModel = {
+    async plan(input) {
+      planned++;
+      return input.message.includes("remember")
+        ? {
+            reply: "I will save that.",
+            actions: [{ type: "create_memory", title: "Unsafe", body: "Must not save" }],
+          }
+        : { reply: "The trip task is still being reviewed.", actions: [] };
+    },
+  };
+  const f = await fixture({ model });
+  try {
+    const list = await f.request("/api/life/native/sessions?limit=3", "phone");
+    assert.equal(list.status, 200);
+    assert.equal(
+      Object.hasOwn((await list.json()) as object, "chatEpoch"),
+      false,
+      "the published native sessions wire remains unchanged",
+    );
+    const state = await f.request("/api/life/native/chat/state", "phone");
+    assert.equal(state.status, 200);
+    const { chatEpoch, available } = (await state.json()) as {
+      chatEpoch: number;
+      available: boolean;
+    };
+    assert.ok(Number.isSafeInteger(chatEpoch));
+    assert.equal(available, true);
+    const requestId = "native_faaf931b-7446-44b4-9d2e-b452ae26629a";
+    const body = { message: "What is happening with my trip?", requestId, chatEpoch };
+    const sent = await f.request("/api/life/native/chat", "phone", body);
+    assert.equal(sent.status, 200);
+    const answer = (await sent.json()) as {
+      status: string;
+      conversationId: string;
+      reply: string;
+      needsMacReview: boolean;
+    };
+    assert.equal(answer.status, "completed");
+    assert.equal(answer.reply, "The trip task is still being reviewed.");
+    assert.equal(answer.needsMacReview, false);
+    assert.equal(f.life.getConversationRequest(actor, requestId)?.turn.status, "completed");
+    const reconciled = await f.request(`/api/life/native/chat/requests/${requestId}`, "phone");
+    assert.equal(reconciled.status, 200);
+    assert.deepEqual(await reconciled.json(), answer);
+    const duplicate = await f.request("/api/life/native/chat", "phone", body);
+    assert.equal(duplicate.status, 200);
+    assert.deepEqual(await duplicate.json(), answer);
+    assert.equal(planned, 1, "a durable request cannot run the model twice");
+    const followUpId = "native_12798995-6699-4a69-9387-768cab83115f";
+    const followUp = await f.request("/api/life/native/chat", "phone", {
+      message: "What should I read next?",
+      requestId: followUpId,
+      chatEpoch,
+      conversationId: answer.conversationId,
+    });
+    assert.equal(followUp.status, 200);
+    assert.equal(
+      ((await followUp.json()) as { conversationId: string }).conversationId,
+      answer.conversationId,
+    );
+    assert.equal(f.life.getConversationRequest(actor, followUpId)?.turn.status, "completed");
+    assert.equal(planned, 2);
+    const forgedDesktopNativeId = await f.request("/api/life/chat", "mac", {
+      scope: "user:alice",
+      message: "What should I read next?",
+      requestId: "native_c61f030e-973b-462e-bd5d-3483512dde8b",
+      chatEpoch,
+    });
+    assert.equal(
+      forgedDesktopNativeId.status,
+      400,
+      "ordinary chat cannot occupy the native read-only request namespace",
+    );
+    const origin = f.life.getConversationRequest(actor, requestId)!;
+    const pending = f.life.createPendingIntent(actor, {
+      conversationId: answer.conversationId,
+      scope,
+      chatEpoch,
+      originTurnId: origin.turn.id,
+      originRequestId: requestId,
+      intent: { kind: "schedule-reminder", title: "Call Mum" },
+      missing: ["when"],
+      question: "When should I remind you?",
+      contextFingerprint: f.life.conversationContextFingerprint(actor, answer.conversationId),
+    });
+    const attemptedAnswer = await f.request("/api/life/native/chat", "phone", {
+      message: "Tomorrow at 10",
+      requestId: "native_e1b75b84-2c30-4dcb-9011-17ed5016df9e",
+      chatEpoch,
+      conversationId: answer.conversationId,
+    });
+    assert.equal(attemptedAnswer.status, 200);
+    assert.equal(
+      f.life.getPendingIntent(actor, answer.conversationId)?.id,
+      pending.id,
+      "native conversation cannot answer or discard a pending desktop intent",
+    );
+
+    const blocked = await f.request("/api/life/native/chat", "phone", {
+      message: "remember that I prefer mornings",
+      requestId: "native_820c96b1-b537-47e7-acce-d821bc4bacaa",
+      chatEpoch,
+      conversationId: answer.conversationId,
+    });
+    assert.equal(blocked.status, 200);
+    const refused = (await blocked.json()) as { reply: string; needsMacReview: boolean };
+    assert.match(refused.reply, /No change was made/);
+    assert.equal(refused.needsMacReview, true);
+    const refusedStatus = await f.request(
+      "/api/life/native/chat/requests/native_820c96b1-b537-47e7-acce-d821bc4bacaa",
+      "phone",
+    );
+    assert.equal(
+      ((await refusedStatus.json()) as { needsMacReview: boolean }).needsMacReview,
+      true,
+    );
+    assert.equal(f.life.listRecords(actor, { scope }).length, 0);
+    assert.equal(f.tasks.list({ owner: `user:${actor.userId}` }).length, 0);
+    assert.equal(f.life.getPendingIntent(actor, answer.conversationId)?.state, "awaiting-fields");
+    const settingsBefore = f.life.resolveSettings(actor).values;
+    const directWrites = [
+      ["native_25545009-3a4e-40ad-8766-3d225ad15ec8", "track a new household chore"],
+      ["native_a1f4464d-7ee0-4a77-8510-09edba9e337c", "feedback: change my settings"],
+      ["native_ddca8355-1485-474a-bbe0-530834fd54ce", "work on this in the background"],
+      ["native_d7dc8562-139d-4a5f-8a22-e8df9b8cac9b", "pause guidance for my plans"],
+      ["native_74fbc5b2-bdb8-4819-b9cf-4ecab139c9fe", "complete Call Mum"],
+    ] as const;
+    for (const [id, message] of directWrites) {
+      const response = await f.request("/api/life/native/chat", "phone", {
+        message,
+        requestId: id,
+        chatEpoch,
+        conversationId: answer.conversationId,
+      });
+      assert.equal(response.status, 200, message);
+      assert.equal(((await response.json()) as { status: string }).status, "completed");
+    }
+    assert.deepEqual(f.life.resolveSettings(actor).values, settingsBefore);
+    assert.equal(f.life.listRecords(actor, { scope }).length, 0);
+    assert.equal(f.tasks.list({ owner: `user:${actor.userId}` }).length, 0);
+    assert.equal(f.life.getPendingIntent(actor, answer.conversationId)?.state, "awaiting-fields");
+    assert.equal(
+      (
+        await f.request("/api/life/native/chat", "phone", {
+          ...body,
+          requestId: "native_f259246c-9169-4ef9-bc0b-554c5fefee25",
+          scope: "user:bob",
+        })
+      ).status,
+      400,
+    );
+    assert.equal((await f.request("/api/life/native/chat", "outsider", body)).status, 401);
+  } finally {
+    await f.close();
+  }
+});
+
+test("native review persists one bounded Unicode-safe reply for POST and status", async () => {
+  const reply = `Family 👩‍👩‍👧‍👧\r\n日本語\u0000\u0001${"😀".repeat(2_981)}`;
+  const f = await fixture({
+    model: {
+      async plan() {
+        return { reply, actions: [] };
+      },
+    },
+  });
+  try {
+    const body = {
+      message: "What did the family plan?",
+      requestId: "native_223e69d0-dbd6-4dd5-a45d-a16d0fd13326",
+      chatEpoch: 1,
+    };
+    const sent = await f.request("/api/life/native/chat", "phone", body);
+    assert.equal(sent.status, 200);
+    const raw = await sent.text();
+    assert.ok(Buffer.byteLength(raw) < 16_384, "the full native envelope fits its transport bound");
+    const value = JSON.parse(raw) as { reply: string; status: string };
+    assert.equal(value.status, "completed");
+    assert.equal(value.reply, `Family 👩‍👩‍👧‍👧\r\n日本語${"😀".repeat(2_981)}`);
+    assert.equal(Array.from(value.reply).length, 3_000);
+    const status = await f.request(`/api/life/native/chat/requests/${body.requestId}`, "phone");
+    assert.equal(status.status, 200);
+    assert.equal(((await status.json()) as { reply: string }).reply, value.reply);
+    assert.equal(f.life.getConversationRequest(actor, body.requestId)?.result?.reply, value.reply);
+  } finally {
+    await f.close();
+  }
+});
+
+test("native read-only chat reports unavailable before a durable turn when no model is configured", async () => {
+  const f = await fixture();
+  try {
+    const state = await f.request("/api/life/native/chat/state", "phone");
+    assert.deepEqual(await state.json(), { chatEpoch: 1, available: false });
+    const sent = await f.request("/api/life/native/chat", "phone", {
+      message: "Remember that I prefer mornings",
+      requestId: "native_820c96b1-b537-47e7-acce-d821bc4bacaa",
+      chatEpoch: 1,
+    });
+    assert.equal(sent.status, 503);
+    assert.equal(
+      f.life.getConversationRequest(actor, "native_820c96b1-b537-47e7-acce-d821bc4bacaa"),
+      undefined,
+    );
+    assert.equal(f.life.listRecords(actor, { scope }).length, 0);
+  } finally {
+    await f.close();
+  }
+});

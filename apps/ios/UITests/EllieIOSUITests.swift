@@ -1,6 +1,54 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testQuietVoiceReviewRequiresExplicitSendAndNeverReplaysUnknown() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-quiet-voice-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        func tap(_ identifier: String) {
+            revealBrowserButton(identifier, in: app, forTap: true).tap()
+        }
+        func waitLabel(_ element: XCUIElement, _ label: String) {
+            let observed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label == %@", label), object: element)
+            XCTAssertEqual(XCTWaiter.wait(for: [observed], timeout: 5), .completed, label)
+        }
+        let sends = app.staticTexts["quiet-voice-fixture-sends"]
+        XCTAssertEqual(sends.label, "Fixture sends: 0")
+        tap("speech-check")
+        tap("speech-record")
+        tap("speech-stop")
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 0", "transcription cannot send itself")
+        tap("speech-life-send")
+        waitLabel(app.staticTexts["speech-life-reply"], "Read-only reply 1.")
+        XCTAssertEqual(sends.label, "Fixture sends: 1")
+        tap("New message")
+        tap("speech-record")
+        tap("speech-stop")
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 1")
+        tap("speech-life-send")
+        waitLabel(app.staticTexts["speech-life-reply"], "Read-only reply 2.")
+        XCTAssertEqual(app.staticTexts["quiet-voice-fixture-follow-up"].label,
+            "Fixture follow-up bound: true")
+        tap("New message")
+        tap("speech-record")
+        tap("speech-stop")
+        tap("speech-life-send")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
+            "The message may have reached Life")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 3")
+        tap("speech-life-check-status")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
+            "Life access was revoked")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["quiet-voice-fixture-status"].label,
+            "Fixture status reads: 1")
+        XCTAssertEqual(sends.label, "Fixture sends: 3", "status never resends an unknown request")
+    }
+
     func testQuietRecentSessionsReviewUsesDistinctLinkedWorkAndRevocationClearsIt() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-quiet-session-fixture"]
@@ -702,10 +750,7 @@ final class EllieIOSUITests: XCTestCase {
             XCTAssertEqual(transcript.value as? String, "Scroll right")
         }
         func row(_ index: Int) -> XCUIElement {
-            let target = app.buttons["speech-netflix-row-\(index)"]
-            for _ in 0..<4 where !target.exists { app.swipeUp() }
-            XCTAssertTrue(target.waitForExistence(timeout: 5))
-            return target
+            revealBrowserButton("speech-netflix-row-\(index)", in: app, forTap: true)
         }
         reviewScroll()
         let run = app.buttons["speech-browser-run"]
@@ -714,21 +759,23 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertEqual(count.label, "Fixture mutations: 0")
         app.buttons["speech-browser-read"].tap()
         XCTAssertTrue(row(2).waitForExistence(timeout: 5))
-        XCTAssertFalse(run.isEnabled)
+        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled)
         row(2).tap()
         XCTAssertTrue(app.staticTexts["speech-netflix-row-review"].label.contains(
             "Row 2: New on Fixture Mac A"))
-        XCTAssertTrue(run.isEnabled)
+        XCTAssertTrue(revealBrowserButton("speech-browser-run", in: app, forTap: true).isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 0")
         run.tap()
         waitForFixtureMutations(1, in: app)
         XCTAssertFalse(app.buttons["speech-netflix-row-2"].exists)
 
         reviewScroll()
-        XCTAssertFalse(run.isEnabled, "the old row choice cannot authorize a later turn")
+        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled,
+                       "the old row choice cannot authorize a later turn")
         app.buttons["speech-browser-read"].tap()
         XCTAssertTrue(row(1).waitForExistence(timeout: 5))
-        XCTAssertFalse(run.isEnabled, "a fresh read still needs an explicit row choice")
+        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled,
+                       "a fresh read still needs an explicit row choice")
         XCTAssertEqual(count.label, "Fixture mutations: 1")
     }
 
@@ -798,14 +845,23 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
         app.buttons["speech-stop"].tap()
         XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
-        app.buttons["Discard transcript"].tap()
-        XCTAssertFalse(app.textViews["speech-transcript"].exists)
+        revealBrowserButton("speech-discard", in: app, forTap: true).tap()
+        // Return to the top of the lazy Form: an off-screen TextEditor alone is not proof
+        // that Discard changed the turn back to the recordable state.
+        let recordAfterDiscard = revealBrowserButton("speech-record", in: app, forTap: true)
+        guard recordAfterDiscard.exists && recordAfterDiscard.isHittable else { return }
+        let discarded = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.textViews["speech-transcript"])
+        guard XCTWaiter.wait(for: [discarded], timeout: 5) == .completed else {
+            XCTFail("Discard must remove the reviewed transcript before another recording")
+            return
+        }
         XCTAssertEqual(count.label, "Fixture mutations: 0")
 
         // A separate reviewed turn is required after discard. Its transcript remains inert
         // until the page has been observed and the person taps Run.
-        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
-        app.buttons["speech-record"].tap()
+        recordAfterDiscard.tap()
         XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
         app.buttons["speech-stop"].tap()
         let transcript = app.textViews["speech-transcript"]

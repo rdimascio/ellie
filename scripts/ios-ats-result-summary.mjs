@@ -1,6 +1,7 @@
 const googleCases = [
   "NativeGoogleHTTPSIntegrationTests/testLateGmailBodyCannotPublishAfterCancelCredentialChangeOrRevocation()",
   "NativeGoogleHTTPSIntegrationTests/testLifeAccountGrantIsIndependentOfNativeEnrollment()",
+  "NativeGoogleHTTPSIntegrationTests/testPinnedNativeLifeQuestionUsesSeparateGrantAndDurableReadOnlyStatus()",
   "NativeGoogleHTTPSIntegrationTests/testPinnedClientsReadSelectedCalendarAndExplicitGmailBodies()",
 ];
 
