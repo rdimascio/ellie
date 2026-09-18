@@ -8,7 +8,9 @@ struct EllieIOSApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
+            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") {
+                WatchPairedUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
                 HomeAppearanceUITestFixtureView(
                     accessibilityLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"),
                     narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))

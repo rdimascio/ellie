@@ -6,8 +6,13 @@ final class WatchMediaPhoneTests: XCTestCase {
   func testWireRequiresLiveExactRequestsAndEvidenceBoundReplies() {
     let now: Int64 = 1_000_000
     let read = WatchMediaRequest.make(.read, now: now)
+    XCTAssertEqual(read.expiresAt, now + 20_000)
     XCTAssertNotNil(WatchMediaRequest.decode(read.message, now: now))
-    XCTAssertNil(WatchMediaRequest.decode(read.message, now: now + 10_000))
+    XCTAssertNotNil(WatchMediaRequest.decode(read.message, now: now + 19_999))
+    XCTAssertNil(WatchMediaRequest.decode(read.message, now: now + 20_000))
+    var excessiveRead = read.message
+    excessiveRead["expiresAt"] = now + 20_001
+    XCTAssertNil(WatchMediaRequest.decode(excessiveRead, now: now))
     var extra = read.message
     extra["playback"] = "play"
     XCTAssertNil(WatchMediaRequest.decode(extra, now: now))
@@ -20,8 +25,17 @@ final class WatchMediaPhoneTests: XCTestCase {
     var hugeExpiry = read.message
     hugeExpiry["expiresAt"] = UInt64.max
     XCTAssertNil(WatchMediaRequest.decode(hugeExpiry, now: now))
-    var invalidMutation = WatchMediaRequest.make(.pause, target: "mac", epoch: read.id,
-                                                  revision: "rev", now: now).message
+    let pause = WatchMediaRequest.make(.pause, target: "mac", epoch: read.id,
+                                       revision: "rev", now: now)
+    XCTAssertEqual(pause.expiresAt, now + 10_000)
+    XCTAssertEqual(WatchMediaRequest.make(.play, target: "mac", epoch: read.id,
+                                          revision: "rev", now: now).expiresAt, now + 10_000)
+    XCTAssertNotNil(WatchMediaRequest.decode(pause.message, now: now + 9_999))
+    XCTAssertNil(WatchMediaRequest.decode(pause.message, now: now + 10_000))
+    var excessiveMutation = pause.message
+    excessiveMutation["expiresAt"] = now + 10_001
+    XCTAssertNil(WatchMediaRequest.decode(excessiveMutation, now: now))
+    var invalidMutation = pause.message
     invalidMutation["revision"] = "old revision"
     XCTAssertNil(WatchMediaRequest.decode(invalidMutation, now: now))
 
@@ -137,9 +151,9 @@ final class WatchMediaPhoneTests: XCTestCase {
     let duplicate = await controller.handle(first, now: { clock.value })
     XCTAssertEqual(duplicate.state, .blocked)
 
-    // More than the cache bound over nonoverlapping ten-second lifetimes stays usable.
+    // More than the cache bound over nonoverlapping read lifetimes stays usable.
     for _ in 0..<129 {
-      clock.value += WatchMediaRequest.lifetimeMilliseconds + 1
+      clock.value += WatchMediaRequest.readLifetimeMilliseconds + 1
       let request = WatchMediaRequest.make(.read, now: clock.value)
       let reply = await controller.handle(request, now: { clock.value })
       XCTAssertEqual(reply.state, .observed)
