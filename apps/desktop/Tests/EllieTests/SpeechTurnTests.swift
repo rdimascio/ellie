@@ -178,6 +178,57 @@ final class SpeechTurnTests: XCTestCase {
   }
 
   @MainActor
+  func testCredentialChangeBeforeQueuedAvailabilityOrRecordStartsMakesNoOldRequest() async {
+    let old = credential()
+    let initialTransport = SpeechFakeTransport()
+    let initial = SpeechTurnStore(credential: old, recorder: SpeechFakeRecorder(),
+      transport: initialTransport)
+    initial.checkAvailability()
+    initial.credentialDidChange() // Same main-actor turn, before the queued task can start.
+    await eventually { initial.phase == .credentialChanged }
+    let initialCalls = await initialTransport.availabilityTokens
+    XCTAssertTrue(initialCalls.isEmpty)
+
+    let recorder = SpeechFakeRecorder()
+    let transport = SpeechFakeTransport()
+    let ready = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    ready.checkAvailability()
+    await eventually { ready.phase == .ready }
+    ready.record()
+    ready.credentialDidChange() // The recording task has not started.
+    await eventually { ready.phase == .credentialChanged }
+    let calls = await transport.availabilityTokens
+    let starts = await recorder.startCalls
+    XCTAssertEqual(calls, [old.token])
+    XCTAssertEqual(starts, 0)
+  }
+
+  @MainActor
+  func testCredentialChangeWhileRecorderStopsDisposesLateArtifactBeforeTranscription() async {
+    let old = credential()
+    let recorder = SpeechFakeRecorder(holdStop: true)
+    let transport = SpeechFakeTransport()
+    let store = SpeechTurnStore(credential: old, recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { await recorder.stopPending }
+
+    store.credentialDidChange()
+    await recorder.finishStop()
+    await eventually { store.phase == .credentialChanged }
+    XCTAssertEqual(store.transcript, "")
+    let transcriptions = await transport.transcriptionTokens
+    let disposals = await recorder.disposals
+    let directoryExists = await recorder.directoryExists
+    XCTAssertTrue(transcriptions.isEmpty)
+    XCTAssertEqual(disposals, 1)
+    XCTAssertFalse(directoryExists)
+  }
+
+  @MainActor
   func testCredentialChangeDuringTranscriptionDisposesAudioWithoutLatePrivateText() async {
     let old = credential()
     let recorder = SpeechFakeRecorder()
@@ -358,9 +409,13 @@ private actor SpeechFakeRecorder: SpeechRecording {
   var startCalls = 0
   var disposals = 0
   var failCleanup = false
+  private let holdStop: Bool
+  private var stopContinuation: CheckedContinuation<Void, Never>?
+  var stopPending: Bool { stopContinuation != nil }
   var directoryExists: Bool { FileManager.default.fileExists(atPath: directory.path) }
 
-  init() {
+  init(holdStop: Bool = false) {
+    self.holdStop = holdStop
     directory = FileManager.default.temporaryDirectory.appendingPathComponent(
       "ellie-speech-fake-\(UUID().uuidString)", isDirectory: true)
     file = directory.appendingPathComponent("turn.wav")
@@ -371,7 +426,19 @@ private actor SpeechFakeRecorder: SpeechRecording {
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
     try Data("synthetic".utf8).write(to: file)
   }
-  func stop() async throws -> SpeechAudioArtifact { SpeechAudioArtifact(id: UUID(), url: file) }
+  func stop() async throws -> SpeechAudioArtifact {
+    if holdStop {
+      await withCheckedContinuation { stopContinuation = $0 }
+      // Model a recorder that finishes its owned artifact after cancellation.
+      try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+      try Data("synthetic".utf8).write(to: file)
+    }
+    return SpeechAudioArtifact(id: UUID(), url: file)
+  }
+  func finishStop() {
+    stopContinuation?.resume()
+    stopContinuation = nil
+  }
   func cancel() async throws { try cleanup() }
   func dispose(_ artifact: SpeechAudioArtifact) async throws {
     guard artifact.url.standardizedFileURL == file.standardizedFileURL else { return }
