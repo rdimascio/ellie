@@ -13,9 +13,14 @@ import {
   computeCapabilities,
   telemetry,
   inferenceRequest,
+  distributedCapabilities,
 } from "@ellie/protocol";
 import type { Context, Job, InferenceJob, Result, NodeInfo } from "@ellie/protocol";
+import type { DistributedMlxGroup } from "@ellie/protocol";
+import { DistributedScheduler } from "./distributed.ts";
 import { route } from "@ellie/router";
+import { decideDesktop } from "@ellie/router/decision";
+import type { DecisionProvider } from "@ellie/decisions";
 import { authorize } from "@ellie/permissions";
 import { readJson } from "@ellie/transport";
 import { selectWorker } from "@ellie/compute";
@@ -45,6 +50,15 @@ interface Session {
   context: Context;
   poll?: { response: ServerResponse; timer: NodeJS.Timeout };
   pending?: Pending;
+  routing?: AbortController;
+}
+
+export interface DecisionRoutingOptions {
+  provider: DecisionProvider;
+  mode: "shadow" | "execute";
+  timeoutMs?: number;
+  minProbability?: number;
+  minMargin?: number;
 }
 function send(res: ServerResponse, status: number, body: unknown): void {
   if (!res.destroyed && !res.writableEnded)
@@ -63,11 +77,36 @@ export function createEllieServer(options: {
   preferences: Preferences;
   jobStore: JobStore;
   commandTimeout?: number;
+  decisionRouting?: DecisionRoutingOptions;
+  distributedGroups?: DistributedMlxGroup[];
 }) {
   const sessions = new Map<string, Session>();
   const auth = options.auth;
+  const distributed = new DistributedScheduler({
+    groups: options.distributedGroups ?? [],
+    store: options.jobStore,
+    nodes: () => [...sessions.values()].map((s) => s.info),
+    invalidate: (id) => {
+      const info = sessions.get(id)?.info;
+      if (info) delete info.telemetryReceivedAt;
+    },
+  });
+  const busyNodes = () =>
+    new Set([
+      ...distributed.busy(),
+      ...[...sessions.values()].filter((s) => s.pending || s.routing).map((s) => s.info.id),
+    ]);
 
   const deliver = (session: Session): void => {
+    if (session.poll && distributed.member(session.info.id)) {
+      const task = distributed.deliver(session.info.id);
+      if (task) {
+        clearTimeout(session.poll.timer);
+        send(session.poll.response, 200, { job: task });
+        delete session.poll;
+      }
+      return;
+    }
     if (!session.poll || !session.pending || session.pending.delivered) return;
     const pending = session.pending;
     if (pending.cancelRequested) {
@@ -247,7 +286,9 @@ export function createEllieServer(options: {
         if (req.method === "POST" && path === "/v1/revoke" && identity.role === "controller") {
           const id = identifier(record(await readJson(req)).id);
           await auth.revoke(id);
+          distributed.changed(id, "node_revoked");
           const session = sessions.get(id);
+          session?.routing?.abort();
           if (session?.poll) {
             clearTimeout(session.poll.timer);
             send(session.poll.response, 403, { error: "Node revoked." });
@@ -280,10 +321,16 @@ export function createEllieServer(options: {
           if (req.method === "POST") {
             await readJson(req);
             const session = sessions.get(stored.target);
+            if (distributed.member(stored.target)?.task.id === id) {
+              distributed.cancelJob(stored.target, id);
+              return send(res, 200, options.jobStore.get(id));
+            }
             if (session?.pending?.job.id === id) return send(res, 200, session.pending.cancel());
             return send(res, 200, options.jobStore.requestCancellation(id) ?? stored);
           }
         }
+        if (req.method === "GET" && path === "/v1/groups" && identity.role === "controller")
+          return send(res, 200, distributed.status(busyNodes()));
         if (req.method === "GET" && path === "/v1/nodes")
           return send(
             res,
@@ -300,6 +347,15 @@ export function createEllieServer(options: {
               ? undefined
               : computeCapabilities(body.computeCapabilities);
           const metrics = body.telemetry === undefined ? undefined : telemetry(body.telemetry);
+          const shards =
+            body.distributedCapabilities === undefined
+              ? []
+              : distributedCapabilities(body.distributedCapabilities);
+          if (
+            (body.distributedCapabilities !== undefined && !metrics) ||
+            shards.some((c) => c.plan.nodeIds[c.rank] !== identity.id)
+          )
+            throw new Error("Distributed registration requires local membership and telemetry.");
           if (compute && !metrics) throw new Error("Compute registration requires telemetry.");
           let session = sessions.get(identity.id);
           if (!session) {
@@ -314,11 +370,15 @@ export function createEllieServer(options: {
             };
             sessions.set(identity.id, session);
           } else {
+            distributed.changed(identity.id);
+            // A reconnect may change capabilities and invalidate the context used by a decision.
+            session.routing?.abort();
             session.info.capabilities = granted;
             session.info.lastSeen = Date.now();
           }
           session.info.executionCapabilities = granted;
           session.info.computeCapabilities = compute;
+          session.info.distributedCapabilities = shards;
           session.info.telemetry = metrics;
           session.info.telemetryReceivedAt = metrics ? Date.now() : undefined;
           return send(res, 200, { ok: true });
@@ -337,13 +397,29 @@ export function createEllieServer(options: {
               ? undefined
               : computeCapabilities(body.computeCapabilities);
           if (compute && !metrics) throw new Error("Compute heartbeat requires telemetry.");
+          const shards =
+            body.distributedCapabilities === undefined
+              ? []
+              : distributedCapabilities(body.distributedCapabilities);
+          if (
+            (body.distributedCapabilities !== undefined && !metrics) ||
+            shards.some((c) => c.plan.nodeIds[c.rank] !== identity.id)
+          )
+            throw new Error("Distributed heartbeat requires local membership and telemetry.");
           session.info.telemetry = metrics;
           session.info.computeCapabilities = compute;
+          session.info.distributedCapabilities = shards;
           session.info.telemetryReceivedAt = metrics ? Date.now() : undefined;
           session.info.lastSeen = Date.now();
+          distributed.checkNode(identity.id);
+          const member = distributed.member(identity.id);
           return send(res, 200, {
             ok: true,
-            cancelJobIds: session.pending?.cancelRequested ? [session.pending.job.id] : [],
+            cancelJobIds: session.pending?.cancelRequested
+              ? [session.pending.job.id]
+              : member?.lease.cancelled && !member.stopped
+                ? [member.task.id]
+                : [],
           });
         }
         if (req.method === "GET" && path === "/v1/poll" && identity.role === "node" && session) {
@@ -368,6 +444,8 @@ export function createEllieServer(options: {
         }
         if (req.method === "POST" && path === "/v1/start" && identity.role === "node" && session) {
           const id = identifier(record(await readJson(req)).id);
+          if (distributed.member(identity.id)?.task.id === id)
+            return send(res, 200, distributed.start(identity.id, id));
           if (!session.pending || !session.pending.delivered || id !== session.pending.job.id)
             return send(res, 409, { error: "No matching delivered job." });
           if (!session.pending.cancelRequested)
@@ -376,6 +454,21 @@ export function createEllieServer(options: {
         }
         if (req.method === "POST" && path === "/v1/result" && identity.role === "node" && session) {
           const body = record(await readJson(req));
+          if (distributed.member(identity.id)?.task.id === body.id) {
+            distributed.report(identity.id, identifier(body.id), result(body.result));
+            return send(res, 200, { ok: true });
+          }
+          // A lost teardown acknowledgement may be retried after the entire lease was released.
+          const completedRank =
+            typeof body.id === "string" && /-[0-7]$/.test(body.id)
+              ? options.jobStore.get(body.id)
+              : undefined;
+          if (
+            completedRank?.target === identity.id &&
+            completedRank.kind === "inference" &&
+            ["completed", "failed", "cancelled", "unknown"].includes(completedRank.state)
+          )
+            return send(res, 200, { ok: true });
           if (
             !session.pending ||
             !session.pending.delivered ||
@@ -388,10 +481,27 @@ export function createEllieServer(options: {
         }
         if (req.method === "POST" && path === "/v1/inference" && identity.role === "controller") {
           const request = inferenceRequest(await readJson(req));
+          if (request.mode === "distributed-mlx") {
+            try {
+              const cancel = distributed.submit(request, busyNodes(), (outcome) =>
+                send(res, 200, outcome),
+              );
+              res.once("close", () => {
+                if (!res.writableEnded) cancel();
+              });
+              if (res.destroyed) cancel();
+              for (const node of sessions.values()) deliver(node);
+            } catch (error) {
+              send(res, 409, {
+                error: error instanceof Error ? error.message : "Distributed placement failed.",
+              });
+            }
+            return;
+          }
           const selected = selectWorker(
             [...sessions.values()].map((s) => s.info),
             request.model,
-            new Set([...sessions.values()].filter((s) => s.pending).map((s) => s.info.id)),
+            busyNodes(),
           );
           if (!selected)
             return send(res, 409, {
@@ -431,9 +541,70 @@ export function createEllieServer(options: {
             return send(res, 409, {
               error: "Node is registered but offline or stale. Start its node service.",
             });
-          if (node.pending)
+          if (busyNodes().has(target))
             return send(res, 409, { error: "Node is busy. Wait for the current command." });
-          const plan = route(string(body.text, 500), node.context, options.preferences);
+          const text = string(body.text, 500);
+          let plan = route(text, node.context, options.preferences);
+          const routing = options.decisionRouting;
+          if (!plan && routing) {
+            const abort = new AbortController();
+            node.routing = abort;
+            const cancel = () => abort.abort();
+            const onClose = () => {
+              if (!res.writableEnded) cancel();
+            };
+            res.once("close", onClose);
+            const timer = setTimeout(cancel, routing.timeoutMs ?? 3000);
+            let rejectAbort: (() => void) | undefined;
+            try {
+              if (res.destroyed || stopped) abort.abort();
+              abort.signal.throwIfAborted();
+              const decision = await Promise.race([
+                decideDesktop(text, { ...node.context }, options.preferences, routing.provider, {
+                  signal: abort.signal,
+                  minProbability: routing.minProbability,
+                  minMargin: routing.minMargin,
+                }),
+                new Promise<never>((_resolve, reject) => {
+                  rejectAbort = () => reject(new Error("Decision cancelled."));
+                  abort.signal.addEventListener("abort", rejectAbort, { once: true });
+                  if (abort.signal.aborted) rejectAbort();
+                }),
+              ]);
+              abort.signal.throwIfAborted();
+              if (res.destroyed || stopped) return;
+              if (
+                sessions.get(target) !== node ||
+                !auth.authenticate(req.headers.authorization) ||
+                Date.now() - node.info.lastSeen > 60_000
+              )
+                return send(res, 409, {
+                  error:
+                    "Node changed or disconnected while interpreting the request. No action was sent.",
+                });
+              if (decision.kind !== "plan")
+                return send(res, 200, { ok: false, message: decision.message });
+              const proposed = actions(decision.plan.actions);
+              authorize(proposed, node.info.capabilities, options.preferences);
+              if (routing.mode === "shadow")
+                return send(res, 200, {
+                  ok: false,
+                  message: `Shadow mode proposed ${JSON.stringify(proposed)}. No action was executed.`,
+                });
+              plan = decision.plan;
+            } catch {
+              return send(res, 200, {
+                ok: false,
+                message:
+                  "Decision routing was unavailable, cancelled, or could not produce an allowed action. No action was sent. Try an explicit command such as “open Arc”.",
+              });
+            } finally {
+              clearTimeout(timer);
+              res.off("close", onClose);
+              if (rejectAbort) abort.signal.removeEventListener("abort", rejectAbort);
+              if (node.routing === abort) delete node.routing;
+            }
+          }
           if (!plan)
             return send(res, 200, {
               ok: false,
@@ -474,7 +645,9 @@ export function createEllieServer(options: {
   const shutdown = (): void => {
     if (stopped) return;
     stopped = true;
+    distributed.shutdown();
     for (const session of sessions.values()) {
+      session.routing?.abort();
       if (session.poll) {
         clearTimeout(session.poll.timer);
         send(session.poll.response, 503, { error: "Server stopping." });

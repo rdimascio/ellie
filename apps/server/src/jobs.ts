@@ -172,6 +172,13 @@ export class JobStore {
       .run(input.id, input.kind, input.target, input.createdAt, input.createdAt, input.expiresAt);
   }
 
+  /** Commit every rank before any part of a distributed job can be delivered. */
+  createBatch(inputs: Parameters<JobStore["create"]>[0][]): void {
+    this.transaction(() => {
+      for (const input of inputs) this.create(input);
+    });
+  }
+
   markDelivered(id: string, now = Date.now()): void {
     const change = this.database
       .prepare(
@@ -192,12 +199,16 @@ export class JobStore {
     throw new Error("Job start did not match delivered work.");
   }
 
-  requestCancellation(id: string, now = Date.now()): JobMetadata | undefined {
+  requestCancellation(
+    id: string,
+    now = Date.now(),
+    reason: JobOutcomeCode = "cancelled_by_caller",
+  ): JobMetadata | undefined {
     this.database
       .prepare(
-        "UPDATE jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancellation_requested' END, updated_at = ?, outcome_ok = CASE WHEN state = 'queued' THEN 0 ELSE outcome_ok END, outcome_code = CASE WHEN state = 'queued' THEN 'cancelled_by_caller' ELSE outcome_code END WHERE id = ? AND state IN ('queued', 'delivered', 'running')",
+        "UPDATE jobs SET state = CASE WHEN state = 'queued' THEN 'cancelled' ELSE 'cancellation_requested' END, updated_at = ?, outcome_ok = CASE WHEN state = 'queued' THEN 0 ELSE outcome_ok END, outcome_code = CASE WHEN state = 'queued' THEN ? ELSE outcome_code END WHERE id = ? AND state IN ('queued', 'delivered', 'running')",
       )
-      .run(now, id);
+      .run(now, reason, id);
     const stored = this.get(id);
     if (stored?.state === "cancelled") this.prune(now);
     return stored;

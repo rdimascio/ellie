@@ -43,6 +43,12 @@ If only the server's network address changes, update `serverUrl` in the node's p
 
 The server Keychain must be accessible in the logged-in session. Rebuilding the ad-hoc signed helper may require a new Keychain or Accessibility grant. Developer signing and a notarized installer are future work.
 
+## Optional decision routing
+
+Decision routing is absent by default. Hosted TypeSafe routing requires `cloudDisclosure: true` in coordinator configuration, set explicitly by `routing typesafe --allow-cloud`. That command stores the key in macOS Keychain under `decision.typesafe`. Both shadow and execution modes disclose unmatched requests, app/site candidate descriptions, and successful-app context to the fixed TypeSafe endpoint. Deterministic commands make no provider call. Ellie does not persist request/response content; the provider controls its own retention. The local adapter accepts only literal loopback origins and never silently switches to cloud.
+
+Responses must match the question set, enum choices, and finite probability distributions. Probability thresholds do not establish user authorization or semantic correctness. Code builds one allowed operation, and existing coordinator/node policy still applies. Shadow proposals do not create jobs or commit context. Disconnect, deadline, revocation, re-registration, and shutdown cancel pending interpretation; a cancelled or stale proposal cannot dispatch later. Model errors are sanitized, input/output sizes are bounded, redirects are rejected, and the adapter does not retry. See [setup, disclosure, and evaluation](decision-routing.md).
+
 ## Optional compute workers
 
 Compute is disabled unless configured in the private node configuration. Enabled workers report free/total memory, load, Ellie job count, power/battery, thermal state, coordinator RTT, and the locally enabled model inventory. These samples stay in coordinator process memory and are not sent to an analytics service. Model IDs may reveal what a user has installed; review node diagnostics before sharing. Each node can inspect only its own status; the controller can inspect all nodes.
@@ -52,3 +58,9 @@ Only the controller may request inference across the worker pool. Enrollment plu
 Telemetry is self-reported by a trusted enrolled node, not remotely attested. Required memory budgets are explicit local policy and are checked again at dispatch. Unknown optional sensors are labeled as such. A failed inference is never replayed automatically. Revocation rejects subsequent worker requests; an already running model request may continue until cancellation or its deadline reaches the runner.
 
 The old LibreSSL initialization command may have left a file literally named `-` in the application directory. Treat it as possible private-key material, do not share it, and remove it if confirmed to be the failed initialization output. New generation never writes private keys into the checkout; the legacy filename is now ignored.
+
+## Experimental distributed inference
+
+Distributed MLX additionally requires an explicitly configured group/model and matching local consent on every member. Network jobs cannot select a Python executable, model path, topology file, or communication endpoint. The rank helper uses offline model loading with remote model/tokenizer code disabled; prompts travel over stdin and library stderr is discarded. The coordinator reserves the entire group and never retries an individual rank. Job metadata contains no prompts, responses, or local paths.
+
+MLX data traffic uses its own TCP or RDMA transport, outside Ellie's authenticated HTTPS control channel. Restrict it to a trusted isolated interconnect. Qualification metrics and plan revisions are operator-supplied assertions, not attestation. Cancellation is propagated by heartbeat and local deadline, and the node waits for subprocess exit before reporting teardown. A hard crash or revocation can leave a group reserved until explicit recovery; see [the distributed lifecycle](distributed-mlx-reference.md#lifecycle-and-recovery).

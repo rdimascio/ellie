@@ -16,6 +16,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/config": "*",
+        "@ellie/decisions": "*",
         "@ellie/macos": "*",
         "@ellie/protocol": "*",
         "@ellie/transport": "*",
@@ -39,6 +40,7 @@
       "dependencies": {
         "@ellie/compute": "*",
         "@ellie/config": "*",
+        "@ellie/decisions": "*",
         "@ellie/permissions": "*",
         "@ellie/protocol": "*",
         "@ellie/router": "*",
@@ -62,6 +64,10 @@
       "dependencies": {
         "@ellie/protocol": "*",
       },
+    },
+    "packages/decisions": {
+      "name": "@ellie/decisions",
+      "version": "0.1.0",
     },
     "packages/knowledge": {
       "name": "@ellie/knowledge",
@@ -99,6 +105,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@ellie/config": "*",
+        "@ellie/decisions": "*",
         "@ellie/protocol": "*",
       },
     },
@@ -126,6 +133,8 @@
     "@ellie/compute": ["@ellie/compute@workspace:packages/compute"],
 
     "@ellie/config": ["@ellie/config@workspace:packages/config"],
+
+    "@ellie/decisions": ["@ellie/decisions@workspace:packages/decisions"],
 
     "@ellie/knowledge": ["@ellie/knowledge@workspace:packages/knowledge"],
 

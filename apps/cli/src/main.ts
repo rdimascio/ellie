@@ -20,6 +20,7 @@ import { Auth, newToken } from "../../server/src/auth.ts";
 import { createEllieServer } from "../../server/src/index.ts";
 import { JobStore } from "../../server/src/jobs.ts";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
+import { LocalDistributedWorker } from "../../node/src/distributed.ts";
 import { runNode } from "../../node/src/index.ts";
 
 import { generateCertificate } from "./certificate.ts";
@@ -34,6 +35,7 @@ import {
   serviceTestOptions,
 } from "./self-test.ts";
 import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
+import { createDecisionRouting, decisionKeyAccount, routingCommand } from "./decision-routing.ts";
 
 const args = process.argv.slice(2);
 const secrets = new Keychain();
@@ -184,12 +186,22 @@ async function main(): Promise<void> {
     const jobStore = new JobStore(join(stateDir, "jobs.sqlite"));
     let app: ReturnType<typeof createEllieServer> | undefined;
     try {
+      let decisionRouting;
+      try {
+        decisionRouting = await createDecisionRouting(config.decisionRouting, secrets);
+      } catch {
+        console.error(
+          "Optional decision routing could not be initialized. Deterministic commands remain available.",
+        );
+      }
       const created = createEllieServer({
         key: await secrets.get("server.key"),
         cert,
         auth: await Auth.open(),
         preferences: config.preferences,
         jobStore,
+        decisionRouting,
+        distributedGroups: config.distributedGroups,
       });
       app = created;
       await new Promise<void>((resolve, reject) => {
@@ -212,6 +224,32 @@ async function main(): Promise<void> {
           app.shutdown();
         }
       });
+    return;
+  }
+  if (args[0] === "routing") {
+    const raw = record(await privateConfig("server.json"));
+    const config = serverConfig(raw);
+    const command = routingCommand(args.slice(1), config.decisionRouting);
+    if (command.kind === "status") {
+      console.log(JSON.stringify(config.decisionRouting ?? { mode: "off" }, null, 2));
+      console.log("This is the saved configuration; restart the coordinator after changes.");
+      return;
+    }
+    if (command.needsKey) {
+      console.log(
+        "Cloud routing will send unmatched commands, allowed app/site candidates, and the previous successful app context to TypeSafe. Setup starts in shadow mode.",
+      );
+      const key = await ask("TypeSafe API key (hidden): ", true);
+      if (!key || key.length > 4096 || /\s/.test(key))
+        throw new Error("Enter a valid TypeSafe API key.");
+      await secrets.set(decisionKeyAccount, key);
+    }
+    if (command.config) raw.decisionRouting = command.config;
+    else delete raw.decisionRouting;
+    await save("server.json", raw);
+    console.log(
+      `Decision routing saved (${command.config?.mode ?? "off"}). Restart the coordinator to apply it.`,
+    );
     return;
   }
   if (args[0] === "server" && args[1] === "pair") {
@@ -282,6 +320,9 @@ async function main(): Promise<void> {
         worker: config.inferenceWorker
           ? new LocalInferenceWorker(config.inferenceWorker)
           : undefined,
+        distributedWorker: config.distributedWorker
+          ? new LocalDistributedWorker(config.distributedWorker, config.id)
+          : undefined,
         health: () => native.health(),
         preferences: config.preferences,
         signal: abort.signal,
@@ -299,9 +340,15 @@ async function main(): Promise<void> {
     if (!report.ok) process.exitCode = 1;
     return;
   }
-  if (args[0] === "nodes") {
+  if (args[0] === "nodes" || args[0] === "groups") {
     await withController(async (client) => {
-      console.log(JSON.stringify(await client.call("GET", "/v1/nodes"), null, 2));
+      console.log(
+        JSON.stringify(
+          await client.call("GET", args[0] === "groups" ? "/v1/groups" : "/v1/nodes"),
+          null,
+          2,
+        ),
+      );
     });
     return;
   }
@@ -328,14 +375,24 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "infer") {
-    const model = string(args[1], 200);
-    const prompt = string(args.slice(2).join(" "), 4000);
+    const groupId = args[1] === "--group" ? identifier(args[2]) : undefined;
+    const model = string(args[groupId ? 3 : 1], 200);
+    const prompt = string(args.slice(groupId ? 4 : 2).join(" "), 4000);
     await withController(async (client) => {
       const interrupt = interruptSignal();
       try {
         commandOutcomeMayBeUnknown = true;
         const response = coordinatorResult(
-          await client.call("POST", "/v1/inference", { model, prompt }, interrupt),
+          await client.call(
+            "POST",
+            "/v1/inference",
+            {
+              model,
+              prompt,
+              ...(groupId ? { mode: "distributed-mlx", groupId } : {}),
+            },
+            { ...interrupt, timeoutMs: groupId ? 130_000 : 40_000 },
+          ),
         );
         commandOutcomeMayBeUnknown = false;
         console.log(response.message);
@@ -389,7 +446,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  server init [--lan]   Generate private config and Keychain identity\n  server start          Start the HTTPS coordinator\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  groups                Inspect distributed group readiness and active ranks (server Mac)\n  infer --group ID MODEL "..."  Run an explicitly enabled MLX group\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up Jev in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
 }
 main().catch((error) => {

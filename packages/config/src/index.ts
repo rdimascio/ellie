@@ -6,6 +6,12 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { record, identifier, string, installedModels } from "@ellie/protocol";
 import type { InstalledModel } from "@ellie/protocol";
+import { distributedMlxGroups } from "@ellie/protocol";
+import type { DistributedMlxGroup } from "@ellie/protocol";
+import { distributedWorkerConfig } from "./distributed.ts";
+import type { DistributedWorkerConfig } from "./distributed.ts";
+export { distributedWorkerConfig } from "./distributed.ts";
+export type { DistributedWorkerConfig, LocalMlxGroup } from "./distributed.ts";
 import { defaults } from "./defaults.ts";
 import type { Preferences } from "./defaults.ts";
 
@@ -17,6 +23,72 @@ export interface ServerConfig {
   host: string;
   port: number;
   preferences: Preferences;
+  decisionRouting?: DecisionRoutingConfig;
+  distributedGroups?: DistributedMlxGroup[];
+}
+export type DecisionRoutingConfig = {
+  mode: "shadow" | "execute";
+  timeoutMs: number;
+  minProbability: number;
+  minMargin: number;
+} & (
+  | { provider: "typesafe"; model: string; cloudDisclosure: true }
+  | { provider: "local"; model: string; endpoint: string }
+);
+
+/** Enabling a hosted provider explicitly permits disclosure of unmatched commands and routing context. */
+export function decisionRoutingConfig(value: unknown): DecisionRoutingConfig {
+  const v = record(value);
+  if (v.mode !== "shadow" && v.mode !== "execute")
+    throw new Error("Decision routing mode must be shadow or execute.");
+  const timeoutMs = v.timeoutMs ?? 3000;
+  const minProbability = v.minProbability ?? 0.98;
+  const minMargin = v.minMargin ?? 0.2;
+  if (!Number.isInteger(timeoutMs) || Number(timeoutMs) < 100 || Number(timeoutMs) > 10000)
+    throw new Error("Decision routing timeout must be between 100 and 10000 milliseconds.");
+  for (const threshold of [minProbability, minMargin])
+    if (
+      typeof threshold !== "number" ||
+      !Number.isFinite(threshold) ||
+      threshold < 0 ||
+      threshold > 1
+    )
+      throw new Error("Decision routing thresholds must be finite numbers between zero and one.");
+  const common: Pick<DecisionRoutingConfig, "mode" | "timeoutMs" | "minProbability" | "minMargin"> =
+    {
+      mode: v.mode,
+      timeoutMs: Number(timeoutMs),
+      minProbability: Number(minProbability),
+      minMargin: Number(minMargin),
+    };
+  if (v.provider === "typesafe") {
+    if (v.cloudDisclosure !== true)
+      throw new Error("TypeSafe decision routing requires explicit cloud disclosure opt-in.");
+    return {
+      ...common,
+      provider: "typesafe",
+      model: string(v.model ?? "jev-latest", 200),
+      cloudDisclosure: true,
+    };
+  }
+  if (v.provider === "local") {
+    const rawEndpoint = string(v.endpoint);
+    if (!/^https?:\/\/(?:127\.0\.0\.1|\[::1\])(?::[0-9]+)?\/?$/.test(rawEndpoint))
+      throw new Error("Decision endpoint must be a literal loopback HTTP(S) origin.");
+    const endpoint = new URL(rawEndpoint);
+    if (
+      !["http:", "https:"].includes(endpoint.protocol) ||
+      !["127.0.0.1", "[::1]"].includes(endpoint.hostname) ||
+      endpoint.username ||
+      endpoint.password ||
+      endpoint.pathname !== "/" ||
+      endpoint.search ||
+      endpoint.hash
+    )
+      throw new Error("Decision endpoint must be a literal loopback HTTP(S) origin.");
+    return { ...common, provider: "local", model: string(v.model, 200), endpoint: endpoint.origin };
+  }
+  throw new Error("Unsupported decision provider.");
 }
 export interface InferenceWorkerConfig {
   endpoint: string;
@@ -29,6 +101,7 @@ export interface NodeConfig {
   preferences: Preferences;
   executionEnabled: boolean;
   inferenceWorker?: InferenceWorkerConfig;
+  distributedWorker?: DistributedWorkerConfig;
 }
 export function inferenceWorkerConfig(value: unknown): InferenceWorkerConfig {
   const v = record(value);
@@ -97,6 +170,12 @@ export function serverConfig(value: unknown): ServerConfig {
     host: string(v.host, 255),
     port: v.port as number,
     preferences: preferences(v.preferences),
+    ...(v.distributedGroups === undefined
+      ? {}
+      : { distributedGroups: distributedMlxGroups(v.distributedGroups) }),
+    ...(v.decisionRouting === undefined
+      ? {}
+      : { decisionRouting: decisionRoutingConfig(v.decisionRouting) }),
   };
 }
 export function serverUrl(value: unknown): string {
@@ -123,6 +202,9 @@ export function nodeConfig(value: unknown): NodeConfig {
     serverUrl: serverUrl(v.serverUrl),
     preferences: preferences(v.preferences),
     executionEnabled: v.executionEnabled !== false,
+    ...(v.distributedWorker === undefined
+      ? {}
+      : { distributedWorker: distributedWorkerConfig(v.distributedWorker, identifier(v.id)) }),
     ...(v.inferenceWorker === undefined
       ? {}
       : { inferenceWorker: inferenceWorkerConfig(v.inferenceWorker) }),

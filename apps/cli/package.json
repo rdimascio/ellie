@@ -6,6 +6,7 @@
   "exports": "./src/main.ts",
   "dependencies": {
     "@ellie/config": "*",
+    "@ellie/decisions": "*",
     "@ellie/macos": "*",
     "@ellie/protocol": "*",
     "@ellie/transport": "*"

@@ -4,6 +4,10 @@ A local-first personal assistant for macOS. Warm, playful, thoughtful, and built
 
 Ellie is at its first developer milestone: text commands → deterministic routing → authenticated HTTPS → native macOS app and window control. Normal operation needs **no model download, cloud account, API key, or paid service**. Voice, automatic conversational routing, retrieval, and browser automation are planned. An optional independent inference-worker probe is available for already installed local models; see [worker setup](docs/inference-workers.md).
 
+An experimental [decision-routing layer](docs/decision-routing.md) can interpret unmatched desktop phrases through an explicitly configured TypeSafe Jev or local model. Setup starts in shadow mode with unexecuted proposals; existing deterministic commands stay local. Run `bun run eval:routing` for the offline synthetic baseline.
+
+An experimental [distributed MLX backend](docs/distributed-mlx.md) can run one model across an explicitly configured Mac group, with shared reservations, a start barrier, and whole-group cancellation. Physical MLX and RDMA validation remain pending.
+
 ## Try the first milestone
 
 You need macOS, Node.js 24, Bun 1.4.2, Xcode Command Line Tools (`xcode-select --install`), and `openssl` on each Mac (the macOS-provided LibreSSL is supported). Node remains the production runtime and test runner; Bun installs the workspace and runs its scripts. The execution Mac needs a logged-in graphical session. Install Arc for the default browser commands. There are no runtime dependencies beyond the workspace packages.
@@ -92,3 +96,5 @@ Run `bun run check` for Oxlint, Oxfmt verification, generated-contract drift che
 Read [architecture](docs/architecture.md), [operation and API contracts](docs/contracts.md), [security and private state](docs/security.md), [Ellie's personality](docs/personality.md), and [manual macOS validation](docs/testing.md). See [CONTRIBUTING.md](CONTRIBUTING.md) before sharing logs or fixtures. MIT licensed.
 
 The [roadmap](docs/roadmap.md) separates the current developer prototype from the work required for an installable household command center, with ordered changes and acceptance criteria.
+
+The [life harness product plan](docs/life-harness-plan.md) proposes Ellie's broader direction: personal memory, proactive help, shared spaces, natural-language extension building, and measured self-improvement.

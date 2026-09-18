@@ -51,4 +51,4 @@ To verify multi-Mac placement, enable the same small model on two paired Macs an
 - Unplug a laptop, enable low-power mode, stop its runner, or let it sleep; unsuitable/unavailable workers must stop receiving new jobs. Already running runner work may take time to stop after its HTTP request is cancelled.
 - A runner may continue processing after a disconnected HTTP client. Use a dedicated runner that honors cancellation; Ellie does not kill or supervise the runner process.
 - Native telemetry and MLX were not physically tested in the Linux development environment. Automated tests use actual HTTPS, a synthetic local HTTP model endpoint, and explicit synthetic resource readings.
-- Distributed MLX is an advanced architecture extension only; no sharding implementation is enabled in this release. See [architecture](architecture.md).
+- An experimental, explicitly configured [distributed MLX backend](distributed-mlx.md) is available separately. Ordinary `infer` requests never enable it automatically; physical MLX acceptance remains pending.

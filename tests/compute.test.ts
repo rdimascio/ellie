@@ -129,7 +129,7 @@ test("compute protocol validates metrics and preserves old configs; only local r
   );
   assert.throws(
     () => inferenceRequest({ model: "m", prompt: "p", mode: "distributed-mlx" }),
-    /advanced/,
+    /Invalid string/,
   );
   assert.equal(
     nodeConfig({

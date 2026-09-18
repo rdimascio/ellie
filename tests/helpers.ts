@@ -10,7 +10,13 @@ import { createEllieServer } from "../apps/server/src/index.ts";
 import { JobStore } from "../apps/server/src/jobs.ts";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 
-export async function fixture(timeout = 2000) {
+export async function fixture(
+  timeout = 2000,
+  options: Pick<
+    Parameters<typeof createEllieServer>[0],
+    "decisionRouting" | "distributedGroups"
+  > = {},
+) {
   const dir = await mkdtemp(join(tmpdir(), "ellie-e2e-"));
   const { key, cert } = await generateCertificate();
   const token = newToken();
@@ -24,6 +30,7 @@ export async function fixture(timeout = 2000) {
     preferences: defaults,
     jobStore,
     commandTimeout: timeout,
+    ...options,
   });
   await new Promise<void>((resolve) => app.server.listen(0, "127.0.0.1", resolve));
   const origin = `https://127.0.0.1:${(app.server.address() as AddressInfo).port}`;

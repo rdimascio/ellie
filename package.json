@@ -14,6 +14,7 @@
     "format:check": "oxfmt --check .",
     "typecheck": "tsc --noEmit",
     "test": "node --test tests/*.test.ts",
+    "eval:routing": "node scripts/evaluate-routing.ts",
     "check": "bun run lint && bun run format:check && bun run contracts:check && bun run typecheck && bun run test",
     "build:macos": "node scripts/build-macos.mjs",
     "contracts:generate": "node scripts/generate-contracts.ts",

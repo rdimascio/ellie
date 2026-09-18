@@ -38,6 +38,7 @@ export interface NodeInfo {
   capabilities: Capability[];
   executionCapabilities: Capability[];
   computeCapabilities?: import("./compute.ts").ComputeCapabilities;
+  distributedCapabilities?: import("./distributed.ts").DistributedMlxCapability[];
   telemetry?: import("./compute.ts").Telemetry;
   telemetryReceivedAt?: number;
   lastSeen: number;
@@ -142,3 +143,4 @@ export function jobMetadata(value: unknown): JobMetadata {
 }
 
 export * from "./compute.ts";
+export * from "./distributed.ts";

@@ -2,12 +2,15 @@
 
 Ellie is working toward a local-first, open-source household command center: a Mac can coordinate the home, a TV can show shared information, and a paired phone can act as a remote. This roadmap is ordered by dependency and learning value. It is not a promise of dates.
 
+The [life harness product plan](life-harness-plan.md) explores the broader personal-assistant direction and proposes future product slices. It does not change the implementation status or release gates recorded here.
+
 ## Current foundation
 
 The repository currently provides a developer milestone, not a household product:
 
 - A foreground TypeScript server and outbound-polling node communicate over authenticated, certificate-pinned HTTPS on a trusted local network.
 - The deterministic router can open allowed macOS apps and HTTPS sites and can place or tile windows through an isolated Swift Accessibility helper.
+- An optional [decision-routing experiment](decision-routing.md) adds Jev/local provider adapters, shadow proposals, bounded semantic execution, and a synthetic evaluation suite. It is disabled by default; hosted accuracy and latency still require an actual provider evaluation.
 - Pairing, per-node credentials, revocation, capability checks, local allowlists, bounded messages, and ephemeral command context are implemented.
 - Optional, explicitly configured Macs can advertise installed local models and resource telemetry. The coordinator schedules a non-streaming inference probe on one eligible independent worker. Separate Macs run concurrently but do not pool memory.
 - Portable certificate generation and basic independent-worker admission, reservation, and scheduling are implemented with regression coverage.
@@ -125,5 +128,5 @@ Physical macOS hardware is a release blocker because CI cannot grant Accessibili
 - **Broader tools:** add browser and household integrations one operation at a time through the canonical schema, capability grant, local enforcement, failure semantics, and behavioral tests.
 - **Optional analytics:** keep it off by default, document every field, exclude prompts, commands, calendar content, profile data, stable household identifiers, and local model names, and support inspection and deletion. The default must emit nothing.
 - **Independent-worker improvements:** add streaming, fair queues, model warm-state signals, cancellation propagation, and operator-visible placement decisions while keeping one-Mac inference the default.
-- **Distributed MLX:** only after independent workers are reliable, implement explicit per-node and per-model opt-in, measured interconnect qualification, shard plans, atomic group leases, whole-group cancellation, and failure recovery. Adding Macs or exhausting memory must never activate sharding automatically.
+- **Distributed MLX:** an experimental implementation now includes explicit per-node/model opt-in, matching shard plans, operator-supplied interconnect qualification, atomic reservations, a start barrier, per-node MLX-LM rank processes, and whole-group cancellation. Physical model/RDMA acceptance, automated qualification, warm runners, streaming, and hard-crash lease reclamation remain pending. See [setup and limits](distributed-mlx.md). Adding Macs or exhausting memory never activates sharding automatically.
 - **Selective native code:** retain Swift for macOS Accessibility and Keychain integration. Add Rust only where profiling or distribution constraints show a concrete benefit.

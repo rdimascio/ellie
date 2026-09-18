@@ -1,4 +1,6 @@
 import { record, string, identifier, VERSION } from "./index.ts";
+import { distributedAssignment } from "./distributed.ts";
+import type { DistributedAssignment } from "./distributed.ts";
 
 export interface InstalledModel {
   id: string;
@@ -23,26 +25,18 @@ export interface Telemetry {
   thermal: "nominal" | "fair" | "serious" | "critical" | "unknown";
   network: { roundTripMs: number | null; quality: "good" | "poor" | "unknown" };
 }
-export interface InferenceRequest {
+export type InferenceRequest = {
   model: string;
   prompt: string;
   maxTokens: number;
-  mode: "independent";
-}
+} & ({ mode: "independent" } | { mode: "distributed-mlx"; groupId: string });
 export interface InferenceJob {
   version: typeof VERSION;
   kind: "inference";
   id: string;
   expiresAt: number;
   request: InferenceRequest;
-}
-/** Advanced extension contract only; V1 does not launch or schedule shard groups. */
-export interface DistributedMlxGroup {
-  mode: "distributed-mlx";
-  id: string;
-  nodeIds: string[];
-  model: string;
-  explicitlyEnabled: true;
+  assignment?: DistributedAssignment;
 }
 
 function number(value: unknown, min: number, max: number): number {
@@ -101,12 +95,14 @@ export function telemetry(value: unknown): Telemetry {
 }
 export function inferenceRequest(value: unknown): InferenceRequest {
   const v = record(value);
-  if (v.mode !== undefined && v.mode !== "independent")
-    throw new Error("Distributed MLX is an advanced extension; no shard-group runner is enabled.");
+  if (v.mode !== undefined && v.mode !== "independent" && v.mode !== "distributed-mlx")
+    throw new Error("Unsupported inference mode.");
   const maxTokens = v.maxTokens === undefined ? 256 : number(v.maxTokens, 1, 2048);
   if (!Number.isInteger(maxTokens)) throw new Error("Invalid token limit.");
   return {
-    mode: "independent",
+    ...(v.mode === "distributed-mlx"
+      ? { mode: "distributed-mlx" as const, groupId: identifier(v.groupId) }
+      : { mode: "independent" as const }),
     model: string(v.model, 200),
     prompt: string(v.prompt, 4000),
     maxTokens,
@@ -115,11 +111,22 @@ export function inferenceRequest(value: unknown): InferenceRequest {
 export function inferenceJob(value: unknown): InferenceJob {
   const v = record(value);
   if (v.version !== VERSION || v.kind !== "inference") throw new Error("Invalid inference job.");
+  const request = inferenceRequest(v.request);
+  const assignment = v.assignment === undefined ? undefined : distributedAssignment(v.assignment);
+  if (request.mode === "distributed-mlx") {
+    if (
+      !assignment ||
+      assignment.plan.id !== request.groupId ||
+      assignment.plan.model !== request.model
+    )
+      throw new Error("Distributed job does not match its assignment.");
+  } else if (assignment) throw new Error("Independent jobs cannot contain a shard assignment.");
   return {
     version: VERSION,
     kind: "inference",
     id: identifier(v.id),
     expiresAt: number(v.expiresAt, 0, Number.MAX_SAFE_INTEGER),
-    request: inferenceRequest(v.request),
+    request,
+    ...(assignment ? { assignment } : {}),
   };
 }
