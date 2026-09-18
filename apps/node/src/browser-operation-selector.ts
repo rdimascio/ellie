@@ -26,6 +26,7 @@ export class BrowserOperationSelector {
     revision: string;
     site: NonNullable<import("@ellie/protocol").BrowserView["site"]>;
   };
+  private youtubeCompanionRevision?: string;
   private readonly binding: (
     signal: AbortSignal,
     refresh?: boolean,
@@ -70,9 +71,12 @@ export class BrowserOperationSelector {
     const adapterAction = refresh ? browserWebMCPAction({ tool: "browser.status" }) : browserAction;
     const revision = typeof binding === "object" ? browserBindingRevision(binding) : undefined;
     if (this.observedSite?.revision !== revision) this.observedSite = undefined;
+    if (this.youtubeCompanionRevision !== revision) this.youtubeCompanionRevision = undefined;
     if (refresh) {
       this.observationEpoch += 1;
       this.observedSite = undefined;
+      this.youtubeCompanionRevision = undefined;
+      this.companion?.invalidate();
     }
     if (
       browserAction.tool === "browser.scrollRow" &&
@@ -89,9 +93,86 @@ export class BrowserOperationSelector {
       if (!this.companion) throw new Error("Browser companion is unavailable.");
       return this.companion.execute(browserAction, binding, signal);
     }
-    if (browserAction.tool === "browser.read") {
+    const accessibilityBinding: BrowserAccessibilityBinding = {
+      availability: "accessibility",
+      documentId: binding.documentId,
+      url: binding.url,
+      revision: browserBindingRevision(binding),
+    };
+    let armedYouTubeRead: Awaited<ReturnType<BrowserAccessibilityRuntime["execute"]>> | undefined;
+    let armedYouTubeEpoch: number | undefined;
+    // The explicit YouTube read also arms the scoped AX generation used by scroll and
+    // playback. A companion page alone must not advertise controls AX cannot perform.
+    if (
+      binding.origin === "https://www.youtube.com" &&
+      this.companion &&
+      (browserAction.tool === "browser.read" ||
+        browserAction.tool === "browser.search" ||
+        (browserAction.tool === "browser.select" && this.youtubeCompanionRevision === revision))
+    ) {
+      if (browserAction.tool === "browser.read") {
+        this.observationEpoch += 1;
+        this.observedSite = undefined;
+        this.youtubeCompanionRevision = undefined;
+        this.companion.invalidate();
+        armedYouTubeEpoch = this.observationEpoch;
+        armedYouTubeRead = await this.accessibility.execute(
+          browserAction,
+          accessibilityBinding,
+          signal,
+        );
+        if (
+          signal.aborted ||
+          armedYouTubeEpoch !== this.observationEpoch ||
+          armedYouTubeRead.browser.operation !== "read" ||
+          armedYouTubeRead.browser.status !== "completed" ||
+          armedYouTubeRead.browser.source !== "accessibility" ||
+          armedYouTubeRead.browser.revision !== revision
+        )
+          throw new Error("Browser page changed during read.");
+      } else if (
+        browserAction.tool === "browser.search" ||
+        browserAction.tool === "browser.select"
+      ) {
+        this.observationEpoch += 1;
+        this.observedSite = undefined;
+        this.youtubeCompanionRevision = undefined;
+      }
+      const epoch = this.observationEpoch;
+      try {
+        const result = await this.companion.execute(browserAction, binding, signal);
+        if (signal.aborted || epoch !== this.observationEpoch)
+          throw new Error("Browser page changed during read.");
+        if (
+          browserAction.tool === "browser.read" &&
+          result.browser.operation === "read" &&
+          result.browser.view.site?.provider === "youtube"
+        ) {
+          this.observedSite = {
+            revision: browserBindingRevision(binding),
+            site: result.browser.view.site,
+          };
+          this.youtubeCompanionRevision = revision;
+        }
+        return result;
+      } catch (error) {
+        if (browserAction.tool !== "browser.read" || signal.aborted) throw error;
+        // Only a read can fall back; a mutation can already have run.
+        if (epoch !== this.observationEpoch) throw new Error("Browser page changed during read.");
+        this.companion.invalidate();
+      }
+    }
+    if (
+      binding.origin === "https://www.youtube.com" &&
+      !this.companion &&
+      browserAction.tool === "browser.search"
+    )
+      throw new Error("Observed YouTube search companion is unavailable.");
+    if (browserAction.tool === "browser.read" && !armedYouTubeRead) {
       this.observationEpoch += 1;
       this.observedSite = undefined;
+      this.youtubeCompanionRevision = undefined;
+      this.companion?.invalidate();
     }
     if (
       browserAction.tool === "browser.scroll" ||
@@ -116,15 +197,13 @@ export class BrowserOperationSelector {
       // The next action requires an explicit fresh read, even after an unknown outcome.
       this.observationEpoch += 1;
       this.observedSite = undefined;
+      this.youtubeCompanionRevision = undefined;
+      this.companion?.invalidate();
     }
-    const readEpoch = this.observationEpoch;
-    const accessibilityBinding: BrowserAccessibilityBinding = {
-      availability: "accessibility",
-      documentId: binding.documentId,
-      url: binding.url,
-      revision: browserBindingRevision(binding),
-    };
-    const result = await this.accessibility.execute(adapterAction, accessibilityBinding, signal);
+    const readEpoch = armedYouTubeEpoch ?? this.observationEpoch;
+    const result =
+      armedYouTubeRead ??
+      (await this.accessibility.execute(adapterAction, accessibilityBinding, signal));
     if (browserAction.tool !== "browser.read" || binding.origin !== "https://www.youtube.com")
       return result;
     if (signal.aborted) throw new Error("Browser request was cancelled.");

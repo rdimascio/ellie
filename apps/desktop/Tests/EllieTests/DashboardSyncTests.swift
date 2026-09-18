@@ -195,6 +195,101 @@ final class DashboardSyncTests: XCTestCase {
     XCTAssertFalse(transport.calls.contains("save"))
   }
 
+  func testConfirmedGrantRemovalClearsCancelledSaveWithoutChangingLocalDashboards() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("EllieDashboardRevocationTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let localFile = directory.appendingPathComponent("local.json")
+    let pendingFile = directory.appendingPathComponent("pending.json")
+    let dashboards = DashboardStore(fileURL: localFile)
+    dashboards.createDashboard(name: "Shared layout")
+    guard let dashboardID = dashboards.selectedID else {
+      XCTFail("The local dashboard was not created.")
+      return
+    }
+    dashboards.renameDashboard(id: dashboardID, name: "Family layout")
+    dashboards.addWidget(kind: .note)
+    guard let widget = dashboards.selectedDashboard?.widgets.first else {
+      XCTFail("The local widget was not created.")
+      return
+    }
+    dashboards.updateWidget(id: widget.id, title: "Family note", size: .wide,
+      config: ["text": "Keep this local edit"])
+    dashboards.addWidget(kind: .clock)
+    dashboards.moveWidget(id: widget.id, offset: 1)
+    XCTAssertNil(dashboards.error)
+    let localValue = dashboards.state
+
+    let transport = SyncTransport()
+    let saveGate = SyncReadGate()
+    transport.saveGate = saveGate
+    transport.saveFailure = .revoked
+    transport.grants = [grant(.shared, .write)]
+    let persistence = PrivatePendingDashboardDraftStore(fileURL: pendingFile)
+    let store = DashboardSyncStore(
+      credential: credential(), transport: transport, persistence: persistence)
+    store.checkAccess()
+    await settle(store)
+    store.prepare(localValue)
+    XCTAssertEqual(try persistence.load()?.value, localValue)
+    store.savePrepared()
+    guard await saveGate.waitUntilStarted() else {
+      let cancelled = store.enterBackground()
+      await saveGate.release()
+      await cancelled?.value
+      XCTFail("The save did not enter the transport before the bounded deadline.")
+      return
+    }
+
+    let cancelled = store.enterBackground()
+    XCTAssertEqual(store.phase, .unknown)
+    transport.grants = []
+    store.checkAccess()
+    await settle(store)
+    XCTAssertEqual(store.phase, .revoked)
+    XCTAssertNil(store.draft)
+    XCTAssertNil(try persistence.load())
+
+    await saveGate.release()
+    await cancelled?.value
+    XCTAssertEqual(store.phase, .revoked)
+    XCTAssertEqual(transport.calls.filter { $0 == "save" }.count, 1)
+    store.savePrepared()
+    XCTAssertEqual(transport.calls.filter { $0 == "save" }.count, 1)
+    XCTAssertEqual(DashboardStore(fileURL: localFile).state, localValue)
+    let restored = DashboardSyncStore(
+      credential: credential(), transport: transport, persistence: persistence)
+    XCTAssertNil(restored.draft)
+    XCTAssertEqual(restored.phase, .idle)
+  }
+
+  func testOfflineAccessKeepsUnknownDraftAndFailedConfirmedRevocationBlocksSync() async {
+    let transport = SyncTransport()
+    let persistence = SyncPersistence()
+    persistence.saved = PendingDashboardDraft(
+      origin: credential().origin, certificateSha256: credential().certificateSha256,
+      clientId: "client-a", profile: .shared, baseRevision: 2,
+      value: DashboardModel.initialState)
+    let store = DashboardSyncStore(
+      credential: credential(), transport: transport, persistence: persistence)
+
+    transport.authorityFailure = .unavailable
+    store.checkAccess()
+    await settle(store)
+    XCTAssertEqual(store.phase, .unknown)
+    XCTAssertNotNil(persistence.saved)
+
+    transport.authorityFailure = nil
+    transport.grants = []
+    persistence.failClear = true
+    store.checkAccess()
+    await settle(store)
+    XCTAssertEqual(store.phase, .privacyBlocked)
+    XCTAssertNotNil(persistence.saved)
+    store.savePrepared()
+    XCTAssertFalse(transport.calls.contains("save"))
+  }
+
   func testCleanupFailureDoesNotRunCredentialAction() {
     let persistence = SyncPersistence()
     persistence.failClear = true
@@ -331,6 +426,7 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
   var readDelayNanoseconds: UInt64 = 0
   var readDocuments: [(SyncReadGate, HouseholdDashboardDocument)] = []
   var readGate: SyncReadGate?
+  var saveGate: SyncReadGate?
   func authority(_ credential: NativeEnrollmentCredential) async throws
     -> [HouseholdDashboardGrant]
   {
@@ -356,6 +452,7 @@ private final class SyncTransport: HouseholdDashboardTransporting, @unchecked Se
     -> DashboardSyncSaveResult
   {
     calls.append("save")
+    if let saveGate { await saveGate.waitForRelease() }
     if let saveFailure { throw saveFailure }
     return saveResult ?? .saved(document)
   }

@@ -6,6 +6,7 @@ export interface IOSGoogleLifeFixture {
   lifeApplication: NativeLifeApplication;
   connectionIds: { calendar: string; gmail: string };
   control: {
+    chatEvidence(): { plans: number; conversations: number; records: number; tasks: number };
     bodyReads(): Record<string, number>;
     heldReadStarted(): number;
     heldReadCompleted(): number;

@@ -90,6 +90,8 @@ export interface ChatRequest {
     expectedRevision: number;
     taskId?: string;
   };
+  /** Service-owned native review policy. The client cannot set this flag. */
+  readOnlyReview?: boolean;
 }
 export interface ChatAction {
   label: string;
@@ -97,6 +99,7 @@ export interface ChatAction {
 }
 export interface ChatResponse {
   reply: string;
+  needsMacReview?: boolean;
   conversationId: string;
   actions: ChatAction[];
   records: LifeRecord[];
@@ -112,6 +115,7 @@ export interface ChatResponse {
   createdGroup?: Pick<LifeGroup, "id" | "name">;
 }
 export interface LifeHarness {
+  readonly readOnlyReviewAvailable: boolean;
   improvements: LifeImprovementEngine;
   deliveries: ScheduledDeliveries;
   plans: LifePlans;
@@ -893,6 +897,60 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     });
     if (suppliedHistory && suppliedHistory.length > 24)
       throw new TypeError("Conversation history is invalid.");
+    if (request.readOnlyReview) {
+      // A native transcript can ask a question, but it cannot cross any of the
+      // deterministic or model action paths below. No pending intent is answered here.
+      const found = options.store.search(request.actor, {
+        query: retrievalQuery(message),
+        scope: request.scope,
+        limit: 5,
+      });
+      const current = () => !request.signal?.aborted && request.isContextCurrent?.() !== false;
+      if (!current()) throw new Error("Conversation context changed.");
+      const plan = options.model
+        ? validateModelPlan(
+            await options.model.plan(
+              {
+                message,
+                evidence: found.map((item) => ({
+                  sourceId: item.sourceId,
+                  title: item.sourceTitle,
+                  text: item.text,
+                  ...(item.reference ? { reference: item.reference } : {}),
+                })),
+                history: suppliedHistory ?? [],
+                ...(request.automaticMemory ? { automaticMemory: request.automaticMemory } : {}),
+                now: now(),
+              },
+              request.signal,
+              request.onProgress,
+            ),
+          )
+        : undefined;
+      if (!current()) throw new Error("Conversation context changed.");
+      const actionRequested =
+        plan?.actions.some(
+          (action) => action.type !== "reply" && action.type !== "search_sources",
+        ) ?? false;
+      return {
+        reply: actionRequested
+          ? "Review this action in Ellie Life on your Mac. No change was made from this iPhone."
+          : (plan?.reply ??
+            "Life question answering is unavailable on this coordinator. Review your Life sessions on your Mac."),
+        ...(actionRequested ? { needsMacReview: true } : {}),
+        conversationId,
+        actions: [],
+        records: [],
+        taskIds: [],
+        evidence: actionRequested
+          ? []
+          : found.map((item) => ({
+              sourceId: item.sourceId,
+              title: item.sourceTitle,
+              ...(item.reference ? { reference: item.reference } : {}),
+            })),
+      };
+    }
     rememberSession(conversationKey, "user", message);
     const records: LifeRecord[] = [],
       tasks: TaskRecord[] = [],
@@ -2262,6 +2320,7 @@ export function createLifeHarness(options: LifeHarnessOptions): LifeHarness {
     );
   }
   return {
+    readOnlyReviewAvailable: options.model !== undefined,
     improvements,
     deliveries,
     plans,

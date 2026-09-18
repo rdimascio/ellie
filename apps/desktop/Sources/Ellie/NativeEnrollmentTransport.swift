@@ -195,6 +195,14 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
       else { return nil }
       return 24_000
     }
+    if components.path == "/api/life/native/chat/state" && components.query == nil {
+      return 1_024
+    }
+    if components.query == nil,
+       path.range(of: "^/api/life/native/chat/requests/native_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+         options: .regularExpression) != nil {
+      return 16_384
+    }
     guard components.query == nil,
       path.range(of: "^/api/life/native/sessions/[A-Za-z0-9_-]{1,128}$",
         options: .regularExpression) != nil
@@ -202,14 +210,44 @@ final class NativeEnrollmentTransport: NSObject, NativeEnrollmentTransporting, @
     return 256_000
   }
 
+  /// One reviewed, actor-scoped Life turn. The caller records its request ID durably first.
+  func lifeQuietPOST(body: Data, credential: LifeWebCredential, sessionToken: String)
+    async throws -> (Data, HTTPURLResponse)
+  {
+    guard (1...4_096).contains(body.count),
+      sessionToken.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+      credential.origin.scheme == "https",
+      let host = nativeTLSHost(credential.origin.host),
+      let url = URL(string: "/api/life/native/chat", relativeTo: credential.origin)?.absoluteURL,
+      url.scheme == "https", url.host == credential.origin.host,
+      url.port == credential.origin.port, url.user == nil, url.password == nil
+    else { throw NativeEnrollmentFailure.invalidCode }
+    return try await pinnedLifeRequest(url: url, host: host, credential: credential,
+      sessionToken: sessionToken, maximumBytes: 16_384, body: body)
+  }
+
   private func pinnedLifeGET(url: URL, host: String, credential: LifeWebCredential,
     sessionToken: String, maximumBytes: Int) async throws -> (Data, HTTPURLResponse)
   {
+    try await pinnedLifeRequest(url: url, host: host, credential: credential,
+      sessionToken: sessionToken, maximumBytes: maximumBytes, body: nil)
+  }
+
+  private func pinnedLifeRequest(url: URL, host: String, credential: LifeWebCredential,
+    sessionToken: String, maximumBytes: Int, body: Data?) async throws -> (Data, HTTPURLResponse)
+  {
     var request = URLRequest(
       url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData, timeoutInterval: timeout)
-    request.httpMethod = "GET"
+    request.httpMethod = body == nil ? "GET" : "POST"
     request.setValue("1", forHTTPHeaderField: "X-Ellie-Version")
     request.setValue("__Host-ellie_life=\(sessionToken)", forHTTPHeaderField: "Cookie")
+    if let body {
+      request.httpBody = body
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.setValue(String(body.count), forHTTPHeaderField: "Content-Length")
+      request.setValue(credential.origin.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")),
+        forHTTPHeaderField: "Origin")
+    }
     let delegate = PinnedSessionDelegate(
       host: host, pin: credential.certificateSha256, maximumBytes: maximumBytes,
       timeout: timeout, verificationDate: now())

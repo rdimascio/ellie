@@ -314,6 +314,7 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var page: BrowserPhonePage?
+  @Published private(set) var credentialChanged = false
   @Published private(set) var selectedRowID: String?
   @Published private(set) var hasPendingBrowserCommand = false
   @Published private(set) var pendingBrowserWarningError: String?
@@ -355,6 +356,7 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   func clearIfTargetChanged(to nodeID: String?) {
+    guard !credentialChanged else { return }
     guard selectedTargetID != nodeID else { return }
     selectedTargetID = nodeID
     page = nil
@@ -370,11 +372,12 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   func canRefresh(on node: PhoneControlNode?) -> Bool {
-    task == nil && node?.online == true && node?.capabilities.contains("browser.read") == true
+    !credentialChanged && task == nil && node?.online == true
+      && node?.capabilities.contains("browser.read") == true
   }
 
   func canPerform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node, node.online else { return false }
+    guard !credentialChanged, task == nil, let node, node.online else { return false }
     if intent == .inspect || intent == .refresh {
       return node.capabilities.contains("browser.read")
     }
@@ -399,7 +402,7 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @discardableResult
   func selectObservedRow(_ rowID: String, on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node, node.online,
+    guard !credentialChanged, task == nil, let node, node.online,
       node.capabilities.contains("browser.control"), let page, page.nodeID == node.id,
       page.site?.provider == .netflix, page.site?.page == .browse,
       page.site?.rows?.contains(where: { $0.id == rowID }) == true
@@ -410,7 +413,10 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @discardableResult
   func refresh(on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node, node.online, node.capabilities.contains("browser.read") else {
+    guard !credentialChanged, task == nil, let node, node.online,
+      node.capabilities.contains("browser.read")
+    else {
+      if credentialChanged { return false }
       if node != nil { phase = .failed("The selected Mac does not allow browser reading.") }
       return false
     }
@@ -426,12 +432,17 @@ final class BrowserPhoneControlStore: ObservableObject {
       self.pendingBrowserWarningError = nil
       let status = try await self.transport.execute(
         .refresh, nodeID: node.id, credential: self.credential)
+      try Task.checkCancellation()
+      guard !self.credentialChanged else { throw CancellationError() }
       guard case .status(let source, true, let revision?) = status else {
         throw PhoneControlFailure.rejected
       }
       let read = try await self.transport.execute(
         .read(revision: revision), nodeID: node.id, credential: self.credential)
-      guard case .page(let page) = read, page.nodeID == node.id, page.source == source,
+      guard case .page(let page) = read, page.nodeID == node.id,
+        (page.source == source ||
+          (source == .accessibility && page.source == .companion
+            && page.site?.provider == .youtube)),
         page.revision == revision
       else { throw PhoneControlFailure.invalidResponse }
       try Task.checkCancellation()
@@ -451,7 +462,7 @@ final class BrowserPhoneControlStore: ObservableObject {
 
   @discardableResult
   func perform(_ intent: BrowserVoiceIntent, on node: PhoneControlNode?) -> Bool {
-    guard task == nil, let node else { return false }
+    guard !credentialChanged, task == nil, let node else { return false }
     if intent == .inspect || intent == .refresh { return refresh(on: node) }
     guard node.online, node.capabilities.contains("browser.control"), let page,
       page.nodeID == node.id
@@ -531,7 +542,11 @@ final class BrowserPhoneControlStore: ObservableObject {
         action, nodeID: node.id, credential: self.credential)
       try Task.checkCancellation()
       guard case .command(let source, let status, let revision) = response,
-        source == page.source, revision == page.revision
+        (source == page.source ||
+          (page.site?.provider == .youtube && page.source == .companion
+            && source == .accessibility
+            && (action.isYouTubeAccessibilityControl))),
+        revision == page.revision
       else { throw PhoneControlFailure.invalidResponse }
       switch status {
       case .completed:
@@ -562,6 +577,14 @@ final class BrowserPhoneControlStore: ObservableObject {
     page = nil
     selectedRowID = nil
     invalidateActiveOperation()
+  }
+
+  func credentialDidChange() {
+    guard !credentialChanged else { return }
+    credentialChanged = true
+    cancel()
+    page = nil
+    selectedRowID = nil
   }
 
   private func invalidateActiveOperation() {
@@ -671,6 +694,14 @@ final class BrowserPhoneControlStore: ObservableObject {
       case .openResult: return site.page == .browse || site.page == .results
       case .scroll(let direction) where direction == .left || direction == .right:
         return site.page == .browse && site.rows?.isEmpty == false
+      default: break
+      }
+    }
+    if site.provider == .youtube {
+      switch intent {
+      case .search:
+        return (site.page == .home || site.page == .results) && site.searchControl != nil
+      case .openResult: return site.page == .results
       default: break
       }
     }

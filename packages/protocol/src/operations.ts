@@ -534,8 +534,12 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         (hasSearchControl &&
           (() => {
             if (
-              observed.provider !== "netflix" ||
-              (observed.page !== "browse" && observed.page !== "results")
+              !(
+                (observed.provider === "netflix" &&
+                  (observed.page === "browse" || observed.page === "results")) ||
+                (observed.provider === "youtube" &&
+                  (observed.page === "home" || observed.page === "results"))
+              )
             )
               return true;
             try {
@@ -564,9 +568,12 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         throw new Error("Invalid browser operation result.");
       site = observed as BrowserView["site"];
     }
+    if (site?.provider === "youtube" && site.searchControl && browser.source !== "companion")
+      throw new Error("Invalid browser operation result.");
     if (
       browser.source === "companion" &&
       site?.provider !== "netflix" &&
+      site?.provider !== "youtube" &&
       site?.provider !== "youtube_tv" &&
       site?.provider !== "disneyplus"
     )

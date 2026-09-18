@@ -13,6 +13,13 @@ h1 {
   gap: 6px;
   margin: 6px 0;
 }
+.controls[hidden] {
+  display: none;
+}
+#search-query {
+  min-width: 0;
+  flex: 1;
+}
 button {
   padding: 7px 9px;
 }

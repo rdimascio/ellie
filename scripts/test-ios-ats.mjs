@@ -65,8 +65,19 @@ const endpointRequests = {
   unexpected: 0,
 };
 const endpointResponses = { ...endpointRequests };
-const googleRequests = { session: 0, list: 0, agenda: 0, preview: 0, detail: 0, other: 0 };
+const googleRequests = {
+  session: 0,
+  list: 0,
+  agenda: 0,
+  preview: 0,
+  detail: 0,
+  chatState: 0,
+  chatSend: 0,
+  chatStatus: 0,
+  other: 0,
+};
 const googleResponses = { ...googleRequests };
+let baselineChatEvidence;
 let heldResponsesClosed = 0;
 const googleTokens = {
   allowed: "12".repeat(32),
@@ -109,6 +120,13 @@ function recordEndpointRequest(request, response) {
     /^\/api\/connections\/[^/]+\/messages\/[^/]+$/.test(path ?? "")
   )
     google = "detail";
+  else if (request.method === "GET" && path === "/api/life/native/chat/state") google = "chatState";
+  else if (request.method === "POST" && path === "/api/life/native/chat") google = "chatSend";
+  else if (
+    request.method === "GET" &&
+    /^\/api\/life\/native\/chat\/requests\/native_[0-9a-f-]+$/.test(path ?? "")
+  )
+    google = "chatStatus";
   else if (path?.startsWith("/api/connections/") || path?.startsWith("/native/v1/life/"))
     google = "other";
   if (google) {
@@ -137,7 +155,17 @@ function diagnosticSummary() {
       .map((key) => `${key}:${Math.min(value[key], 99)}`)
       .join(",");
   const lifeCounts = (value) =>
-    ["session", "list", "agenda", "preview", "detail", "other"]
+    [
+      "session",
+      "list",
+      "agenda",
+      "preview",
+      "detail",
+      "chatState",
+      "chatSend",
+      "chatStatus",
+      "other",
+    ]
       .map((key) => `${key}:${Math.min(value[key], 99)}`)
       .join(",");
   let speech = "unavailable";
@@ -492,6 +520,7 @@ if (audio[44] >= 3) {
     nativeAuth,
     grantedClientIds: [googleClients.allowed.id, googleClients.revocable.id],
   });
+  baselineChatEvidence = googleLife.control.chatEvidence();
   const disconnectBearer = `Bearer ${"de".repeat(32)}`;
   const cancelBearer = `Bearer ${"cd".repeat(32)}`;
   readSpeechMarkers = () => {
@@ -845,6 +874,13 @@ if (audio[44] >= 3) {
     googleRequests.agenda < 1 ||
     googleRequests.preview < 1 ||
     googleRequests.detail < 6 ||
+    googleRequests.chatState < 1 ||
+    googleRequests.chatSend !== 1 ||
+    googleRequests.chatStatus !== 1 ||
+    googleLife.control.chatEvidence().plans !== 1 ||
+    googleLife.control.chatEvidence().conversations !== baselineChatEvidence.conversations + 1 ||
+    googleLife.control.chatEvidence().records !== baselineChatEvidence.records ||
+    googleLife.control.chatEvidence().tasks !== baselineChatEvidence.tasks ||
     googleLife.control.bodyReads().unicode_message !== 1 ||
     googleLife.control.bodyReads().truncated_message !== 1 ||
     googleLife.control.bodyReads().unavailable_message !== 1

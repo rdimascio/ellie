@@ -317,6 +317,15 @@ final class DashboardSyncStore: ObservableObject {
       .loading, operation: { try await self.transport.authority(self.credential) },
       failurePhase: priorPhase == .unknown ? .unknown : nil
     ) { value in
+      if let draft = self.draft,
+        !value.contains(where: {
+          $0.clientId == self.credential.client.id && $0.profile == draft.profile
+            && $0.kind == "dashboards"
+        })
+      {
+        self.revoke(.forbidden)
+        return self.phase
+      }
       self.grants = value
       self.remote = nil
       let profiles = self.allowedProfiles
