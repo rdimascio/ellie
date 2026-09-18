@@ -8,13 +8,15 @@ const names = [
   "NativeGoogleHTTPSIntegrationTests/testPinnedNativeLifeQuestionUsesSeparateGrantAndDurableReadOnlyStatus()",
   "NativeGoogleHTTPSIntegrationTests/testPinnedClientsReadSelectedCalendarAndExplicitGmailBodies()",
 ];
+const householdName =
+  "HouseholdChoresHTTPSIntegrationTests/testTwoEnrolledClientsUsePinnedProductionChoresWithNoWriteReplay()";
 
 function result() {
   return {
     summary: {
       result: "Passed",
-      totalTestCount: 5,
-      passedTests: 5,
+      totalTestCount: 6,
+      passedTests: 6,
       failedTests: 0,
       skippedTests: 0,
     },
@@ -27,6 +29,7 @@ function result() {
               nodeIdentifier,
               result: "Passed",
             })),
+            { nodeType: "Test Case", nodeIdentifier: householdName, result: "Passed" },
             { nodeType: "Test Case", nodeIdentifier: "OtherTests/testOther()", result: "Passed" },
           ],
         },
@@ -35,12 +38,13 @@ function result() {
   };
 }
 
-test("ATS result retains only passing counts and exact Google case names", () => {
+test("ATS result retains passing counts and exact Google and household case names", () => {
   const { summary, tests } = result();
   assert.deepEqual(verifiedATSResult(summary, tests), {
     xcresultOutcome: "Passed",
-    counts: { total: 5, passed: 5, failed: 0, skipped: 0 },
+    counts: { total: 6, passed: 6, failed: 0, skipped: 0 },
     googleCases: names,
+    householdCases: [householdName],
   });
 });
 
@@ -79,6 +83,16 @@ test("ATS result rejects zero, skipped, failed, missing, duplicated, and inconsi
     () => {
       const value = result();
       value.tests.testNodes[0]!.children.splice(3, 1);
+      return value;
+    },
+    () => {
+      const value = result();
+      value.tests.testNodes[0]!.children[4]!.nodeIdentifier = "OtherTests/testOther()";
+      return value;
+    },
+    () => {
+      const value = result();
+      value.tests.testNodes[0]!.children[5]!.nodeIdentifier = householdName;
       return value;
     },
   ];

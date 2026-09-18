@@ -20,6 +20,7 @@ import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
 import { createIOSGoogleLifeFixture } from "./ios-google-life-fixture.mjs";
+import { createIOSHouseholdChoresFixture } from "./ios-household-chores-fixture.mjs";
 import { fixtureNodeLauncher } from "./ios-fixture-node-launcher.mjs";
 import { verifiedATSResult } from "./ios-ats-result-summary.mjs";
 import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
@@ -40,6 +41,7 @@ let simulatorID,
   nativeAuth,
   nativeSpeech,
   googleLife,
+  chores,
   activeChild,
   interruptChild,
   requestedSignal,
@@ -95,7 +97,9 @@ function endpointStage(request) {
   if (
     path?.startsWith("/native/v1/speech/") ||
     path?.startsWith("/__ellie-test/speech/") ||
-    path?.startsWith("/__ellie-test/google/")
+    path?.startsWith("/__ellie-test/google/") ||
+    path?.startsWith("/__ellie-test/chores/") ||
+    path?.startsWith("/native/v1/household/")
   ) {
     return undefined;
   }
@@ -448,6 +452,10 @@ if (audio[44] >= 3) {
     "google-denied",
     "invite-google-revocable",
     "google-revocable",
+    "invite-chores-a",
+    "chores-client-a",
+    "invite-chores-b",
+    "chores-client-b",
   ];
   nativeAuth = new NativeAuth(NativeAuth.empty(), async () => {}, {
     token: () => "a".repeat(64),
@@ -521,6 +529,23 @@ if (audio[44] >= 3) {
     grantedClientIds: [googleClients.allowed.id, googleClients.revocable.id],
   });
   baselineChatEvidence = googleLife.control.chatEvidence();
+  const choresTokens = { a: "ab".repeat(32), b: "bc".repeat(32) };
+  const choresClients = {};
+  for (const role of ["a", "b"]) {
+    const invitation = await nativeAuth.invite({
+      label: `Synthetic chores ${role}`,
+      grants: [],
+    });
+    choresClients[role] = await nativeAuth.pair(invitation.code, choresTokens[role]);
+    if (choresClients[role].id !== `chores-client-${role}`)
+      throw new Error("Chores fixture client identity is invalid.");
+  }
+  chores = await createIOSHouseholdChoresFixture({
+    directory: join(owned, "chores-household"),
+    nativeAuth,
+    clients: choresClients,
+    tokens: choresTokens,
+  });
   const disconnectBearer = `Bearer ${"de".repeat(32)}`;
   const cancelBearer = `Bearer ${"cd".repeat(32)}`;
   readSpeechMarkers = () => {
@@ -555,6 +580,7 @@ if (audio[44] >= 3) {
     origin,
     auth: browserAuth,
     nativeAuth,
+    household: chores.household,
     speech: nativeSpeech,
     nativeLife: googleLife.nativeLife,
     lifeApplication: googleLife.lifeApplication,
@@ -577,6 +603,8 @@ if (audio[44] >= 3) {
   hosted.server.removeAllListeners("request");
   hosted.server.on("request", (request, response) => {
     recordEndpointRequest(request, response);
+    if (chores.handleControl(request, response)) return;
+    chores.wrapProduction(request, response);
     const googleControl =
       /^\/__ellie-test\/google\/(held-started\/[123]|settled\/[123]|release)$/.exec(
         request.url ?? "",
@@ -835,6 +863,13 @@ if (audio[44] >= 3) {
               readFileSync(resolve(root, "apps/ios/Tests/NativeGoogleHTTPSIntegrationTests.swift")),
             )
             .digest("hex"),
+          choresTests: createHash("sha256")
+            .update(
+              readFileSync(
+                resolve(root, "apps/ios/Tests/HouseholdChoresHTTPSIntegrationTests.swift"),
+              ),
+            )
+            .digest("hex"),
         },
       },
       null,
@@ -887,6 +922,17 @@ if (audio[44] >= 3) {
   ) {
     throw new Error("The Google fixture did not traverse the expected finite Life routes.");
   }
+  if (
+    chores.counts.writes !== 3 ||
+    chores.counts.dropped !== 1 ||
+    chores.counts.held !== 1 ||
+    chores.counts.released !== 1 ||
+    chores.counts.reads < 5
+  ) {
+    throw new Error(
+      "The pinned chores fixture did not traverse the expected finite write/read lifecycle.",
+    );
+  }
   enterDiagnosticStage("built-policy");
   const appInfo = JSON.parse(
     await execute(
@@ -931,6 +977,7 @@ if (audio[44] >= 3) {
     await googleLife?.close();
     await nativeSpeech?.close();
     await nativeAuth?.close();
+    await chores?.close();
     await browserAuth?.close();
   });
   if (simulatorID) {

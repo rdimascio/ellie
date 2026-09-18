@@ -5,4 +5,5 @@ export declare function verifiedATSResult(
   xcresultOutcome: "Passed";
   counts: { total: number; passed: number; failed: number; skipped: number };
   googleCases: string[];
+  householdCases: string[];
 };
