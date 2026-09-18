@@ -7,6 +7,7 @@ struct SpeechTurnView: View {
   @ObservedObject private var browserStore: BrowserPhoneControlStore
   @StateObject private var speech: SpeechTurnStore
   @StateObject private var lifeReview: IOSQuietVoiceStore
+  @FocusState private var transcriptFocused: Bool
   private let credential: NativeEnrollmentCredential
   private let lifeConversationID: String?
 
@@ -58,6 +59,7 @@ struct SpeechTurnView: View {
       if speech.phase == .reviewing {
         Section("Review transcript") {
           TextEditor(text: $speech.transcript)
+            .focused($transcriptFocused)
             .frame(minHeight: 140)
             .accessibilityIdentifier("speech-transcript")
             .onChange(of: speech.transcript) { _, value in
@@ -158,6 +160,15 @@ struct SpeechTurnView: View {
     }
     .ellieScreen()
     .navigationTitle("Voice command")
+    .toolbar {
+      ToolbarItemGroup(placement: .keyboard) {
+        if speech.phase == .reviewing {
+          Spacer()
+          Button("Done") { transcriptFocused = false }
+            .accessibilityIdentifier("speech-transcript-done")
+        }
+      }
+    }
     .onDisappear {
       speech.cancelAndDiscard()
       browserStore.cancel()

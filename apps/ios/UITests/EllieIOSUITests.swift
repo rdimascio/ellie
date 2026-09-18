@@ -750,31 +750,30 @@ final class EllieIOSUITests: XCTestCase {
             XCTAssertEqual(transcript.value as? String, "Scroll right")
         }
         func row(_ index: Int) -> XCUIElement {
-            revealBrowserButton("speech-netflix-row-\(index)", in: app, forTap: true)
+            revealSpeechReviewButton("speech-netflix-row-\(index)", in: app, forTap: true)
         }
         reviewScroll()
-        let run = app.buttons["speech-browser-run"]
-        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
         XCTAssertFalse(run.isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 0")
-        app.buttons["speech-browser-read"].tap()
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
         XCTAssertTrue(row(2).waitForExistence(timeout: 5))
-        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled)
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled)
         row(2).tap()
         XCTAssertTrue(app.staticTexts["speech-netflix-row-review"].label.contains(
             "Row 2: New on Fixture Mac A"))
-        XCTAssertTrue(revealBrowserButton("speech-browser-run", in: app, forTap: true).isEnabled)
+        XCTAssertTrue(revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 0")
-        run.tap()
+        revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).tap()
         waitForFixtureMutations(1, in: app)
         XCTAssertFalse(app.buttons["speech-netflix-row-2"].exists)
 
         reviewScroll()
-        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled,
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled,
                        "the old row choice cannot authorize a later turn")
-        app.buttons["speech-browser-read"].tap()
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
         XCTAssertTrue(row(1).waitForExistence(timeout: 5))
-        XCTAssertFalse(revealBrowserButton("speech-browser-run", in: app).isEnabled,
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled,
                        "a fresh read still needs an explicit row choice")
         XCTAssertEqual(count.label, "Fixture mutations: 1")
     }
@@ -848,6 +847,19 @@ final class EllieIOSUITests: XCTestCase {
             XCTFail("The edited spoken search must be exact before reviewing a command")
             return
         }
+        let done = app.buttons["speech-transcript-done"]
+        guard done.waitForExistence(timeout: 5) else {
+            XCTFail("Reviewing an edited transcript must offer keyboard Done")
+            return
+        }
+        done.tap()
+        let keyboardGone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+        guard XCTWaiter.wait(for: [keyboardGone], timeout: 5) == .completed else {
+            XCTFail("Done must dismiss the keyboard without sending the transcript")
+            return
+        }
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
         let run = revealSpeechReviewButton("speech-browser-run", in: app)
         XCTAssertFalse(run.isEnabled, "A spoken search requires an observed selected document")
         XCTAssertEqual(count.label, "Fixture mutations: 0")
@@ -948,27 +960,33 @@ final class EllieIOSUITests: XCTestCase {
         let transcript = app.textViews["speech-transcript"]
         XCTAssertTrue(transcript.waitForExistence(timeout: 5))
         XCTAssertEqual(transcript.value as? String, "Search for public video")
-        let run = app.buttons["speech-browser-run"]
-        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
         XCTAssertFalse(run.isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 0")
-        app.buttons["speech-browser-read"].tap()
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
         let runEnabled = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "isEnabled == true"), object: run)
-        XCTAssertEqual(XCTWaiter.wait(for: [runEnabled], timeout: 5), .completed)
+        guard XCTWaiter.wait(for: [runEnabled], timeout: 5) == .completed else {
+            XCTFail("A fresh page read must enable the reviewed search before Run")
+            return
+        }
         XCTAssertEqual(count.label, "Fixture mutations: 0")
-        run.tap()
-        XCTAssertTrue(app.buttons["speech-browser-read-updated"].waitForExistence(timeout: 5))
+        revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).tap()
+        let updatedRead = revealSpeechReviewButton("speech-browser-read-updated", in: app)
+        guard updatedRead.exists else { return }
         waitForFixtureMutations(1, in: app)
         XCTAssertFalse(app.buttons["speech-browser-continue"].exists)
 
-        let updatedRead = app.buttons["speech-browser-read-updated"]
         let updatedReadEnabled = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "isEnabled == true"), object: updatedRead)
-        XCTAssertEqual(XCTWaiter.wait(for: [updatedReadEnabled], timeout: 5), .completed)
-        updatedRead.tap()
-        XCTAssertTrue(app.buttons["speech-browser-continue"].waitForExistence(timeout: 5))
-        app.buttons["speech-browser-continue"].tap()
+        guard XCTWaiter.wait(for: [updatedReadEnabled], timeout: 5) == .completed else {
+            XCTFail("The separate updated Read must become available before continuing")
+            return
+        }
+        revealSpeechReviewButton("speech-browser-read-updated", in: app, forTap: true).tap()
+        let continuation = revealSpeechReviewButton("speech-browser-continue", in: app, forTap: true)
+        guard continuation.exists && continuation.isHittable else { return }
+        continuation.tap()
         XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
         let observedSite = app.staticTexts["browser-observed-site"]
         let observedPlayback = app.staticTexts["browser-observed-playback"]
