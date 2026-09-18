@@ -89,26 +89,47 @@ private final class QuietVoiceClientFixture: IOSQuietVoiceClient {
     var statusCalls = 0
     var failNextSend = false
     var statusNotFound = false
-    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int { 1 }
+    var statusRevoked = false
+    var holdEpoch = false
+    var holdSend = false
+    var holdStatus = false
+    private var heldEpoch: CheckedContinuation<Int, Never>?
+    private var heldSend: CheckedContinuation<IOSQuietChatOutcome, Never>?
+    private var heldStatus: CheckedContinuation<IOSQuietChatOutcome, Never>?
+    private var outcome: IOSQuietChatOutcome { IOSQuietChatOutcome(status: "completed",
+        conversationID: "quiet_1", turnID: "turn_2", reply: "A read-only reply.",
+        needsMacReview: false) }
+    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int {
+        if holdEpoch { return await withCheckedContinuation { heldEpoch = $0 } }
+        return 1
+    }
     func send(_ credential: NativeEnrollmentCredential, body: Data) async throws
         -> IOSQuietChatOutcome {
         let value = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         let requestID = try XCTUnwrap(value["requestId"] as? String)
         sends.append((requestID, value["conversationId"] as? String))
+        if holdSend { return await withCheckedContinuation { heldSend = $0 } }
         if failNextSend {
             failNextSend = false
             throw IOSQuietFailure.unavailable
         }
-        return IOSQuietChatOutcome(status: "completed", conversationID: "quiet_1",
-            turnID: "turn_2", reply: "A read-only reply.", needsMacReview: false)
+        return outcome
     }
     func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws
         -> IOSQuietChatOutcome {
         statusCalls += 1
+        if holdStatus { return await withCheckedContinuation { heldStatus = $0 } }
+        if statusRevoked { throw IOSQuietFailure.revoked }
         if statusNotFound { throw IOSQuietFailure.notFound }
         return IOSQuietChatOutcome(status: "completed", conversationID: "quiet_1",
             turnID: "turn_1", reply: "The first read-only reply.", needsMacReview: false)
     }
+    func releaseEpoch() { heldEpoch?.resume(returning: 1); heldEpoch = nil }
+    func releaseSend() { heldSend?.resume(returning: outcome); heldSend = nil }
+    func releaseStatus() { heldStatus?.resume(returning: outcome); heldStatus = nil }
+    var epochPending: Bool { heldEpoch != nil }
+    var sendPending: Bool { heldSend != nil }
+    var statusPending: Bool { heldStatus != nil }
 }
 
 final class IOSQuietSessionsTests: XCTestCase {
@@ -208,6 +229,14 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTAssertEqual(try IOSQuietWire.chatOutcome(try json([
             "status": "completed", "conversationId": "quiet_1", "turnId": "turn_1",
             "reply": "Review 👩‍👩‍👧‍👧\r\ncomplete", "needsMacReview": true])).needsMacReview, true)
+        let serverNormalizedReply = "Family 👩‍👩‍👧‍👧\r\n日本語" + String(repeating: "😀", count: 2_981)
+        let serverWire = try json(["status": "completed", "conversationId": "quiet_1",
+            "turnId": "turn_1", "reply": serverNormalizedReply, "needsMacReview": false])
+        XCTAssertTrue(serverWire.count < 16_384)
+        XCTAssertEqual(try IOSQuietWire.chatOutcome(serverWire).reply, serverNormalizedReply)
+        XCTAssertThrowsError(try IOSQuietWire.chatOutcome(try json([
+            "status": "completed", "conversationId": "quiet_1", "turnId": "turn_1",
+            "reply": "Unsafe\u{0001}reply", "needsMacReview": false])))
         XCTAssertThrowsError(try IOSQuietWire.page(try json(["sessions": [],
             "page": ["hasMore": true]])))
     }
@@ -326,7 +355,7 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTAssertEqual(second.phase, .idle)
         XCTAssertNil(secondJournal.token)
         XCTAssertEqual(secondClient.sends.count, 1)
-        XCTAssertEqual(secondClient.statusCalls, 0)
+        XCTAssertEqual(secondClient.statusCalls, 1, "the explicit status read occurred once")
     }
 
     @MainActor
@@ -342,6 +371,83 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTAssertTrue(journal.recordedScopes.isEmpty)
         XCTAssertTrue(client.sends.isEmpty)
         XCTAssertTrue(store.canSend)
+    }
+
+    @MainActor
+    func testConcurrentMarkerAppearingDuringEpochNeverSendsOrSticksChecking() async {
+        let client = QuietVoiceClientFixture(), journal = QuietVoiceJournal()
+        client.holdEpoch = true
+        let first = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        first.sendReviewed("First reviewed question")
+        await eventually { client.epochPending }
+        let secondClient = QuietVoiceClientFixture()
+        secondClient.holdSend = true
+        let second = IOSQuietVoiceStore(credential: credential(), client: secondClient,
+            journal: journal)
+        second.sendReviewed("Second reviewed question")
+        await eventually { secondClient.sendPending }
+        let newer = journal.token
+        XCTAssertNotNil(newer)
+        client.releaseEpoch()
+        await eventually { first.phase == .unknown }
+        XCTAssertEqual(journal.token, newer)
+        XCTAssertFalse(first.canSend)
+        XCTAssertTrue(client.sends.isEmpty)
+        second.background()
+        secondClient.releaseSend()
+    }
+
+    @MainActor
+    func testLateVoiceSendAndStatusCannotResurrectBackgroundOrRevokedReply() async {
+        let client = QuietVoiceClientFixture(), journal = QuietVoiceJournal()
+        client.holdSend = true
+        let store = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        store.sendReviewed("Review a question")
+        await eventually { client.sendPending }
+        store.background()
+        XCTAssertEqual(store.phase, .unknown)
+        client.releaseSend()
+        let observationEnd = ContinuousClock.now + .milliseconds(250)
+        while ContinuousClock.now < observationEnd {
+            XCTAssertEqual(store.phase, .unknown)
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertNotNil(journal.token)
+        client.holdStatus = true
+        store.reconcile()
+        await eventually { client.statusPending }
+        store.credentialDidChange()
+        XCTAssertEqual(store.phase, .revoked)
+        client.releaseStatus()
+        for _ in 0..<10 { try? await Task.sleep(for: .milliseconds(20)) }
+        store.restore()
+        store.reset()
+        store.reconcile()
+        XCTAssertEqual(store.phase, .revoked)
+        XCTAssertFalse(store.canSend)
+        XCTAssertNotNil(journal.token)
+        XCTAssertEqual(client.sends.count, 1)
+        XCTAssertEqual(client.statusCalls, 1)
+    }
+
+    @MainActor
+    func testRevokedStatusRemainsRevokedAcrossRestoreAndReset() async {
+        let client = QuietVoiceClientFixture(), journal = QuietVoiceJournal()
+        client.failNextSend = true
+        let store = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        store.sendReviewed("Review this question")
+        await eventually { store.phase == .unknown }
+        client.statusRevoked = true
+        store.reconcile()
+        await eventually { store.phase == .revoked }
+        store.restore()
+        store.reset()
+        store.reconcile()
+        XCTAssertEqual(store.phase, .revoked)
+        XCTAssertFalse(store.canSend)
+        XCTAssertNotNil(journal.token)
+        XCTAssertEqual(client.sends.count, 1)
+        XCTAssertEqual(client.statusCalls, 1)
     }
 
     @MainActor

@@ -102,4 +102,92 @@ private final class IOSQuietMemoryMarkerFixture: BrowserMutationUncertaintyPersi
         return .cleared
     }
 }
+
+private actor IOSQuietVoiceFixtureRecorder: SpeechRecording {
+    func start() async throws {}
+    func stop() async throws -> SpeechAudioArtifact {
+        SpeechAudioArtifact(id: UUID(), url: URL(fileURLWithPath: "/dev/null"))
+    }
+    func cancel() async throws {}
+    func dispose(_ artifact: SpeechAudioArtifact) async throws {}
+}
+
+private actor IOSQuietVoiceFixtureSpeech: SpeechTransporting {
+    private var index = 0
+    func availability(for credential: NativeEnrollmentCredential) async throws {}
+    func transcribe(_ artifact: SpeechAudioArtifact, turnID: UUID,
+        credential: NativeEnrollmentCredential) async throws -> String {
+        defer { index += 1 }
+        return ["What did we plan?", "What happens next?", "One more question?"][min(index, 2)]
+    }
+    func cancel(turnID: UUID, credential: NativeEnrollmentCredential) async {}
+}
+
+@MainActor
+private final class IOSQuietVoiceFixtureClient: ObservableObject, IOSQuietVoiceClient {
+    @Published private(set) var sends = 0
+    @Published private(set) var statusReads = 0
+    @Published private(set) var conversationIDs: [String?] = []
+    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int { 1 }
+    func send(_ credential: NativeEnrollmentCredential, body: Data) async throws
+        -> IOSQuietChatOutcome {
+        let value = try JSONSerialization.jsonObject(with: body) as? [String: Any]
+        sends += 1
+        conversationIDs.append(value?["conversationId"] as? String)
+        if sends == 3 { throw IOSQuietFailure.unavailable }
+        return IOSQuietChatOutcome(status: "completed", conversationID: "quiet_fixture",
+            turnID: "turn_\(sends)", reply: "Read-only reply \(sends).", needsMacReview: false)
+    }
+    func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws
+        -> IOSQuietChatOutcome {
+        statusReads += 1
+        throw IOSQuietFailure.revoked
+    }
+}
+
+@MainActor
+struct IOSQuietVoiceUITestFixtureView: View {
+    @StateObject private var client: IOSQuietVoiceFixtureClient
+    @StateObject private var speech: SpeechTurnStore
+    @StateObject private var life: IOSQuietVoiceStore
+    @StateObject private var controls: PhoneControlStore
+    @StateObject private var browser: BrowserPhoneControlStore
+    private let credential: NativeEnrollmentCredential
+
+    init() {
+        let credential = NativeEnrollmentCredential(
+            origin: URL(string: "https://127.0.0.1:8444")!,
+            certificateSha256: String(repeating: "b", count: 64),
+            client: NativeClient(id: "fixture-phone", role: "native_phone_controller",
+                label: "Fixture", grants: [], createdAt: 1_800_000_000_000,
+                expiresAt: 1_807_776_000_000),
+            token: String(repeating: "c", count: 64))
+        let client = IOSQuietVoiceFixtureClient()
+        self.credential = credential
+        _client = StateObject(wrappedValue: client)
+        _speech = StateObject(wrappedValue: SpeechTurnStore(credential: credential,
+            recorder: IOSQuietVoiceFixtureRecorder(), transport: IOSQuietVoiceFixtureSpeech()))
+        _life = StateObject(wrappedValue: IOSQuietVoiceStore(credential: credential,
+            client: client, journal: IOSQuietMemoryMarkerFixture()))
+        _controls = StateObject(wrappedValue: PhoneControlStore(credential: credential))
+        _browser = StateObject(wrappedValue: BrowserPhoneControlStore(credential: credential,
+            uncertainty: IOSQuietMemoryMarkerFixture()))
+    }
+    var body: some View {
+        NavigationStack {
+            SpeechTurnView(credential: credential, controls: controls, browser: browser,
+                speech: speech, lifeReview: life)
+        }
+        .overlay(alignment: .bottomTrailing) {
+            VStack {
+                Text("Fixture sends: \(client.sends)")
+                    .accessibilityIdentifier("quiet-voice-fixture-sends")
+                Text("Fixture status reads: \(client.statusReads)")
+                    .accessibilityIdentifier("quiet-voice-fixture-status")
+                Text("Fixture follow-up bound: \(client.conversationIDs.dropFirst().first == "quiet_fixture")")
+                    .accessibilityIdentifier("quiet-voice-fixture-follow-up")
+            }.font(.caption2).padding(4).allowsHitTesting(false)
+        }
+    }
+}
 #endif

@@ -23,6 +23,25 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
         createdAt: 1, expiresAt: 9_007_199_254_740_000), token: token)
   }
 
+  func testPinnedNativeLifeQuestionUsesSeparateGrantAndDurableReadOnlyStatus() async throws {
+    let allowed = try credential("allowed")
+    let client = IOSPinnedQuietVoiceClient()
+    let epoch = try await client.epoch(allowed)
+    let requestID = "ae2bbc9c-57c0-4a8a-97fc-e6ba10179bc2"
+    let body = try IOSPinnedQuietVoiceClient.encodedBody(requestID: requestID,
+      epoch: epoch, message: "What is the family plan?", conversationID: nil)
+    let sent = try await client.send(allowed, body: body)
+    XCTAssertEqual(sent.status, "completed")
+    XCTAssertEqual(sent.reply, "Family 👩‍👩‍👧‍👧\r\n日本語 read-only answer.")
+    XCTAssertFalse(sent.needsMacReview)
+    let status = try await client.status(allowed, requestID: requestID)
+    XCTAssertEqual(status, sent, "a status read observes the same durable reply without resending")
+    do {
+      _ = try await client.epoch(credential("denied"))
+      XCTFail("Native enrollment alone authorized a Life question")
+    } catch { XCTAssertEqual(error as? LifeWebSessionFailure, .grantRequired) }
+  }
+
   func testPinnedClientsReadSelectedCalendarAndExplicitGmailBodies() async throws {
     let phone = try credential("allowed")
     let agendaClient = IOSPinnedAgendaClient()

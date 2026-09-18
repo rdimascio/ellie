@@ -291,6 +291,20 @@ function presentation(value: unknown, limit: number, fallback: string): string {
   if (value.length <= limit) return value;
   return `${value.slice(0, Math.max(0, limit - 1))}…`;
 }
+function nativeReviewReply(value: string): string {
+  // The native decoder permits ordinary multilingual text, joiners, and line breaks,
+  // but rejects other controls. Bound Unicode scalars before JSON serialization;
+  // 3,000 scalars require at most 12 KB of UTF-8 plus a small envelope.
+  const safe = Array.from(value)
+    .filter((scalar) => {
+      if (scalar === "\t" || scalar === "\n" || scalar === "\r") return true;
+      if (scalar === "\u200c" || scalar === "\u200d") return true;
+      return !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(scalar);
+    })
+    .slice(0, 3_000)
+    .join("");
+  return safe || "Reply unavailable.";
+}
 function jsonObject(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new HttpError(400, "JSON object required.");
@@ -3074,7 +3088,7 @@ export class LifeHttpServer {
       }) ?? [];
     return {
       reply: nativeReview
-        ? Array.from(result.reply).slice(0, 3_000).join("") || "Reply unavailable."
+        ? nativeReviewReply(result.reply)
         : presentation(result.reply, 8000, "Done."),
       ...(nativeReview ? { nativeReadOnly: true } : {}),
       ...(result.needsMacReview === true ? { needsMacReview: true } : {}),
@@ -3235,9 +3249,7 @@ export class LifeHttpServer {
       status: turn.status,
       conversationId: conversation.id,
       turnId: turn.id,
-      ...(result
-        ? { reply: Array.from(result.reply).slice(0, 3_000).join("") || "Reply unavailable." }
-        : {}),
+      ...(result ? { reply: result.reply } : {}),
       needsMacReview:
         result?.needsMacReview === true ||
         !!this.options.store.getPendingIntent(this.actor, conversation.id),

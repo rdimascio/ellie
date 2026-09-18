@@ -628,6 +628,38 @@ test("native voice review binds one durable personal turn without executing mode
   }
 });
 
+test("native review persists one bounded Unicode-safe reply for POST and status", async () => {
+  const reply = `Family 👩‍👩‍👧‍👧\r\n日本語\u0000\u0001${"😀".repeat(2_981)}`;
+  const f = await fixture({
+    model: {
+      async plan() {
+        return { reply, actions: [] };
+      },
+    },
+  });
+  try {
+    const body = {
+      message: "What did the family plan?",
+      requestId: "native_223e69d0-dbd6-4dd5-a45d-a16d0fd13326",
+      chatEpoch: 1,
+    };
+    const sent = await f.request("/api/life/native/chat", "phone", body);
+    assert.equal(sent.status, 200);
+    const raw = await sent.text();
+    assert.ok(Buffer.byteLength(raw) < 16_384, "the full native envelope fits its transport bound");
+    const value = JSON.parse(raw) as { reply: string; status: string };
+    assert.equal(value.status, "completed");
+    assert.equal(value.reply, `Family 👩‍👩‍👧‍👧\r\n日本語${"😀".repeat(2_981)}`);
+    assert.equal(Array.from(value.reply).length, 3_000);
+    const status = await f.request(`/api/life/native/chat/requests/${body.requestId}`, "phone");
+    assert.equal(status.status, 200);
+    assert.equal(((await status.json()) as { reply: string }).reply, value.reply);
+    assert.equal(f.life.getConversationRequest(actor, body.requestId)?.result?.reply, value.reply);
+  } finally {
+    await f.close();
+  }
+});
+
 test("native read-only chat reports unavailable before a durable turn when no model is configured", async () => {
   const f = await fixture();
   try {

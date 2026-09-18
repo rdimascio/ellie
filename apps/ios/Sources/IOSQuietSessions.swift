@@ -719,6 +719,7 @@ final class IOSQuietVoiceStore: ObservableObject {
     private var pendingRequestID: String?
     private var lastConversationID: String?
     private var credentialChanged = false
+    private var accessRevoked = false
 
     init(credential: NativeEnrollmentCredential,
          client: IOSQuietVoiceClient = IOSPinnedQuietVoiceClient(),
@@ -740,12 +741,12 @@ final class IOSQuietVoiceStore: ObservableObject {
     }
     var canSend: Bool {
         switch phase {
-        case .idle, .failed: return operation == nil && !credentialChanged
+        case .idle, .failed: return operation == nil && !credentialChanged && !accessRevoked
         default: return false
         }
     }
     func restore() {
-        guard !credentialChanged else { phase = .revoked; return }
+        guard !credentialChanged && !accessRevoked else { phase = .revoked; return }
         guard operation == nil else { return }
         guard let scope else { phase = .storageUnavailable; return }
         do {
@@ -783,8 +784,17 @@ final class IOSQuietVoiceStore: ObservableObject {
                 let body = try IOSPinnedQuietVoiceClient.encodedBody(requestID: requestID,
                     epoch: epoch, message: reviewed,
                     conversationID: conversationID ?? self.lastConversationID)
-                guard try journal.recordIfClear(token: requestID, for: scope) else {
-                    self.restore(); return
+                do {
+                    guard try journal.recordIfClear(token: requestID, for: scope) else {
+                        // Another store recorded first while the epoch request was in flight.
+                        // Never send this message or leave the UI in its checking phase.
+                        self.pendingRequestID = try journal.pendingToken(for: scope)
+                        self.phase = self.pendingRequestID == nil ? .storageUnavailable : .unknown
+                        return
+                    }
+                } catch {
+                    self.phase = .storageUnavailable
+                    return
                 }
                 self.pendingRequestID = requestID
                 self.phase = .sending
@@ -795,21 +805,25 @@ final class IOSQuietVoiceStore: ObservableObject {
                 self.settle(outcome, requestID: requestID, scope: scope)
             } catch {
                 guard let self, self.generation == ticket else { return }
-                if self.pendingRequestID != nil { self.phase = .unknown }
+                if error as? IOSQuietFailure == .revoked ||
+                    error as? LifeWebSessionFailure == .revoked ||
+                    error as? LifeWebSessionFailure == .grantRequired {
+                    self.accessRevoked = true
+                    self.phase = .revoked
+                }
+                else if self.pendingRequestID != nil { self.phase = .unknown }
                 else if error as? IOSQuietFailure == .invalidRequest {
                     self.phase = .failed("The reviewed message is too long for Life. Shorten it and send again; it was not sent.")
                 }
                 else if error as? IOSQuietFailure == .notConfigured {
                     self.phase = .failed("Life question answering is not configured on this coordinator. Your message was not sent.")
                 }
-                else if error as? IOSQuietFailure == .revoked ||
-                    error as? LifeWebSessionFailure == .revoked ||
-                    error as? LifeWebSessionFailure == .grantRequired { self.phase = .revoked }
                 else { self.phase = .failed("Life is unavailable. Your reviewed message was not sent.") }
             }
         }
     }
     func reconcile() {
+        guard !credentialChanged && !accessRevoked else { phase = .revoked; return }
         guard operation == nil else { return }
         guard let scope, let requestID = pendingRequestID else { restore(); return }
         generation += 1
@@ -829,6 +843,7 @@ final class IOSQuietVoiceStore: ObservableObject {
                 } else if error as? IOSQuietFailure == .revoked ||
                     error as? LifeWebSessionFailure == .revoked ||
                     error as? LifeWebSessionFailure == .grantRequired {
+                    self.accessRevoked = true
                     self.phase = .revoked
                 } else {
                     self.phase = .unknown
@@ -848,6 +863,7 @@ final class IOSQuietVoiceStore: ObservableObject {
         } catch { phase = .storageUnavailable }
     }
     func reset() {
+        guard !credentialChanged && !accessRevoked else { phase = .revoked; return }
         guard operation == nil, pendingRequestID == nil else { return }
         phase = .idle
     }
@@ -869,7 +885,7 @@ final class IOSQuietVoiceStore: ObservableObject {
         generation += 1
         operation?.cancel(); operation = nil
         lastConversationID = nil
-        if credentialChanged { phase = .revoked }
+        if credentialChanged || accessRevoked { phase = .revoked }
         else if pendingRequestID != nil { phase = .unknown }
         else { phase = .idle }
     }

@@ -223,11 +223,15 @@ struct SpeechTurnView: View {
   }
 
   private var stopTrackingQuestion: some View {
-    Button("Stop tracking this question", role: .destructive) {
-      lifeReview.stopTracking()
-      speech.discardReview()
+    VStack(alignment: .leading, spacing: 8) {
+      Text("A reply may still appear in Life. Stopping tracking clears only this iPhone's local request; it does not cancel the Life question.")
+        .font(.footnote).foregroundStyle(.secondary)
+      Button("Stop tracking this question", role: .destructive) {
+        lifeReview.stopTracking()
+        speech.discardReview()
+      }
+      .accessibilityIdentifier("speech-life-stop-tracking")
     }
-    .accessibilityIdentifier("speech-life-stop-tracking")
   }
 
   @ViewBuilder private var browserStatus: some View {
