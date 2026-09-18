@@ -1,8 +1,11 @@
 import Combine
+import CryptoKit
 import Foundation
 import SwiftUI
 
-enum IOSQuietFailure: Error, Equatable { case revoked, unavailable, invalidResponse }
+enum IOSQuietFailure: Error, Equatable {
+    case revoked, unavailable, notConfigured, notFound, invalidRequest, invalidResponse
+}
 
 struct IOSQuietSession: Identifiable, Equatable, Sendable {
     let id: String
@@ -199,6 +202,37 @@ enum IOSQuietWire {
             activityLimited: try bool(value["activityLimited"]),
             olderTurnsOmitted: try bool(page["hasMore"]))
     }
+    static func chatEpoch(_ data: Data) throws -> Int {
+        let value = try root(data, maximum: 24_000)
+        try keys(value, required: ["chatEpoch", "available"])
+        guard try bool(value["available"]) else { throw IOSQuietFailure.notConfigured }
+        return try number(value["chatEpoch"], maximum: Int.max)
+    }
+    static func chatOutcome(_ data: Data) throws -> IOSQuietChatOutcome {
+        let value = try root(data, maximum: 16_384)
+        try keys(value, required: ["status", "conversationId", "turnId", "needsMacReview"],
+            optional: ["reply"])
+        let status = try text(value["status"], maximum: 16)
+        guard ["pending", "completed", "interrupted"].contains(status) else {
+            throw IOSQuietFailure.invalidResponse
+        }
+        let reply = try value["reply"].map { try text($0, maximum: 4_000, empty: true) }
+        guard (status == "completed") == (reply != nil) else {
+            throw IOSQuietFailure.invalidResponse
+        }
+        return IOSQuietChatOutcome(status: status,
+            conversationID: try sessionID(value["conversationId"]),
+            turnID: try id(value["turnId"]), reply: reply,
+            needsMacReview: try bool(value["needsMacReview"]))
+    }
+}
+
+struct IOSQuietChatOutcome: Equatable, Sendable {
+    let status: String
+    let conversationID: String
+    let turnID: String
+    let reply: String?
+    let needsMacReview: Bool
 }
 
 protocol IOSQuietClient: Sendable {
@@ -399,7 +433,7 @@ struct IOSQuietSessionsHome: View {
             }
             ForEach(store.recent) { session in
                 NavigationLink {
-                    IOSQuietSessionDetail(store: store, id: session.id)
+                    IOSQuietSessionDetail(store: store, credential: credential, id: session.id)
                 } label: {
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
@@ -420,7 +454,7 @@ struct IOSQuietSessionsHome: View {
                 if session.id != store.recent.last?.id { Divider().overlay(ElliePalette.border) }
             }
             HStack(spacing: 18) {
-                NavigationLink("See all") { IOSQuietAllSessions(store: store) }
+                NavigationLink("See all") { IOSQuietAllSessions(store: store, credential: credential) }
                     .accessibilityIdentifier("quiet-see-all")
                 Spacer()
                 NavigationLink {
@@ -446,21 +480,25 @@ struct IOSQuietSessionsHome: View {
 @MainActor
 private struct IOSQuietVoiceEntry: View {
     let credential: NativeEnrollmentCredential
+    var conversationID: String? = nil
     @StateObject private var controls: PhoneControlStore
     @StateObject private var browser: BrowserPhoneControlStore
-    init(credential: NativeEnrollmentCredential) {
+    init(credential: NativeEnrollmentCredential, conversationID: String? = nil) {
         self.credential = credential
+        self.conversationID = conversationID
         _controls = StateObject(wrappedValue: PhoneControlStore(credential: credential))
         _browser = StateObject(wrappedValue: BrowserPhoneControlStore(credential: credential))
     }
     var body: some View {
-        SpeechTurnView(credential: credential, controls: controls, browser: browser)
+        SpeechTurnView(credential: credential, controls: controls, browser: browser,
+            lifeConversationID: conversationID)
     }
 }
 
 @MainActor
 private struct IOSQuietAllSessions: View {
     @ObservedObject var store: IOSQuietSessionsStore
+    let credential: NativeEnrollmentCredential
     var body: some View {
         List {
             if store.busy {
@@ -473,7 +511,9 @@ private struct IOSQuietAllSessions: View {
                 Text(notice).accessibilityIdentifier("quiet-all-notice")
             }
             ForEach(store.all) { session in
-                NavigationLink(session.title) { IOSQuietSessionDetail(store: store, id: session.id) }
+                NavigationLink(session.title) {
+                    IOSQuietSessionDetail(store: store, credential: credential, id: session.id)
+                }
                     .accessibilityIdentifier("quiet-all-session-\(session.id)")
             }
             if store.hasMore {
@@ -491,6 +531,7 @@ private struct IOSQuietAllSessions: View {
 @MainActor
 private struct IOSQuietSessionDetail: View {
     @ObservedObject var store: IOSQuietSessionsStore
+    let credential: NativeEnrollmentCredential
     let id: String
     var body: some View {
         ScrollView {
@@ -505,6 +546,12 @@ private struct IOSQuietSessionDetail: View {
                         .accessibilityIdentifier("quiet-detail-notice")
                 }
                 if let detail = store.detail, detail.session.id == id {
+                    NavigationLink {
+                        IOSQuietVoiceEntry(credential: credential, conversationID: id)
+                    } label: {
+                        Label("Ask Life about this session", systemImage: "waveform")
+                    }
+                    .accessibilityIdentifier("quiet-session-voice")
                     if detail.olderTurnsOmitted && !detail.originalRequest.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Original request").font(.caption).foregroundStyle(ElliePalette.muted)
@@ -575,5 +622,244 @@ private struct IOSQuietSessionDetail: View {
         .ellieScreen()
         .toolbar { Button("Refresh") { store.open(id) }.disabled(store.busy) }
         .onAppear { store.open(id) }
+    }
+}
+
+@MainActor
+protocol IOSQuietVoiceClient: Sendable {
+    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int
+    func send(_ credential: NativeEnrollmentCredential, body: Data) async throws -> IOSQuietChatOutcome
+    func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws -> IOSQuietChatOutcome
+}
+
+struct IOSPinnedQuietVoiceClient: IOSQuietVoiceClient {
+    private let transport = NativeEnrollmentTransport(timeout: 10)
+    private let authorizer = NativeLifeWebSessionAuthorizer()
+
+    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int {
+        let authority = LifeWebCredential(enrollment: credential)
+        let session = try await authorizer.authorize(authority)
+        try Task.checkCancellation()
+        let (data, response) = try await transport.lifeQuietGET(
+            path: "/api/life/native/chat/state", credential: authority,
+            sessionToken: session.token)
+        try check(response.statusCode)
+        return try IOSQuietWire.chatEpoch(data)
+    }
+    static func encodedBody(requestID: String, epoch: Int, message: String,
+        conversationID: String?) throws -> Data {
+        guard requestID.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+            options: .regularExpression) != nil, epoch >= 0 else {
+            throw IOSQuietFailure.invalidRequest
+        }
+        var payload: [String: Any] = [
+            "message": message, "requestId": "native_\(requestID)", "chatEpoch": epoch,
+        ]
+        if let conversationID { payload["conversationId"] = conversationID }
+        let body = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        guard (1...4_096).contains(body.count) else { throw IOSQuietFailure.invalidRequest }
+        return body
+    }
+    func send(_ credential: NativeEnrollmentCredential, body: Data) async throws -> IOSQuietChatOutcome {
+        let authority = LifeWebCredential(enrollment: credential)
+        let session = try await authorizer.authorize(authority)
+        try Task.checkCancellation()
+        let (data, response) = try await transport.lifeQuietPOST(body: body,
+            credential: authority, sessionToken: session.token)
+        try check(response.statusCode)
+        return try IOSQuietWire.chatOutcome(data)
+    }
+    func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws -> IOSQuietChatOutcome {
+        let authority = LifeWebCredential(enrollment: credential)
+        let session = try await authorizer.authorize(authority)
+        try Task.checkCancellation()
+        let (data, response) = try await transport.lifeQuietGET(
+            path: "/api/life/native/chat/requests/native_\(requestID)",
+            credential: authority, sessionToken: session.token)
+        if response.statusCode == 404 { throw IOSQuietFailure.notFound }
+        try check(response.statusCode)
+        return try IOSQuietWire.chatOutcome(data)
+    }
+    private func check(_ status: Int) throws {
+        switch status {
+        case 200: return
+        case 401, 403: throw IOSQuietFailure.revoked
+        default: throw IOSQuietFailure.unavailable
+        }
+    }
+}
+
+@MainActor
+final class IOSQuietVoiceStore: ObservableObject {
+    enum Phase: Equatable {
+        case idle, checking, sending, unknown, notFound, storageUnavailable, revoked
+        case completed(IOSQuietChatOutcome)
+        case interrupted
+        case failed(String)
+    }
+    @Published private(set) var phase: Phase = .idle
+    private let credential: NativeEnrollmentCredential
+    private let client: IOSQuietVoiceClient
+    private let journal: BrowserMutationUncertaintyPersisting
+    private let scope: String?
+    private var operation: Task<Void, Never>?
+    private var generation = 0
+    private var pendingRequestID: String?
+    private var lastConversationID: String?
+    private var credentialChanged = false
+
+    init(credential: NativeEnrollmentCredential,
+         client: IOSQuietVoiceClient = IOSPinnedQuietVoiceClient(),
+         journal: BrowserMutationUncertaintyPersisting? = nil) {
+        self.credential = credential
+        self.client = client
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        self.journal = journal ?? PrivateBrowserMutationUncertaintyStore(fileURL:
+            base.appendingPathComponent("Ellie", isDirectory: true)
+                .appendingPathComponent("quiet-review-uncertainty-v1.json"))
+        if let origin = canonicalNativeOrigin(credential.origin.absoluteString),
+           origin == credential.origin, validNativeIdentifier(credential.client.id),
+           credential.certificateSha256.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+           credential.token.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil {
+            let binding = "ellie-quiet-review-v1\u{0}\(origin.absoluteString)\u{0}\(credential.certificateSha256)\u{0}\(credential.client.id)\u{0}\(credential.token)"
+            scope = SHA256.hash(data: Data(binding.utf8))
+                .map { String(format: "%02x", $0) }.joined()
+        } else { scope = nil }
+    }
+    var canSend: Bool {
+        switch phase {
+        case .idle, .failed: return operation == nil && !credentialChanged
+        default: return false
+        }
+    }
+    func restore() {
+        guard !credentialChanged else { phase = .revoked; return }
+        guard operation == nil, let scope else { phase = .storageUnavailable; return }
+        do {
+            pendingRequestID = try journal.pendingToken(for: scope)
+            if pendingRequestID != nil { phase = .unknown }
+        } catch { phase = .storageUnavailable }
+    }
+    func sendReviewed(_ message: String, conversationID: String? = nil) {
+        guard canSend, let scope else { phase = .storageUnavailable; return }
+        let reviewed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !reviewed.isEmpty, reviewed.utf16.count <= 2_000,
+              !reviewed.unicodeScalars.contains(where: {
+                  CharacterSet.controlCharacters.contains($0) &&
+                  ![9, 10, 13, 0x200C, 0x200D].contains($0.value)
+              }),
+              conversationID == nil || conversationID?.range(
+                of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil
+        else { phase = .failed("Review a valid message before sending."); return }
+        do {
+            if try journal.pendingToken(for: scope) != nil {
+                restore(); return
+            }
+        } catch { phase = .storageUnavailable; return }
+        let requestID = UUID().uuidString.lowercased()
+        generation += 1
+        let ticket = generation
+        phase = .checking
+        operation = Task { [weak self, client, credential, journal] in
+            defer { if self?.generation == ticket { self?.operation = nil } }
+            do {
+                let epoch = try await client.epoch(credential)
+                try Task.checkCancellation()
+                guard let self, self.generation == ticket else { return }
+                let body = try IOSPinnedQuietVoiceClient.encodedBody(requestID: requestID,
+                    epoch: epoch, message: reviewed,
+                    conversationID: conversationID ?? self.lastConversationID)
+                guard try journal.recordIfClear(token: requestID, for: scope) else {
+                    self.restore(); return
+                }
+                self.pendingRequestID = requestID
+                self.phase = .sending
+                try Task.checkCancellation()
+                let outcome = try await client.send(credential, body: body)
+                try Task.checkCancellation()
+                guard self.generation == ticket else { return }
+                self.settle(outcome, requestID: requestID, scope: scope)
+            } catch {
+                guard let self, self.generation == ticket else { return }
+                if self.pendingRequestID != nil { self.phase = .unknown }
+                else if error as? IOSQuietFailure == .invalidRequest {
+                    self.phase = .failed("The reviewed message is too long for Life. Shorten it and send again; it was not sent.")
+                }
+                else if error as? IOSQuietFailure == .notConfigured {
+                    self.phase = .failed("Life question answering is not configured on this coordinator. Your message was not sent.")
+                }
+                else if error as? IOSQuietFailure == .revoked ||
+                    error as? LifeWebSessionFailure == .revoked ||
+                    error as? LifeWebSessionFailure == .grantRequired { self.phase = .revoked }
+                else { self.phase = .failed("Life is unavailable. Your reviewed message was not sent.") }
+            }
+        }
+    }
+    func reconcile() {
+        guard operation == nil, let scope, let requestID = pendingRequestID else { restore(); return }
+        generation += 1
+        let ticket = generation
+        phase = .checking
+        operation = Task { [weak self, client, credential] in
+            defer { if self?.generation == ticket { self?.operation = nil } }
+            do {
+                let outcome = try await client.status(credential, requestID: requestID)
+                try Task.checkCancellation()
+                guard let self, self.generation == ticket else { return }
+                self.settle(outcome, requestID: requestID, scope: scope)
+            } catch {
+                guard let self, self.generation == ticket else { return }
+                if error as? IOSQuietFailure == .notFound {
+                    self.phase = .notFound
+                } else if error as? IOSQuietFailure == .revoked ||
+                    error as? LifeWebSessionFailure == .revoked ||
+                    error as? LifeWebSessionFailure == .grantRequired {
+                    self.phase = .revoked
+                } else {
+                    self.phase = .unknown
+                }
+            }
+        }
+    }
+    private func settle(_ outcome: IOSQuietChatOutcome, requestID: String, scope: String) {
+        guard outcome.status != "pending" else { phase = .unknown; return }
+        do {
+            guard try journal.clear(token: requestID, for: scope) != .mismatch else {
+                phase = .unknown; return
+            }
+            pendingRequestID = nil
+            if outcome.status == "completed" { lastConversationID = outcome.conversationID }
+            phase = outcome.status == "completed" ? .completed(outcome) : .interrupted
+        } catch { phase = .storageUnavailable }
+    }
+    func reset() {
+        guard operation == nil, pendingRequestID == nil else { return }
+        phase = .idle
+    }
+    func stopTracking() {
+        guard operation == nil, let scope, let requestID = pendingRequestID else { return }
+        guard phase == .unknown || phase == .notFound else { return }
+        do {
+            let cleared = try journal.clear(token: requestID, for: scope)
+            guard cleared == .cleared else {
+                phase = .storageUnavailable
+                return
+            }
+            pendingRequestID = nil
+            lastConversationID = nil
+            phase = .idle
+        } catch { phase = .storageUnavailable }
+    }
+    func background() {
+        generation += 1
+        operation?.cancel(); operation = nil
+        lastConversationID = nil
+        if pendingRequestID != nil { phase = .unknown }
+        else { phase = .idle }
+    }
+    func credentialDidChange() {
+        background()
+        credentialChanged = true
+        phase = .revoked
     }
 }

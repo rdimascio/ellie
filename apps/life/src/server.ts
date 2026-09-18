@@ -73,6 +73,7 @@ const PLUGIN_HOST_CSP =
 const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 export interface LifeHarnessLike {
+  readonly readOnlyReviewAvailable?: boolean;
   improvements?: {
     modelAvailable: boolean;
     list(actor: LifeActor): ImprovementProposalLike[];
@@ -109,8 +110,11 @@ export interface LifeHarnessLike {
       expectedRevision: number;
       taskId?: string;
     };
+    /** Trusted native-session policy, never taken from the request body. */
+    readOnlyReview?: boolean;
   }): Promise<{
     reply: string;
+    needsMacReview?: boolean;
     conversationId: string;
     actions?: Array<{ label: string; status: string }>;
     records?: LifeRecord[];
@@ -1302,6 +1306,21 @@ export class LifeHttpServer {
         return await this.teachingMutation(request, response, path);
       if (path === "/api/life/chat" && request.method === "POST")
         return await this.chat(request, response);
+      if (path === "/api/life/native/chat" && request.method === "POST" && embedded)
+        return await this.chat(request, response, true);
+      if (path === "/api/life/native/chat/state" && request.method === "GET" && embedded) {
+        this.send(response, 200, {
+          chatEpoch: this.options.store.chatEpoch(this.actor),
+          available: this.options.harness.readOnlyReviewAvailable === true,
+        });
+        return;
+      }
+      if (
+        /^\/api\/life\/native\/chat\/requests\/[A-Za-z0-9_-]{1,128}$/.test(path) &&
+        request.method === "GET" &&
+        embedded
+      )
+        return this.chatRequest(path, response, true);
       if (/^\/api\/life\/chat\/requests\/[^/]+$/.test(path) && request.method === "GET")
         return this.chatRequest(path, response);
       if (path === "/api/life/memory" && request.method === "GET") {
@@ -2669,40 +2688,65 @@ export class LifeHttpServer {
     this.options.harness.invalidateContext?.(this.actor, guide.record.scope);
     this.send(response, 200, this.teachingGuide(guide));
   }
-  private async chat(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  private async chat(
+    request: IncomingMessage,
+    response: ServerResponse,
+    nativeReview = false,
+  ): Promise<void> {
+    if (nativeReview && this.options.harness.readOnlyReviewAvailable !== true)
+      throw new HttpError(503, "Life question answering is unavailable on this coordinator.");
     const body = jsonObject(await this.body(request)),
-      scope = this.scope(body.scope),
-      message = bounded(body.message, "message", 8000),
+      scope = nativeReview
+        ? { type: "user" as const, id: this.actor.userId }
+        : this.scope(body.scope),
+      message = bounded(body.message, "message", nativeReview ? 2_000 : 8000),
       requestId = identifier(body.requestId, "requestId"),
       chatEpoch = Number(body.chatEpoch),
       conversationId =
         body.conversationId === undefined
           ? undefined
-          : identifier(body.conversationId, "conversationId"),
-      begun = this.options.store.beginConversationTurn(this.actor, {
-        scope,
-        message,
-        requestId,
-        chatEpoch,
-        ...(conversationId ? { conversationId } : {}),
-      });
+          : identifier(body.conversationId, "conversationId");
+    if (
+      nativeReview &&
+      (Object.keys(body).some(
+        (key) => !["message", "requestId", "chatEpoch", "conversationId"].includes(key),
+      ) ||
+        !/^native_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          requestId,
+        ) ||
+        !Number.isSafeInteger(body.chatEpoch) ||
+        Number(body.chatEpoch) < 0 ||
+        (conversationId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(conversationId)))
+    )
+      throw new HttpError(400, "Native chat request is invalid.");
+    if (!nativeReview && requestId.startsWith("native_"))
+      throw new HttpError(400, "Chat request id is reserved.");
+    const begun = this.options.store.beginConversationTurn(this.actor, {
+      scope,
+      message,
+      requestId,
+      chatEpoch,
+      ...(conversationId ? { conversationId } : {}),
+    });
     let automaticMemoryForgotten = 0;
     try {
-      this.automaticMemory.captureTurn(this.actor, {
-        conversationId: begun.conversation.id,
-        turnId: begun.turn.id,
-      });
-      const forget =
-        /^(?:please\s+)?(?:forget|do not remember|don't remember)\s+(?:that\s+)?(.+?)[.!?]*$/i.exec(
-          message.trim(),
-        );
-      if (forget && begun.status === "new") {
-        this.automaticMemory.suppressTurn(this.actor, begun.turn.id);
-        const query = forget[1]!.trim();
-        if (query.length <= 500)
-          automaticMemoryForgotten = this.automaticMemory.forget(this.actor, { scope, query });
+      if (!nativeReview) {
+        this.automaticMemory.captureTurn(this.actor, {
+          conversationId: begun.conversation.id,
+          turnId: begun.turn.id,
+        });
+        const forget =
+          /^(?:please\s+)?(?:forget|do not remember|don't remember)\s+(?:that\s+)?(.+?)[.!?]*$/i.exec(
+            message.trim(),
+          );
+        if (forget && begun.status === "new") {
+          this.automaticMemory.suppressTurn(this.actor, begun.turn.id);
+          const query = forget[1]!.trim();
+          if (query.length <= 500)
+            automaticMemoryForgotten = this.automaticMemory.forget(this.actor, { scope, query });
+        }
+        this.automaticMemory.sync(this.actor, scope);
       }
-      this.automaticMemory.sync(this.actor, scope);
     } catch (error) {
       if (begun.status === "new")
         this.options.store.interruptConversationTurn(this.actor, {
@@ -2713,10 +2757,14 @@ export class LifeHttpServer {
       throw error;
     }
     if (begun.status !== "new") {
+      if (nativeReview && begun.result && begun.result.nativeReadOnly !== true)
+        throw new HttpError(404, "Native review request not found.");
       this.send(
         response,
         200,
-        this.conversationChatEnvelope(begun.conversation, begun.turn, begun.result),
+        nativeReview
+          ? this.nativeChatEnvelope(begun.conversation, begun.turn, begun.result)
+          : this.conversationChatEnvelope(begun.conversation, begun.turn, begun.result),
       );
       return;
     }
@@ -2760,11 +2808,12 @@ export class LifeHttpServer {
         12,
         fingerprint,
       ),
-      pendingIntent = this.options.store.getPendingIntent(this.actor, begun.conversation.id),
-      recentOperation = this.options.store.recentConversationOperation(
-        this.actor,
-        begun.conversation.id,
-      );
+      pendingIntent = nativeReview
+        ? undefined
+        : this.options.store.getPendingIntent(this.actor, begun.conversation.id),
+      recentOperation = nativeReview
+        ? undefined
+        : this.options.store.recentConversationOperation(this.actor, begun.conversation.id);
     const progressEntry = {
       conversationId: begun.conversation.id,
       turnId: begun.turn.id,
@@ -2898,12 +2947,23 @@ export class LifeHttpServer {
         ...(pendingIntent ? { pendingIntent } : {}),
         ...(recentOperation ? { recentOperation } : {}),
         conversationPreferences,
+        ...(nativeReview ? { readOnlyReview: true } : {}),
         signal: controller.signal,
         onProgress,
       });
       this.recheckOwner(owner(scope));
       const directive = result.continuation;
-      if (directive?.action === "create" || directive?.action === "replace") {
+      if (
+        nativeReview &&
+        (directive ||
+          result.actions?.length ||
+          result.records?.length ||
+          result.taskIds?.length ||
+          result.conversationPreferenceUpdate ||
+          result.createdGroup)
+      )
+        throw new Error("Read-only Life review returned an action.");
+      if (!nativeReview && (directive?.action === "create" || directive?.action === "replace")) {
         const created = this.options.store.createPendingIntent(this.actor, {
           conversationId: begun.conversation.id,
           scope,
@@ -2926,13 +2986,13 @@ export class LifeHttpServer {
           });
           result = await executePending(answered);
         }
-      } else if (directive?.action === "cancel")
+      } else if (!nativeReview && directive?.action === "cancel")
         this.options.store.cancelPendingIntent(
           this.actor,
           directive.pendingIntentId,
           directive.expectedRevision,
         );
-      else if (directive?.action === "answer") {
+      else if (!nativeReview && directive?.action === "answer") {
         const answered = this.options.store.answerPendingIntent(this.actor, {
           id: directive.pendingIntentId,
           expectedRevision: directive.expectedRevision,
@@ -2942,7 +3002,7 @@ export class LifeHttpServer {
         });
         result = await executePending(answered);
       }
-      const normalized = this.conversationResult(scope, result),
+      const normalized = this.conversationResult(scope, result, nativeReview),
         completed = this.options.store.completeConversationTurn(this.actor, {
           conversationId: begun.conversation.id,
           turnId: begun.turn.id,
@@ -2961,7 +3021,9 @@ export class LifeHttpServer {
       this.send(
         response,
         200,
-        this.conversationChatEnvelope(completed.conversation, completed.turn, completed.result),
+        nativeReview
+          ? this.nativeChatEnvelope(completed.conversation, completed.turn, completed.result)
+          : this.conversationChatEnvelope(completed.conversation, completed.turn, completed.result),
       );
     } catch (error) {
       if (activeRescheduleId) {
@@ -2993,6 +3055,7 @@ export class LifeHttpServer {
   private conversationResult(
     scope: LifeScope,
     result: Awaited<ReturnType<LifeHarnessLike["chat"]>>,
+    nativeReview = false,
   ): import("../../../packages/life-core/src/index.ts").ConversationResult {
     const evidence =
       result.evidence?.slice(0, 50).flatMap((item) => {
@@ -3010,7 +3073,11 @@ export class LifeHttpServer {
           : [];
       }) ?? [];
     return {
-      reply: presentation(result.reply, 8000, "Done."),
+      reply: nativeReview
+        ? Array.from(result.reply).slice(0, 3_000).join("") || "Reply unavailable."
+        : presentation(result.reply, 8000, "Done."),
+      ...(nativeReview ? { nativeReadOnly: true } : {}),
+      ...(result.needsMacReview === true ? { needsMacReview: true } : {}),
       actions: (result.actions ?? []).slice(0, 20).map((action) => ({
         label: presentation(action.label, 500, "Completed"),
         status: presentation(action.status, 50, "completed"),
@@ -3114,10 +3181,27 @@ export class LifeHttpServer {
     );
     this.send(response, 204);
   }
-  private chatRequest(path: string, response: ServerResponse): void {
+  private chatRequest(path: string, response: ServerResponse, nativeReview = false): void {
     const requestId = identifier(decodeURIComponent(path.split("/").at(-1)!), "requestId"),
       found = this.options.store.getConversationRequest(this.actor, requestId);
     if (!found) throw new HttpError(404, "Chat request not found.");
+    if (nativeReview) {
+      if (
+        !/^native_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+          requestId,
+        ) ||
+        found.conversation.scope.type !== "user" ||
+        found.conversation.scope.id !== this.actor.userId ||
+        (found.result && found.result.nativeReadOnly !== true)
+      )
+        throw new HttpError(404, "Chat request not found.");
+      this.send(
+        response,
+        200,
+        this.nativeChatEnvelope(found.conversation, found.turn, found.result),
+      );
+      return;
+    }
     this.send(response, 200, {
       ...this.conversationChatEnvelope(found.conversation, found.turn, found.result),
       ...(() => {
@@ -3141,6 +3225,23 @@ export class LifeHttpServer {
         };
       })(),
     });
+  }
+  private nativeChatEnvelope(
+    conversation: import("../../../packages/life-core/src/index.ts").ConversationSummary,
+    turn: import("../../../packages/life-core/src/index.ts").ConversationTurn,
+    result?: import("../../../packages/life-core/src/index.ts").ConversationResult,
+  ): Record<string, unknown> {
+    return {
+      status: turn.status,
+      conversationId: conversation.id,
+      turnId: turn.id,
+      ...(result
+        ? { reply: Array.from(result.reply).slice(0, 3_000).join("") || "Reply unavailable." }
+        : {}),
+      needsMacReview:
+        result?.needsMacReview === true ||
+        !!this.options.store.getPendingIntent(this.actor, conversation.id),
+    };
   }
   private conversationSummary(
     value: import("../../../packages/life-core/src/index.ts").ConversationSummary,

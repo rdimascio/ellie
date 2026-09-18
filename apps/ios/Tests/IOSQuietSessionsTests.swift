@@ -65,6 +65,52 @@ private actor QuietFixtureClient: IOSQuietClient {
     func completed() -> [String] { completedDetails }
 }
 
+@MainActor
+private final class QuietVoiceJournal: BrowserMutationUncertaintyPersisting {
+    var token: String?
+    var recordedScopes: [String] = []
+    func pendingToken(for scope: String) throws -> String? { token }
+    func recordIfClear(token value: String, for scope: String) throws -> Bool {
+        guard token == nil else { return false }
+        recordedScopes.append(scope)
+        token = value
+        return true
+    }
+    func clear(token value: String, for scope: String) throws -> BrowserMutationUncertaintyClearResult {
+        guard token == value else { return .mismatch }
+        token = nil
+        return .cleared
+    }
+}
+
+@MainActor
+private final class QuietVoiceClientFixture: IOSQuietVoiceClient {
+    var sends: [(String, String?)] = []
+    var statusCalls = 0
+    var failNextSend = false
+    var statusNotFound = false
+    func epoch(_ credential: NativeEnrollmentCredential) async throws -> Int { 1 }
+    func send(_ credential: NativeEnrollmentCredential, body: Data) async throws
+        -> IOSQuietChatOutcome {
+        let value = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        let requestID = try XCTUnwrap(value["requestId"] as? String)
+        sends.append((requestID, value["conversationId"] as? String))
+        if failNextSend {
+            failNextSend = false
+            throw IOSQuietFailure.unavailable
+        }
+        return IOSQuietChatOutcome(status: "completed", conversationID: "quiet_1",
+            turnID: "turn_2", reply: "A read-only reply.", needsMacReview: false)
+    }
+    func status(_ credential: NativeEnrollmentCredential, requestID: String) async throws
+        -> IOSQuietChatOutcome {
+        statusCalls += 1
+        if statusNotFound { throw IOSQuietFailure.notFound }
+        return IOSQuietChatOutcome(status: "completed", conversationID: "quiet_1",
+            turnID: "turn_1", reply: "The first read-only reply.", needsMacReview: false)
+    }
+}
+
 final class IOSQuietSessionsTests: XCTestCase {
     private func json(_ value: [String: Any]) throws -> Data {
         try JSONSerialization.data(withJSONObject: value)
@@ -92,6 +138,10 @@ final class IOSQuietSessionsTests: XCTestCase {
             path: "/api/life/native/sessions?limit=20&cursor=abc_-"), 24_000)
         XCTAssertEqual(NativeEnrollmentTransport.lifeQuietMaximumBytes(
             path: "/api/life/native/sessions/photo_session"), 256_000)
+        XCTAssertEqual(NativeEnrollmentTransport.lifeQuietMaximumBytes(
+            path: "/api/life/native/chat/state"), 1_024)
+        XCTAssertEqual(NativeEnrollmentTransport.lifeQuietMaximumBytes(
+            path: "/api/life/native/chat/requests/native_820c96b1-b537-47e7-acce-d821bc4bacaa"), 16_384)
         for path in ["/api/life/native/sessions?scope=user:bob&limit=3",
                      "/api/life/native/sessions?limit=21",
                      "/api/life/native/sessions?limit=3&cursor=%2F",
@@ -141,6 +191,24 @@ final class IOSQuietSessionsTests: XCTestCase {
         XCTAssertThrowsError(try IOSQuietWire.page(try json(["sessions": [],
             "page": ["hasMore": false], "token": "never expose"])))
         XCTAssertThrowsError(try IOSQuietWire.page(try json(["sessions": [],
+            "page": ["hasMore": false], "chatEpoch": 1])))
+        XCTAssertEqual(try IOSQuietWire.chatEpoch(try json([
+            "chatEpoch": 1, "available": true])), 1)
+        XCTAssertThrowsError(try IOSQuietWire.chatEpoch(try json([
+            "chatEpoch": 1, "available": false])))
+        let requestID = "820c96b1-b537-47e7-acce-d821bc4bacaa"
+        let multilingual = String(repeating: "日", count: 900)
+        let encoded = try IOSPinnedQuietVoiceClient.encodedBody(requestID: requestID,
+            epoch: 1, message: multilingual, conversationID: nil)
+        XCTAssertTrue(encoded.count <= 4_096)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: encoded) as? [String: Any])?["message"] as? String,
+            multilingual)
+        XCTAssertThrowsError(try IOSPinnedQuietVoiceClient.encodedBody(requestID: requestID,
+            epoch: 1, message: String(repeating: "日", count: 2_000), conversationID: nil))
+        XCTAssertEqual(try IOSQuietWire.chatOutcome(try json([
+            "status": "completed", "conversationId": "quiet_1", "turnId": "turn_1",
+            "reply": "Review 👩‍👩‍👧‍👧\r\ncomplete", "needsMacReview": true])).needsMacReview, true)
+        XCTAssertThrowsError(try IOSQuietWire.page(try json(["sessions": [],
             "page": ["hasMore": true]])))
     }
 
@@ -189,6 +257,91 @@ final class IOSQuietSessionsTests: XCTestCase {
         store.loadAll()
         await eventually { !store.busy && store.all.count == 2 }
         XCTAssertEqual(store.all.map(\.id), ["trip_session", "photo_session"])
+    }
+
+    @MainActor
+    func testVoiceUnknownSurvivesRelaunchAndReconcilesWithoutResend() async {
+        let client = QuietVoiceClientFixture(), journal = QuietVoiceJournal()
+        client.failNextSend = true
+        let first = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        first.restore()
+        first.sendReviewed("What happened with our trip?", conversationID: "quiet_1")
+        await eventually { first.phase == .unknown }
+        XCTAssertEqual(client.sends.count, 1)
+        XCTAssertNotNil(journal.token)
+        let restored = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        restored.restore()
+        XCTAssertEqual(restored.phase, .unknown)
+        XCTAssertFalse(restored.canSend)
+        restored.reconcile()
+        await eventually {
+            if case .completed = restored.phase { return true }
+            return false
+        }
+        XCTAssertEqual(client.sends.count, 1, "a status read never resends a question")
+        XCTAssertEqual(client.statusCalls, 1)
+        XCTAssertNil(journal.token)
+        restored.reset()
+        restored.sendReviewed("What is next for our trip?")
+        await eventually {
+            if case .completed = restored.phase { return client.sends.count == 2 }
+            return false
+        }
+        XCTAssertEqual(client.sends[1].1, "quiet_1", "a deliberate next question stays in the conversation")
+        XCTAssertNotEqual(client.sends[0].0, client.sends[1].0)
+        XCTAssertEqual(Set(journal.recordedScopes).count, 1)
+        restored.background()
+        XCTAssertEqual(restored.phase, .idle, "backgrounding removes the private reply")
+        restored.credentialDidChange()
+        XCTAssertEqual(restored.phase, .revoked)
+        XCTAssertFalse(restored.canSend)
+    }
+
+    @MainActor
+    func testVoiceStopTrackingUsesExactTokenAndNeverResends() async {
+        let client = QuietVoiceClientFixture(), journal = QuietVoiceJournal()
+        client.failNextSend = true
+        let store = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        store.sendReviewed("Read this question")
+        await eventually { store.phase == .unknown }
+        let original = journal.token
+        journal.token = UUID().uuidString.lowercased()
+        store.stopTracking()
+        XCTAssertEqual(store.phase, .storageUnavailable)
+        XCTAssertNotEqual(journal.token, original, "a newer marker cannot be cleared")
+        XCTAssertEqual(client.sends.count, 1)
+        XCTAssertEqual(client.statusCalls, 0)
+
+        let secondJournal = QuietVoiceJournal(), secondClient = QuietVoiceClientFixture()
+        secondClient.failNextSend = true
+        let second = IOSQuietVoiceStore(credential: credential(), client: secondClient,
+            journal: secondJournal)
+        second.sendReviewed("Another reviewed question")
+        await eventually { second.phase == .unknown }
+        secondClient.statusNotFound = true
+        second.reconcile()
+        await eventually { second.phase == .notFound }
+        XCTAssertNotNil(secondJournal.token, "404 cannot prove an in-flight POST will not arrive")
+        second.stopTracking()
+        XCTAssertEqual(second.phase, .idle)
+        XCTAssertNil(secondJournal.token)
+        XCTAssertEqual(secondClient.sends.count, 1)
+        XCTAssertEqual(secondClient.statusCalls, 0)
+    }
+
+    @MainActor
+    func testVoiceEncodedBodyLimitFailsBeforeDurableMarkerOrPOST() async {
+        let client = QuietVoiceClientFixture(), journal = QuietVoiceJournal()
+        let store = IOSQuietVoiceStore(credential: credential(), client: client, journal: journal)
+        store.sendReviewed(String(repeating: "日", count: 2_000))
+        await eventually {
+            if case .failed = store.phase { return true }
+            return false
+        }
+        XCTAssertNil(journal.token)
+        XCTAssertTrue(journal.recordedScopes.isEmpty)
+        XCTAssertTrue(client.sends.isEmpty)
+        XCTAssertTrue(store.canSend)
     }
 
     @MainActor
