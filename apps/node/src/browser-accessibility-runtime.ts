@@ -96,6 +96,7 @@ const checkedReply = (value: unknown, pending: Pending): Reply => {
     "title",
     "summary",
     "items",
+    "scrollDirections",
     "operation",
   ]);
   if (parsed.id !== pending.id) throw new Error();
@@ -120,7 +121,7 @@ const checkedReply = (value: unknown, pending: Pending): Reply => {
     const keys = Object.keys(parsed);
     if (
       required.some((key) => !keys.includes(key)) ||
-      keys.some((key) => ![...required, "title", "summary"].includes(key)) ||
+      keys.some((key) => ![...required, "title", "summary", "scrollDirections"].includes(key)) ||
       parsed.status !== "completed" ||
       parsed.sessionID !== expected.sessionID ||
       parsed.documentRevision !== expected.documentRevision ||
@@ -141,6 +142,14 @@ const checkedReply = (value: unknown, pending: Pending): Reply => {
     }
     if (parsed.title !== undefined) boundedText(parsed.title, 500);
     if (parsed.summary !== undefined) boundedText(parsed.summary, 2_000);
+    if (
+      parsed.scrollDirections !== undefined &&
+      (!Array.isArray(parsed.scrollDirections) ||
+        parsed.scrollDirections.length > 2 ||
+        parsed.scrollDirections.some((direction) => direction !== "up" && direction !== "down") ||
+        new Set(parsed.scrollDirections).size !== parsed.scrollDirections.length)
+    )
+      throw new Error();
     return parsed;
   }
   exactKeys(parsed, ["id", "status", "sessionID", "documentRevision", "operation"]);
@@ -409,6 +418,9 @@ export class BrowserAccessibilityRuntime {
             ...(typeof reply.title === "string" ? { title: reply.title } : {}),
             ...(typeof reply.summary === "string" ? { summary: reply.summary } : {}),
             items: reply.items,
+            ...(reply.scrollDirections === undefined
+              ? {}
+              : { axScrollDirections: reply.scrollDirections }),
           },
         },
       });

@@ -239,6 +239,34 @@ private func replacingSearchButton(
 
 private func scenario(_ name: String) throws {
   switch name {
+  case "observed-vertical-scroll":
+    let backend = MockBackend()
+    let adapter = BrowserAccessibilityAdapter(backend: backend)
+    let page = try bind(adapter)
+    let view = try adapter.read(page)
+    try expect(view.scrollDirections == ["up", "down"], "web-area directions")
+    try expect(browserAccessibilityModallyBlockedRole("AXDialog"), "dialog must block")
+    try expect(browserAccessibilityModallyBlockedRole("AXSheet"), "sheet must block")
+    try expect(browserAccessibilityModallyBlockedRole("AXAlert"), "alert must block")
+    try expect(!browserAccessibilityModallyBlockedRole("AXGroup"), "ordinary group")
+    let result = try adapter.perform(
+      .scroll(.down, generation: view.generation,
+              documentRevision: view.documentRevision), on: page)
+    try expect(result.status == .dispatchedUnverified, "scroll outcome")
+    try expect(backend.actions == ["scroll-down"], "one observed scroll")
+    try expectFailure(.stale) {
+      _ = try adapter.perform(
+        .scroll(.down, generation: view.generation,
+                documentRevision: view.documentRevision), on: page)
+    }
+    let noScrollNodes = MockBackend.defaultNodes().map { node in
+      guard node.kind == .webArea else { return node }
+      return MockBackend.node(node.kind, node.label, node.path, [], reference: node.reference)
+    }
+    let unavailable = BrowserAccessibilityAdapter(backend: MockBackend(nodes: noScrollNodes))
+    let noScrollPage = try bind(unavailable)
+    let noScrollView = try unavailable.read(noScrollPage)
+    try expect(noScrollView.scrollDirections.isEmpty, "missing web-area capability")
   case "read-select-stale":
     let backend = MockBackend()
     let adapter = BrowserAccessibilityAdapter(backend: backend)

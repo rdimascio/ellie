@@ -41,6 +41,7 @@ private struct Response: Encodable {
   let title: String?
   let summary: String?
   let items: [Item]?
+  let scrollDirections: [String]?
   let operation: String?
 }
 
@@ -190,7 +191,7 @@ enum BrowserAccessibilitySessionMain {
             session = created
             try write(Response(id: request.id, status: "bound", sessionID: created.id,
               generation: nil, documentRevision: revision, title: nil, summary: nil,
-              items: nil, operation: nil))
+              items: nil, scrollDirections: nil, operation: nil))
           case "read":
             guard let current = session, request.sessionID == current.id else {
               throw BrowserAccessibilityFailure.stale
@@ -200,7 +201,8 @@ enum BrowserAccessibilitySessionMain {
             try write(Response(id: request.id, status: "completed", sessionID: current.id,
               generation: view.generation, documentRevision: view.documentRevision,
               title: view.title, summary: view.summary,
-              items: view.items.map { Item(id: $0.id, label: $0.label) }, operation: "read"))
+              items: view.items.map { Item(id: $0.id, label: $0.label) },
+              scrollDirections: view.scrollDirections, operation: "read"))
           case "perform":
             guard let current = session, request.sessionID == current.id,
               let generation = request.generation, let revision = request.documentRevision,
@@ -231,7 +233,7 @@ enum BrowserAccessibilitySessionMain {
             try write(Response(id: request.id, status: outcome.status.rawValue,
               sessionID: current.id, generation: nil,
               documentRevision: outcome.documentRevision, title: nil, summary: nil,
-              items: nil, operation: outcome.operation.rawValue))
+              items: nil, scrollDirections: nil, operation: outcome.operation.rawValue))
           default: throw BrowserAccessibilityFailure.invalid
           }
         }
@@ -241,7 +243,7 @@ enum BrowserAccessibilitySessionMain {
       // The helper is a private protocol boundary. Never echo AX or parsing details.
       try? write(Response(id: "failure", status: "unavailable", sessionID: nil,
         generation: nil, documentRevision: nil, title: nil, summary: nil, items: nil,
-        operation: nil))
+        scrollDirections: nil, operation: nil))
       exit(1)
     }
   }

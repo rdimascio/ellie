@@ -99,6 +99,7 @@ test(
     assert.equal(compiled.stdout, "");
     assert.equal(compiled.stderr, "");
     for (const scenario of [
+      "observed-vertical-scroll",
       "read-select-stale",
       "link-url-rebind",
       "page-rebind",
