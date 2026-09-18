@@ -424,8 +424,20 @@ try {
   if (!events.some((row) => row.operation === "read" && row.target === "watch-fixture-mac-a")) {
     throw new Error("Watch UI did not cause a phone-side fresh read of A.");
   }
+  const eventsBeforeProcessStop = JSON.stringify(events);
   await simctl("terminate-phone", ["terminate", phoneID, bundle]);
-  await watchTest("testUnreachablePhoneHasNoAction");
+  await watchTest("testStoppedPhoneProcessDoesNotRestoreAction");
+  const eventsAfterProcessStop = requireEvents(eventPath, "watch-fixture-mac-a", 1);
+  if (JSON.stringify(eventsAfterProcessStop) !== eventsBeforeProcessStop) {
+    throw new Error("A stopped phone process caused an unreviewed Watch fixture action.");
+  }
+  receipt.processStop = {
+    terminatedOwnedApp: true,
+    watchRequiredFreshRead: true,
+    noAdditionalFixtureEvents: true,
+    phoneReachabilityNotClaimedOffline: true,
+  };
+  persist();
   await simctl("relaunch-B", [
     "launch",
     phoneID,

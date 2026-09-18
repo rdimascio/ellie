@@ -54,15 +54,22 @@ final class WatchPairedUITests: XCTestCase {
     XCTAssertFalse(app.buttons["watch-pause"].isEnabled)
   }
 
-  func testUnreachablePhoneHasNoAction() {
+  func testStoppedPhoneProcessDoesNotRestoreAction() {
     let app = XCUIApplication()
     app.launchArguments = ["--ellie-watch-paired-diagnostic"]
     app.launch()
     let read = app.buttons["watch-read"]
     XCTAssertTrue(read.waitForExistence(timeout: 15))
-    XCTAssertTrue(waitForLabel(app.staticTexts["watch-media-status"],
-                               contains: "unreachable", timeout: 15))
-    XCTAssertFalse(waitForEnabled(read, timeout: 3), "No paired iPhone app is running")
+    let reconnected = waitForEnabled(read, timeout: 15)
+    let status = app.staticTexts["watch-media-status"]
+    if reconnected {
+      XCTAssertTrue(waitForLabel(status, contains: "Read the current page", timeout: 5),
+                    "A reachable iPhone must ask for a fresh read, not retain an unreachable label")
+    } else {
+      XCTAssertTrue(waitForLabel(status, contains: "unreachable", timeout: 5),
+                    "A stopped iPhone process may remain unreachable; action authority still stays cleared")
+    }
+    XCTAssertFalse(app.staticTexts["watch-observed-title"].exists)
     XCTAssertFalse(app.buttons["watch-play"].isEnabled)
     XCTAssertFalse(app.buttons["watch-pause"].isEnabled)
   }

@@ -4,6 +4,9 @@ import WatchConnectivity
 
 @MainActor
 final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate {
+  private static let initialStatus = "Open Ellie on iPhone and enable Watch control."
+  private static let unreachableStatus =
+    "The iPhone is unreachable. Open Ellie on iPhone, then read again."
   @Published private(set) var status = "Open Ellie on iPhone and enable Watch control."
   @Published private(set) var observation: WatchMediaObservation?
   @Published private(set) var waiting = false
@@ -78,7 +81,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     let session = WCSession.default
     guard session.activationState == .activated, session.isReachable else {
       observation = nil
-      status = "The iPhone is unreachable. Open Ellie on iPhone, then read again."
+      status = Self.unreachableStatus
       return
     }
     let request: WatchMediaRequest
@@ -184,6 +187,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   }
 
   private func updateReachability(_ session: WCSession) {
+    let wasReachable = reachable
     reachable = foreground && session.activationState == .activated && session.isReachable
     updatePairedDiagnostic(session)
     if !reachable {
@@ -195,7 +199,11 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
         #endif
         finishUncertain(operation)
       }
-      else { status = "The iPhone is unreachable. Open Ellie on iPhone, then read again." }
+      else { status = Self.unreachableStatus }
+    } else if !wasReachable &&
+                (status == Self.unreachableStatus || status == Self.initialStatus) {
+      // Reachability permits a new read, but never restores an old observation or action.
+      status = "iPhone connected. Read the current page before an action."
     }
   }
 

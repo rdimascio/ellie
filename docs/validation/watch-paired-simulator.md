@@ -34,9 +34,12 @@ the Watch UI test includes a fixed activation/reachability diagnostic if its Rea
 If child or cleanup certainty is lost, it stops issuing commands and retains the IDs and evidence for
 owner inspection. A test counts only when `xcresulttool` reports exactly one
 executed pass with zero failed or skipped tests. The expected sequence is a fresh observed Mac A
-page, one Play sent with an unknown result and disabled follow-up controls, an unreachable phone
-phase, then a restarted phone explicitly selecting Mac B and a fresh B observation. The phone's
-synthetic event log must contain exactly one A Play and no B mutation or replay.
+page, one Play sent with an unknown result and disabled follow-up controls, termination of the
+owned iPhone app process without restoring Watch action authority, then an explicit launch
+selecting Mac B and a fresh B observation. WatchConnectivity may activate a terminated iPhone app
+in the background, so the process-stop case is not an offline-device test. The phone's synthetic
+event log must contain exactly one A Play, no additional event during process-stop recovery, and
+no B mutation or replay. An actual unavailable-device case remains pending.
 
 This verifies the paired UI/transport seam if it passes. It does not prove media playback, a real
 browser action, physical-device reachability, or an old A observation remaining live during a
