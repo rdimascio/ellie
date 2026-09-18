@@ -19,7 +19,7 @@ struct BrowserVoiceUITestFixtureView: View {
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
       completeActions: completeActions,
-      source: netflixRows || netflixSearch ? .companion : .webmcp,
+      source: netflixRows || netflixSearch || completeActions ? .companion : .webmcp,
       siteOverride: netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite : nil,
       netflixSearch: netflixSearch)
     _controls = StateObject(
@@ -552,13 +552,15 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   private var observedSite: BrowserPhoneSite {
     switch mutationCount {
     case 0:
-      BrowserPhoneSite(page: .home, playback: .unavailable, currentTimeSeconds: nil)
+      BrowserVoiceUITestFixture.netflixSearchSite
     case 1:
-      BrowserPhoneSite(page: .results, playback: .unavailable, currentTimeSeconds: nil)
+      BrowserVoiceUITestFixture.netflixResultsSite
     case 3:
-      BrowserPhoneSite(page: .watch, playback: .playing, currentTimeSeconds: 1)
+      BrowserPhoneSite(
+        provider: .netflix, page: .watch, playback: .playing, currentTimeSeconds: 1)
     default:
-      BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: 1)
+      BrowserPhoneSite(
+        provider: .netflix, page: .watch, playback: .paused, currentTimeSeconds: 1)
     }
   }
 }
