@@ -10,6 +10,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
   @Published private(set) var reachable = false
   #if DEBUG
   @Published private(set) var pairedDiagnostic = "supported=unknown activation=unknown reachable=false foreground=false"
+  @Published private(set) var deliveryDiagnostic = "idle"
   #endif
 
   private var pendingID: String?
@@ -40,7 +41,12 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     foreground = false
     reachable = false
     updatePairedDiagnostic(WCSession.isSupported() ? WCSession.default : nil)
-    if let pendingOperation { finishUncertain(pendingOperation) }
+    if let pendingOperation {
+      #if DEBUG
+      deliveryDiagnostic = "suspended"
+      #endif
+      finishUncertain(pendingOperation)
+    }
     else {
       observation = nil
       status = "Read the current page after returning to Ellie."
@@ -72,11 +78,17 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     pendingID = request.id
     pendingOperation = operation
     waiting = true
+    #if DEBUG
+    deliveryDiagnostic = "sent"
+    #endif
     status = operation == .read ? "Reading the selected Mac…" : "Command sent; outcome unverified."
     timeout?.cancel()
     timeout = Task {
       try? await Task.sleep(for: .milliseconds(WatchMediaRequest.lifetimeMilliseconds))
       guard !Task.isCancelled, pendingID == request.id else { return }
+      #if DEBUG
+      deliveryDiagnostic = "deadline"
+      #endif
       finishUncertain(operation)
     }
     session.sendMessage(request.message) { response in
@@ -84,14 +96,25 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     } errorHandler: { _ in
       Task { @MainActor in
         guard self.pendingID == request.id else { return }
+        #if DEBUG
+        self.deliveryDiagnostic = "send_error"
+        #endif
         self.finishUncertain(operation)
       }
     }
   }
 
   private func receive(_ value: [String: Any], request: WatchMediaRequest) {
-    guard pendingID == request.id else { return }
+    guard pendingID == request.id else {
+      #if DEBUG
+      deliveryDiagnostic = "late_reply"
+      #endif
+      return
+    }
     guard foreground, WatchMediaWire.now() < request.expiresAt else {
+      #if DEBUG
+      deliveryDiagnostic = "expired_reply"
+      #endif
       finishUncertain(request.operation)
       return
     }
@@ -101,11 +124,17 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     pendingOperation = nil
     waiting = false
     guard let reply = WatchMediaReply.decode(value, expectedID: request.id) else {
+      #if DEBUG
+      deliveryDiagnostic = "invalid_reply"
+      #endif
       status = request.operation == .read
         ? "The iPhone returned an invalid observation. Read again."
         : "The command outcome is unknown. Read the page before another action."
       return
     }
+    #if DEBUG
+    deliveryDiagnostic = "reply_\(reply.state.rawValue)"
+    #endif
     switch reply.state {
     case .observed:
       guard request.operation == .read, let observed = reply.observation else {
@@ -143,7 +172,12 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
     if !reachable {
       let operation = pendingOperation
       observation = nil
-      if let operation { finishUncertain(operation) }
+      if let operation {
+        #if DEBUG
+        deliveryDiagnostic = "reachability_lost"
+        #endif
+        finishUncertain(operation)
+      }
       else { status = "The iPhone is unreachable. Open Ellie on iPhone, then read again." }
     }
   }

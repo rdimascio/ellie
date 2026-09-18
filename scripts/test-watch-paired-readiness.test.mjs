@@ -7,7 +7,7 @@ const phone = "11111111-1111-1111-1111-111111111111";
 const watch = "22222222-2222-2222-2222-222222222222";
 const state = (overrides = {}) =>
   JSON.stringify({
-    version: 1,
+    version: 2,
     activation: "activated",
     paired: true,
     watchAppInstalled: true,
@@ -15,6 +15,10 @@ const state = (overrides = {}) =>
     foreground: true,
     enabledTarget: "watch-fixture-mac-a",
     recordedAtMilliseconds: 1_789_683_600_000,
+    messagesReceived: 0,
+    messagesDecoded: 0,
+    replyHandlersInvoked: 0,
+    lastReplyState: "none",
     ...overrides,
   });
 
@@ -69,6 +73,9 @@ test("malformed or foreign readiness cannot authorize a paired Watch test", asyn
     state({ version: true }),
     state({ enabledTarget: "another-mac" }),
     state({ extra: "not admitted" }),
+    state({ messagesReceived: 0, messagesDecoded: 1 }),
+    state({ messagesReceived: 1, replyHandlersInvoked: 2 }),
+    state({ messagesReceived: 1, replyHandlersInvoked: 1, lastReplyState: "arbitrary" }),
     "{",
   ]) {
     await assert.rejects(
@@ -79,4 +86,15 @@ test("malformed or foreign readiness cannot authorize a paired Watch test", asyn
     );
   }
   assert.equal(parsePhoneReadiness(state()).enabledTarget, "watch-fixture-mac-a");
+  assert.equal(
+    parsePhoneReadiness(
+      state({
+        messagesReceived: 1,
+        messagesDecoded: 1,
+        replyHandlersInvoked: 1,
+        lastReplyState: "observed",
+      }),
+    ).lastReplyState,
+    "observed",
+  );
 });

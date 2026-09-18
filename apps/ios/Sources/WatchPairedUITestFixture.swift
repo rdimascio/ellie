@@ -9,7 +9,7 @@ import WatchConnectivity
 @MainActor
 enum WatchPairedUITestReadiness {
   private struct Snapshot: Encodable {
-    let version = 1
+    let version = 2
     let activation: String
     let paired: Bool
     let watchAppInstalled: Bool
@@ -17,6 +17,34 @@ enum WatchPairedUITestReadiness {
     let enabledTarget: String
     let foreground: Bool
     let recordedAtMilliseconds: Int64
+    let messagesReceived: Int
+    let messagesDecoded: Int
+    let replyHandlersInvoked: Int
+    let lastReplyState: String
+  }
+
+  private static var messagesReceived = 0
+  private static var messagesDecoded = 0
+  private static var replyHandlersInvoked = 0
+  private static var lastReplyState = "none"
+
+  static func noteReceived(enabledTargetID: String?) {
+    guard ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") else { return }
+    messagesReceived = min(messagesReceived + 1, 128)
+    record(session: WCSession.default, enabledTargetID: enabledTargetID)
+  }
+
+  static func noteDecoded(enabledTargetID: String?) {
+    guard ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") else { return }
+    messagesDecoded = min(messagesDecoded + 1, 128)
+    record(session: WCSession.default, enabledTargetID: enabledTargetID)
+  }
+
+  static func noteReply(_ state: WatchMediaState, enabledTargetID: String?) {
+    guard ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") else { return }
+    replyHandlersInvoked = min(replyHandlersInvoked + 1, 128)
+    lastReplyState = state.rawValue
+    record(session: WCSession.default, enabledTargetID: enabledTargetID)
   }
 
   static func record(session: WCSession, enabledTargetID: String?) {
@@ -36,7 +64,9 @@ enum WatchPairedUITestReadiness {
       watchAppInstalled: session.isWatchAppInstalled, reachable: session.isReachable,
       enabledTarget: enabledTargetID ?? "",
       foreground: UIApplication.shared.applicationState == .active,
-      recordedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000))
+      recordedAtMilliseconds: Int64(Date().timeIntervalSince1970 * 1_000),
+      messagesReceived: messagesReceived, messagesDecoded: messagesDecoded,
+      replyHandlersInvoked: replyHandlersInvoked, lastReplyState: lastReplyState)
     let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     let directory = support.appendingPathComponent("Ellie/WatchPaired")
     let file = directory.appendingPathComponent("\(arguments[marker + 1]).readiness.json")

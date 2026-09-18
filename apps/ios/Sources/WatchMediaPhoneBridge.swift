@@ -95,16 +95,28 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     replyHandler: @escaping ([String: Any]) -> Void
   ) {
     Task { @MainActor in
+      #if DEBUG
+      WatchPairedUITestReadiness.noteReceived(enabledTargetID: self.enabledTargetID)
+      #endif
       guard let request = WatchMediaRequest.decode(message) else {
         // A malformed request has no trusted ID or authority; never interpret its action.
         replyHandler(["version": 1, "id": "invalid", "state": "blocked"])
+        #if DEBUG
+        WatchPairedUITestReadiness.noteReply(.blocked, enabledTargetID: self.enabledTargetID)
+        #endif
         return
       }
+      #if DEBUG
+      WatchPairedUITestReadiness.noteDecoded(enabledTargetID: self.enabledTargetID)
+      #endif
       let response = await self.controller.handle(request) {
         session.activationState == .activated && session.isReachable
           && session.isPaired && session.isWatchAppInstalled
       }
       replyHandler(response.message)
+      #if DEBUG
+      WatchPairedUITestReadiness.noteReply(response.state, enabledTargetID: self.enabledTargetID)
+      #endif
     }
   }
 

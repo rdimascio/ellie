@@ -13,7 +13,9 @@ final class WatchPairedUITests: XCTestCase {
                   "WCSession did not reach the paired iPhone: \(app.staticTexts["watch-media-status"].value ?? "missing")")
     read.tap()
     let title = app.staticTexts["watch-observed-title"]
-    XCTAssertTrue(title.waitForExistence(timeout: 15))
+    XCTAssertTrue(title.waitForExistence(timeout: 15),
+                  "Watch transport: \(app.staticTexts["watch-transport-diagnostic"].label); "
+                    + "session: \(app.staticTexts["watch-media-status"].value ?? "missing")")
     XCTAssertEqual(title.label, "Fixture film A")
     XCTAssertEqual(app.staticTexts["watch-observed-target"].label, "YouTube · Fixture Mac A")
     let play = app.buttons["watch-play"]

@@ -22,6 +22,10 @@ struct WatchMediaView: View {
           .accessibilityValue(
             ProcessInfo.processInfo.arguments.contains("--ellie-watch-paired-diagnostic")
               ? media.pairedDiagnostic : "")
+        if ProcessInfo.processInfo.arguments.contains("--ellie-watch-paired-diagnostic") {
+          Text(media.deliveryDiagnostic).font(.caption2).foregroundStyle(.secondary)
+            .accessibilityIdentifier("watch-transport-diagnostic")
+        }
         #else
         Text(media.status).font(.caption).foregroundStyle(.secondary)
           .accessibilityIdentifier("watch-media-status")

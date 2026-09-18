@@ -5,13 +5,18 @@ const keys = [
   "activation",
   "enabledTarget",
   "foreground",
+  "lastReplyState",
+  "messagesDecoded",
+  "messagesReceived",
   "paired",
   "reachable",
   "recordedAtMilliseconds",
+  "replyHandlersInvoked",
   "version",
   "watchAppInstalled",
 ];
 const targets = new Set(["", "watch-fixture-mac-a", "watch-fixture-mac-b"]);
+const replyStates = new Set(["none", "observed", "unknown", "unavailable", "blocked", "stale"]);
 
 export function parsePhoneReadiness(value) {
   const row = JSON.parse(value);
@@ -20,14 +25,21 @@ export function parsePhoneReadiness(value) {
     typeof row !== "object" ||
     Array.isArray(row) ||
     Object.keys(row).sort().join() !== keys.slice().sort().join() ||
-    row.version !== 1 ||
+    row.version !== 2 ||
     !["activated", "inactive", "not_activated", "unknown"].includes(row.activation) ||
     !targets.has(row.enabledTarget) ||
     !["paired", "watchAppInstalled", "reachable", "foreground"].every(
       (key) => typeof row[key] === "boolean",
     ) ||
     !Number.isSafeInteger(row.recordedAtMilliseconds) ||
-    row.recordedAtMilliseconds <= 0
+    row.recordedAtMilliseconds <= 0 ||
+    !["messagesReceived", "messagesDecoded", "replyHandlersInvoked"].every(
+      (key) => Number.isSafeInteger(row[key]) && row[key] >= 0 && row[key] <= 128,
+    ) ||
+    row.messagesDecoded > row.messagesReceived ||
+    row.replyHandlersInvoked > row.messagesReceived ||
+    !replyStates.has(row.lastReplyState) ||
+    (row.replyHandlersInvoked === 0) !== (row.lastReplyState === "none")
   ) {
     throw new Error("Malformed paired phone readiness evidence.");
   }
