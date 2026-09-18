@@ -8,6 +8,7 @@ struct IOSDashboardList: View {
     @StateObject private var choresStore: ChoresStore
     @StateObject private var weatherStore: WeatherStore
     @StateObject private var agendaStore: IOSGoogleAgendaStore
+    @StateObject private var quietStore: IOSQuietSessionsStore
     #if DEBUG
     var uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)? = nil
     #endif
@@ -19,21 +20,25 @@ struct IOSDashboardList: View {
         _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
         _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
         _agendaStore = StateObject(wrappedValue: IOSGoogleAgendaStore())
+        _quietStore = StateObject(wrappedValue: IOSQuietSessionsStore())
     }
 
     #if DEBUG
     init(store: DashboardStore, enrollment: NativeEnrollmentStore, choresStore: ChoresStore? = nil,
          weatherStore: WeatherStore? = nil, agendaStore: IOSGoogleAgendaStore? = nil,
-         uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)?) {
+         uiTestLifeDestination: ((NativeEnrollmentCredential) -> AnyView)?,
+         quietStore: IOSQuietSessionsStore? = nil) {
         self.store = store
         self.enrollment = enrollment
         _choresStore = StateObject(wrappedValue: choresStore ?? ChoresStore())
         _weatherStore = StateObject(wrappedValue: weatherStore ?? WeatherStore())
         _agendaStore = StateObject(wrappedValue: agendaStore ?? IOSGoogleAgendaStore())
+        _quietStore = StateObject(wrappedValue: quietStore ?? IOSQuietSessionsStore())
         self.uiTestLifeDestination = uiTestLifeDestination
     }
     #endif
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
     @State private var creating = false
     @State private var name = ""
     @State private var importing = false
@@ -47,6 +52,9 @@ struct IOSDashboardList: View {
             GeometryReader { geometry in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
+                        if case .enrolled(let credential) = enrollment.phase {
+                            IOSQuietSessionsHome(store: quietStore, credential: credential)
+                        }
                         if dynamicTypeSize.isAccessibilitySize {
                             if case .enrolled(let credential) = enrollment.phase {
                                 lifeEntry(for: credential)
@@ -186,7 +194,13 @@ struct IOSDashboardList: View {
             Text("Importing replaces every dashboard and note saved on this iPhone.")
         }
         .onAppear { agendaStore.bind(activeCredential) }
-        .onChange(of: enrollment.phase) { _, _ in agendaStore.bind(activeCredential) }
+        .onChange(of: enrollment.phase) { _, _ in
+            agendaStore.bind(activeCredential)
+            quietStore.bind(activeCredential)
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { quietStore.background() }
+        }
     }
 
     private var activeCredential: NativeEnrollmentCredential? {
