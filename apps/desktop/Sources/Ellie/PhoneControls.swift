@@ -26,7 +26,8 @@ enum PhoneControlFailure: Error, Equatable, LocalizedError {
     switch self {
     case .revoked: "This iPhone’s coordinator session is no longer authorized."
     case .rejected: "The coordinator did not accept this request. Refresh devices and try again."
-    case .unavailable: "The coordinator is unavailable."
+    case .unavailable:
+      "The saved coordinator connection is unavailable. Check its phone listener and network; keep this pairing while you investigate."
     case .invalidResponse: "The coordinator returned an invalid response."
     case .cancelled: "The request stopped."
     case .browserReadSettling:
