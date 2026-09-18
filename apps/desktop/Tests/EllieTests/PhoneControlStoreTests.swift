@@ -195,6 +195,34 @@ final class PhoneControlStoreTests: XCTestCase {
     XCTAssertEqual(commandCount, 1)
   }
 
+  @MainActor
+  func testCredentialChangePermanentlyBlocksOldStoreAndPreservesUnknownCommand() async {
+    let transport = PhoneControlFakeTransport(nodes: [node("mac-a")], suspendCommand: true)
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = "mac-a"
+    store.send()
+    await eventually { await transport.commandCalls.count == 1 }
+
+    store.credentialDidChange()
+    XCTAssertTrue(store.credentialChanged)
+    XCTAssertFalse(store.canSend)
+    XCTAssertNil(store.selectedNodeID)
+    XCTAssertTrue(store.nodes.isEmpty)
+    await transport.finishCommand(.completed)
+    await eventually { store.phase == .outcome(.unknown, nodeID: "mac-a", app: .safari) }
+
+    store.refresh()
+    store.selectedNodeID = "mac-a"
+    store.send()
+    XCTAssertFalse(store.canSend)
+    let nodeCalls = await transport.nodeCalls
+    let commandCalls = await transport.commandCalls.count
+    XCTAssertEqual(nodeCalls, 1)
+    XCTAssertEqual(commandCalls, 1)
+  }
+
   private func credential() -> NativeEnrollmentCredential {
     let grants = [
       NativeGrant(target: "mac-a", capabilities: ["app.open"]),

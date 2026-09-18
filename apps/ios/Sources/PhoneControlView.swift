@@ -19,76 +19,85 @@ struct PhoneControlView: View {
 
   var body: some View {
     Form {
-      Section("Mac") {
-        if store.nodes.isEmpty {
-          Text("Refresh to load the Macs granted to this iPhone.")
-            .foregroundStyle(.secondary)
-        } else {
-          Picker("Target", selection: $store.selectedNodeID) {
-            Text("Choose a Mac").tag(String?.none)
-            ForEach(store.nodes) { node in
-              Text("\(node.label)\(node.online ? "" : " — Offline")").tag(Optional(node.id))
+      if store.credentialChanged {
+        Section {
+          Label("Pairing changed. Reopen Mac controls.", systemImage: "lock.slash")
+            .accessibilityIdentifier("phone-controls-credential-changed")
+          Text("If a command was in progress, check the Mac before trying again.")
+            .font(.footnote).foregroundStyle(.secondary)
+        }
+      } else {
+        Section("Mac") {
+          if store.nodes.isEmpty {
+            Text("Refresh to load the Macs granted to this iPhone.")
+              .foregroundStyle(.secondary)
+          } else {
+            Picker("Target", selection: $store.selectedNodeID) {
+              Text("Choose a Mac").tag(String?.none)
+              ForEach(store.nodes) { node in
+                Text("\(node.label)\(node.online ? "" : " — Offline")").tag(Optional(node.id))
+              }
+            }
+            .accessibilityIdentifier("phone-target-picker")
+            .disabled(isBusy)
+          }
+          Button("Refresh Macs", systemImage: "arrow.clockwise") { store.refresh() }
+            .disabled(isBusy)
+        }
+
+        Section("Application") {
+          Picker("Application", selection: $store.selectedApp) {
+            ForEach(PhoneControlApp.allCases) { app in Text(app.label).tag(app) }
+          }
+          .disabled(isBusy)
+          Button("Open on selected Mac") { store.send() }
+            .disabled(!store.canSend)
+        }
+
+        Section("Voice") {
+          NavigationLink {
+            SpeechTurnView(credential: credential, controls: store, browser: browser)
+          } label: {
+            Label("Record a command", systemImage: "waveform")
+          }
+        }
+
+        Section("Browser") {
+          NavigationLink("Control selected Mac browser") {
+            BrowserControlView(controls: store, browser: browser)
+          }
+          .disabled(store.selectedNode == nil)
+        }
+
+        Section("Apple Watch") {
+          if let target = watch.enabledTargetID {
+            Label("Enabled for \(nodeLabel(target))", systemImage: "applewatch")
+            Button("Disable Watch control", role: .destructive) { watch.disable() }
+          } else {
+            Button("Enable Watch control for selected Mac") {
+              if let node = store.selectedNode { _ = watch.enable(credential: credential, node: node) }
+            }
+            .disabled(!watchTargetEligible || !watch.available || isBusy)
+            Text("The Watch uses this iPhone's current browser grants. Open Ellie on Watch and tap Read; actions are never queued for later delivery.")
+              .font(.footnote).foregroundStyle(.secondary)
+            if store.selectedNode != nil && !watchTargetEligible {
+              Text("Select an online Mac with browser reading and control granted to this iPhone.")
+                .font(.footnote).foregroundStyle(.secondary)
             }
           }
-          .accessibilityIdentifier("phone-target-picker")
-          .disabled(isBusy)
-        }
-        Button("Refresh Macs", systemImage: "arrow.clockwise") { store.refresh() }
-          .disabled(isBusy)
-      }
-
-      Section("Application") {
-        Picker("Application", selection: $store.selectedApp) {
-          ForEach(PhoneControlApp.allCases) { app in Text(app.label).tag(app) }
-        }
-        .disabled(isBusy)
-        Button("Open on selected Mac") { store.send() }
-          .disabled(!store.canSend)
-      }
-
-      Section("Voice") {
-        NavigationLink {
-          SpeechTurnView(credential: credential, controls: store, browser: browser)
-        } label: {
-          Label("Record a command", systemImage: "waveform")
-        }
-      }
-
-      Section("Browser") {
-        NavigationLink("Control selected Mac browser") {
-          BrowserControlView(controls: store, browser: browser)
-        }
-        .disabled(store.selectedNode == nil)
-      }
-
-      Section("Apple Watch") {
-        if let target = watch.enabledTargetID {
-          Label("Enabled for \(nodeLabel(target))", systemImage: "applewatch")
-          Button("Disable Watch control", role: .destructive) { watch.disable() }
-        } else {
-          Button("Enable Watch control for selected Mac") {
-            if let node = store.selectedNode { _ = watch.enable(credential: credential, node: node) }
-          }
-          .disabled(!watchTargetEligible || !watch.available || isBusy)
-          Text("The Watch uses this iPhone's current browser grants. Open Ellie on Watch and tap Read; actions are never queued for later delivery.")
-            .font(.footnote).foregroundStyle(.secondary)
-          if store.selectedNode != nil && !watchTargetEligible {
-            Text("Select an online Mac with browser reading and control granted to this iPhone.")
+          if !watch.available {
+            Text("A paired Watch with Ellie installed is not available yet.")
               .font(.footnote).foregroundStyle(.secondary)
           }
         }
-        if !watch.available {
-          Text("A paired Watch with Ellie installed is not available yet.")
-            .font(.footnote).foregroundStyle(.secondary)
-        }
-      }
 
-      status
+        status
 
-      if isBusy {
-        Section {
-          Button("Stop waiting", role: .cancel) { store.cancel() }
-            .disabled(store.phase == .cancelling)
+        if isBusy {
+          Section {
+            Button("Stop waiting", role: .cancel) { store.cancel() }
+              .disabled(store.phase == .cancelling)
+          }
         }
       }
     }
@@ -107,6 +116,11 @@ struct PhoneControlView: View {
         store.cancel()
         browser.cancel()
       }
+    }
+    .onChange(of: credential) { _, _ in
+      browser.credentialDidChange()
+      store.credentialDidChange()
+      watch.disable()
     }
   }
 

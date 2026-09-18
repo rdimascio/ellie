@@ -55,6 +55,7 @@ final class PhoneControlStore: ObservableObject {
 
   @Published private(set) var phase: Phase = .idle
   @Published private(set) var nodes: [PhoneControlNode] = []
+  @Published private(set) var credentialChanged = false
   @Published var selectedNodeID: String?
   @Published var selectedApp: PhoneControlApp = .safari
 
@@ -77,17 +78,19 @@ final class PhoneControlStore: ObservableObject {
   }
 
   var canSend: Bool {
-    task == nil && selectedNode?.canOpenApps == true
+    !credentialChanged && task == nil && selectedNode?.canOpenApps == true
   }
 
   func refresh() {
-    guard task == nil else { return }
+    guard !credentialChanged, task == nil else { return }
     phase = .loading
     launchInventory()
   }
 
   func send() {
-    guard task == nil, let node = selectedNode, node.canOpenApps else { return }
+    guard !credentialChanged, task == nil, let node = selectedNode, node.canOpenApps else {
+      return
+    }
     let nodeID = node.id
     let app = selectedApp
     activeCommand = (nodeID, app)
@@ -104,6 +107,14 @@ final class PhoneControlStore: ObservableObject {
     generation += 1
     task?.cancel()
     phase = .cancelling
+  }
+
+  func credentialDidChange() {
+    guard !credentialChanged else { return }
+    credentialChanged = true
+    cancel()
+    nodes = []
+    selectedNodeID = nil
   }
 
   private func launchInventory() {
