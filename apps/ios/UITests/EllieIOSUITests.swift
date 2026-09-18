@@ -840,29 +840,35 @@ final class EllieIOSUITests: XCTestCase {
         let transcript = app.textViews["speech-transcript"]
         XCTAssertTrue(transcript.waitForExistence(timeout: 5))
         XCTAssertEqual(transcript.value as? String, "Search for public")
-        transcript.tap()
+        // A center tap in the mostly empty TextEditor places the caret at the start.
+        // Tap to the right of its first line and require the exact edited transcript.
+        transcript.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.12)).tap()
         transcript.typeText(" video")
-        XCTAssertEqual(transcript.value as? String, "Search for public video")
-        let run = app.buttons["speech-browser-run"]
-        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        guard transcript.value as? String == "Search for public video" else {
+            XCTFail("The edited spoken search must be exact before reviewing a command")
+            return
+        }
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
         XCTAssertFalse(run.isEnabled, "A spoken search requires an observed selected document")
         XCTAssertEqual(count.label, "Fixture mutations: 0")
 
-        app.buttons["speech-browser-read"].tap()
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        XCTAssertFalse(revealSpeechReviewButton("speech-browser-run", in: app).isEnabled)
         let unavailable = app.staticTexts["speech-youtube-search-unavailable"]
         XCTAssertTrue(unavailable.waitForExistence(timeout: 5))
         XCTAssertTrue(unavailable.label.contains("No search was sent"))
         XCTAssertFalse(run.isEnabled)
         XCTAssertEqual(count.label, "Fixture mutations: 0")
         XCTAssertEqual(history.label, "Fixture actions: read.home")
-        revealBrowserButton("speech-browser-read", in: app, forTap: true).tap()
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        XCTAssertTrue(revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).isEnabled)
         let review = app.staticTexts["speech-youtube-search-review"]
         XCTAssertTrue(review.waitForExistence(timeout: 5))
         XCTAssertTrue(review.label.contains("Search field on Fixture Mac A"))
         XCTAssertFalse(unavailable.exists)
         XCTAssertTrue(run.isEnabled)
         XCTAssertEqual(history.label, "Fixture actions: read.home,read.home")
-        run.tap()
+        revealSpeechReviewButton("speech-browser-run", in: app, forTap: true).tap()
         waitForFixtureMutations(1, in: app)
         XCTAssertEqual(history.label, "Fixture actions: read.home,read.home,search.public video")
         XCTAssertFalse(run.exists, "Run consumes the reviewed transcript")
