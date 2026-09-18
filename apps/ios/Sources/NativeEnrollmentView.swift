@@ -45,7 +45,7 @@ struct NativeEnrollmentView: View {
         }
       case .checking, .working: ProgressView("Waiting…")
       case .enrolled(let credential):
-        Section("Paired") {
+        Section {
           LabeledContent("Coordinator", value: credential.origin.absoluteString)
           LabeledContent("Device", value: credential.client.label)
           NavigationLink("Control a Mac") { PhoneControlView(credential: credential) }
@@ -63,6 +63,12 @@ struct NativeEnrollmentView: View {
             IOSGmailInboxView(credential: credential)
               .id(credential.client.id)
           }
+        } header: {
+          Text("Saved pairing")
+        } footer: {
+          Text(
+            "This iPhone has a saved credential. Open Mac controls and refresh Macs to check whether its coordinator listener is available."
+          )
         }
         Section {
           Button("Log out from coordinator", role: .destructive) {

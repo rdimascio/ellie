@@ -29,7 +29,9 @@ struct PhoneControlView: View {
       } else {
         Section("Mac") {
           if store.nodes.isEmpty {
-            Text("Refresh to load the Macs granted to this iPhone.")
+            Text(store.phase == .ready
+              ? "No Macs are available to this iPhone. Check its Mac grants and the coordinator's node status."
+              : "Refresh to load the Macs granted to this iPhone.")
               .foregroundStyle(.secondary)
           } else {
             Picker("Target", selection: $store.selectedNodeID) {
