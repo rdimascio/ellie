@@ -30,16 +30,17 @@ function call(
   port: number,
   ca: string,
   path: string,
-  options: { token?: string; cookie?: string } = {},
+  options: { token?: string; cookie?: string; body?: unknown } = {},
 ) {
   return new Promise<{ status: number; json: any }>((resolve, reject) => {
+    const body = options.body === undefined ? undefined : JSON.stringify(options.body);
     const request = httpsRequest(
       {
         hostname,
         servername: hostname,
         port,
         path,
-        method: options.token ? "POST" : "GET",
+        method: options.token || body ? "POST" : "GET",
         ca,
         lookup: (_name, opts, callback) =>
           opts.all
@@ -54,6 +55,13 @@ function call(
                 "x-ellie-version": "1",
                 "content-type": "application/json",
                 "content-length": "2",
+              }
+            : {}),
+          ...(body
+            ? {
+                "content-type": "application/json",
+                "content-length": String(Buffer.byteLength(body)),
+                origin: `https://${hostname}:${port}`,
               }
             : {}),
         },
@@ -76,12 +84,12 @@ function call(
     );
     request.setTimeout(8_000, () => request.destroy(new Error("fixture request timed out")));
     request.once("error", reject);
-    request.end(options.token ? "{}" : undefined);
+    request.end(options.token ? "{}" : body);
   });
 }
 
 test(
-  "production pinned-Life gateway exposes selected calendar and only explicitly read Gmail body",
+  "production pinned-Life gateway serves selected Google reads and one durable native review",
   { timeout: 25_000 },
   async () => {
     const directory = await mkdtemp(join(tmpdir(), "ellie-ios-google-life-"));
@@ -109,6 +117,9 @@ test(
         grantedClientIds: [allowed.id],
       });
       assert.deepEqual(fixture.control.bodyReads(), {});
+      assert.equal(fixture.control.chatEvidence().plans, 0);
+      assert.equal(fixture.control.chatEvidence().conversations, 0);
+      assert.equal(fixture.control.chatEvidence().records, 0);
       const tls = await generateBrowserTlsIdentity(hostname);
       const port = await freePort();
       browser = createBrowserServer({
@@ -137,6 +148,27 @@ test(
       const listing = await call(port, tls.rootCert, "/api/connections", { cookie });
       assert.equal(listing.status, 200);
       assert.equal(listing.json.connections.length, 2);
+      const chatState = await call(port, tls.rootCert, "/api/life/native/chat/state", { cookie });
+      assert.equal(chatState.status, 200);
+      assert.equal(chatState.json.available, true);
+      const requestId = "native_ae2bbc9c-57c0-4a8a-97fc-e6ba10179bc2";
+      const sent = await call(port, tls.rootCert, "/api/life/native/chat", {
+        cookie,
+        body: {
+          message: "What is the family plan?",
+          requestId,
+          chatEpoch: chatState.json.chatEpoch,
+        },
+      });
+      assert.equal(sent.status, 200);
+      assert.equal(sent.json.reply, "Family 👩‍👩‍👧‍👧\r\n日本語 read-only answer.");
+      const status = await call(port, tls.rootCert, `/api/life/native/chat/requests/${requestId}`, {
+        cookie,
+      });
+      assert.deepEqual(status.json, sent.json);
+      assert.equal(fixture.control.chatEvidence().plans, 1);
+      assert.equal(fixture.control.chatEvidence().conversations, 1);
+      assert.equal(fixture.control.chatEvidence().records, 0);
       const agenda = await call(
         port,
         tls.rootCert,

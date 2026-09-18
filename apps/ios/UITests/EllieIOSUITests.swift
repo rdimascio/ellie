@@ -1,6 +1,53 @@
 import XCTest
 
 final class EllieIOSUITests: XCTestCase {
+    func testQuietVoiceReviewRequiresExplicitSendAndNeverReplaysUnknown() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["--ellie-ui-quiet-voice-fixture"]
+        app.launch()
+        defer { app.terminate() }
+        func tap(_ identifier: String) {
+            revealBrowserButton(identifier, in: app, forTap: true).tap()
+        }
+        func waitLabel(_ element: XCUIElement, _ label: String) {
+            let observed = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "label == %@", label), object: element)
+            XCTAssertEqual(XCTWaiter.wait(for: [observed], timeout: 5), .completed, label)
+        }
+        let sends = app.staticTexts["quiet-voice-fixture-sends"]
+        XCTAssertEqual(sends.label, "Fixture sends: 0")
+        tap("speech-check")
+        tap("speech-record")
+        tap("speech-stop")
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 0", "transcription cannot send itself")
+        tap("speech-life-send")
+        waitLabel(app.staticTexts["speech-life-reply"], "Read-only reply 1.")
+        XCTAssertEqual(sends.label, "Fixture sends: 1")
+        tap("New message")
+        tap("speech-record")
+        tap("speech-stop")
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 1")
+        tap("speech-life-send")
+        waitLabel(app.staticTexts["speech-life-reply"], "Read-only reply 2.")
+        XCTAssertEqual(app.staticTexts["quiet-voice-fixture-follow-up"].label,
+            "Fixture follow-up bound: true")
+        tap("New message")
+        tap("speech-record")
+        tap("speech-stop")
+        tap("speech-life-send")
+        XCTAssertTrue(app.buttons["speech-life-check-status"].waitForExistence(timeout: 5))
+        XCTAssertEqual(sends.label, "Fixture sends: 3")
+        tap("speech-life-check-status")
+        XCTAssertTrue(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@",
+            "Life access was revoked")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertEqual(app.staticTexts["quiet-voice-fixture-status"].label,
+            "Fixture status reads: 1")
+        XCTAssertEqual(sends.label, "Fixture sends: 3", "status never resends an unknown request")
+    }
+
     func testQuietRecentSessionsReviewUsesDistinctLinkedWorkAndRevocationClearsIt() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-quiet-session-fixture"]

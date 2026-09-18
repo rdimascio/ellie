@@ -159,6 +159,8 @@ export interface ConversationEvidence {
 }
 export interface ConversationResult {
   reply: string;
+  nativeReadOnly?: boolean;
+  needsMacReview?: boolean;
   actions: Array<{ label: string; status: string }>;
   recordIds: string[];
   recordReceipts?: Array<{ id: string; kind: "reminder" | "event"; revision: number }>;
@@ -2919,6 +2921,8 @@ export class LifeStore {
       throw new TypeError("Conversation result is invalid");
     const result: ConversationResult = {
       reply,
+      ...(input.result.nativeReadOnly === true ? { nativeReadOnly: true } : {}),
+      ...(input.result.needsMacReview === true ? { needsMacReview: true } : {}),
       actions: input.result.actions.map((a) => ({
         label: text(a.label, "action.label", 500),
         status: text(a.status, "action.status", 50),
