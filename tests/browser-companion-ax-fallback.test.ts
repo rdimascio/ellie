@@ -34,6 +34,7 @@ function setup(origin: string, page: "unsupported" | "login" = "unsupported") {
   const axCalls: string[] = [];
   let axDirections: ("up" | "down")[] = ["down"];
   let afterCompanion: (() => void) | undefined;
+  let afterStatus: (() => void) | undefined;
   let afterAX: (() => void) | undefined;
   const companion = {
     async execute(action: BrowserAction) {
@@ -68,7 +69,21 @@ function setup(origin: string, page: "unsupported" | "login" = "unsupported") {
   const accessibility = {
     async execute(action: BrowserAction) {
       axCalls.push(action.tool);
-      afterAX?.();
+      if (action.tool === "browser.status") {
+        afterStatus?.();
+        return browserWebMCPOperationResult({
+          ok: true,
+          message: "Bound web area.",
+          browser: {
+            source: "accessibility",
+            operation: "status",
+            status: "connected",
+            revision: browserBindingRevision(binding),
+            origin,
+          },
+        });
+      }
+      if (action.tool === "browser.read") afterAX?.();
       if (action.tool === "browser.read")
         return browserWebMCPOperationResult({
           ok: true,
@@ -129,6 +144,9 @@ function setup(origin: string, page: "unsupported" | "login" = "unsupported") {
     afterCompanion(value: () => void) {
       afterCompanion = value;
     },
+    afterStatus(value: () => void) {
+      afterStatus = value;
+    },
     afterAX(value: () => void) {
       afterAX = value;
     },
@@ -152,10 +170,10 @@ for (const origin of origins) {
       ),
       /observed browser control/,
     );
-    assert.deepEqual(f.axCalls, ["browser.read"]);
+    assert.deepEqual(f.axCalls, ["browser.status", "browser.read"]);
     assert.equal(browserResult(await f.scroll("down")).status, "unknown");
     await assert.rejects(f.scroll("down"), /observed browser control/);
-    assert.deepEqual(f.axCalls, ["browser.read", "browser.scroll"]);
+    assert.deepEqual(f.axCalls, ["browser.status", "browser.read", "browser.scroll"]);
     assert.equal(f.companionCalls, 1);
   });
 }
@@ -186,17 +204,22 @@ test("binding, cancellation and an ambiguous AX observation prevent scroll admis
   await assert.rejects(cancelled.read(controller.signal), /cancelled/);
   assert.deepEqual(cancelled.axCalls, []);
 
+  const statusChanged = setup(origins[1]);
+  statusChanged.afterStatus(() => statusChanged.changeBinding());
+  await assert.rejects(statusChanged.read(), /page changed/);
+  assert.deepEqual(statusChanged.axCalls, ["browser.status"]);
+
   const duringAX = setup(origins[1]);
   duringAX.afterAX(() => duringAX.changeBinding());
   await assert.rejects(duringAX.read(), /page changed/);
-  assert.deepEqual(duringAX.axCalls, ["browser.read"]);
+  assert.deepEqual(duringAX.axCalls, ["browser.status", "browser.read"]);
   await assert.rejects(duringAX.scroll("down"), /Companion action must not run/);
 
   const noScroll = setup(origins[1]);
   noScroll.setDirections([]);
   assert.equal(browserResult(await noScroll.read()).source, "accessibility");
   await assert.rejects(noScroll.scroll("down"), /observed browser control/);
-  assert.deepEqual(noScroll.axCalls, ["browser.read"]);
+  assert.deepEqual(noScroll.axCalls, ["browser.status", "browser.read"]);
 });
 
 test("an unknown AX scroll consumes observation without replay", async () => {
@@ -204,7 +227,7 @@ test("an unknown AX scroll consumes observation without replay", async () => {
   await f.read();
   assert.equal(browserResult(await f.scroll("down")).status, "unknown");
   await assert.rejects(f.scroll("down"), /observed browser control/);
-  assert.deepEqual(f.axCalls, ["browser.read", "browser.scroll"]);
+  assert.deepEqual(f.axCalls, ["browser.status", "browser.read", "browser.scroll"]);
 });
 
 test("AX scroll capability is a bounded read-only protocol field", () => {
