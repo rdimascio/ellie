@@ -6,6 +6,8 @@ Updated September 17, 2026. This catalogue preserves earlier sessions and define
 
 **Current handoff:** use only the exact app and browser build named by the coordinator for that session. If no build-specific handoff is supplied, report **blocked: candidate handoff**. Do not install another build, change enrollment or repeat permission setup from this document alone.
 
+A verified signed development iPhone archive was installed in place on the paired physical phone, with a successful install reply and app metadata present afterward. The app has not yet had a build-specific launch and enrollment-retention check; this install alone does not start the IP, Google, chores or Watch acceptance sessions below.
+
 **Earlier previews:** prior native Mac and Life preview results remain historical evidence. They do not establish which source, model or authenticated session is running now. For a later Life session, the coordinator must supply a fresh authenticated preview and identify its source; if it asks for authentication, report **blocked: preview session** and do not reuse an expired one-time link.
 
 The coordinator supplies a private handoff folder containing this guide, a current `agenda-qa.json` with synthetic events and `invalid-import.json` for rejection checks. Fixture paths, preview authentication links and owner configuration stay outside the repository.
