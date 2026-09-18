@@ -78,18 +78,10 @@ Admission memory is deliberately conservative. On macOS it includes free and ina
 
 The local adapter accepts only literal loopback HTTP(S) origins, refuses redirects, and talks to an operator-managed OpenAI-compatible runner (`GET /v1/models`, `POST /v1/chat/completions`). MLX-LM provides a compatible server interface; see its [upstream implementation](https://github.com/ml-explore/mlx-lm/blob/main/mlx_lm/server.py). Runner installation, model download, startup, memory measurement, and model compatibility remain explicit operator tasks. Ellie does not send requests to a cloud provider. The operator must configure the runner itself for local-only models; Ellie cannot enforce a runner's internal network policy.
 
-### Optional advanced distributed MLX
+### Experimental distributed MLX
 
-Distributed inference is a future explicitly enabled backend for a heavyweight model that cannot fit on any one eligible Mac. It is not the V1 control plane or default execution mode. Independent workers improve concurrent throughput without creating a shared memory pool. Three 16 GB Macs do not become one transparent 48 GB model host.
+An explicitly configured `distributed-mlx` request reserves all members of a named group before delivery. Each Mac checks its locally enabled plan and resources, prepares its Python runner, and waits at a shared start barrier. One MLX-LM rank per Mac uses either ring/pipeline or JACCL with an explicit shard strategy. The selected backend initializes strictly, and rank zero's text is returned only when every rank has exited successfully.
 
-The protocol reserves a `DistributedMlxGroup` contract with a group identity, explicit member IDs, model, and explicit enablement. This release does **not** implement a shard-group runner; runtime requests for distributed mode are rejected. Merely adding Macs or running out of memory never opts a user into sharding.
+The coordinator requires matching ordered membership, model, backend, strategy, and plan revision, plus unexpired operator-supplied interconnect measurements. Atomic job metadata creation precedes delivery. Failure, cancellation, stale telemetry, reconnect, revocation, or deadline expiry cancels the whole group. Reservations remain occupied until all delivered ranks acknowledge process teardown; no rank is automatically retried. Independent workers remain the default and do not pool memory.
 
-Before activating that backend, implement and verify all of the following:
-
-- Explicit operator opt-in per group and model, and per-node local consent to shard participation.
-- A supported model/shard plan with measured per-member memory/KV-cache headroom; all members ready on fresh telemetry, preferably AC with healthy thermal state.
-- Measured interconnect bandwidth/latency and a supported MLX communication backend. Ordinary heartbeat RTT alone cannot qualify a cluster. MLX's [distributed communication documentation](https://ml-explore.github.io/mlx/build/html/usage/distributed.html) describes its separate distributed runtime.
-- Atomic reservation of every member, a gang lease, cancellation/deadline propagation, and whole-group teardown when a member sleeps, overheats, disconnects, or loses capacity. Do not retry only one shard or mix it with independently scheduled work.
-- A single provider boundary returning the same inference result/stream contract. The rest of Ellie must not depend on ranks, shard topology, or the chosen interconnect.
-
-V1 delivery order remains: reliable deterministic desktop control; independent local inference workers; conversational/knowledge and voice adapters; measured, opt-in sharding only when the model actually requires it.
+This is an experimental, non-streaming probe with synthetic lifecycle coverage; physical MLX and RDMA acceptance remain pending. MLX tensor traffic uses a separate trusted interconnect and does not inherit the HTTPS control channel's protection. See the [setup guide](distributed-mlx.md) and [recovery notes](distributed-mlx-reference.md#lifecycle-and-recovery). Warm runners, streaming, automatic interconnect qualification, and automatic recovery of unacknowledged leases remain future work.

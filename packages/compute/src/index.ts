@@ -1,4 +1,5 @@
 import type { NodeInfo } from "@ellie/protocol";
+export { distributedMemberEligible, distributedGroupProblem } from "./distributed.ts";
 
 export const TELEMETRY_MAX_AGE_MS = 35_000;
 /** Pure admission policy shared with workers. Missing power/thermal metrics are explicit unknowns. */

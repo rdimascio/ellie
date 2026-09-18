@@ -63,6 +63,7 @@ export interface NodeInfo {
   capabilities: Capability[];
   executionCapabilities: Capability[];
   computeCapabilities?: import("./compute.ts").ComputeCapabilities;
+  distributedCapabilities?: import("./distributed.ts").DistributedMlxCapability[];
   telemetry?: import("./compute.ts").Telemetry;
   telemetryReceivedAt?: number;
   lastSeen: number;
@@ -175,3 +176,4 @@ export * from "./native-pairing-qr.ts";
 export * from "./native-session-contract.ts";
 export * from "./native-controls.ts";
 export * from "./household-state.ts";
+export * from "./distributed.ts";

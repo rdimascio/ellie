@@ -7,6 +7,12 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { record, identifier, string, installedModels } from "@ellie/protocol";
 import type { InstalledModel } from "@ellie/protocol";
+import { distributedMlxGroups } from "@ellie/protocol";
+import type { DistributedMlxGroup } from "@ellie/protocol";
+import { distributedWorkerConfig } from "./distributed.ts";
+import type { DistributedWorkerConfig } from "./distributed.ts";
+export { distributedWorkerConfig } from "./distributed.ts";
+export type { DistributedWorkerConfig, LocalMlxGroup } from "./distributed.ts";
 import { defaults } from "./defaults.ts";
 import type { Preferences } from "./defaults.ts";
 
@@ -30,6 +36,7 @@ export interface ServerConfig {
   port: number;
   preferences: Preferences;
   decisionRouting?: DecisionRoutingConfig;
+  distributedGroups?: DistributedMlxGroup[];
 }
 export type DecisionRoutingConfig = {
   mode: "shadow" | "execute";
@@ -142,6 +149,7 @@ export interface NodeConfig {
   preferences: Preferences;
   executionEnabled: boolean;
   inferenceWorker?: InferenceWorkerConfig;
+  distributedWorker?: DistributedWorkerConfig;
 }
 export function inferenceWorkerConfig(value: unknown): InferenceWorkerConfig {
   const v = record(value);
@@ -210,6 +218,9 @@ export function serverConfig(value: unknown): ServerConfig {
     host: string(v.host, 255),
     port: v.port as number,
     preferences: preferences(v.preferences),
+    ...(v.distributedGroups === undefined
+      ? {}
+      : { distributedGroups: distributedMlxGroups(v.distributedGroups) }),
     ...(v.decisionRouting === undefined
       ? {}
       : { decisionRouting: decisionRoutingConfig(v.decisionRouting) }),
@@ -239,6 +250,9 @@ export function nodeConfig(value: unknown): NodeConfig {
     serverUrl: serverUrl(v.serverUrl),
     preferences: preferences(v.preferences),
     executionEnabled: v.executionEnabled !== false,
+    ...(v.distributedWorker === undefined
+      ? {}
+      : { distributedWorker: distributedWorkerConfig(v.distributedWorker, identifier(v.id)) }),
     ...(v.inferenceWorker === undefined
       ? {}
       : { inferenceWorker: inferenceWorkerConfig(v.inferenceWorker) }),

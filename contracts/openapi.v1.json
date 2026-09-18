@@ -878,6 +878,46 @@
         }
       }
     },
+    "/v1/groups": {
+      "get": {
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ProtocolVersion"
+          }
+        ],
+        "operationId": "listDistributedGroups",
+        "summary": "Inspect explicitly configured MLX groups and teardown reservations",
+        "description": "Controller bearer identity required. Qualification and local consent are checked at each placement.",
+        "responses": {
+          "200": {
+            "description": "Group readiness and payload-free rank state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "$ref": "#/components/schemas/DistributedGroupStatus"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
     "/v1/heartbeat": {
       "post": {
         "parameters": [
@@ -3061,6 +3101,232 @@
           }
         }
       },
+      "DistributedMlxPlan": {
+        "type": "object",
+        "required": [
+          "mode",
+          "id",
+          "planId",
+          "nodeIds",
+          "model",
+          "backend",
+          "strategy",
+          "explicitlyEnabled"
+        ],
+        "properties": {
+          "mode": {
+            "const": "distributed-mlx"
+          },
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "planId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "nodeIds": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 8,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "\\S"
+          },
+          "backend": {
+            "enum": [
+              "ring",
+              "jaccl"
+            ]
+          },
+          "strategy": {
+            "enum": [
+              "pipeline",
+              "tensor"
+            ]
+          },
+          "explicitlyEnabled": {
+            "const": true
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "strategy": {
+                  "const": "tensor"
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "backend": {
+                  "const": "jaccl"
+                }
+              }
+            }
+          }
+        ]
+      },
+      "DistributedCapability": {
+        "type": "object",
+        "required": [
+          "plan",
+          "rank",
+          "requiredFreeMemoryBytes"
+        ],
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/DistributedMlxPlan"
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 7
+          },
+          "requiredFreeMemoryBytes": {
+            "type": "number",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "description": "Rank must index this node's identity in the plan's ordered nodeIds. Group IDs are unique per node."
+      },
+      "DistributedAssignment": {
+        "type": "object",
+        "required": [
+          "plan",
+          "rank",
+          "leaseId"
+        ],
+        "properties": {
+          "plan": {
+            "$ref": "#/components/schemas/DistributedMlxPlan"
+          },
+          "rank": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 7
+          },
+          "leaseId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          }
+        }
+      },
+      "DistributedGroupStatus": {
+        "type": "object",
+        "required": [
+          "id",
+          "model",
+          "planId",
+          "nodeIds",
+          "backend",
+          "strategy",
+          "problem",
+          "jobs"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "model": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "\\S"
+          },
+          "planId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "nodeIds": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
+          },
+          "backend": {
+            "enum": [
+              "ring",
+              "jaccl"
+            ]
+          },
+          "strategy": {
+            "enum": [
+              "pipeline",
+              "tensor"
+            ]
+          },
+          "problem": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "jobs": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "nodeId",
+                "ready",
+                "stopped",
+                "cancelling"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100,
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+                },
+                "nodeId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 100,
+                  "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+                },
+                "ready": {
+                  "type": "boolean"
+                },
+                "stopped": {
+                  "type": "boolean"
+                },
+                "cancelling": {
+                  "type": "boolean"
+                }
+              }
+            }
+          }
+        }
+      },
       "Power": {
         "type": "object",
         "required": [
@@ -3169,6 +3435,9 @@
         "dependentRequired": {
           "computeCapabilities": [
             "telemetry"
+          ],
+          "distributedCapabilities": [
+            "telemetry"
           ]
         },
         "properties": {
@@ -3189,6 +3458,13 @@
           "computeCapabilities": {
             "$ref": "#/components/schemas/ComputeCapabilities"
           },
+          "distributedCapabilities": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/DistributedCapability"
+            }
+          },
           "telemetry": {
             "$ref": "#/components/schemas/Telemetry"
           }
@@ -3199,11 +3475,21 @@
         "dependentRequired": {
           "computeCapabilities": [
             "telemetry"
+          ],
+          "distributedCapabilities": [
+            "telemetry"
           ]
         },
         "properties": {
           "computeCapabilities": {
             "$ref": "#/components/schemas/ComputeCapabilities"
+          },
+          "distributedCapabilities": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/DistributedCapability"
+            }
           },
           "telemetry": {
             "$ref": "#/components/schemas/Telemetry"
@@ -3254,6 +3540,10 @@
         "properties": {
           "cancel": {
             "type": "boolean"
+          },
+          "ready": {
+            "type": "boolean",
+            "description": "Distributed jobs must wait until every member is ready."
           }
         }
       },
@@ -3363,6 +3653,13 @@
           "computeCapabilities": {
             "$ref": "#/components/schemas/ComputeCapabilities"
           },
+          "distributedCapabilities": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "$ref": "#/components/schemas/DistributedCapability"
+            }
+          },
           "telemetry": {
             "$ref": "#/components/schemas/Telemetry"
           },
@@ -3382,8 +3679,17 @@
         ],
         "properties": {
           "mode": {
-            "const": "independent",
+            "enum": [
+              "independent",
+              "distributed-mlx"
+            ],
             "default": "independent"
+          },
+          "groupId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
           },
           "model": {
             "type": "string",
@@ -3403,7 +3709,26 @@
             "maximum": 2048,
             "default": 256
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "required": [
+                "mode"
+              ],
+              "properties": {
+                "mode": {
+                  "const": "distributed-mlx"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "groupId"
+              ]
+            }
+          }
+        ]
       },
       "InferenceJob": {
         "type": "object",
@@ -3432,8 +3757,41 @@
           },
           "request": {
             "$ref": "#/components/schemas/InferenceRequest"
+          },
+          "assignment": {
+            "$ref": "#/components/schemas/DistributedAssignment"
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "request": {
+                  "required": [
+                    "mode"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "const": "distributed-mlx"
+                    }
+                  }
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "assignment"
+              ]
+            },
+            "else": {
+              "not": {
+                "required": [
+                  "assignment"
+                ]
+              }
+            }
+          }
+        ]
       },
       "PollResponse": {
         "type": "object",
@@ -3497,6 +3855,34 @@
             "minLength": 1,
             "maxLength": 100,
             "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "groupId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100,
+            "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+          },
+          "workerIds": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
+          },
+          "jobIds": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 8,
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 100,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+            }
           }
         }
       },

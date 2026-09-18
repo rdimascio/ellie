@@ -17,6 +17,10 @@ The original desktop command path uses text commands â†’ deterministic routing â
 
 An [optional decision-routing experiment](docs/decision-routing.md) can propose a single allowed desktop action for commands the deterministic grammar does not recognize. It starts in shadow mode, with explicit local or hosted provider setup; this coordinator command path is separate from Ellie Life conversation and the native clients.
 
+An experimental [decision-routing layer](docs/decision-routing.md) can interpret unmatched desktop phrases through an explicitly configured TypeSafe Jev or local model. Setup starts in shadow mode with unexecuted proposals; existing deterministic commands stay local. Run `bun run eval:routing` for the offline synthetic baseline.
+
+An experimental [distributed MLX backend](docs/distributed-mlx.md) can run one model across an explicitly configured Mac group, with shared reservations, a start barrier, and whole-group cancellation. Physical MLX and RDMA validation remain pending.
+
 ## Try the first milestone
 
 You need macOS, Node.js 24, Bun 1.4.2, Xcode Command Line Tools (`xcode-select --install`), and `openssl` on each Mac (the macOS-provided LibreSSL is supported). Node remains the production runtime and test runner; Bun installs the workspace and runs its scripts. The execution Mac needs a logged-in graphical session. Install Arc for the default browser commands. Bun installs the local runtime dependencies with the workspace.
