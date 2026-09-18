@@ -123,6 +123,26 @@ async function livePopupSearch(sender, selectedWindowId) {
   );
 }
 
+async function selectedPopupBindingTab(sender, tab, browserWindow) {
+  if (
+    browserWindow.id !== tab.windowId ||
+    browserWindow.type !== "normal" ||
+    !(await livePopupSearch(sender, tab.windowId))
+  )
+    return false;
+  // The toolbar popup can own focus while its parent normal window reports
+  // focused=false. Chrome, not the message payload, supplies the last selected tab.
+  const selected = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return (
+    selected.length === 1 &&
+    selected[0].id === tab.id &&
+    selected[0].windowId === tab.windowId &&
+    selected[0].url === tab.url &&
+    selected[0].active === true &&
+    selected[0].status === "complete"
+  );
+}
+
 async function dispatch(
   tabId,
   command,
@@ -370,7 +390,7 @@ async function currentWebMCPDocument(binding) {
   return binding;
 }
 
-async function bindWebMCP(tabId) {
+async function bindWebMCP(tabId, popupSender) {
   if (activeWebMCP || pendingWebMCPBind) throw new Error("busy");
   const initial = await chrome.tabs.get(tabId);
   if (
@@ -383,7 +403,12 @@ async function bindWebMCP(tabId) {
     throw new Error("unsupported_page");
   }
   const browserWindow = await chrome.windows.get(initial.windowId);
-  if (browserWindow.id !== initial.windowId || browserWindow.focused !== true) {
+  if (
+    browserWindow.id !== initial.windowId ||
+    (popupSender
+      ? !(await selectedPopupBindingTab(popupSender, initial, browserWindow))
+      : browserWindow.focused !== true)
+  ) {
     throw new Error("unsupported_page");
   }
   const tab = initial;
@@ -420,7 +445,9 @@ async function bindWebMCP(tabId) {
       after.status !== "complete" ||
       after.url !== binding.url ||
       afterWindow.id !== tab.windowId ||
-      afterWindow.focused !== true
+      (popupSender
+        ? !(await selectedPopupBindingTab(popupSender, after, afterWindow))
+        : afterWindow.focused !== true)
     )
       throw new Error("page_changed");
     webMCPSelection = {
@@ -866,7 +893,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   const operation =
     message.command?.type === "bindWebMCP"
-      ? bindWebMCP(message.tabId)
+      ? bindWebMCP(message.tabId, sender || {})
       : message.command?.type === "discoverWebMCP"
         ? discoverWebMCP(message.tabId)
         : dispatch(
