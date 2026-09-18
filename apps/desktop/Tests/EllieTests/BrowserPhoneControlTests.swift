@@ -371,6 +371,31 @@ final class BrowserPhoneControlTests: XCTestCase {
     await eventually { if case .failed = rejected.phase { true } else { false } }
     XCTAssertNil(rejected.page)
     XCTAssertFalse(rejected.canPerform(.search(query: "title"), on: node))
+
+    let missingField = BrowserPhoneFakeTransport(source: .companion,
+      site: BrowserPhoneSite(provider: .youtube, page: .home, playback: .unavailable,
+        currentTimeSeconds: nil), statusSource: .accessibility)
+    let noSearch = BrowserPhoneControlStore(credential: credential(), transport: missingField,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(noSearch.refresh(on: node))
+    await eventually { noSearch.phase == .ready }
+    XCTAssertFalse(noSearch.canPerform(.search(query: "title"), on: node))
+    XCTAssertFalse(noSearch.perform(.search(query: "title"), on: node))
+    let missingFieldActions = await missingField.actions
+    XCTAssertEqual(missingFieldActions.count, 2,
+      "A missing observed field cannot dispatch a synthetic search")
+
+    let wrongStatusSource = BrowserPhoneFakeTransport(source: .companion, site: site,
+      statusSource: .webmcp)
+    let sourceMismatch = BrowserPhoneControlStore(credential: credential(),
+      transport: wrongStatusSource, uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(sourceMismatch.refresh(on: node))
+    await eventually { if case .failed = sourceMismatch.phase { true } else { false } }
+    XCTAssertNil(sourceMismatch.page)
+    XCTAssertFalse(sourceMismatch.canPerform(.search(query: "title"), on: node))
+    let wrongStatusActions = await wrongStatusSource.actions
+    XCTAssertEqual(wrongStatusActions.count, 2,
+      "A companion read cannot be accepted under a WebMCP status source")
   }
 
   func testCanonicalAccessibilityResultsDecodeWithoutWeakeningTheClosedSourceSet() throws {

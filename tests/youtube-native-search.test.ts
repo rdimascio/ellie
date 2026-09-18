@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { browserWebMCPOperationResult, browserWebMCPResultFor } from "@ellie/protocol";
 import { BrowserCompanionOperations } from "../apps/node/src/browser-companion-operations.ts";
+import { BrowserAccessibilityRuntime } from "../apps/node/src/browser-accessibility-runtime.ts";
 import { BrowserOperationSelector } from "../apps/node/src/browser-operation-selector.ts";
 import {
   browserBindingRevision,
@@ -17,6 +21,66 @@ const selected = (url: string): BrowserBinding => ({
   documentId: `document-${randomUUID()}`,
   expiresAt: Date.now() + 60_000,
 });
+
+async function syntheticAXBoundary(invalidRead = false) {
+  const root = await mkdtemp(join(tmpdir(), "ellie-youtube-ax-"));
+  const events = join(root, "events.jsonl");
+  const helper = join(root, "helper.mjs");
+  await writeFile(
+    helper,
+    `#!${process.execPath}
+import { appendFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+let documentRevision;
+let generation = 0;
+setTimeout(() => process.exit(1), 5_000);
+for await (const line of createInterface({ input: process.stdin })) {
+  const request = JSON.parse(line);
+  appendFileSync(${JSON.stringify(events)}, JSON.stringify({ type: request.type, operation: request.operation }) + '\\n');
+  if (request.type === 'bind') {
+    documentRevision = request.documentRevision;
+    console.log(JSON.stringify({ id: request.id, status: 'bound', sessionID: 'session-1', documentRevision }));
+  } else if (request.type === 'read') {
+    generation += 1;
+    console.log(JSON.stringify({ id: request.id, status: ${JSON.stringify(invalidRead ? "invalid" : "completed")}, sessionID: 'session-1', generation: 'generation-' + generation, documentRevision, items: [], operation: 'read' }));
+  } else if (request.type === 'perform') {
+    console.log(JSON.stringify({ id: request.id, status: 'dispatchedUnverified', sessionID: 'session-1', documentRevision, operation: request.operation }));
+  }
+}
+`,
+  );
+  await chmod(helper, 0o700);
+  const context = {
+    browserProcessPid: process.pid,
+    browserStartSeconds: 1,
+    browserStartMicroseconds: 0,
+    browserCodeHash: "00".repeat(20),
+    connectionId: "youtube-entry-test",
+    authenticated: true,
+  };
+  const runtime = new BrowserAccessibilityRuntime(helper, () => context);
+  return {
+    runtime,
+    context,
+    async events() {
+      try {
+        return (await readFile(events, "utf8"))
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line) as { type: string; operation?: string });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+    },
+    async close() {
+      await runtime.close();
+      await rm(root, { recursive: true });
+    },
+    root,
+  };
+}
 
 test("YouTube observed search consumes a pinned document and requires a fresh results read", async () => {
   let binding = selected("https://www.youtube.com/");
@@ -67,9 +131,20 @@ test("YouTube observed search consumes a pinned document and requires a fresh re
       },
     },
     {
-      execute: async () => {
+      execute: async (action: { tool: string }) => {
         axCommands += 1;
-        throw new Error("unexpected AX dispatch");
+        assert.equal(action.tool, "browser.read", "only the explicit read may arm AX");
+        return browserWebMCPOperationResult({
+          ok: true,
+          message: "AX controls armed.",
+          browser: {
+            source: "accessibility",
+            operation: "read",
+            status: "completed",
+            revision: browserBindingRevision(binding),
+            view: { items: [] },
+          },
+        });
       },
     } as never,
     companion,
@@ -127,7 +202,213 @@ test("YouTube observed search consumes a pinned document and requires a fresh re
     /fresh read/,
   );
   assert.deepEqual(commands, ["inspect", "searchObserved", "inspect", "open"]);
-  assert.equal(axCommands, 0);
+  assert.equal(axCommands, 2);
+});
+
+test("an explicit YouTube read arms the real AX boundary for one Down, then fresh watch Play", async (t) => {
+  const owned = await syntheticAXBoundary();
+  try {
+    const binding = selected("https://www.youtube.com/watch?v=owned-fixture");
+    const revision = browserBindingRevision(binding);
+    let page: "home" | "watch" = "home";
+    const companion = new BrowserCompanionOperations({
+      async request(request) {
+        if (request.type !== "media.execute" || request.command.type !== "inspect")
+          throw new Error("unexpected companion mutation");
+        const site = {
+          provider: "youtube",
+          page,
+          playback: page === "watch" ? "paused" : "unavailable",
+        };
+        return browserWebMCPResultFor(request.id, "ok", {
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          url: binding.url,
+          value: {
+            snapshotId: randomUUID(),
+            candidates: [],
+            playback: { available: false },
+            site,
+          },
+        });
+      },
+    });
+    const selector = new BrowserOperationSelector(
+      async () => binding,
+      {
+        execute: async () => {
+          throw new Error("unexpected WebMCP dispatch");
+        },
+      },
+      owned.runtime,
+      companion,
+    );
+    const signal = new AbortController().signal;
+    const read = () =>
+      selector.execute({ tool: "browser.read", view: "summary", revision }, signal);
+    const first = await read();
+    if (!("browser" in first)) throw new Error("missing browser read result");
+    assert.equal(first.browser.source, "companion");
+    const down = await selector.execute(
+      { tool: "browser.scroll", direction: "down", revision },
+      signal,
+    );
+    if (!("browser" in down)) throw new Error("missing browser command result");
+    assert.equal(down.browser.status, "unknown");
+    await assert.rejects(
+      () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+      /fresh read/,
+    );
+    page = "watch";
+    await read();
+    const play = await selector.execute(
+      { tool: "browser.playback", action: "play", revision },
+      signal,
+    );
+    if (!("browser" in play)) throw new Error("missing browser command result");
+    assert.equal(play.browser.status, "unknown");
+    await assert.rejects(
+      () => selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
+      /fresh read/,
+    );
+    assert.deepEqual(
+      (await owned.events()).map(
+        (event) => `${event.type}${event.operation ? `:${event.operation}` : ""}`,
+      ),
+      ["bind", "read", "perform:scroll", "read", "perform:playback"],
+    );
+    // The native host context still authorizes the exact browser process and document.
+    await read();
+    owned.context.browserStartMicroseconds += 1;
+    await assert.rejects(
+      () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+      /page changed/,
+    );
+    assert.equal((await owned.events()).filter((event) => event.type === "perform").length, 2);
+  } finally {
+    await owned.close().catch((error: unknown) => {
+      t.diagnostic(`Retained synthetic AX boundary: ${owned.root}`);
+      throw error;
+    });
+  }
+});
+
+test("failed AX arming never advertises a companion search or playback control", async (t) => {
+  const owned = await syntheticAXBoundary(true);
+  try {
+    const binding = selected("https://www.youtube.com/");
+    const revision = browserBindingRevision(binding);
+    let companionInspects = 0;
+    const companion = new BrowserCompanionOperations({
+      async request() {
+        companionInspects += 1;
+        throw new Error("companion must not run after failed AX arming");
+      },
+    });
+    const selector = new BrowserOperationSelector(
+      async () => binding,
+      {
+        execute: async () => {
+          throw new Error("unexpected WebMCP dispatch");
+        },
+      },
+      owned.runtime,
+      companion,
+    );
+    const signal = new AbortController().signal;
+    await assert.rejects(
+      () => selector.execute({ tool: "browser.read", view: "summary", revision }, signal),
+      /accessibility read failed/,
+    );
+    assert.equal(companionInspects, 0);
+    await assert.rejects(
+      () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+      /fresh read/,
+    );
+    assert.equal((await owned.events()).filter((event) => event.type === "perform").length, 0);
+  } finally {
+    await owned.close().catch((error: unknown) => {
+      t.diagnostic(`Retained synthetic AX boundary: ${owned.root}`);
+      throw error;
+    });
+  }
+});
+
+test("a superseded companion read cannot republish AX authority after refresh", async (t) => {
+  const owned = await syntheticAXBoundary();
+  let release: (() => void) | undefined;
+  try {
+    const binding = selected("https://www.youtube.com/");
+    const revision = browserBindingRevision(binding);
+    let enter!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      enter = resolve;
+    });
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const companion = new BrowserCompanionOperations({
+      async request(request) {
+        if (request.type !== "media.execute" || request.command.type !== "inspect")
+          throw new Error("unexpected companion mutation");
+        enter();
+        await held;
+        return browserWebMCPResultFor(request.id, "ok", {
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          url: binding.url,
+          value: {
+            snapshotId: randomUUID(),
+            candidates: [],
+            playback: { available: false },
+            site: { provider: "youtube", page: "home", playback: "unavailable" },
+          },
+        });
+      },
+    });
+    const selector = new BrowserOperationSelector(
+      async () => binding,
+      {
+        execute: async () => {
+          throw new Error("unexpected WebMCP dispatch");
+        },
+      },
+      owned.runtime,
+      companion,
+    );
+    const signal = new AbortController().signal;
+    const older = selector.execute({ tool: "browser.read", view: "summary", revision }, signal);
+    const observedOlder = older.then(
+      () => ({ kind: "fulfilled" as const, message: "" }),
+      (error: unknown) => ({ kind: "rejected" as const, message: String(error) }),
+    );
+    let entryTimer: NodeJS.Timeout | undefined;
+    const arrival = await Promise.race([
+      entered.then(() => "companion-entered"),
+      observedOlder.then((outcome) => `read-before-companion:${outcome.message}`),
+      new Promise<string>((resolve) => {
+        entryTimer = setTimeout(() => resolve("entry-timeout"), 2_000);
+      }),
+    ]);
+    clearTimeout(entryTimer);
+    assert.equal(arrival, "companion-entered");
+    await selector.execute({ tool: "browser.refresh" }, signal);
+    release?.();
+    const stale = await observedOlder;
+    assert.equal(stale.kind, "rejected");
+    assert.match(stale.message, /page changed|read failed/);
+    await assert.rejects(
+      () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+      /fresh read/,
+    );
+    assert.equal((await owned.events()).filter((event) => event.type === "perform").length, 0);
+  } finally {
+    release?.();
+    await owned.close().catch((error: unknown) => {
+      t.diagnostic(`Retained synthetic AX boundary: ${owned.root}`);
+      throw error;
+    });
+  }
 });
 
 test("YouTube search control is accepted only on home/results and no other provider or binding", async () => {

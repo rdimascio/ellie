@@ -712,6 +712,73 @@ final class EllieIOSUITests: XCTestCase {
         waitForFixtureMutations(2, in: app)
     }
 
+    func testReviewedYouTubeVoiceSearchUsesObservedFieldAndNeverReplaysUnknown() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-youtube-voice-search"
+        ]
+        app.launch()
+        let synthetic = app.staticTexts["browser-fixture-synthetic-label"]
+        XCTAssertTrue(synthetic.waitForExistence(timeout: 5))
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        let history = app.staticTexts["browser-fixture-action-history"]
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        let transcript = app.textViews["speech-transcript"]
+        XCTAssertTrue(transcript.waitForExistence(timeout: 5))
+        XCTAssertEqual(transcript.value as? String, "Search for public")
+        transcript.tap()
+        transcript.typeText(" video")
+        XCTAssertEqual(transcript.value as? String, "Search for public video")
+        let run = app.buttons["speech-browser-run"]
+        XCTAssertTrue(run.waitForExistence(timeout: 5))
+        XCTAssertFalse(run.isEnabled, "A spoken search requires an observed selected document")
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
+
+        app.buttons["speech-browser-read"].tap()
+        let review = app.staticTexts["speech-youtube-search-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertTrue(review.label.contains("Search field on Fixture Mac A"))
+        XCTAssertTrue(run.isEnabled)
+        XCTAssertEqual(history.label, "Fixture actions: read.home")
+        run.tap()
+        waitForFixtureMutations(1, in: app)
+        XCTAssertEqual(history.label, "Fixture actions: read.home,search.public video")
+        XCTAssertFalse(run.exists, "Run consumes the reviewed transcript")
+        let noReplay = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", "Fixture mutations: 1"), object: count)
+        noReplay.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+
+        let updatedRead = app.buttons["speech-browser-read-updated"]
+        XCTAssertTrue(updatedRead.waitForExistence(timeout: 5))
+        updatedRead.tap()
+        let continuation = app.buttons["speech-browser-continue"]
+        XCTAssertTrue(continuation.waitForExistence(timeout: 5))
+        continuation.tap()
+        let site = app.staticTexts["browser-observed-site"]
+        XCTAssertTrue(site.waitForExistence(timeout: 5))
+        XCTAssertEqual(site.label, "Observed YouTube results page")
+        XCTAssertEqual(history.label,
+                       "Fixture actions: read.home,search.public video,read.results")
+        let result = revealBrowserButton("browser-result-1", in: app, forTap: true)
+        XCTAssertTrue(result.isEnabled)
+        result.tap()
+        waitForFixtureMutations(2, in: app)
+        waitForFixturePageToClear(in: app)
+        XCTAssertEqual(history.label,
+                       "Fixture actions: read.home,search.public video,read.results,select")
+        revealBrowserButton("Read current page", in: app, forTap: true).tap()
+        XCTAssertEqual(site.label, "Observed YouTube watch page")
+        XCTAssertEqual(history.label,
+                       "Fixture actions: read.home,search.public video,read.results,select,read.watch")
+        XCTAssertEqual(count.label, "Fixture mutations: 2")
+    }
+
     func testReviewedVoiceRequiresFreshPageBetweenSearchSelectionAndPlayback() {
         let app = XCUIApplication()
         app.launchArguments = [

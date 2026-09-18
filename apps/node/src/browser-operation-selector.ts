@@ -93,8 +93,16 @@ export class BrowserOperationSelector {
       if (!this.companion) throw new Error("Browser companion is unavailable.");
       return this.companion.execute(browserAction, binding, signal);
     }
-    // The selected YouTube document exposes a reviewed DOM search snapshot through the
-    // companion. Keep scoped AX scroll and playback on their existing adapter.
+    const accessibilityBinding: BrowserAccessibilityBinding = {
+      availability: "accessibility",
+      documentId: binding.documentId,
+      url: binding.url,
+      revision: browserBindingRevision(binding),
+    };
+    let armedYouTubeRead: Awaited<ReturnType<BrowserAccessibilityRuntime["execute"]>> | undefined;
+    let armedYouTubeEpoch: number | undefined;
+    // The explicit YouTube read also arms the scoped AX generation used by scroll and
+    // playback. A companion page alone must not advertise controls AX cannot perform.
     if (
       binding.origin === "https://www.youtube.com" &&
       this.companion &&
@@ -106,6 +114,22 @@ export class BrowserOperationSelector {
         this.observationEpoch += 1;
         this.observedSite = undefined;
         this.youtubeCompanionRevision = undefined;
+        this.companion.invalidate();
+        armedYouTubeEpoch = this.observationEpoch;
+        armedYouTubeRead = await this.accessibility.execute(
+          browserAction,
+          accessibilityBinding,
+          signal,
+        );
+        if (
+          signal.aborted ||
+          armedYouTubeEpoch !== this.observationEpoch ||
+          armedYouTubeRead.browser.operation !== "read" ||
+          armedYouTubeRead.browser.status !== "completed" ||
+          armedYouTubeRead.browser.source !== "accessibility" ||
+          armedYouTubeRead.browser.revision !== revision
+        )
+          throw new Error("Browser page changed during read.");
       } else if (
         browserAction.tool === "browser.search" ||
         browserAction.tool === "browser.select"
@@ -117,11 +141,11 @@ export class BrowserOperationSelector {
       const epoch = this.observationEpoch;
       try {
         const result = await this.companion.execute(browserAction, binding, signal);
+        if (signal.aborted || epoch !== this.observationEpoch)
+          throw new Error("Browser page changed during read.");
         if (
           browserAction.tool === "browser.read" &&
           result.browser.operation === "read" &&
-          !signal.aborted &&
-          epoch === this.observationEpoch &&
           result.browser.view.site?.provider === "youtube"
         ) {
           this.observedSite = {
@@ -134,6 +158,7 @@ export class BrowserOperationSelector {
       } catch (error) {
         if (browserAction.tool !== "browser.read" || signal.aborted) throw error;
         // Only a read can fall back; a mutation can already have run.
+        if (epoch !== this.observationEpoch) throw new Error("Browser page changed during read.");
         this.companion.invalidate();
       }
     }
@@ -143,7 +168,7 @@ export class BrowserOperationSelector {
       browserAction.tool === "browser.search"
     )
       throw new Error("Observed YouTube search companion is unavailable.");
-    if (browserAction.tool === "browser.read") {
+    if (browserAction.tool === "browser.read" && !armedYouTubeRead) {
       this.observationEpoch += 1;
       this.observedSite = undefined;
       this.youtubeCompanionRevision = undefined;
@@ -175,14 +200,10 @@ export class BrowserOperationSelector {
       this.youtubeCompanionRevision = undefined;
       this.companion?.invalidate();
     }
-    const readEpoch = this.observationEpoch;
-    const accessibilityBinding: BrowserAccessibilityBinding = {
-      availability: "accessibility",
-      documentId: binding.documentId,
-      url: binding.url,
-      revision: browserBindingRevision(binding),
-    };
-    const result = await this.accessibility.execute(adapterAction, accessibilityBinding, signal);
+    const readEpoch = armedYouTubeEpoch ?? this.observationEpoch;
+    const result =
+      armedYouTubeRead ??
+      (await this.accessibility.execute(adapterAction, accessibilityBinding, signal));
     if (browserAction.tool !== "browser.read" || binding.origin !== "https://www.youtube.com")
       return result;
     if (signal.aborted) throw new Error("Browser request was cancelled.");
