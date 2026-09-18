@@ -54,7 +54,7 @@ struct BrowserControlView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .disneyplus {
-              Text("Only visible Disney+ title links on this page can be selected. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
+              Text("On an observed Disney+ title page, Up and Down move the page when one viewport scroller is available; read again before selecting a visible title. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
           }

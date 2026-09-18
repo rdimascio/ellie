@@ -249,9 +249,13 @@ final class BrowserPhoneControlTests: XCTestCase {
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil), .search(query: "title"), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
-        currentTimeSeconds: nil), .scroll(.down), false),
+        currentTimeSeconds: nil), .scroll(.down), true),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.left), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
         currentTimeSeconds: nil), .openResult(index: 1), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.down), false),
     ]
     for (site, intent, allowed) in cases {
       let transport = BrowserPhoneFakeTransport(source: .companion, site: site)
@@ -298,6 +302,30 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(actions[2], .scrollRow(second, .right, revision: String(repeating: "a", count: 64)))
     await transport.finishCommand()
     await eventually { !store.isBusy }
+  }
+
+  @MainActor
+  func testDisneyPlusVerticalBrowseNeedsFreshReadAfterUnknown() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let site = BrowserPhoneSite(provider: .disneyplus, page: .browse,
+      playback: .unavailable, currentTimeSeconds: nil)
+    let transport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
+    XCTAssertFalse(store.canPerform(.scroll(.right), on: node))
+    XCTAssertFalse(store.canPerform(.play, on: node))
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertNil(store.page)
+    XCTAssertFalse(store.perform(.scroll(.down), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
+      .scroll(.down, revision: String(repeating: "a", count: 64))])
   }
 
   @MainActor

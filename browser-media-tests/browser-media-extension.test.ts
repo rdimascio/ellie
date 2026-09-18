@@ -1735,6 +1735,113 @@ test(
 );
 
 test(
+  "selected Disney+ extension scrolls one observed viewport and requires another read",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ disneyOnly: true, stableNativePort: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(
+        `http://127.0.0.1:${port}/browse/entity-2fa6a394-c272-41ef-afaa-714116cb16f2`,
+      );
+      await launched.page.setContent(`<main><div style="height:2400px">Observed title page</div>
+        <a id="title" href="/browse/entity-76ff81fe-447b-4d3b-8a5e-f07db1b6be27"
+          aria-label="Observed title" style="position:absolute;top:900px;left:20px;width:260px;height:80px">Title</a>
+        </main><script>window.clicks=0;document.addEventListener('click',event=>{const anchor=event.target.closest('a');if(anchor?.id==='title'){event.preventDefault();window.clicks++;history.pushState({},'',anchor.href)}})</script>`);
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const request = (body: Record<string, unknown>) =>
+        launched.worker.evaluate((value) => globalThis.__ellieTestWebMCP.request(value), body);
+      const binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.status",
+      });
+      assert.equal(binding.availability, "companion");
+      const inspect = (bound: any) =>
+        request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: bound.bindingId,
+          documentId: bound.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        });
+      assert.equal((await inspect(binding)).value.site.page, "browse");
+      const scroll = {
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+      };
+      const effect = await request(scroll);
+      assert.equal(effect.value.outcome, "scrolled");
+      const position = await launched.page.evaluate(() => scrollY);
+      assert.ok(position > 0);
+      const replay = await launched.worker.evaluate(async (value) => {
+        try {
+          await globalThis.__ellieTestWebMCP.request(value);
+          return "replayed";
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
+      }, scroll);
+      assert.notEqual(replay, "replayed");
+      assert.equal(await launched.page.evaluate(() => scrollY), position);
+      await assert.rejects(inspect(binding), /unbound/);
+      const refreshed = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      assert.equal(refreshed.availability, "companion");
+      const freshRead = await inspect(refreshed);
+      assert.equal(freshRead.value.site.page, "browse");
+      assert.equal(freshRead.value.candidates[0]?.title, "Observed title");
+      const open = {
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: refreshed.bindingId,
+        documentId: refreshed.documentId,
+        command: {
+          type: "open",
+          actionId: crypto.randomUUID(),
+          snapshotId: freshRead.value.snapshotId,
+          candidateId: freshRead.value.candidates[0].id,
+        },
+      };
+      const selection = await launched.worker.evaluate(async (value) => {
+        try {
+          await globalThis.__ellieTestWebMCP.request(value);
+          return "verified";
+        } catch (error) {
+          return error instanceof Error ? error.message : "failed";
+        }
+      }, open);
+      assert.equal(selection, "unknown");
+      assert.equal(await launched.page.evaluate(() => globalThis["clicks"]), 1);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "selected Disney+ companion opens one observed synthetic entity without replay or playback",
   { timeout: 30_000 },
   async () => {
@@ -1815,6 +1922,83 @@ test(
       }, open);
       assert.notEqual(replay, "replayed");
       assert.equal(await launched.page.evaluate(() => globalThis["clicks"]), 1);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "cancelled Disney+ scroll arming leaves the selected viewport untouched",
+  { timeout: 20_000 },
+  async () => {
+    const owned = await fixture({
+      disneyOnly: true,
+      stableNativePort: true,
+      companionArming: true,
+    });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(
+        `http://127.0.0.1:${port}/browse/entity-2fa6a394-c272-41ef-afaa-714116cb16f2`,
+      );
+      await launched.page.setContent('<main style="height:2400px">Observed title page</main>');
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      const binding = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      await launched.worker.evaluate((value) => globalThis.__ellieTestWebMCP.request(value), {
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        command: { type: "inspect", actionId: crypto.randomUUID() },
+      });
+      await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.arm());
+      const pending = launched.worker.evaluate(
+        async (value) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(value);
+            return "effect";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+        },
+      );
+      try {
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.entered());
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.abortActive());
+      } finally {
+        await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.release());
+      }
+      assert.equal(await pending, "cancelled");
+      assert.equal(await launched.page.evaluate(() => scrollY), 0);
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));

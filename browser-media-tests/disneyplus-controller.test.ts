@@ -55,6 +55,127 @@ async function withPage(run: (page: Page) => Promise<void>) {
   }
 }
 
+async function makeViewportScrollable(page: Page) {
+  await page.evaluate(() => {
+    const spacer = document.createElement("div");
+    spacer.id = "scroll-spacer";
+    spacer.style.height = "2400px";
+    document.body.append(spacer);
+  });
+}
+
+test(
+  "Disney+ one observed viewport scroll needs a fresh read and never replays",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await makeViewportScrollable(page);
+      const first = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const down = { type: "scrollViewport", actionId: actionId(), direction: "down" };
+      assert.deepEqual(await dispatch(page, down), { outcome: "scrolled" });
+      const afterDown = await page.evaluate(() => scrollY);
+      assert.ok(afterDown > 0);
+      await assert.rejects(dispatch(page, down), /duplicate_action/);
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /stale_snapshot/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), afterDown);
+      const next = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.notEqual(next.snapshotId, first.snapshotId);
+      assert.deepEqual(
+        await dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "up" }),
+        { outcome: "scrolled" },
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      const ready = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.equal(ready.candidates[0]?.title, "Observed title");
+      assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), []);
+    });
+  },
+);
+
+test(
+  "Disney+ stale, cancelled, blocked, absent and ambiguous viewport scrolls have no effect",
+  { timeout: 20_000 },
+  async () => {
+    await withPage(async (page) => {
+      const missing = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.ok(missing.snapshotId);
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /scroll_unavailable/,
+      );
+      await makeViewportScrollable(page);
+      await dispatch(page, { type: "inspect", actionId: actionId() });
+      await page.evaluate(() => history.pushState({}, "", "/commerce/plans"));
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /page_changed/,
+      );
+      await page.evaluate((url) => history.pushState({}, "", url), current);
+      assert.equal(await page.evaluate(() => scrollY), 0);
+
+      await dispatch(page, { type: "inspect", actionId: actionId() });
+      await page.evaluate(() => scrollTo(0, 30));
+      const movedExternally = await page.evaluate(() => scrollY);
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /stale_snapshot/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), movedExternally);
+      await page.evaluate(() => scrollTo(0, 0));
+
+      await dispatch(page, { type: "inspect", actionId: actionId() });
+      const cancelled = actionId();
+      await dispatch(page, { type: "cancel", actionId: actionId(), targetActionId: cancelled });
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: cancelled, direction: "down" }),
+        /cancelled/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+
+      await dispatch(page, { type: "inspect", actionId: actionId() });
+      await page.locator("main").evaluate((node) => node.setAttribute("role", "dialog"));
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /unsupported_page/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      await page.locator("main").evaluate((node) => node.removeAttribute("role"));
+
+      await page.evaluate(() => {
+        document.body.style.overflowY = "hidden";
+      });
+      await dispatch(page, { type: "inspect", actionId: actionId() });
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /scroll_unavailable/,
+      );
+      await page.evaluate(() => {
+        document.body.style.overflowY = "";
+      });
+      assert.equal(await page.evaluate(() => scrollY), 0);
+
+      await page.evaluate(() => {
+        const competing = document.createElement("div");
+        competing.id = "competing-scroller";
+        competing.style.cssText =
+          "position:fixed;left:25vw;top:25vh;width:50vw;height:50vh;overflow-y:auto;z-index:10;background:white";
+        competing.innerHTML = '<div style="height:150vh">Competing page region</div>';
+        document.body.append(competing);
+      });
+      await dispatch(page, { type: "inspect", actionId: actionId() });
+      await assert.rejects(
+        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        /scroll_ambiguous/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), []);
+    });
+  },
+);
+
 test(
   "Disney+ public entity inspection exposes only one observed title and no playback",
   { timeout: 15_000 },
