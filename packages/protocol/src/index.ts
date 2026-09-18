@@ -2,11 +2,14 @@ export const VERSION = OPERATION_REGISTRY.version;
 export {
   OPERATION_REGISTRY,
   CAPABILITIES,
+  DESKTOP_CAPABILITIES,
   LAYOUTS,
   MONITORS,
   operationDefinition,
   action,
   actions,
+  browserWebMCPAction,
+  browserWebMCPOperationResult,
 } from "./operations.ts";
 export type {
   Action,
@@ -15,16 +18,34 @@ export type {
   Monitor,
   OperationId,
   OperationResult,
+  BrowserWebMCPAction,
+  BrowserAction,
+  BrowserCapability,
+  BrowserWebMCPCapability,
+  BrowserWebMCPOperationResult,
+  BrowserWebMCPStructuredResult,
+  BrowserView,
 } from "./operations.ts";
-import { CAPABILITIES, OPERATION_REGISTRY, actions } from "./operations.ts";
-import type { Action, Capability, OperationResult } from "./operations.ts";
+import {
+  CAPABILITIES,
+  DESKTOP_CAPABILITIES,
+  OPERATION_REGISTRY,
+  actions,
+  browserWebMCPOperationResult,
+} from "./operations.ts";
+import type {
+  Action,
+  BrowserWebMCPOperationResult,
+  Capability,
+  OperationResult,
+} from "./operations.ts";
 export interface Job {
   version: typeof VERSION;
   id: string;
   expiresAt: number;
   actions: Action[];
 }
-export type Result = OperationResult;
+export type Result = OperationResult | BrowserWebMCPOperationResult;
 export interface Context {
   lastApp?: string;
 }
@@ -113,6 +134,7 @@ export function job(value: unknown): Job {
 }
 export function result(value: unknown): Result {
   const v = record(value);
+  if (Object.hasOwn(v, "browser")) return browserWebMCPOperationResult(v);
   if (typeof v.ok !== "boolean") throw new Error("Invalid result.");
   return { ok: v.ok, message: string(v.message, OPERATION_REGISTRY.limits.maxResultMessageLength) };
 }
@@ -143,6 +165,7 @@ export function jobMetadata(value: unknown): JobMetadata {
 
 export * from "./compute.ts";
 export * from "./browser-pairing-qr.ts";
+export * from "./browser-webmcp.ts";
 export * from "./native-pairing-qr.ts";
 
 export * from "./native-session-contract.ts";

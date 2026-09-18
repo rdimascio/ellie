@@ -8,6 +8,28 @@ The owner explicitly requested merging the open PR backlog on September 14. Revi
 
 ## Release priority and parallel work
 
+### Current owner priority — September 14, 2026
+
+The owner explicitly prioritized a complete native iPhone voice and website-control demo as the
+next acceptance milestone, including accessibility-element fallback where WebMCP is unsupported.
+This supersedes the earlier feature freeze below; the release history and remaining shipping
+gates stay in the backlog. See the [demo contract and acceptance cases](phone-voice-web-demo.md).
+PR97 and PR98 have now merged with passing checks; PR98 adds read-only selection preflight.
+Neither merge establishes installed-service or physical-phone acceptance.
+
+| Active lane                    | Scope and next handoff                                                                                                                                                       |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WebMCP bridge                  | Browser connection, current tool API, private native messaging and bounded cancellation; focused synthetic browser and IPC checks have passed, coordinating review is next.  |
+| Browser execution              | Separate browser grants, typed operations and structured outcomes; primitives are ready for review before coordinator/node wiring.                                           |
+| Accessibility and native phone | Bounded native accessibility fallback, followed by shared voice intents and native remote integration; real site and physical microphone acceptance remain required.         |
+| Independent quality lab        | A separately authorized two-hour task evaluates isolated memory, conversation, proactivity and failures, publishing focused regression PRs without duplicating release work. |
+
+The existing 30-minute coordinator owns integration, shared hardware reservations, complete
+validation, merges and milestone QA. The quality task owns its own schedule activation and
+coverage ledger. Resume existing engineers for bounded work rather than creating duplicate owners.
+
+### Earlier release sequence and retained evidence
+
 The [shared release coordination contract](integration-coordination.md) assigns Life authentication/native access and release packaging to separate owners, with one active scheduled coordinator, one combined validation gate and a serialized merge queue.
 
 The user explicitly corrected the workflow: new feature ideas must not displace the stability and shipping backlog. Freeze feature expansion until there is one reviewable, installable native candidate and an honest end-to-end acceptance record. Browser media and Apple Watch remain committed backlog requirements; complete only already-started review fixes before parking that feature work. PR count is not release progress.

@@ -19,6 +19,28 @@ async function fixture() {
     assert.equal(value.split(needle).length - 1, 1);
     await writeFile(path, value.replace(needle, '"http://127.0.0.1:PORT"'));
   }
+  const backgroundPath = join(extension, "background.js");
+  const background = await readFile(backgroundPath, "utf8");
+  const reviewedNeedle = "const reviewedWebMCPBindings = Object.freeze({});";
+  assert.equal(background.split(reviewedNeedle).length - 1, 1);
+  const tabGetNeedle = `async function executeWebMCP(request, controller) {
+  const binding = liveBinding();
+  const before = await chrome.tabs.get(binding.tabId);`;
+  assert.equal(background.split(tabGetNeedle).length - 1, 1);
+  await writeFile(
+    backgroundPath,
+    background
+      .replace(
+        reviewedNeedle,
+        `const reviewedWebMCPBindings = Object.freeze({"http://127.0.0.1:PORT":[{name:"ellie_fixture_action",inputSchema:{type:"object",additionalProperties:false},annotations:{readOnlyHint:false,untrustedContentHint:false,consequentialHint:false}}]});`,
+      )
+      .replace(
+        tabGetNeedle,
+        `${tabGetNeedle.split("\n  const before")[0]}
+  if (globalThis.__ellieTestBeforeTabGet) await globalThis.__ellieTestBeforeTabGet;
+  const before = await chrome.tabs.get(binding.tabId);`,
+      ) + "\nglobalThis.__ellieTestWebMCP = { bind: bindWebMCP, request: handleNativeRequest };\n",
+  );
   const controllerPath = join(extension, "media-controller.js");
   const controller = await readFile(controllerPath, "utf8");
   const youtubeNeedle = 'new Set(["https://www.youtube.com"])';
@@ -162,6 +184,112 @@ test(
         const ownedServer = server;
         await new Promise<void>((resolve) => ownedServer.close(() => resolve()));
       }
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "connected WebMCP tab aborts a stale history action and blocks rebinding",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture();
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
+      const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
+      assert.ok(tab?.id);
+      await launched.page.evaluate(() => {
+        const tool = {
+          name: "ellie_fixture_action",
+          description: "Synthetic action",
+          inputSchema: { type: "object", additionalProperties: false },
+          annotations: {
+            readOnlyHint: false,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+        };
+        Object.defineProperty(document, "modelContext", {
+          configurable: true,
+          value: {
+            getTools: async () => [tool],
+            executeTool: async () => {
+              (globalThis as any).__ellieHistoryMutation = true;
+              return { applied: true };
+            },
+          },
+        });
+      });
+      const binding = await launched.worker.evaluate(
+        (tabId) => globalThis.__ellieTestWebMCP.bind(tabId),
+        tab.id,
+      );
+      const listed = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: "list-1",
+          type: "tools.list",
+        }),
+      );
+      await launched.worker.evaluate(() => {
+        globalThis.__ellieTestBeforeTabGet = new Promise<void>((resolve) => {
+          globalThis.__ellieReleaseTabGet = resolve;
+        });
+      });
+      const pending = launched.worker.evaluate(
+        async ({ binding, listed }) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request({
+              protocol: "ellie.browser-webmcp.v1",
+              id: "execute-history",
+              type: "tool.execute",
+              bindingId: binding.bindingId,
+              documentId: listed.documentId,
+              toolHandle: listed.tools[0].handle,
+              args: {},
+            });
+            return "completed";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        { binding, listed },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(
+        await launched.worker.evaluate(async (tabId) => {
+          try {
+            await globalThis.__ellieTestWebMCP.bind(tabId);
+            return "rebound";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        }, tab.id),
+        "busy",
+      );
+      await launched.page.evaluate(() => history.pushState({}, "", "/fresh-view"));
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await launched.worker.evaluate(() => globalThis.__ellieReleaseTabGet());
+      assert.equal(await pending, "cancelled");
+      assert.equal(
+        await launched.page.evaluate(() => Boolean((globalThis as any).__ellieHistoryMutation)),
+        false,
+      );
+      const refreshed = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: "status-fresh",
+          type: "binding.status",
+        }),
+      );
+      assert.notEqual(refreshed.bindingId, binding.bindingId);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(owned.root, { recursive: true, force: true });
     }
   },
@@ -346,6 +474,213 @@ test(
         const ownedServer = server;
         await new Promise<void>((resolve) => ownedServer.close(() => resolve()));
       }
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "WebMCP controller executes the exact discovered tool and aborts by signal",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture();
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const tabs = await launched.worker.evaluate(async () => globalThis["chrome"].tabs.query({}));
+      const tab = tabs.find((item: any) => item.url?.startsWith("http://127.0.0.1:"));
+      assert.ok(tab?.id);
+      await launched.page.evaluate(() => {
+        const tool = {
+          name: "ellie_fixture_search",
+          description: "Search the synthetic fixture",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["query"],
+            properties: { query: { type: "string" } },
+          },
+          annotations: {
+            readOnlyHint: true,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+        };
+        Object.defineProperty(document, "modelContext", {
+          configurable: true,
+          value: {
+            getTools: async () => {
+              if ((globalThis as any).__ellieDelayTools)
+                await new Promise<void>((resolve) => {
+                  (globalThis as any).__ellieReleaseDelayedTools = resolve;
+                });
+              return [tool];
+            },
+            executeTool: async (candidate, args, options) => {
+              if (candidate !== tool) throw new Error("wrong_tool_identity");
+              (globalThis as any).__ellieWebMCPMutations =
+                ((globalThis as any).__ellieWebMCPMutations || 0) + 1;
+              if (args.query === "wait")
+                return await new Promise((_resolve, reject) =>
+                  options.signal.addEventListener("abort", () => reject(new Error("aborted")), {
+                    once: true,
+                  }),
+                );
+              return { items: [{ id: "one", label: String(args.query) }] };
+            },
+          },
+        });
+      });
+      await launched.harness.evaluate(async (tabId) => {
+        await globalThis["chrome"].scripting.executeScript({
+          target: { tabId },
+          world: "MAIN",
+          files: ["webmcp-controller.js"],
+        });
+      }, tab.id);
+      const reviewed = [
+        {
+          name: "ellie_fixture_search",
+          inputSchema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["query"],
+            properties: { query: { type: "string" } },
+          },
+          annotations: {
+            readOnlyHint: true,
+            untrustedContentHint: false,
+            consequentialHint: false,
+          },
+        },
+      ];
+      const tools = await launched.harness.evaluate(
+        async ({ tabId, reviewed }) => {
+          const [result] = await globalThis["chrome"].scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: (policy) => globalThis.__ellieWebMCPControllerV1.list(policy),
+            args: [reviewed],
+          });
+          return result.result;
+        },
+        { tabId: tab.id, reviewed },
+      );
+      assert.equal(tools.length, 1);
+      const { handle, ...metadata } = tools[0];
+      const completed = await launched.harness.evaluate(
+        async ({ tabId, handle, metadata }) => {
+          const [result] = await globalThis["chrome"].scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: (handle, metadata) =>
+              globalThis.__ellieWebMCPControllerV1.execute(
+                handle,
+                metadata,
+                { query: "cats" },
+                "execution-1",
+              ),
+            args: [handle, metadata],
+          });
+          return result.result;
+        },
+        { tabId: tab.id, handle, metadata },
+      );
+      assert.deepEqual(completed, {
+        navigation: false,
+        value: { items: [{ id: "one", label: "cats" }] },
+      });
+
+      assert.equal(
+        await launched.harness.evaluate(async (tabId) => {
+          const [result] = await globalThis["chrome"].scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: () => globalThis.__ellieWebMCPControllerV1.cancel("execution-before-register"),
+          });
+          return result.result;
+        }, tab.id),
+        true,
+      );
+      assert.equal(
+        await launched.harness.evaluate(
+          async ({ tabId, handle, metadata }) => {
+            const [result] = await globalThis["chrome"].scripting.executeScript({
+              target: { tabId },
+              world: "MAIN",
+              func: async (handle, metadata) => {
+                try {
+                  await globalThis.__ellieWebMCPControllerV1.execute(
+                    handle,
+                    metadata,
+                    { query: "late" },
+                    "execution-before-register",
+                  );
+                  return "mutated";
+                } catch {
+                  return "cancelled";
+                }
+              },
+              args: [handle, metadata],
+            });
+            return result.result;
+          },
+          { tabId: tab.id, handle, metadata },
+        ),
+        "cancelled",
+      );
+
+      await launched.page.evaluate(() => {
+        (globalThis as any).__ellieDelayTools = true;
+      });
+
+      const waiting = launched.harness.evaluate(
+        async ({ tabId, handle, metadata }) => {
+          const [result] = await globalThis["chrome"].scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: async (handle, metadata) => {
+              try {
+                await globalThis.__ellieWebMCPControllerV1.execute(
+                  handle,
+                  metadata,
+                  { query: "wait" },
+                  "execution-2",
+                );
+                return "completed";
+              } catch {
+                return "aborted";
+              }
+            },
+            args: [handle, metadata],
+          });
+          return result.result;
+        },
+        { tabId: tab.id, handle, metadata },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      assert.equal(
+        await launched.harness.evaluate(async (tabId) => {
+          const [result] = await globalThis["chrome"].scripting.executeScript({
+            target: { tabId },
+            world: "MAIN",
+            func: () => globalThis.__ellieWebMCPControllerV1.cancel("execution-2"),
+          });
+          return result.result;
+        }, tab.id),
+        true,
+      );
+      await launched.page.evaluate(() => (globalThis as any).__ellieReleaseDelayedTools());
+      assert.equal(await waiting, "aborted");
+      assert.equal(
+        await launched.page.evaluate(() => (globalThis as any).__ellieWebMCPMutations),
+        1,
+      );
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(owned.root, { recursive: true, force: true });
     }
   },

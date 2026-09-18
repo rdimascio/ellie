@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { generateKeyPairSync } from "node:crypto";
 import { defaults } from "@ellie/config";
-import { CAPABILITIES } from "@ellie/protocol";
+import { CAPABILITIES, DESKTOP_CAPABILITIES } from "@ellie/protocol";
 import { generateCertificate } from "../apps/cli/src/certificate.ts";
 import { doctor, doctorService } from "../apps/cli/src/diagnostics.ts";
 import type { DiagnosticDependencies } from "../apps/cli/src/diagnostics.ts";
@@ -48,7 +48,7 @@ async function fixture(role: "coordinator" | "node") {
       return "a".repeat(64);
     },
     run: async () => ({ code: 0, stdout: "" }),
-    capabilities: async () => [...CAPABILITIES],
+    capabilities: async () => [...DESKTOP_CAPABILITIES],
     serviceStatus: async (requested) => ({
       role: requested,
       installed: true,
@@ -61,7 +61,7 @@ async function fixture(role: "coordinator" | "node") {
     client: () => ({
       call: async () =>
         role === "node"
-          ? [{ id: nodeId, lastSeen: now, executionCapabilities: [...CAPABILITIES] }]
+          ? [{ id: nodeId, lastSeen: now, executionCapabilities: [...DESKTOP_CAPABILITIES] }]
           : [],
       close: () => {
         closed = true;
@@ -73,9 +73,9 @@ async function fixture(role: "coordinator" | "node") {
 }
 
 test("lightweight doctor preserves available-tool output and Accessibility failure semantics", async () => {
-  const healthy = await doctor({ capabilities: async () => [...CAPABILITIES] });
+  const healthy = await doctor({ capabilities: async () => [...DESKTOP_CAPABILITIES] });
   assert.equal(healthy.ok, true);
-  assert.deepEqual(healthy.lines, [`Available tools: ${CAPABILITIES.join(", ")}`]);
+  assert.deepEqual(healthy.lines, [`Available tools: ${DESKTOP_CAPABILITIES.join(", ")}`]);
 
   const limited = await doctor({ capabilities: async () => ["app.open", "url.open"] });
   assert.equal(limited.ok, false);

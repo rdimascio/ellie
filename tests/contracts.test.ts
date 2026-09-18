@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import { action, actions } from "@ellie/protocol";
 import {
   CAPABILITIES,
+  DESKTOP_CAPABILITIES,
   LAYOUTS,
   MONITORS,
   OPERATION_REGISTRY,
@@ -49,10 +50,15 @@ test("OpenAPI describes shutdown and matches runtime rejection of blank strings"
 });
 
 test("the registry derives operation types, capabilities, enums, validation, and local policy", () => {
-  assert.deepEqual(
-    CAPABILITIES,
-    OPERATION_REGISTRY.operations.map((operation) => operation.id),
-  );
+  assert.deepEqual(CAPABILITIES, [
+    ...new Set(OPERATION_REGISTRY.operations.map((operation) => operation.requiredCapability)),
+  ]);
+  assert.deepEqual(DESKTOP_CAPABILITIES, [
+    "app.open",
+    "url.open",
+    "window.place",
+    "window.adjacent",
+  ]);
   assert.equal(LAYOUTS, OPERATION_REGISTRY.values.layouts);
   assert.equal(MONITORS, OPERATION_REGISTRY.values.monitors);
 
@@ -64,6 +70,32 @@ test("the registry derives operation types, capabilities, enums, validation, and
 
   const inherited = Object.assign(Object.create({ app: defaults.browser }), { tool: "app.open" });
   assert.throws(() => action(inherited), /Invalid operation input/);
+});
+
+test("browser jobs use canonical actions and distinct read and control grants", () => {
+  const revision = "a".repeat(64);
+  const read = action({ tool: "browser.read", view: "summary", revision });
+  const select = action({ tool: "browser.select", itemId: "observed-1", revision });
+  assert.deepEqual(
+    job({ version: 1, id: "browser-job", expiresAt: 1000, actions: [read, select] }).actions,
+    [read, select],
+  );
+  assert.doesNotThrow(() => authorize([read], ["browser.read"], defaults));
+  assert.throws(() => authorize([select], ["browser.read"], defaults), /browser\.control/);
+  assert.doesNotThrow(() =>
+    authorize([read, select], ["browser.read", "browser.control"], defaults),
+  );
+  assert.throws(() => authorize([read], ["app.open"], defaults), /browser\.read/);
+  assert.doesNotThrow(() =>
+    authorize([action({ tool: "app.open", app: defaults.browser })], ["app.open"], defaults),
+  );
+  for (const malformed of [
+    { tool: "browser.status", origin: "https://private.example" },
+    { tool: "browser.read", view: "summary", revision, documentId: "untrusted" },
+    { tool: "browser.select", itemId: "observed-1", revision, label: "untrusted" },
+    { tool: "browser.search", query: " trailing ", revision },
+  ])
+    assert.throws(() => action(malformed));
 });
 
 test("registry bounds reject malformed, unknown, and oversized desktop jobs", () => {

@@ -1,4 +1,4 @@
-import { CAPABILITIES } from "@ellie/protocol";
+import { DESKTOP_CAPABILITIES } from "@ellie/protocol";
 import type { Action, Capability, JobState } from "@ellie/protocol";
 
 export const SCENARIOS = {
@@ -168,7 +168,7 @@ export function scenarioState(scenario: Scenario, sequence = 0): DemoState {
             name: "Living room Mac",
             room: "Living room",
             available: scenario !== "offline" && scenario !== "loading",
-            capabilities: [...CAPABILITIES],
+            capabilities: [...DESKTOP_CAPABILITIES],
           },
           {
             id: "demo-study",
@@ -182,7 +182,7 @@ export function scenarioState(scenario: Scenario, sequence = 0): DemoState {
             name: "Laptop",
             room: "Around the house",
             available: false,
-            capabilities: [...CAPABILITIES],
+            capabilities: [...DESKTOP_CAPABILITIES],
           },
         ];
   const state: JobState = ["running", "completed", "failed", "cancelled", "unknown"].includes(

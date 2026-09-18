@@ -98,3 +98,7 @@ document.querySelector("#webmcp").onclick = async () => {
     else status.textContent = `WebMCP: ${value.tools.length} tools (read only)`;
   }
 };
+
+document.querySelector("#bind-webmcp").onclick = async () => {
+  await run({ type: "bindWebMCP", actionId: crypto.randomUUID() });
+};

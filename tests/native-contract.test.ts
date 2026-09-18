@@ -7,6 +7,7 @@ import {
   nativeAppCommand,
   VERSION,
   nativePairingQr,
+  nativeGrants,
   parseNativePairingQr,
 } from "@ellie/protocol";
 import { generatedContracts } from "../scripts/generate-contracts.ts";
@@ -32,6 +33,18 @@ test("shared native QR fixtures follow the real canonical parser and byte limits
   );
   assert.deepEqual(fixtures.responses.pair, fixtures.responses.session);
   assert.equal(NATIVE_SESSION_CONTRACT.version, VERSION);
+});
+
+test("native grants keep app opening and browser read/control authority distinct", () => {
+  assert.deepEqual(
+    nativeGrants([{ target: "test-mini", capabilities: ["browser.read", "browser.control"] }]),
+    [{ target: "test-mini", capabilities: ["browser.read", "browser.control"] }],
+  );
+  assert.deepEqual(nativeGrants([{ target: "test-mini", capabilities: ["app.open"] }]), [
+    { target: "test-mini", capabilities: ["app.open"] },
+  ]);
+  for (const capabilities of [["browser.control", "browser.control"], ["browser.javascript"], []])
+    assert.throws(() => nativeGrants([{ target: "test-mini", capabilities }]));
 });
 
 test("native OpenAPI describes the separate runtime routes without controller authority", () => {

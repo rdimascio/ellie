@@ -1418,7 +1418,9 @@
           "app.open",
           "url.open",
           "window.place",
-          "window.adjacent"
+          "window.adjacent",
+          "browser.read",
+          "browser.control"
         ]
       },
       "Layout": {
@@ -1557,6 +1559,152 @@
                 "minLength": 1,
                 "maxLength": 100,
                 "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.status"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "view",
+              "revision"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.read"
+              },
+              "view": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._-]{1,128}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "direction",
+              "revision"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.scroll"
+              },
+              "direction": {
+                "type": "string",
+                "enum": [
+                  "up",
+                  "down",
+                  "left",
+                  "right"
+                ]
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._-]{1,128}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "query",
+              "revision"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.search"
+              },
+              "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "format": "ellie-browser-query"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._-]{1,128}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "itemId",
+              "revision"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.select"
+              },
+              "itemId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$"
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._-]{1,128}$"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "tool",
+              "action",
+              "revision"
+            ],
+            "properties": {
+              "tool": {
+                "const": "browser.playback"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "play",
+                  "pause"
+                ]
+              },
+              "revision": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": "^[A-Za-z0-9._-]{1,128}$"
               }
             }
           }
@@ -2300,7 +2448,7 @@
           "capabilities": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 4,
+            "maxItems": 6,
             "uniqueItems": true,
             "items": {
               "$ref": "#/components/schemas/Capability"
@@ -2566,9 +2714,14 @@
           "capabilities": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 1,
+            "maxItems": 3,
+            "uniqueItems": true,
             "items": {
-              "const": "app.open"
+              "enum": [
+                "app.open",
+                "browser.read",
+                "browser.control"
+              ]
             }
           }
         }
@@ -2597,7 +2750,7 @@
             "items": {
               "$ref": "#/components/schemas/NativeGrant"
             },
-            "description": "Each target is unique. Native phone authority is restricted to app.open on explicitly granted targets.",
+            "description": "Each target is unique. Native phone authority is restricted to the exact app.open, browser.read, and browser.control capabilities granted for that target.",
             "x-ellie-unique-key": "target"
           }
         }
@@ -2639,7 +2792,7 @@
             "items": {
               "$ref": "#/components/schemas/NativeGrant"
             },
-            "description": "Each target is unique. Native phone authority is restricted to app.open on explicitly granted targets.",
+            "description": "Each target is unique. Native phone authority is restricted to the exact app.open, browser.read, and browser.control capabilities granted for that target.",
             "x-ellie-unique-key": "target"
           },
           "createdAt": {
@@ -2715,7 +2868,7 @@
             "items": {
               "$ref": "#/components/schemas/NativeGrant"
             },
-            "description": "Each target is unique. Native phone authority is restricted to app.open on explicitly granted targets.",
+            "description": "Each target is unique. Native phone authority is restricted to the exact app.open, browser.read, and browser.control capabilities granted for that target.",
             "x-ellie-unique-key": "target"
           }
         },
@@ -2975,14 +3128,14 @@
         "properties": {
           "capabilities": {
             "type": "array",
-            "maxItems": 4,
+            "maxItems": 6,
             "items": {
               "$ref": "#/components/schemas/Capability"
             }
           },
           "executionCapabilities": {
             "type": "array",
-            "maxItems": 4,
+            "maxItems": 6,
             "items": {
               "$ref": "#/components/schemas/Capability"
             }
