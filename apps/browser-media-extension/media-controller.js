@@ -194,6 +194,81 @@
       ? selected
       : undefined;
   };
+  const observedYoutubeSearchControl = () => {
+    if (!youtubeOrigins.has(location.origin)) return undefined;
+    const site = siteObservation();
+    if (site.page !== "home" && site.page !== "results") return undefined;
+    const url = new URL(location.href);
+    if (
+      url.hash ||
+      (site.page === "home" && url.search) ||
+      (site.page === "results" &&
+        (url.searchParams.size !== 1 || url.searchParams.getAll("search_query").length !== 1))
+    )
+      return undefined;
+    if (
+      document.querySelector("input[type='password']") ||
+      [...document.querySelectorAll("[role='dialog'],[aria-modal='true']")].some(visible)
+    )
+      return undefined;
+    const inputs = document.querySelectorAll("input");
+    const buttons = document.querySelectorAll("button");
+    if (inputs.length > 128 || buttons.length > 256) return undefined;
+    const uncovered = (element) => {
+      if (!visible(element)) return false;
+      const rect = element.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      return Boolean(hit && element.contains(hit));
+    };
+    const searchFields = [...inputs].filter(
+      (input) =>
+        (input.name === "search_query" ||
+          input.type === "search" ||
+          input.getAttribute("role") === "searchbox") &&
+        uncovered(input),
+    );
+    if (searchFields.length !== 1) return undefined;
+    const fields = [...inputs].filter((input) => {
+      const form = input.closest("form");
+      const action = form && new URL(form.action, location.href);
+      return (
+        input.type === "text" &&
+        input.name === "search_query" &&
+        input.getAttribute("role") === "combobox" &&
+        input.getAttribute("placeholder") === "Search" &&
+        !input.disabled &&
+        !input.readOnly &&
+        !input.closest("[inert],[aria-disabled='true']") &&
+        form?.method.toLowerCase() === "get" &&
+        action?.origin === location.origin &&
+        action.pathname === "/results" &&
+        !action.search &&
+        !action.hash &&
+        uncovered(input)
+      );
+    });
+    if (fields.length !== 1 || fields[0] !== searchFields[0]) return undefined;
+    const input = fields[0];
+    const container = input.closest("form")?.parentElement?.parentElement;
+    if (!container) return undefined;
+    const controls = [...buttons].filter(
+      (button) =>
+        button.getAttribute("aria-label") === "Search" &&
+        !button.disabled &&
+        !button.closest("[inert],[aria-disabled='true']") &&
+        uncovered(button),
+    );
+    return controls.length === 1 && controls[0].parentElement === container
+      ? {
+          input,
+          button: controls[0],
+          container,
+          value: input.value,
+          id: crypto.randomUUID(),
+          label: "Search",
+        }
+      : undefined;
+  };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
     if (c.type === "inspect" || c.type === "observe" || c.type === "play" || c.type === "pause")
@@ -428,7 +503,9 @@
         const currentSearch =
           netflixOrigins.has(location.origin) && (site.page === "browse" || site.page === "results")
             ? observedSearchControl()
-            : undefined;
+            : youtubeOrigins.has(location.origin)
+              ? observedYoutubeSearchControl()
+              : undefined;
         const searchControl = currentSearch
           ? { ...currentSearch, id: crypto.randomUUID() }
           : undefined;
@@ -460,6 +537,9 @@
           snapshotId,
           candidates: entries.map(({ id, title }) => ({ id, title })),
           playback,
+          ...(youtubeOrigins.has(location.origin) && searchControl
+            ? { searchControl: { id: searchControl.id, label: searchControl.label } }
+            : {}),
           site:
             netflixOrigins.has(location.origin) &&
             (site.page === "browse" || site.page === "results")
@@ -475,7 +555,11 @@
                     ? { searchControl: { id: searchControl.id, label: searchControl.label } }
                     : {}),
                 }
-              : site,
+              : youtubeOrigins.has(location.origin) &&
+                  (site.page === "home" || site.page === "results") &&
+                  searchControl
+                ? { ...site, searchControl: { id: searchControl.id, label: searchControl.label } }
+                : site,
           ...(rowCandidateId ? { rowCandidateId } : {}),
         };
       }
@@ -527,7 +611,8 @@
         return { outcome: "scrolled" };
       }
       if (command.type === "searchObserved") {
-        if (!netflixOrigins.has(location.origin)) throw new Error("search_unavailable");
+        if (!netflixOrigins.has(location.origin) && !youtubeOrigins.has(location.origin))
+          throw new Error("search_unavailable");
         const snapshot = snapshots.get(command.snapshotId);
         if (
           !snapshot ||
@@ -537,7 +622,8 @@
         )
           throw new Error("stale_snapshot");
         const chosen = snapshot.searchControl;
-        const current = observedSearchControl();
+        const youtube = youtubeOrigins.has(location.origin);
+        const current = youtube ? observedYoutubeSearchControl() : observedSearchControl();
         if (
           !chosen ||
           chosen.id !== command.controlId ||
@@ -547,7 +633,8 @@
           current.label !== chosen.label ||
           current.type !== chosen.type ||
           current.role !== chosen.role ||
-          current.value !== chosen.value
+          current.value !== chosen.value ||
+          (youtube && (current.button !== chosen.button || current.container !== chosen.container))
         )
           throw new Error("search_unavailable");
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
@@ -558,8 +645,41 @@
           data: command.query,
         });
         active(command, expectedUrl, deadline);
+        snapshots.delete(command.snapshotId);
         setter.call(chosen.input, command.query);
         chosen.input.dispatchEvent(event);
+        if (youtube) {
+          const expectedOrigin = new URL(expectedUrl).origin;
+          active(command, expectedUrl, deadline);
+          const ready = observedYoutubeSearchControl();
+          if (
+            !ready ||
+            ready.input !== chosen.input ||
+            ready.button !== chosen.button ||
+            ready.container !== chosen.container ||
+            ready.value !== command.query
+          )
+            throw new Error("search_unavailable");
+          chosen.button.click();
+          for (let index = 0; index < 20; index += 1) {
+            await wait(50);
+            if (cancelled.has(command.actionId)) throw new Error("cancelled");
+            if (Date.now() >= deadline) throw new Error("command_timeout");
+            const url = new URL(location.href);
+            if (url.href === expectedUrl) continue;
+            if (
+              url.origin !== expectedOrigin ||
+              url.pathname !== "/results" ||
+              url.hash ||
+              url.searchParams.size !== 1 ||
+              url.searchParams.getAll("search_query").length !== 1 ||
+              url.searchParams.get("search_query") !== command.query
+            )
+              throw new Error("page_changed");
+            return { outcome: "navigation_observed" };
+          }
+          throw new Error("navigation_not_observed");
+        }
         return { outcome: "search_dispatched" };
       }
       if (command.type === "scrollRow" || command.type === "open") {

@@ -431,7 +431,10 @@ final class BrowserPhoneControlStore: ObservableObject {
       }
       let read = try await self.transport.execute(
         .read(revision: revision), nodeID: node.id, credential: self.credential)
-      guard case .page(let page) = read, page.nodeID == node.id, page.source == source,
+      guard case .page(let page) = read, page.nodeID == node.id,
+        (page.source == source ||
+          (source == .accessibility && page.source == .companion
+            && page.site?.provider == .youtube)),
         page.revision == revision
       else { throw PhoneControlFailure.invalidResponse }
       try Task.checkCancellation()
@@ -531,7 +534,11 @@ final class BrowserPhoneControlStore: ObservableObject {
         action, nodeID: node.id, credential: self.credential)
       try Task.checkCancellation()
       guard case .command(let source, let status, let revision) = response,
-        source == page.source, revision == page.revision
+        (source == page.source ||
+          (page.site?.provider == .youtube && page.source == .companion
+            && source == .accessibility
+            && (action.isYouTubeAccessibilityControl))),
+        revision == page.revision
       else { throw PhoneControlFailure.invalidResponse }
       switch status {
       case .completed:
@@ -671,6 +678,14 @@ final class BrowserPhoneControlStore: ObservableObject {
       case .openResult: return site.page == .browse || site.page == .results
       case .scroll(let direction) where direction == .left || direction == .right:
         return site.page == .browse && site.rows?.isEmpty == false
+      default: break
+      }
+    }
+    if site.provider == .youtube {
+      switch intent {
+      case .search:
+        return (site.page == .home || site.page == .results) && site.searchControl != nil
+      case .openResult: return site.page == .results
       default: break
       }
     }

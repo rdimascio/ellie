@@ -87,10 +87,12 @@ struct SpeechTurnView: View {
               .font(.footnote).foregroundStyle(.secondary)
           } else if let intent = BrowserVoiceIntentParser.parse(speech.transcript) {
             if case .search = intent, let site = browserStore.page?.site,
-              site.provider == .netflix, let control = site.searchControl {
+              (site.provider == .netflix || site.provider == .youtube),
+              let control = site.searchControl {
               Text("Run will use the observed \(control.label) field on \(controlStore.selectedNode?.label ?? "the selected Mac"). Read again to observe any result.")
                 .font(.footnote)
-                .accessibilityIdentifier("speech-netflix-search-review")
+                .accessibilityIdentifier(
+                  site.provider == .netflix ? "speech-netflix-search-review" : "speech-youtube-search-review")
             }
             if case .scroll(let direction) = intent,
               direction == .left || direction == .right,

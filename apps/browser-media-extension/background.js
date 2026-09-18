@@ -97,8 +97,55 @@ function allowedOrigin(url) {
   }
 }
 
-async function dispatch(tabId, command, expectedBinding, authorizeEffect, effectStarted) {
+async function livePopupSearch(sender, selectedWindowId) {
+  if (
+    sender?.id !== chrome.runtime.id ||
+    sender.url !== chrome.runtime.getURL("popup.html") ||
+    (sender.documentId !== undefined &&
+      (typeof sender.documentId !== "string" || !sender.documentId)) ||
+    sender.tab ||
+    !Number.isInteger(selectedWindowId) ||
+    selectedWindowId < 0
+  )
+    return false;
+  const contexts = await chrome.runtime.getContexts({
+    documentUrls: [chrome.runtime.getURL("popup.html")],
+  });
+  return (
+    contexts.length === 1 &&
+    contexts[0].contextType === "POPUP" &&
+    typeof contexts[0].documentId === "string" &&
+    Boolean(contexts[0].documentId) &&
+    (sender.documentId === undefined || contexts[0].documentId === sender.documentId) &&
+    contexts[0].documentUrl === chrome.runtime.getURL("popup.html") &&
+    contexts[0].tabId === -1 &&
+    contexts[0].windowId === -1
+  );
+}
+
+async function dispatch(
+  tabId,
+  command,
+  expectedBinding,
+  authorizeEffect,
+  effectStarted,
+  popupSearch,
+) {
   const deadline = Date.now() + 2000;
+  const before = await chrome.tabs.get(tabId);
+  if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
+  const youtubeSearch =
+    command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com";
+  if (
+    youtubeSearch &&
+    (before.active !== true ||
+      before.status !== "complete" ||
+      (expectedBinding
+        ? !(await chrome.windows.get(before.windowId)).focused
+        : before.windowId !== popupSearch?.selectedWindowId ||
+          !(await livePopupSearch(popupSearch?.sender, popupSearch?.selectedWindowId))))
+  )
+    throw new Error("page_changed");
   if (mutationTypes.has(command?.type)) {
     if (!actionPattern.test(command?.actionId)) throw new Error("invalid_command");
     let ledger = mutationLedgers.get(tabId);
@@ -107,8 +154,6 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
     if (ledger.size >= 256) throw new Error("action_ledger_full");
     ledger.add(command.actionId);
   }
-  const before = await chrome.tabs.get(tabId);
-  if (!before.url || !allowedOrigin(before.url)) throw new Error("unsupported_page");
   const controllerFile =
     new URL(before.url).origin === "https://tv.youtube.com"
       ? "youtube-tv-controller.js"
@@ -131,14 +176,16 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
   const documentId = installed[0]?.documentId;
   if (!documentId) throw new Error("page_changed");
   if (expectedBinding && documentId !== expectedBinding.documentId) throw new Error("page_changed");
-  if (expectedBinding) {
+  if (expectedBinding || youtubeSearch) {
     const armed = await chrome.tabs.get(tabId);
     if (
-      armed.url !== expectedBinding.url ||
-      armed.windowId !== expectedBinding.windowId ||
+      armed.url !== (expectedBinding?.url ?? before.url) ||
+      armed.windowId !== (expectedBinding?.windowId ?? before.windowId) ||
       armed.active !== true ||
       armed.status !== "complete" ||
-      !(await chrome.windows.get(expectedBinding.windowId)).focused
+      (expectedBinding
+        ? !(await chrome.windows.get(expectedBinding.windowId)).focused
+        : !(await livePopupSearch(popupSearch?.sender, popupSearch?.selectedWindowId)))
     )
       throw new Error("page_changed");
   }
@@ -165,10 +212,28 @@ async function dispatch(tabId, command, expectedBinding, authorizeEffect, effect
     new Promise((_, reject) => setTimeout(() => reject(new Error("command_timeout")), 2500)),
   ]);
   const after = await chrome.tabs.get(tabId);
+  const observedYoutubeResults = (() => {
+    if (!youtubeSearch || !after.url) return false;
+    const url = new URL(after.url);
+    return (
+      url.origin === new URL(before.url).origin &&
+      url.pathname === "/results" &&
+      !url.hash &&
+      url.searchParams.size === 1 &&
+      url.searchParams.getAll("search_query").length === 1 &&
+      url.searchParams.get("search_query") === command.query
+    );
+  })();
   if (
     !after.url ||
     !allowedOrigin(after.url) ||
-    (command.type !== "open" && after.url !== before.url)
+    (youtubeSearch && (!observedYoutubeResults || after.url === before.url)) ||
+    (!youtubeSearch && command.type !== "open" && after.url !== before.url) ||
+    (youtubeSearch &&
+      (after.windowId !== before.windowId ||
+        after.active !== true ||
+        after.status !== "complete" ||
+        (expectedBinding && !(await chrome.windows.get(before.windowId)).focused)))
   )
     throw new Error("page_changed");
   if (command.type === "open" && new URL(after.url).origin !== new URL(before.url).origin)
@@ -522,9 +587,14 @@ async function executeCompanion(request, controller) {
     throw new Error("invalid_arguments");
   const binding = liveBinding();
   const selection = liveSelection();
+  const youtubeObserved =
+    binding.availability === "accessibility" && binding.origin === "https://www.youtube.com";
   if (
-    binding.availability !== "companion" ||
-    !companionBindingOrigins.has(binding.origin) ||
+    !(
+      (binding.availability === "companion" && companionBindingOrigins.has(binding.origin)) ||
+      youtubeObserved
+    ) ||
+    (youtubeObserved && !["inspect", "searchObserved", "open"].includes(request.command.type)) ||
     selection.tabId !== binding.tabId ||
     selection.windowId !== binding.windowId ||
     request.bindingId !== binding.bindingId ||
@@ -760,16 +830,28 @@ function connectNativeHost() {
   return nativeConnectionStatus;
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const messageKeys =
     message && typeof message === "object" ? Object.keys(message).sort().join() : "";
   if (
-    messageKeys !== "command,protocol,tabId" ||
+    (messageKeys !== "command,protocol,tabId" &&
+      messageKeys !== "command,protocol,tabId,windowId") ||
     message.protocol !== "ellie.media.v1" ||
     !Number.isInteger(message.tabId) ||
     message.tabId < 0
   )
     return;
+  const popupSearch = message.command?.type === "searchObserved";
+  if (
+    (popupSearch &&
+      (messageKeys !== "command,protocol,tabId,windowId" ||
+        !Number.isInteger(message.windowId) ||
+        message.windowId < 0)) ||
+    (!popupSearch && messageKeys !== "command,protocol,tabId")
+  ) {
+    sendResponse({ ok: false, error: "invalid_command" });
+    return;
+  }
   if (message.command?.type === "discoverWebMCP" || message.command?.type === "bindWebMCP") {
     const keys = Object.keys(message.command).sort().join();
     if (
@@ -787,7 +869,14 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       ? bindWebMCP(message.tabId)
       : message.command?.type === "discoverWebMCP"
         ? discoverWebMCP(message.tabId)
-        : dispatch(message.tabId, message.command);
+        : dispatch(
+            message.tabId,
+            message.command,
+            undefined,
+            undefined,
+            undefined,
+            popupSearch ? { sender, selectedWindowId: message.windowId } : undefined,
+          );
   const fixed = new Set([
     "unsupported_page",
     "page_changed",
