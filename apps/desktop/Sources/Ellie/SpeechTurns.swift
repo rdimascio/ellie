@@ -60,6 +60,7 @@ final class SpeechTurnStore: ObservableObject {
   private var generation = 0
   private var activeTurnID: UUID?
   private var credentialInvalidated = false
+  private var cancelledTurnCleanupFailed = false
 
   init(
     credential: NativeEnrollmentCredential, recorder: any SpeechRecording,
@@ -160,6 +161,7 @@ final class SpeechTurnStore: ObservableObject {
     default: break
     }
     guard phase != .cancelling else { return }
+    cancelledTurnCleanupFailed = false
     generation += 1
     let expected = generation
     let active = task
@@ -176,7 +178,7 @@ final class SpeechTurnStore: ObservableObject {
       if let turnID { await transport.cancel(turnID: turnID, credential: credential) }
       _ = await active?.value
       guard generation == expected else { return }
-      if cleanupFailed {
+      if cleanupFailed || cancelledTurnCleanupFailed {
         phase = .cleanupRequired
         return
       }
@@ -222,7 +224,14 @@ final class SpeechTurnStore: ObservableObject {
         let next = try await operation()
         if expected == generation { phase = next }
       } catch {
-        guard expected == generation else { return }
+        guard expected == generation else {
+          // Cancellation waits for this task. Preserve a late artifact-disposal
+          // failure before it decides whether private audio was removed.
+          if phase == .cancelling, error as? SpeechTurnFailure == .cleanupFailed {
+            cancelledTurnCleanupFailed = true
+          }
+          return
+        }
         activeTurnID = nil
         if error is CancellationError || error as? SpeechTurnFailure == .cancelled {
           phase = credentialInvalidated ? .credentialChanged : .idle
