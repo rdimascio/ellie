@@ -442,7 +442,9 @@ final class BrowserPhoneControlStore: ObservableObject {
       guard case .page(let page) = read, page.nodeID == node.id,
         (page.source == source ||
           (source == .accessibility && page.source == .companion
-            && page.site?.provider == .youtube)),
+            && page.site?.provider == .youtube) ||
+          (source == .companion && page.source == .accessibility && page.site == nil
+            && page.axScrollDirections != nil)),
         page.revision == revision
       else { throw PhoneControlFailure.invalidResponse }
       try Task.checkCancellation()

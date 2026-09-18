@@ -373,7 +373,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
     let transport = BrowserPhoneFakeTransport(source: .accessibility,
-      commandStatus: .unknown, axScrollDirections: [.down])
+      commandStatus: .unknown, statusSource: .companion, axScrollDirections: [.down])
     let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
       uncertainty: BrowserPhoneFakeUncertaintyStore())
     XCTAssertTrue(store.refresh(on: node))
@@ -400,7 +400,8 @@ final class BrowserPhoneControlTests: XCTestCase {
 
     let unavailable = BrowserPhoneControlStore(credential: credential(),
       transport: BrowserPhoneFakeTransport(source: .accessibility,
-        axScrollDirections: []), uncertainty: BrowserPhoneFakeUncertaintyStore())
+        statusSource: .companion, axScrollDirections: []),
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     XCTAssertTrue(unavailable.refresh(on: node))
     await eventually { unavailable.phase == .ready }
     XCTAssertFalse(unavailable.canPerform(.scroll(.down), on: node))
@@ -408,10 +409,18 @@ final class BrowserPhoneControlTests: XCTestCase {
 
     let invalidModel = BrowserPhoneControlStore(credential: credential(),
       transport: BrowserPhoneFakeTransport(source: .accessibility,
-        axScrollDirections: [.left]), uncertainty: BrowserPhoneFakeUncertaintyStore())
+        statusSource: .companion, axScrollDirections: [.left]),
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
     XCTAssertTrue(invalidModel.refresh(on: node))
     await eventually { invalidModel.phase == .ready }
     XCTAssertFalse(invalidModel.canPerform(.scroll(.left), on: node))
+
+    let unproven = BrowserPhoneControlStore(credential: credential(),
+      transport: BrowserPhoneFakeTransport(source: .accessibility,
+        statusSource: .companion), uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(unproven.refresh(on: node))
+    await eventually { if case .failed = unproven.phase { true } else { false } }
+    XCTAssertNil(unproven.page, "Companion status cannot admit an arbitrary AX page")
 
     let youtube = BrowserPhoneControlStore(credential: credential(),
       transport: BrowserPhoneFakeTransport(source: .accessibility,
