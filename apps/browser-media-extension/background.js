@@ -118,7 +118,8 @@ async function livePopupSearch(sender, selectedWindowId) {
     Boolean(contexts[0].documentId) &&
     (sender.documentId === undefined || contexts[0].documentId === sender.documentId) &&
     contexts[0].documentUrl === chrome.runtime.getURL("popup.html") &&
-    contexts[0].tabId === -1
+    contexts[0].tabId === -1 &&
+    contexts[0].windowId === -1
   );
 }
 

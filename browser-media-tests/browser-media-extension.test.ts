@@ -774,6 +774,12 @@ test("YouTube popup search accepts only exact results on its selected active tab
       noInjection: true,
     },
     {
+      name: "popup context has a browser window",
+      afterUrl: exactResults,
+      contextWindowId: 3,
+      noInjection: true,
+    },
+    {
       name: "different selected window",
       afterUrl: exactResults,
       selectedWindowId: 9,
@@ -805,7 +811,7 @@ test("YouTube popup search accepts only exact results on its selected active tab
       documentId: scenario.contextDocumentId ?? "popup-document",
       documentUrl: "chrome-extension://ellie-test-extension/popup.html",
       tabId: scenario.popupType === "TAB" ? 7 : -1,
-      windowId: -1,
+      windowId: scenario.contextWindowId ?? -1,
     };
     const context: Record<string, any> = {
       chrome: {
