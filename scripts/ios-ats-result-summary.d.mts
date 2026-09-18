@@ -6,4 +6,5 @@ export declare function verifiedATSResult(
   counts: { total: number; passed: number; failed: number; skipped: number };
   googleCases: string[];
   householdCases: string[];
+  quietCases: string[];
 };

@@ -10,13 +10,17 @@ const names = [
 ];
 const householdName =
   "HouseholdChoresHTTPSIntegrationTests/testTwoEnrolledClientsUsePinnedProductionChoresWithNoWriteReplay()";
+const quietNames = [
+  "QuietLifeHTTPSIntegrationTests/testPinnedSessionsReadVerifiedActivityAndReconcileOneReviewedVoiceTurnAfterStoreReconstruction()",
+  "QuietLifeHTTPSIntegrationTests/testCancelledAndRevokedDelayedPinnedDetailNeverPublishesOrResends()",
+];
 
 function result() {
   return {
     summary: {
       result: "Passed",
-      totalTestCount: 6,
-      passedTests: 6,
+      totalTestCount: 8,
+      passedTests: 8,
       failedTests: 0,
       skippedTests: 0,
     },
@@ -30,6 +34,11 @@ function result() {
               result: "Passed",
             })),
             { nodeType: "Test Case", nodeIdentifier: householdName, result: "Passed" },
+            ...quietNames.map((nodeIdentifier) => ({
+              nodeType: "Test Case",
+              nodeIdentifier,
+              result: "Passed",
+            })),
             { nodeType: "Test Case", nodeIdentifier: "OtherTests/testOther()", result: "Passed" },
           ],
         },
@@ -38,13 +47,14 @@ function result() {
   };
 }
 
-test("ATS result retains passing counts and exact Google and household case names", () => {
+test("ATS result retains passing counts and exact Google, household and Quiet cases", () => {
   const { summary, tests } = result();
   assert.deepEqual(verifiedATSResult(summary, tests), {
     xcresultOutcome: "Passed",
-    counts: { total: 6, passed: 6, failed: 0, skipped: 0 },
+    counts: { total: 8, passed: 8, failed: 0, skipped: 0 },
     googleCases: names,
     householdCases: [householdName],
+    quietCases: quietNames,
   });
 });
 
@@ -92,7 +102,17 @@ test("ATS result rejects zero, skipped, failed, missing, duplicated, and inconsi
     },
     () => {
       const value = result();
-      value.tests.testNodes[0]!.children[5]!.nodeIdentifier = householdName;
+      value.tests.testNodes[0]!.children[7]!.nodeIdentifier = householdName;
+      return value;
+    },
+    () => {
+      const value = result();
+      value.tests.testNodes[0]!.children[5]!.nodeIdentifier = "OtherTests/testOther()";
+      return value;
+    },
+    () => {
+      const value = result();
+      value.tests.testNodes[0]!.children[7]!.nodeIdentifier = quietNames[0]!;
       return value;
     },
   ];
