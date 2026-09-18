@@ -1677,8 +1677,10 @@ final class EllieIOSUITests: XCTestCase {
             let chunk = String(characters[start ..< min(start + 4, characters.count)])
             element.typeText(chunk)
             expected += chunk
-            let actual = element.value as? String
-            guard actual == expected else {
+            let committedValue = XCTNSPredicateExpectation(
+                predicate: NSPredicate(format: "value == %@", expected), object: element)
+            guard XCTWaiter.wait(for: [committedValue], timeout: 2) == .completed else {
+                let actual = element.value as? String
                 XCTFail("Expected input value \(expected); observed \(String(describing: actual))")
                 throw InputFailure.valueMismatch
             }
