@@ -4,7 +4,12 @@ enum WatchMediaOperation: String { case read, play, pause }
 enum WatchMediaState: String { case observed, unknown, unavailable, blocked, stale }
 
 struct WatchMediaRequest {
-  static let lifetimeMilliseconds: Int64 = 10_000
+  // Read-only observation tolerates cold delivery; mutations keep the shorter authority window.
+  static let readLifetimeMilliseconds: Int64 = 20_000
+  static let mutationLifetimeMilliseconds: Int64 = 10_000
+  static func lifetimeMilliseconds(for operation: WatchMediaOperation) -> Int64 {
+    operation == .read ? readLifetimeMilliseconds : mutationLifetimeMilliseconds
+  }
   let id: String
   let operation: WatchMediaOperation
   let expiresAt: Int64
@@ -18,7 +23,8 @@ struct WatchMediaRequest {
   ) -> Self {
     Self(
       id: UUID().uuidString.lowercased(), operation: operation,
-      expiresAt: now + lifetimeMilliseconds, target: target, epoch: epoch, revision: revision)
+      expiresAt: now + lifetimeMilliseconds(for: operation),
+      target: target, epoch: epoch, revision: revision)
   }
 
   var message: [String: Any] {
@@ -41,9 +47,9 @@ struct WatchMediaRequest {
       CFGetTypeID(expiry) != CFBooleanGetTypeID(),
       expiry.doubleValue.rounded() == expiry.doubleValue,
       expiry.doubleValue > Double(now),
-      expiry.doubleValue <= Double(now + lifetimeMilliseconds),
+      expiry.doubleValue <= Double(now + lifetimeMilliseconds(for: operation)),
       expiry.int64Value > now,
-      expiry.int64Value <= now + lifetimeMilliseconds
+      expiry.int64Value <= now + lifetimeMilliseconds(for: operation)
     else { return nil }
     switch operation {
     case .read:

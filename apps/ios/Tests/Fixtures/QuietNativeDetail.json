@@ -1,0 +1,34 @@
+{
+  "session": {
+    "id": "quiet_1",
+    "title": "Review the albums",
+    "updatedAt": "2027-01-15T08:00:00.000Z",
+    "pending": false
+  },
+  "originalRequest": "Review the albums",
+  "turns": [
+    {
+      "id": "quiet_2",
+      "request": "Review the albums",
+      "reply": "Review is ready.",
+      "status": "completed",
+      "updatedAt": "2027-01-15T08:00:00.000Z"
+    }
+  ],
+  "activity": [
+    {
+      "id": "photo.task:1",
+      "state": "succeeded",
+      "updatedAt": "2027-01-15T08:00:00.000Z",
+      "progress": [{ "at": "2027-01-15T08:00:00.000Z", "message": "Checked three albums" }],
+      "finding": {
+        "summary": "Three albums checked.",
+        "citations": [
+          { "title": "Album register", "sourceId": "source.album:1@life/path", "sourceRevision": 1 }
+        ]
+      }
+    }
+  ],
+  "activityLimited": false,
+  "page": { "hasMore": false }
+}

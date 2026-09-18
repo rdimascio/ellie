@@ -88,6 +88,10 @@ enum BrowserPhoneAction: Equatable, Sendable {
   var requiresControl: Bool {
     switch self { case .status, .refresh, .read: false; default: true }
   }
+
+  var isYouTubeAccessibilityControl: Bool {
+    switch self { case .scroll, .playback: true; default: false }
+  }
 }
 
 protocol BrowserPhoneControlTransporting: Sendable {
@@ -285,7 +289,10 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     } else {
       site = nil
     }
-    if source == .companion && site?.provider != .netflix && site?.provider != .youtubeTV && site?.provider != .disneyplus {
+    if source == .companion && site?.provider != .netflix && site?.provider != .youtubeTV && site?.provider != .disneyplus && site?.provider != .youtube {
+      throw PhoneControlFailure.invalidResponse
+    }
+    if site?.provider == .youtube && site?.searchControl != nil && source != .companion {
       throw PhoneControlFailure.invalidResponse
     }
     return .page(
@@ -341,7 +348,8 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
   } else { rows = nil }
   let searchControl: BrowserPhoneSearchControl?
   if let raw = value["searchControl"] {
-    guard provider == .netflix, (page == .browse || page == .results),
+    guard (provider == .netflix && (page == .browse || page == .results))
+      || (provider == .youtube && (page == .home || page == .results)),
       let entry = raw as? [String: Any], Set(entry.keys) == Set(["id", "label"]),
       let id = entry["id"] as? String, validBrowserRowID(id),
       let label = entry["label"] as? String, validBrowserText(label, maximum: 100)

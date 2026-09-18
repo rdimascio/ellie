@@ -8,12 +8,18 @@ struct EllieIOSApp: App {
     var body: some Scene {
         WindowGroup {
             #if DEBUG
-            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
+            if ProcessInfo.processInfo.arguments.contains("--ellie-ui-watch-paired-fixture") {
+                WatchPairedUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-appearance-fixture") {
                 HomeAppearanceUITestFixtureView(
                     accessibilityLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-accessibility"),
                     narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-gmail-read-fixture") {
                 IOSGmailUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-session-fixture") {
+                IOSQuietSessionsUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-voice-fixture") {
+                IOSQuietVoiceUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(
@@ -21,7 +27,9 @@ struct EllieIOSApp: App {
                     netflixRows: ProcessInfo.processInfo.arguments.contains(
                         "--ellie-ui-browser-netflix-voice-rows"),
                     netflixSearch: ProcessInfo.processInfo.arguments.contains(
-                        "--ellie-ui-browser-netflix-voice-search"))
+                        "--ellie-ui-browser-netflix-voice-search"),
+                    youtubeSearch: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-youtube-voice-search"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-composed-fixture") {
                 if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
                     from: ProcessInfo.processInfo.arguments,

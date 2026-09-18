@@ -159,6 +159,8 @@ export interface ConversationEvidence {
 }
 export interface ConversationResult {
   reply: string;
+  nativeReadOnly?: boolean;
+  needsMacReview?: boolean;
   actions: Array<{ label: string; status: string }>;
   recordIds: string[];
   recordReceipts?: Array<{ id: string; kind: "reminder" | "event"; revision: number }>;
@@ -2919,6 +2921,8 @@ export class LifeStore {
       throw new TypeError("Conversation result is invalid");
     const result: ConversationResult = {
       reply,
+      ...(input.result.nativeReadOnly === true ? { nativeReadOnly: true } : {}),
+      ...(input.result.needsMacReview === true ? { needsMacReview: true } : {}),
       actions: input.result.actions.map((a) => ({
         label: text(a.label, "action.label", 500),
         status: text(a.status, "action.status", 50),
@@ -3257,6 +3261,44 @@ export class LifeStore {
       conversation,
       this.contextFingerprintFor(actor, conversation.scope),
     );
+  }
+  getConversationOriginalTurn(
+    actor: LifeActor,
+    conversationId: string,
+  ): ConversationTurn | undefined {
+    const conversation = this.accessibleConversation(actor, conversationId);
+    const row = this.db
+      .prepare(
+        "SELECT * FROM conversation_turns WHERE conversation_id=? AND user_id=? ORDER BY rowid ASC LIMIT 1",
+      )
+      .get(conversation.id, this.actor(actor)) as Record<string, unknown> | undefined;
+    return row ? this.turn(actor, row, conversation) : undefined;
+  }
+  getConversationLinkedTaskIds(
+    actor: LifeActor,
+    conversationId: string,
+  ): {
+    items: string[];
+    limited: boolean;
+  } {
+    const conversation = this.accessibleConversation(actor, conversationId);
+    const rows = this.db
+      .prepare(
+        "SELECT result_json FROM conversation_turns WHERE conversation_id=? AND user_id=? ORDER BY rowid DESC LIMIT 201",
+      )
+      .all(conversation.id, this.actor(actor)) as Array<Record<string, unknown>>;
+    const ids = new Set<string>();
+    let limited = rows.length > 200;
+    for (const row of rows.slice(0, 200)) {
+      if (!row.result_json) continue;
+      const result = JSON.parse(String(row.result_json)) as ConversationResult;
+      for (const raw of result.taskIds ?? []) {
+        const id = identifier(raw, "taskId");
+        if (ids.size < 8) ids.add(id);
+        else if (!ids.has(id)) limited = true;
+      }
+    }
+    return { items: [...ids], limited };
   }
   getConversationRequest(
     actor: LifeActor,

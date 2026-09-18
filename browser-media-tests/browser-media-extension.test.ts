@@ -179,6 +179,165 @@ test("native host is connected only after a request and reports a later disconne
   );
 });
 
+test("only a live toolbar popup can bind its exact selected normal-window tab while the popup owns focus", async () => {
+  const background = await readFile(join(source, "background.js"), "utf8");
+  const scenarios = [
+    { name: "popup-focused parent", allowed: true },
+    { name: "tab-hosted popup", popupType: "TAB" },
+    { name: "sender from a tab", senderTab: true },
+    { name: "foreign sender", senderId: "another-extension" },
+    {
+      name: "other extension page",
+      senderUrl: "chrome-extension://ellie-test-extension/other.html",
+    },
+    { name: "other popup document", senderDocumentId: "other-document" },
+    { name: "closed popup", popupClosed: true },
+    { name: "duplicate popup", duplicatePopup: true },
+    { name: "wrong selected tab", selectedTabId: 8 },
+    { name: "inactive selected tab", selectedActive: false },
+    { name: "unready selected tab", selectedStatus: "loading" },
+    { name: "different selected URL", selectedUrl: "https://www.youtube.com/results" },
+    { name: "other last-focused window", selectedWindowId: 9 },
+    { name: "non-normal parent", windowType: "popup" },
+    { name: "tab changes during arming", afterTabId: 8, afterArm: true },
+    { name: "window changes during arming", afterWindowType: "popup", afterArm: true },
+    { name: "popup closes during arming", closeDuringArm: true, afterArm: true },
+  ] as const;
+  for (const scenario of scenarios) {
+    const runtimeMessages = extensionEvent();
+    const tab = {
+      id: 7,
+      windowId: 3,
+      active: true,
+      status: "complete",
+      url: "https://www.youtube.com/",
+    };
+    let selectedTabId: number = "selectedTabId" in scenario ? scenario.selectedTabId : 7;
+    let popupClosed = "popupClosed" in scenario && scenario.popupClosed;
+    let windowType = "windowType" in scenario ? scenario.windowType : "normal";
+    let injections = 0;
+    let nativeConnections = 0;
+    const popupContext = {
+      contextType: "popupType" in scenario ? scenario.popupType : "POPUP",
+      documentId: "popup-document",
+      documentUrl: "chrome-extension://ellie-test-extension/popup.html",
+      tabId: "popupType" in scenario ? 7 : -1,
+      windowId: -1,
+    };
+    const context: Record<string, any> = {
+      chrome: {
+        runtime: {
+          id: "ellie-test-extension",
+          getURL: (path: string) => `chrome-extension://ellie-test-extension/${path}`,
+          getContexts: async () =>
+            popupClosed
+              ? []
+              : "duplicatePopup" in scenario
+                ? [popupContext, popupContext]
+                : [popupContext],
+          onMessage: runtimeMessages,
+          connectNative() {
+            nativeConnections += 1;
+            return {
+              onDisconnect: extensionEvent(),
+              onMessage: extensionEvent(),
+              postMessage() {},
+            };
+          },
+          sendMessage: async () => undefined,
+        },
+        tabs: {
+          onRemoved: extensionEvent(),
+          onReplaced: extensionEvent(),
+          onUpdated: extensionEvent(),
+          get: async () => ({ ...tab }),
+          query: async (filter: unknown) => {
+            assert.deepEqual(JSON.parse(JSON.stringify(filter)), {
+              active: true,
+              lastFocusedWindow: true,
+            });
+            return [
+              {
+                ...tab,
+                id: selectedTabId,
+                windowId: "selectedWindowId" in scenario ? scenario.selectedWindowId : 3,
+                active: "selectedActive" in scenario ? scenario.selectedActive : true,
+                status: "selectedStatus" in scenario ? scenario.selectedStatus : "complete",
+                url: "selectedUrl" in scenario ? scenario.selectedUrl : tab.url,
+              },
+            ];
+          },
+        },
+        windows: {
+          get: async (id: number) => ({
+            id,
+            type: windowType,
+            focused: false,
+          }),
+        },
+        scripting: {
+          executeScript: async () => {
+            injections += 1;
+            if ("afterTabId" in scenario) selectedTabId = scenario.afterTabId;
+            if ("afterWindowType" in scenario) windowType = scenario.afterWindowType;
+            if ("closeDuringArm" in scenario) popupClosed = true;
+            return [{ documentId: "selected-document" }];
+          },
+        },
+      },
+      AbortController,
+      URL,
+      Promise,
+      Set,
+      Map,
+      Date,
+      Error,
+      Object,
+      Array,
+      String,
+      Number,
+      RegExp,
+      crypto,
+      setTimeout,
+      clearTimeout,
+    };
+    runInNewContext(background, context);
+    const sender = {
+      id: "senderId" in scenario ? scenario.senderId : "ellie-test-extension",
+      url:
+        "senderUrl" in scenario
+          ? scenario.senderUrl
+          : "chrome-extension://ellie-test-extension/popup.html",
+      documentId: "senderDocumentId" in scenario ? scenario.senderDocumentId : "popup-document",
+      ...("senderTab" in scenario ? { tab: { id: 7 } } : {}),
+    };
+    const response = await new Promise<any>((resolve) => {
+      runtimeMessages.emit(
+        {
+          protocol: "ellie.media.v1",
+          tabId: 7,
+          command: { type: "bindWebMCP", actionId: crypto.randomUUID() },
+        },
+        sender,
+        resolve,
+      );
+    });
+    assert.equal(response.ok, "allowed" in scenario, scenario.name);
+    assert.equal(
+      injections,
+      "afterArm" in scenario || "allowed" in scenario ? 1 : 0,
+      scenario.name,
+    );
+    assert.equal(
+      nativeConnections,
+      "afterArm" in scenario || "allowed" in scenario ? 1 : 0,
+      scenario.name,
+    );
+    if ("allowed" in scenario) assert.equal(response.value.availability, "accessibility");
+    else assert.equal(response.error, "afterArm" in scenario ? "page_changed" : "unsupported_page");
+  }
+});
+
 test("explicit refresh renews only the retained same-page selection authority", async () => {
   const background = await readFile(join(source, "background.js"), "utf8");
   const disconnect = extensionEvent();
@@ -992,6 +1151,9 @@ async function fixture(
   const youtubeSearchNeedle =
     'command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com"';
   assert.equal(background.split(youtubeSearchNeedle).length - 1, 1);
+  const youtubeNativeNeedle =
+    'binding.availability === "accessibility" && binding.origin === "https://www.youtube.com"';
+  assert.equal(background.split(youtubeNativeNeedle).length - 1, 1);
   await writeFile(
     backgroundPath,
     background
@@ -1021,6 +1183,12 @@ async function fixture(
         options.youtubeSearch
           ? 'command.type === "searchObserved" && new URL(before.url).origin === "http://127.0.0.1:PORT"'
           : youtubeSearchNeedle,
+      )
+      .replace(
+        youtubeNativeNeedle,
+        options.accessibilityOnly
+          ? 'binding.availability === "accessibility" && binding.origin === "http://127.0.0.1:PORT"'
+          : youtubeNativeNeedle,
       )
       .replace(
         'new URL(before.url).origin === "https://tv.youtube.com"',
@@ -1988,6 +2156,151 @@ test(
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "native selected YouTube document observes search once and requires fresh results binding",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({
+      accessibilityOnly: true,
+      youtubeSearch: true,
+      stableNativePort: true,
+    });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    const sitePage = () => `<!doctype html><style>
+      .ytSearchboxComponentInputContainer {display:flex;gap:8px;margin:16px}
+      input,button {width:280px;height:42px} a {display:block;width:350px;height:45px}
+    </style><div class="ytSearchboxComponentInputContainer">
+      <div><form action="/results"><input name="search_query" role="combobox" type="text" placeholder="Search"></form></div>
+      <button id="submit" aria-label="Search">Search</button>
+    </div><a href="/watch?v=abcdefghijk" title="Observed public result">Observed public result</a>
+    <script>
+      window.effects={searches:0,opens:0};
+      document.querySelector('#submit').onclick=e=>{e.preventDefault();effects.searches++;history.pushState({},'', '/results?search_query='+encodeURIComponent(document.querySelector('input').value))};
+      document.querySelector('a').onclick=e=>{e.preventDefault();effects.opens++;history.pushState({},'',e.currentTarget.href)};
+    </script>`;
+    try {
+      const launched = await launch(owned.extension, owned.root, sitePage);
+      ({ context, server } = launched);
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      const binding = await launched.worker.evaluate(
+        (id) => globalThis.__ellieTestWebMCP.bind(id),
+        tab.id,
+      );
+      assert.equal(binding.availability, "accessibility");
+      const native = (request: Record<string, unknown>) =>
+        launched.worker.evaluate(async (value) => {
+          try {
+            return await globalThis.__ellieTestWebMCP.request(value);
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : "failed" };
+          }
+        }, request);
+      const inspect = async (selected: any) =>
+        native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: selected.bindingId,
+          documentId: selected.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        });
+      const selected = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.status",
+      });
+      let observed = await inspect(selected);
+      assert.equal(observed.value.site.provider, "youtube");
+      assert.equal(observed.value.site.page, "home");
+      assert.deepEqual(observed.value.site.searchControl, observed.value.searchControl);
+      const query = "Artemis official launch";
+      const search = (record: any, documentId = selected.documentId) =>
+        native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: selected.bindingId,
+          documentId,
+          command: {
+            type: "searchObserved",
+            actionId: crypto.randomUUID(),
+            snapshotId: record.value.snapshotId,
+            controlId: record.value.searchControl.id,
+            query,
+          },
+        });
+      assert.equal((await search(observed, "wrong-document")).error, "page_changed");
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 0,
+        opens: 0,
+      });
+      await launched.harness.bringToFront();
+      assert.equal((await search(observed)).error, "page_changed");
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 0,
+        opens: 0,
+      });
+      await launched.page.bringToFront();
+      observed = await inspect(selected);
+      assert.equal(observed.value.site.searchControl.label, "Search");
+      const result = await search(observed);
+      assert.ok(
+        result.value?.outcome === "navigation_observed" || result.error === "unknown",
+        JSON.stringify(result),
+      );
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 1,
+        opens: 0,
+      });
+      assert.ok((await search(observed)).error);
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 1,
+        opens: 0,
+      });
+      const refreshed = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      assert.equal(refreshed.availability, "accessibility");
+      const results = await inspect(refreshed);
+      assert.equal(results.value.site.page, "results");
+      assert.equal(results.value.candidates.length, 1);
+      const open = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: refreshed.bindingId,
+        documentId: refreshed.documentId,
+        command: {
+          type: "open",
+          actionId: crypto.randomUUID(),
+          snapshotId: results.value.snapshotId,
+          candidateId: results.value.candidates[0].id,
+        },
+      });
+      assert.ok(
+        open.value?.outcome === "navigation_observed" || open.error === "unknown",
+        JSON.stringify(open),
+      );
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 1,
+        opens: 1,
+      });
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
       await rm(owned.root, { recursive: true, force: true });
     }
   },
