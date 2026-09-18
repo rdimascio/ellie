@@ -990,7 +990,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.navigationBars["Browser control"].waitForExistence(timeout: 5))
         let observedSite = app.staticTexts["browser-observed-site"]
         let observedPlayback = app.staticTexts["browser-observed-playback"]
-        XCTAssertEqual(observedSite.label, "Observed YouTube results page")
+        XCTAssertEqual(observedSite.label, "Observed Netflix search results")
         XCTAssertFalse(observedPlayback.exists)
         XCTAssertFalse(revealBrowserButton("Play", in: app).isEnabled)
         XCTAssertFalse(revealBrowserButton("Pause", in: app).isEnabled)
@@ -1003,7 +1003,7 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(observedSite.exists)
 
         revealBrowserButton("Read current page", in: app, forTap: true).tap()
-        XCTAssertEqual(observedSite.label, "Observed YouTube watch page")
+        XCTAssertEqual(observedSite.label, "Observed Netflix watch page")
         XCTAssertEqual(observedPlayback.label, "Observed playback: paused")
         let play = revealBrowserButton("Play", in: app, forTap: true)
         XCTAssertTrue(play.isEnabled)
