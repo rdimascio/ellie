@@ -954,6 +954,9 @@ async function fixture(
   const youtubeSearchNeedle =
     'command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com"';
   assert.equal(background.split(youtubeSearchNeedle).length - 1, 1);
+  const youtubeNativeNeedle =
+    'binding.availability === "accessibility" && binding.origin === "https://www.youtube.com"';
+  assert.equal(background.split(youtubeNativeNeedle).length - 1, 1);
   await writeFile(
     backgroundPath,
     background
@@ -983,6 +986,12 @@ async function fixture(
         options.youtubeSearch
           ? 'command.type === "searchObserved" && new URL(before.url).origin === "http://127.0.0.1:PORT"'
           : youtubeSearchNeedle,
+      )
+      .replace(
+        youtubeNativeNeedle,
+        options.accessibilityOnly
+          ? 'binding.availability === "accessibility" && binding.origin === "http://127.0.0.1:PORT"'
+          : youtubeNativeNeedle,
       )
       .replace(
         'new URL(before.url).origin === "https://tv.youtube.com"',
@@ -1950,6 +1959,151 @@ test(
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
+  "native selected YouTube document observes search once and requires fresh results binding",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({
+      accessibilityOnly: true,
+      youtubeSearch: true,
+      stableNativePort: true,
+    });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    const sitePage = () => `<!doctype html><style>
+      .ytSearchboxComponentInputContainer {display:flex;gap:8px;margin:16px}
+      input,button {width:280px;height:42px} a {display:block;width:350px;height:45px}
+    </style><div class="ytSearchboxComponentInputContainer">
+      <div><form action="/results"><input name="search_query" role="combobox" type="text" placeholder="Search"></form></div>
+      <button id="submit" aria-label="Search">Search</button>
+    </div><a href="/watch?v=abcdefghijk" title="Observed public result">Observed public result</a>
+    <script>
+      window.effects={searches:0,opens:0};
+      document.querySelector('#submit').onclick=e=>{e.preventDefault();effects.searches++;history.pushState({},'', '/results?search_query='+encodeURIComponent(document.querySelector('input').value))};
+      document.querySelector('a').onclick=e=>{e.preventDefault();effects.opens++;history.pushState({},'',e.currentTarget.href)};
+    </script>`;
+    try {
+      const launched = await launch(owned.extension, owned.root, sitePage);
+      ({ context, server } = launched);
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      const binding = await launched.worker.evaluate(
+        (id) => globalThis.__ellieTestWebMCP.bind(id),
+        tab.id,
+      );
+      assert.equal(binding.availability, "accessibility");
+      const native = (request: Record<string, unknown>) =>
+        launched.worker.evaluate(async (value) => {
+          try {
+            return await globalThis.__ellieTestWebMCP.request(value);
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : "failed" };
+          }
+        }, request);
+      const inspect = async (selected: any) =>
+        native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: selected.bindingId,
+          documentId: selected.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        });
+      const selected = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.status",
+      });
+      let observed = await inspect(selected);
+      assert.equal(observed.value.site.provider, "youtube");
+      assert.equal(observed.value.site.page, "home");
+      assert.deepEqual(observed.value.site.searchControl, observed.value.searchControl);
+      const query = "Artemis official launch";
+      const search = (record: any, documentId = selected.documentId) =>
+        native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: selected.bindingId,
+          documentId,
+          command: {
+            type: "searchObserved",
+            actionId: crypto.randomUUID(),
+            snapshotId: record.value.snapshotId,
+            controlId: record.value.searchControl.id,
+            query,
+          },
+        });
+      assert.equal((await search(observed, "wrong-document")).error, "page_changed");
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 0,
+        opens: 0,
+      });
+      await launched.harness.bringToFront();
+      assert.equal((await search(observed)).error, "page_changed");
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 0,
+        opens: 0,
+      });
+      await launched.page.bringToFront();
+      observed = await inspect(selected);
+      assert.equal(observed.value.site.searchControl.label, "Search");
+      const result = await search(observed);
+      assert.ok(
+        result.value?.outcome === "navigation_observed" || result.error === "unknown",
+        JSON.stringify(result),
+      );
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 1,
+        opens: 0,
+      });
+      assert.ok((await search(observed)).error);
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 1,
+        opens: 0,
+      });
+      const refreshed = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      assert.equal(refreshed.availability, "accessibility");
+      const results = await inspect(refreshed);
+      assert.equal(results.value.site.page, "results");
+      assert.equal(results.value.candidates.length, 1);
+      const open = await native({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: refreshed.bindingId,
+        documentId: refreshed.documentId,
+        command: {
+          type: "open",
+          actionId: crypto.randomUUID(),
+          snapshotId: results.value.snapshotId,
+          candidateId: results.value.candidates[0].id,
+        },
+      });
+      assert.ok(
+        open.value?.outcome === "navigation_observed" || open.error === "unknown",
+        JSON.stringify(open),
+      );
+      assert.deepEqual(await launched.page.evaluate(() => window.effects), {
+        searches: 1,
+        opens: 1,
+      });
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
       await rm(owned.root, { recursive: true, force: true });
     }
   },

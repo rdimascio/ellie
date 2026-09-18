@@ -585,9 +585,14 @@ async function executeCompanion(request, controller) {
     throw new Error("invalid_arguments");
   const binding = liveBinding();
   const selection = liveSelection();
+  const youtubeObserved =
+    binding.availability === "accessibility" && binding.origin === "https://www.youtube.com";
   if (
-    binding.availability !== "companion" ||
-    !companionBindingOrigins.has(binding.origin) ||
+    !(
+      (binding.availability === "companion" && companionBindingOrigins.has(binding.origin)) ||
+      youtubeObserved
+    ) ||
+    (youtubeObserved && !["inspect", "searchObserved", "open"].includes(request.command.type)) ||
     selection.tabId !== binding.tabId ||
     selection.windowId !== binding.windowId ||
     request.bindingId !== binding.bindingId ||

@@ -46,9 +46,15 @@ const uuid = (value: unknown): value is string =>
 /** The DOM companion is limited to the exact selected, reviewed provider document. */
 export class BrowserCompanionOperations {
   private observed?: Observation;
+  private observationEpoch = 0;
   private readonly bridge: Bridge;
   constructor(bridge: Bridge) {
     this.bridge = bridge;
+  }
+
+  invalidate(): void {
+    this.observationEpoch += 1;
+    this.observed = undefined;
   }
 
   private async call(
@@ -84,10 +90,13 @@ export class BrowserCompanionOperations {
     signal: AbortSignal,
   ): Promise<BrowserWebMCPOperationResult> {
     if (
-      binding.availability !== "companion" ||
-      (binding.origin !== "https://www.netflix.com" &&
-        binding.origin !== "https://tv.youtube.com" &&
-        binding.origin !== "https://www.disneyplus.com") ||
+      !(
+        (binding.availability === "companion" &&
+          (binding.origin === "https://www.netflix.com" ||
+            binding.origin === "https://tv.youtube.com" ||
+            binding.origin === "https://www.disneyplus.com")) ||
+        (binding.availability === "accessibility" && binding.origin === "https://www.youtube.com")
+      ) ||
       new URL(binding.url).origin !== binding.origin ||
       binding.expiresAt <= Date.now()
     )
@@ -99,9 +108,9 @@ export class BrowserCompanionOperations {
       this.observed?.documentId !== binding.documentId ||
       this.observed?.url !== binding.url
     )
-      this.observed = undefined;
+      this.invalidate();
     if (action.tool === "browser.status" || action.tool === "browser.refresh") {
-      if (action.tool === "browser.refresh") this.observed = undefined;
+      if (action.tool === "browser.refresh") this.invalidate();
       return browserWebMCPOperationResult({
         ok: true,
         message: "Browser companion tab connected.",
@@ -118,21 +127,36 @@ export class BrowserCompanionOperations {
       throw new Error("Browser page changed before the requested action.");
     if (action.tool === "browser.read") {
       if (action.view !== "summary") throw new Error("Browser view is unsupported.");
-      this.observed = undefined;
+      this.invalidate();
+      const readEpoch = this.observationEpoch;
       if (signal.aborted) throw new Error("Browser request was cancelled.");
       const response = await this.call(
         binding,
         { type: "inspect", actionId: randomUUID() },
         signal,
       );
-      if (signal.aborted || response.status !== "ok")
+      if (signal.aborted || response.status !== "ok" || readEpoch !== this.observationEpoch)
         throw new Error("Browser companion read failed.");
       const raw = response.value as Record<string, unknown>;
+      const topSearch = Object.hasOwn(raw, "searchControl");
       const value = exact(
         raw,
         Object.hasOwn(raw, "rowCandidateId")
-          ? ["snapshotId", "candidates", "playback", "site", "rowCandidateId"]
-          : ["snapshotId", "candidates", "playback", "site"],
+          ? [
+              "snapshotId",
+              "candidates",
+              "playback",
+              "site",
+              "rowCandidateId",
+              ...(topSearch ? ["searchControl"] : []),
+            ]
+          : [
+              "snapshotId",
+              "candidates",
+              "playback",
+              "site",
+              ...(topSearch ? ["searchControl"] : []),
+            ],
       );
       if (
         !uuid(value.snapshotId) ||
@@ -173,12 +197,26 @@ export class BrowserCompanionOperations {
       if (
         checked.browser.operation !== "read" ||
         checked.browser.view.site?.provider !==
-          (binding.origin === "https://www.netflix.com"
-            ? "netflix"
-            : binding.origin === "https://tv.youtube.com"
-              ? "youtube_tv"
-              : "disneyplus")
+          (binding.origin === "https://www.youtube.com"
+            ? "youtube"
+            : binding.origin === "https://www.netflix.com"
+              ? "netflix"
+              : binding.origin === "https://tv.youtube.com"
+                ? "youtube_tv"
+                : "disneyplus")
       )
+        throw new Error("Browser companion observation is invalid.");
+      if (
+        binding.origin === "https://www.youtube.com" &&
+        (topSearch !== Boolean(checked.browser.view.site.searchControl) ||
+          (topSearch &&
+            (exact(value.searchControl, ["id", "label"]).id !==
+              checked.browser.view.site.searchControl?.id ||
+              exact(value.searchControl, ["id", "label"]).label !==
+                checked.browser.view.site.searchControl?.label)))
+      )
+        throw new Error("Browser companion observation is invalid.");
+      if (binding.origin !== "https://www.youtube.com" && topSearch)
         throw new Error("Browser companion observation is invalid.");
       this.observed = {
         bindingId: binding.bindingId,
@@ -199,16 +237,19 @@ export class BrowserCompanionOperations {
     const observed = this.observed;
     if (!observed)
       throw new Error(
-        binding.origin === "https://www.netflix.com"
-          ? "Read the Netflix page before an action."
-          : binding.origin === "https://tv.youtube.com"
-            ? "Read the YouTube TV page before an action."
-            : "Read the Disney+ page before an action.",
+        binding.origin === "https://tv.youtube.com"
+          ? "Read the YouTube TV page before an action."
+          : binding.origin === "https://www.disneyplus.com"
+            ? "Read the Disney+ page before an action."
+            : `Read the ${binding.origin === "https://www.youtube.com" ? "YouTube" : "Netflix"} page before an action.`,
       );
     if (observed.site.page === "login" || observed.site.page === "unsupported")
       throw new Error("Selected browser page needs attention before an action.");
     const youtubeTV = binding.origin === "https://tv.youtube.com";
     const disneyplus = binding.origin === "https://www.disneyplus.com";
+    const youtube = binding.origin === "https://www.youtube.com";
+    if (youtube && action.tool !== "browser.search" && action.tool !== "browser.select")
+      throw new Error("YouTube observed controls support only search and title selection.");
     if (disneyplus && (action.tool !== "browser.select" || observed.site.page !== "browse"))
       throw new Error("Disney+ exposes only observed title links on this page.");
     if (
@@ -224,10 +265,12 @@ export class BrowserCompanionOperations {
     let command: BrowserCompanionCommand;
     if (action.tool === "browser.search") {
       if (
-        (observed.site.page !== "browse" && observed.site.page !== "results") ||
+        (youtube
+          ? observed.site.page !== "home" && observed.site.page !== "results"
+          : observed.site.page !== "browse" && observed.site.page !== "results") ||
         !observed.searchControl
       )
-        throw new Error("Netflix search control is unavailable; read the page again.");
+        throw new Error("Observed search control is unavailable; read the page again.");
       command = {
         type: "searchObserved",
         actionId: randomUUID(),
@@ -259,10 +302,12 @@ export class BrowserCompanionOperations {
         );
     } else if (action.tool === "browser.select") {
       if (
-        (observed.site.page !== "browse" && observed.site.page !== "results") ||
+        (youtube
+          ? observed.site.page !== "results"
+          : observed.site.page !== "browse" && observed.site.page !== "results") ||
         !observed.items.has(action.itemId)
       )
-        throw new Error("Netflix selection is stale.");
+        throw new Error("Observed selection is stale.");
       command = {
         type: "open",
         actionId: randomUUID(),
@@ -278,7 +323,7 @@ export class BrowserCompanionOperations {
       command = { type: action.action, actionId: randomUUID() };
     } else throw new Error("Browser operation is unsupported.");
     // Once admitted, the mutation consumes the observation even if its result is lost.
-    this.observed = undefined;
+    this.invalidate();
     if (signal.aborted) throw new Error("Browser request was cancelled.");
     let status: "unknown" | "failed" | "cancelled" = "unknown";
     try {

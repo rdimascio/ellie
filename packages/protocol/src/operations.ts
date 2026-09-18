@@ -534,8 +534,12 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         (hasSearchControl &&
           (() => {
             if (
-              observed.provider !== "netflix" ||
-              (observed.page !== "browse" && observed.page !== "results")
+              !(
+                (observed.provider === "netflix" &&
+                  (observed.page === "browse" || observed.page === "results")) ||
+                (observed.provider === "youtube" &&
+                  (observed.page === "home" || observed.page === "results"))
+              )
             )
               return true;
             try {
@@ -567,6 +571,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     if (
       browser.source === "companion" &&
       site?.provider !== "netflix" &&
+      site?.provider !== "youtube" &&
       site?.provider !== "youtube_tv" &&
       site?.provider !== "disneyplus"
     )

@@ -134,7 +134,7 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"netflix","page":"home","playback":"unavailable"}"#,
       #"{"provider":"netflix","page":"login","playback":"playing"}"#,
       #"{"provider":"youtube","page":"results","playback":"unavailable","horizontalScrollAvailable":true}"#,
-      #"{"provider":"youtube","page":"results","playback":"unavailable"}"#,
+      #"{"provider":"youtube","page":"watch","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#,
       #"{"provider":"netflix","page":"watch","playback":"paused","horizontalScrollAvailable":true}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","horizontalScrollAvailable":1}"#,
       #"{"provider":"netflix","page":"watch","playback":"paused","rows":[]}"#,
@@ -162,6 +162,27 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"youtube_tv","page":"browse","playback":"playing"}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","rows":[]}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
+    ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
+  }
+
+  func testYouTubeCompanionSearchControlDecodesOnlyOnObservedHomeOrResults() throws {
+    let revision = String(repeating: "a", count: 64)
+    func read(_ site: String, source: String = "companion") -> Data {
+      Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    }
+    let control = #""searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}"#
+    for page in ["home", "results"] {
+      let site = "{\"provider\":\"youtube\",\"page\":\"\(page)\",\"playback\":\"unavailable\",\(control)}"
+      guard case .page(let observed) = try decodeBrowserPhoneResponse(read(site), nodeID: "mac")
+      else { return XCTFail("Expected selected YouTube observation") }
+      XCTAssertEqual(observed.source, .companion)
+      XCTAssertEqual(observed.site?.searchControl?.label, "Search")
+    }
+    for invalid in [
+      #"{"provider":"youtube","page":"watch","playback":"paused","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#,
+      #"{"provider":"youtube","page":"home","playback":"unavailable","searchControl":{"id":"input","label":"Search"}}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
@@ -304,6 +325,48 @@ final class BrowserPhoneControlTests: XCTestCase {
         XCTAssertEqual(actions.count, 2, "A rejected observed state cannot dispatch")
       }
     }
+  }
+
+  @MainActor
+  func testYouTubeCompanionSearchAndAccessibilityControlsKeepDistinctSources() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let site = BrowserPhoneSite(provider: .youtube, page: .home, playback: .unavailable,
+      currentTimeSeconds: nil, searchControl: BrowserPhoneSearchControl(
+        id: "10000000-0000-4000-8000-000000000003", label: "Search"))
+    let transport = BrowserPhoneFakeTransport(source: .companion, commandStatus: .unknown,
+      site: site, statusSource: .accessibility)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.canPerform(.search(query: "public video"), on: node))
+    XCTAssertTrue(store.perform(.search(query: "public video"), on: node))
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertNil(store.page)
+    XCTAssertFalse(store.canPerform(.search(query: "public video"), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions.count, 3)
+    XCTAssertEqual(actions[2], .search("public video", revision: String(repeating: "a", count: 64)))
+
+    let axTransport = BrowserPhoneFakeTransport(source: .companion, commandStatus: .unknown,
+      site: site, statusSource: .accessibility)
+    let axStore = BrowserPhoneControlStore(credential: credential(), transport: axTransport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(axStore.refresh(on: node))
+    await eventually { axStore.phase == .ready }
+    XCTAssertTrue(axStore.perform(.scroll(.down), on: node))
+    await eventually { if case .unknown = axStore.phase { true } else { false } }
+
+    let spoof = BrowserPhoneFakeTransport(source: .companion,
+      site: BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), statusSource: .accessibility)
+    let rejected = BrowserPhoneControlStore(credential: credential(), transport: spoof,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(rejected.refresh(on: node))
+    await eventually { if case .failed = rejected.phase { true } else { false } }
+    XCTAssertNil(rejected.page)
+    XCTAssertFalse(rejected.canPerform(.search(query: "title"), on: node))
   }
 
   func testCanonicalAccessibilityResultsDecodeWithoutWeakeningTheClosedSourceSet() throws {
@@ -1092,6 +1155,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private let readFailure: PhoneControlFailure?
   private let commandError: Bool
   private let source: BrowserPhoneSource
+  private let statusSource: BrowserPhoneSource?
   private let commandStatus: BrowserPhoneCommandStatus?
   private let items: [BrowserPhoneItem]
   private let site: BrowserPhoneSite?
@@ -1101,12 +1165,13 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     delayRead: Bool = false, readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
     items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)],
-    site: BrowserPhoneSite? = nil
+    site: BrowserPhoneSite? = nil, statusSource: BrowserPhoneSource? = nil
   ) {
     self.delayRead = delayRead
     self.readFailure = readFailure
     self.commandError = commandError
     self.source = source
+    self.statusSource = statusSource
     self.commandStatus = commandStatus
     self.items = items
     self.site = site
@@ -1117,7 +1182,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     actions.append(action)
     let revision = String(repeating: "a", count: 64)
     switch action {
-    case .status, .refresh: return .status(source: source, connected: true, revision: revision)
+    case .status, .refresh: return .status(source: statusSource ?? source, connected: true, revision: revision)
     case .read:
       if delayRead { await withCheckedContinuation { readContinuation = $0 } }
       if let readFailure { throw readFailure }
@@ -1128,10 +1193,12 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     default:
       if commandError { throw PhoneControlFailure.unavailable }
       if let commandStatus {
-        return .command(source: source, status: commandStatus, revision: revision)
+        return .command(source: site?.provider == .youtube && action.isYouTubeAccessibilityControl
+          ? .accessibility : source, status: commandStatus, revision: revision)
       }
       await withCheckedContinuation { commandContinuation = $0 }
-      return .command(source: source, status: .completed, revision: revision)
+      return .command(source: site?.provider == .youtube && action.isYouTubeAccessibilityControl
+        ? .accessibility : source, status: .completed, revision: revision)
     }
   }
   func finishCommand() {
