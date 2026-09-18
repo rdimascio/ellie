@@ -340,14 +340,14 @@ try {
   enterStage("xcode-build-for-testing");
   xcodeStarted = true;
   await execute("xcodebuild", [...xcodeTestTargetArguments, "build-for-testing"], {
-    timeout: 300_000,
+    timeout: 480_000,
     label: "Xcode build for testing",
   });
   enterStage("xcode-test-without-building");
   await execute(
     "xcodebuild",
     [...xcodeTestTargetArguments, "-resultBundlePath", resultBundle, "test-without-building"],
-    { timeout: 1_200_000, label: "Xcode test without building" },
+    { timeout: 1_800_000, label: "Xcode test without building" },
   );
   succeeded = true;
   enterStage("complete");

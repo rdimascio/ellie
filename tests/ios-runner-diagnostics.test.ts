@@ -50,7 +50,7 @@ async function fixture(mode: FixtureMode) {
   }
   if (mode === "test-suite-timeout") {
     const shortened = runner.replace(
-      '{ timeout: 1_200_000, label: "Xcode test without building" }',
+      '{ timeout: 1_800_000, label: "Xcode test without building" }',
       '{ timeout: 100, label: "Xcode test without building" }',
     );
     assert.notEqual(shortened, runner, "UI suite deadline fixture replacement must apply");

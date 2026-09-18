@@ -14,6 +14,8 @@ struct EllieIOSApp: App {
                     narrowLayout: ProcessInfo.processInfo.arguments.contains("--ellie-ui-home-narrow"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-gmail-read-fixture") {
                 IOSGmailUITestFixtureView()
+            } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-quiet-session-fixture") {
+                IOSQuietSessionsUITestFixtureView()
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-reviewed-browser-fixture") {
                 BrowserVoiceUITestFixtureView(
                     completeActions: ProcessInfo.processInfo.arguments.contains(

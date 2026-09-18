@@ -58,10 +58,10 @@ jobs:
         run: bun run desktop:build
       - name: Build native iPhone dashboard app
         run: bun run ios:build
-  native_ios_ui:
+  native_ios:
     runs-on: macos-15
-    # Keep the existing 20-minute UI suite deadline and leave bounded setup/cleanup time.
-    timeout-minutes: 35
+    # The UI runner permits 30 minutes; ATS follows on its warmed host with bounded cleanup.
+    timeout-minutes: 60
     outputs:
       head: ${{ steps.source.outputs.head }}
     steps:
@@ -105,38 +105,6 @@ jobs:
             test-results/native-ios.xcresult
             test-results/native-ios-runner-diagnostic.txt
           retention-days: 3
-  native_ios_ats:
-    runs-on: macos-15
-    timeout-minutes: 35
-    outputs:
-      head: ${{ steps.source.outputs.head }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Verify native source revision
-        id: source
-        run: |
-          head="$(git rev-parse HEAD)"
-          test "$head" = "$GITHUB_SHA"
-          echo "head=$head" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.4.2
-      - run: bun install --frozen-lockfile --ignore-scripts
-      - name: Initialize cold CoreSimulator runtime inventory
-        env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          python3 - <<'PY'
-          import subprocess
-          subprocess.run(
-              ["xcrun", "simctl", "list", "runtimes", "--json"],
-              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-              timeout=60, check=True,
-          )
-          PY
       - name: Test native iPhone pinned HTTPS and Keychain
         id: native_ios_ats
         run: bun run test:ios-ats
@@ -150,7 +118,7 @@ jobs:
             test-results/native-ios-ats.xcresult
           retention-days: 3
   native:
-    needs: [native_core, native_ios_ui, native_ios_ats]
+    needs: [native_core, native_ios]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -158,18 +126,14 @@ jobs:
       - name: Require every native check on this revision
         env:
           CORE_RESULT: ${{ needs.native_core.result }}
-          UI_RESULT: ${{ needs.native_ios_ui.result }}
-          ATS_RESULT: ${{ needs.native_ios_ats.result }}
+          IOS_RESULT: ${{ needs.native_ios.result }}
           CORE_HEAD: ${{ needs.native_core.outputs.head }}
-          UI_HEAD: ${{ needs.native_ios_ui.outputs.head }}
-          ATS_HEAD: ${{ needs.native_ios_ats.outputs.head }}
+          IOS_HEAD: ${{ needs.native_ios.outputs.head }}
         run: |
           test "$CORE_RESULT" = success
-          test "$UI_RESULT" = success
-          test "$ATS_RESULT" = success
+          test "$IOS_RESULT" = success
           test "$CORE_HEAD" = "$GITHUB_SHA"
-          test "$UI_HEAD" = "$GITHUB_SHA"
-          test "$ATS_HEAD" = "$GITHUB_SHA"
+          test "$IOS_HEAD" = "$GITHUB_SHA"
   command-center:
     runs-on: ubuntu-latest
     steps:

@@ -1317,6 +1317,10 @@ export class LifeHttpServer {
       }
       if (path === "/api/life/conversations" && request.method === "GET")
         return this.conversations(url, response);
+      if (path === "/api/life/native/sessions" && request.method === "GET")
+        return this.nativeSessions(url, response);
+      if (/^\/api\/life\/native\/sessions\/[^/]+$/.test(path) && request.method === "GET")
+        return this.nativeSession(path, response);
       if (
         /^\/api\/life\/conversations\/[^/]+\/pending-intent$/.test(path) &&
         request.method === "GET"
@@ -3166,6 +3170,116 @@ export class LifeHttpServer {
       conversations: page.items.map((item) => this.conversationSummary(item)),
       chatEpoch: this.options.store.chatEpoch(this.actor),
       page: { hasMore: page.hasMore, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) },
+    });
+  }
+  // The native review surface is deliberately narrower than the web conversation and task APIs.
+  // Only durable turn results from this actor's own conversations can link work into a session.
+  private nativeSessions(url: URL, response: ServerResponse): void {
+    const rawLimit = url.searchParams.get("limit");
+    const parameters = [...url.searchParams.entries()];
+    if (
+      parameters.length > 2 ||
+      parameters.some(([key]) => key !== "limit" && key !== "cursor") ||
+      parameters.filter(([key]) => key === "limit").length > 1 ||
+      parameters.filter(([key]) => key === "cursor").length > 1 ||
+      (url.searchParams.has("cursor") &&
+        !/^[A-Za-z0-9_-]{1,512}$/.test(url.searchParams.get("cursor") ?? ""))
+    )
+      throw new HttpError(400, "Session query is invalid.");
+    const limit = rawLimit === null ? 3 : Number(rawLimit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 20)
+      throw new HttpError(400, "Session limit is invalid.");
+    const page = this.options.store.listConversations(this.actor, {
+      scope: { type: "user", id: this.actor.userId },
+      limit,
+      ...(url.searchParams.get("cursor") ? { cursor: url.searchParams.get("cursor")! } : {}),
+    });
+    this.send(response, 200, {
+      sessions: page.items.map((item) => ({
+        id: item.id,
+        title: Array.from(item.title).slice(0, 160).join(""),
+        updatedAt: new Date(item.updatedAt).toISOString(),
+        turnCount: item.turnCount,
+        pending: item.pending,
+      })),
+      page: { hasMore: page.hasMore, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) },
+    });
+  }
+  private nativeSession(path: string, response: ServerResponse): void {
+    const id = identifier(decodeURIComponent(path.split("/").at(-1)!), "conversationId"),
+      detail = this.options.store.getConversation(this.actor, id, { limit: 12 }),
+      original = this.options.store.getConversationOriginalTurn(this.actor, id),
+      linked = this.options.store.getConversationLinkedTaskIds(this.actor, id);
+    if (
+      detail.conversation.scope.type !== "user" ||
+      detail.conversation.scope.id !== this.actor.userId
+    )
+      throw new HttpError(404, "Session unavailable.");
+    const owner = `user:${this.actor.userId}` as OwnerScope;
+    const activity = linked.items.flatMap((taskId) => {
+      const task = this.options.tasks.get(taskId, owner);
+      if (!task || task.owner !== owner) return [];
+      const verified = this.verifiedTaskResult(task, detail.conversation.scope);
+      const finding =
+        task.state === "succeeded" &&
+        task.outcomeVerified === true &&
+        verified &&
+        "result" in verified &&
+        verified.result.status === "complete" &&
+        Array.isArray(verified.result.citations) &&
+        verified.result.citations.length > 0
+          ? {
+              summary: Array.from(String(verified.result.summary)).slice(0, 600).join(""),
+              citations: Array.isArray(verified.result.citations)
+                ? verified.result.citations.slice(0, 4).map((citation) => ({
+                    title: Array.from(String(citation.title)).slice(0, 160).join(""),
+                    sourceId: citation.sourceId,
+                    sourceRevision: citation.sourceRevision,
+                  }))
+                : [],
+            }
+          : undefined;
+      return [
+        {
+          id: task.id,
+          state: task.state,
+          updatedAt: new Date(task.updatedAt).toISOString(),
+          progress: this.options.tasks
+            .progress(task.id, owner)
+            .slice(-4)
+            .map((point) => ({
+              at: new Date(point.at).toISOString(),
+              message: Array.from(point.message).slice(0, 200).join(""),
+            })),
+          ...(finding ? { finding } : {}),
+          ...(task.state === "succeeded" &&
+          task.outcomeVerified === true &&
+          verified &&
+          "stale" in verified &&
+          verified.stale
+            ? { findingStale: true }
+            : {}),
+        },
+      ];
+    });
+    this.send(response, 200, {
+      session: {
+        id,
+        title: Array.from(detail.conversation.title).slice(0, 160).join(""),
+        updatedAt: new Date(detail.conversation.updatedAt).toISOString(),
+        pending: detail.conversation.pending,
+      },
+      originalRequest: original ? Array.from(original.user).slice(0, 1_000).join("") : "",
+      turns: detail.turns.items.map((turn) => ({
+        id: turn.id,
+        request: Array.from(turn.user).slice(0, 1_000).join(""),
+        ...(turn.assistant ? { reply: Array.from(turn.assistant).slice(0, 2_000).join("") } : {}),
+        status: turn.status,
+        updatedAt: new Date(turn.updatedAt).toISOString(),
+      })),
+      activity,
+      activityLimited: linked.limited,
+      page: { hasMore: detail.turns.hasMore },
     });
   }
   private conversation(path: string, url: URL, response: ServerResponse): void {
