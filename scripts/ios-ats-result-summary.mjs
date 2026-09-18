@@ -4,6 +4,13 @@ const googleCases = [
   "NativeGoogleHTTPSIntegrationTests/testPinnedNativeLifeQuestionUsesSeparateGrantAndDurableReadOnlyStatus()",
   "NativeGoogleHTTPSIntegrationTests/testPinnedClientsReadSelectedCalendarAndExplicitGmailBodies()",
 ];
+const householdCases = [
+  "HouseholdChoresHTTPSIntegrationTests/testTwoEnrolledClientsUsePinnedProductionChoresWithNoWriteReplay()",
+];
+const quietCases = [
+  "QuietLifeHTTPSIntegrationTests/testPinnedSessionsReadVerifiedActivityAndReconcileOneReviewedVoiceTurnAfterStoreReconstruction()",
+  "QuietLifeHTTPSIntegrationTests/testCancelledAndRevokedDelayedPinnedDetailNeverPublishesOrResends()",
+];
 
 export function verifiedATSResult(summary, tests) {
   const counts = {
@@ -46,5 +53,13 @@ export function verifiedATSResult(summary, tests) {
     if (cases.filter((test) => test.nodeIdentifier === name).length !== 1)
       throw new Error("An expected Google HTTPS test did not pass exactly once.");
   }
-  return { xcresultOutcome: "Passed", counts, googleCases };
+  for (const name of householdCases) {
+    if (cases.filter((test) => test.nodeIdentifier === name).length !== 1)
+      throw new Error("An expected household HTTPS test did not pass exactly once.");
+  }
+  for (const name of quietCases) {
+    if (cases.filter((test) => test.nodeIdentifier === name).length !== 1)
+      throw new Error("An expected Quiet HTTPS test did not pass exactly once.");
+  }
+  return { xcresultOutcome: "Passed", counts, googleCases, householdCases, quietCases };
 }

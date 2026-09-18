@@ -20,6 +20,7 @@ import { NativeAuth } from "../apps/server/src/native-auth.ts";
 import { NativeSpeech } from "../apps/server/src/native-speech.ts";
 import { WhisperCliSpeechInput } from "../packages/speech/src/index.ts";
 import { createIOSGoogleLifeFixture } from "./ios-google-life-fixture.mjs";
+import { createIOSHouseholdChoresFixture } from "./ios-household-chores-fixture.mjs";
 import { fixtureNodeLauncher } from "./ios-fixture-node-launcher.mjs";
 import { verifiedATSResult } from "./ios-ats-result-summary.mjs";
 import { parseAppleVersion, selectCompatibleIOSRuntime } from "./ios-runtime-selection.mjs";
@@ -40,6 +41,7 @@ let simulatorID,
   nativeAuth,
   nativeSpeech,
   googleLife,
+  chores,
   activeChild,
   interruptChild,
   requestedSignal,
@@ -84,6 +86,14 @@ const googleTokens = {
   denied: "34".repeat(32),
   revocable: "78".repeat(32),
 };
+const quietControlRoute =
+  /^\/__ellie-test\/quiet\/(stats|arm-detail|detail-started\/[0-9]+|release-detail|detail-settled\/[0-9]+|arm-chat-response|chat-response-held\/[0-9]+|release-chat-response|chat-response-released\/[0-9]+)$/;
+const quietTokens = {
+  allowed: "9a".repeat(32),
+  denied: "9b".repeat(32),
+  revocable: "9c".repeat(32),
+};
+let quietControls = 0;
 
 function enterDiagnosticStage(stage) {
   diagnosticStage = stage;
@@ -95,7 +105,11 @@ function endpointStage(request) {
   if (
     path?.startsWith("/native/v1/speech/") ||
     path?.startsWith("/__ellie-test/speech/") ||
-    path?.startsWith("/__ellie-test/google/")
+    path?.startsWith("/__ellie-test/google/") ||
+    path?.startsWith("/__ellie-test/chores/") ||
+    path?.startsWith("/native/v1/household/") ||
+    quietControlRoute.test(request.url ?? "") ||
+    /^\/api\/life\/native\/sessions(?:$|\/[^/]+$)/.test(path ?? "")
   ) {
     return undefined;
   }
@@ -448,6 +462,16 @@ if (audio[44] >= 3) {
     "google-denied",
     "invite-google-revocable",
     "google-revocable",
+    "invite-quiet-allowed",
+    "quiet-allowed",
+    "invite-quiet-denied",
+    "quiet-denied",
+    "invite-quiet-revocable",
+    "quiet-revocable",
+    "invite-chores-a",
+    "chores-client-a",
+    "invite-chores-b",
+    "chores-client-b",
   ];
   nativeAuth = new NativeAuth(NativeAuth.empty(), async () => {}, {
     token: () => "a".repeat(64),
@@ -515,12 +539,46 @@ if (audio[44] >= 3) {
   }
   const googleDirectory = join(owned, "google-life");
   mkdirSync(googleDirectory, { mode: 0o700 });
+  const quietClients = {};
+  for (const role of ["allowed", "denied", "revocable"]) {
+    const invitation = await nativeAuth.invite({
+      label: `Quiet ${role}`,
+      grants: [{ target: "quiet-fixture-no-node", capabilities: ["app.open"] }],
+    });
+    quietClients[role] = await nativeAuth.pair(invitation.code, quietTokens[role]);
+    if (quietClients[role].id !== `quiet-${role}`)
+      throw new Error("Quiet fixture client identity is invalid.");
+  }
   googleLife = await createIOSGoogleLifeFixture({
     directory: googleDirectory,
     nativeAuth,
-    grantedClientIds: [googleClients.allowed.id, googleClients.revocable.id],
+    grantedClientIds: [
+      googleClients.allowed.id,
+      googleClients.revocable.id,
+      quietClients.allowed.id,
+      quietClients.revocable.id,
+    ],
+    quiet: true,
   });
+  if (!googleLife.quiet) throw new Error("Synthetic Quiet fixture is unavailable.");
   baselineChatEvidence = googleLife.control.chatEvidence();
+  const choresTokens = { a: "ab".repeat(32), b: "bc".repeat(32) };
+  const choresClients = {};
+  for (const role of ["a", "b"]) {
+    const invitation = await nativeAuth.invite({
+      label: `Synthetic chores ${role}`,
+      grants: [{ target: "chores-fixture-no-node", capabilities: ["app.open"] }],
+    });
+    choresClients[role] = await nativeAuth.pair(invitation.code, choresTokens[role]);
+    if (choresClients[role].id !== `chores-client-${role}`)
+      throw new Error("Chores fixture client identity is invalid.");
+  }
+  chores = await createIOSHouseholdChoresFixture({
+    directory: join(owned, "chores-household"),
+    nativeAuth,
+    clients: choresClients,
+    tokens: choresTokens,
+  });
   const disconnectBearer = `Bearer ${"de".repeat(32)}`;
   const cancelBearer = `Bearer ${"cd".repeat(32)}`;
   readSpeechMarkers = () => {
@@ -555,6 +613,7 @@ if (audio[44] >= 3) {
     origin,
     auth: browserAuth,
     nativeAuth,
+    household: chores.household,
     speech: nativeSpeech,
     nativeLife: googleLife.nativeLife,
     lifeApplication: googleLife.lifeApplication,
@@ -577,6 +636,60 @@ if (audio[44] >= 3) {
   hosted.server.removeAllListeners("request");
   hosted.server.on("request", (request, response) => {
     recordEndpointRequest(request, response);
+    if (chores.handleControl(request, response)) return;
+    chores.wrapProduction(request, response);
+    const quietAction = quietControlRoute.exec(request.url ?? "");
+    if (quietAction) {
+      void (async () => {
+        const valid =
+          request.method === "GET" &&
+          request.headers.authorization === `Bearer ${quietTokens.allowed}` &&
+          request.headers["x-ellie-version"] === "1";
+        let ok = valid;
+        if (ok) {
+          quietControls++;
+          const action = quietAction[1];
+          const control = googleLife.quiet.control;
+          if (action === "arm-detail") control.armDetail();
+          else if (action === "release-detail") control.releaseDetail();
+          else if (action === "arm-chat-response") control.armChatResponse();
+          else if (action === "release-chat-response") control.releaseChatResponse();
+          else if (action !== "stats") {
+            const [counter, targetText] = action.split("/");
+            const target = Number(targetText);
+            const read =
+              counter === "detail-started"
+                ? control.detailStarted
+                : counter === "detail-settled"
+                  ? control.detailSettled
+                  : counter === "chat-response-held"
+                    ? control.chatResponseHeld
+                    : control.chatResponseReleased;
+            const deadline = Date.now() + 5_000;
+            while (read() < target && Date.now() < deadline)
+              await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+            ok = read() >= target;
+          }
+        }
+        const control = googleLife.quiet.control;
+        response.writeHead(ok ? 200 : 409, {
+          "content-type": "application/json",
+          "cache-control": "no-store",
+        });
+        response.end(
+          JSON.stringify({
+            ok,
+            detailStarted: control.detailStarted(),
+            detailSettled: control.detailSettled(),
+            chatResponseHeld: control.chatResponseHeld(),
+            chatResponseReleased: control.chatResponseReleased(),
+            nativeChatPosts: control.nativeChatPosts(),
+            durableTurns: control.durableTurns(),
+          }),
+        );
+      })().catch(() => response.destroy());
+      return;
+    }
     const googleControl =
       /^\/__ellie-test\/google\/(held-started\/[123]|settled\/[123]|release)$/.exec(
         request.url ?? "",
@@ -835,6 +948,18 @@ if (audio[44] >= 3) {
               readFileSync(resolve(root, "apps/ios/Tests/NativeGoogleHTTPSIntegrationTests.swift")),
             )
             .digest("hex"),
+          choresTests: createHash("sha256")
+            .update(
+              readFileSync(
+                resolve(root, "apps/ios/Tests/HouseholdChoresHTTPSIntegrationTests.swift"),
+              ),
+            )
+            .digest("hex"),
+          quietTests: createHash("sha256")
+            .update(
+              readFileSync(resolve(root, "apps/ios/Tests/QuietLifeHTTPSIntegrationTests.swift")),
+            )
+            .digest("hex"),
         },
       },
       null,
@@ -862,7 +987,7 @@ if (audio[44] >= 3) {
   }
   if (
     JSON.stringify(endpointRequests) !==
-      JSON.stringify({ session: 1, inventory: 2, command: 1, logout: 2, unexpected: 0 }) ||
+      JSON.stringify({ session: 1, inventory: 2, command: 1, logout: 3, unexpected: 0 }) ||
     JSON.stringify(endpointResponses) !== JSON.stringify(endpointRequests)
   ) {
     throw new Error("The synthetic listener observed an unexpected request lifecycle.");
@@ -875,10 +1000,10 @@ if (audio[44] >= 3) {
     googleRequests.preview < 1 ||
     googleRequests.detail < 6 ||
     googleRequests.chatState < 1 ||
-    googleRequests.chatSend !== 1 ||
-    googleRequests.chatStatus !== 1 ||
-    googleLife.control.chatEvidence().plans !== 1 ||
-    googleLife.control.chatEvidence().conversations !== baselineChatEvidence.conversations + 1 ||
+    googleRequests.chatSend !== 2 ||
+    googleRequests.chatStatus !== 2 ||
+    googleLife.control.chatEvidence().plans !== 2 ||
+    googleLife.control.chatEvidence().conversations !== baselineChatEvidence.conversations + 2 ||
     googleLife.control.chatEvidence().records !== baselineChatEvidence.records ||
     googleLife.control.chatEvidence().tasks !== baselineChatEvidence.tasks ||
     googleLife.control.bodyReads().unicode_message !== 1 ||
@@ -887,6 +1012,37 @@ if (audio[44] >= 3) {
   ) {
     throw new Error("The Google fixture did not traverse the expected finite Life routes.");
   }
+  if (
+    quietControls !== 20 ||
+    googleLife.quiet.control.nativeChatPosts() !== 2 ||
+    googleLife.quiet.control.detailStarted() !== 3 ||
+    googleLife.quiet.control.detailSettled() !== 3 ||
+    googleLife.quiet.control.chatResponseHeld() !== 1 ||
+    googleLife.quiet.control.chatResponseReleased() !== 1
+  ) {
+    throw new Error("The pinned Quiet fixture did not traverse the expected finite lifecycle.");
+  }
+  console.log(
+    `ATS Quiet HTTPS: ${quietControls} controls, ${googleLife.quiet.control.detailStarted()} held details, ` +
+      `${googleLife.quiet.control.nativeChatPosts()} combined Google and Quiet chat POSTs.`,
+  );
+  if (
+    chores.counts.writes !== 3 ||
+    chores.counts.dropped !== 1 ||
+    chores.counts.held !== 1 ||
+    chores.counts.releaseAttempts !== 1 ||
+    chores.counts.reads !== 5 ||
+    chores.counts.controls !== 5
+  ) {
+    throw new Error(
+      "The pinned chores fixture did not traverse the expected finite write/read lifecycle.",
+    );
+  }
+  console.log(
+    `ATS household HTTPS: ${chores.counts.reads} reads, ${chores.counts.writes} conditional PUTs, ` +
+      `${chores.counts.dropped} dropped response, ${chores.counts.held} held response, ` +
+      `${chores.counts.releaseAttempts} canceled-response release attempt.`,
+  );
   enterDiagnosticStage("built-policy");
   const appInfo = JSON.parse(
     await execute(
@@ -928,9 +1084,11 @@ if (audio[44] >= 3) {
   }
   const teardownSettled = await settleFixtureTeardown(async () => {
     googleLife?.control.releaseHeld();
+    googleLife?.quiet?.releaseAll();
     await googleLife?.close();
     await nativeSpeech?.close();
     await nativeAuth?.close();
+    await chores?.close();
     await browserAuth?.close();
   });
   if (simulatorID) {
