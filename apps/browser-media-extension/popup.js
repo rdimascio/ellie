@@ -46,7 +46,10 @@ async function run(command) {
       ambiguous_video: "More than one visible video.",
       busy: "Another action is still running.",
     };
-    status.textContent = friendly[error.message] || "The action could not be verified.";
+    status.textContent =
+      command.type === "searchObserved"
+        ? "Search outcome unverified. Inspect the current page before another action."
+        : friendly[error.message] || "The action could not be verified.";
   }
 }
 stop.onclick = async () => {

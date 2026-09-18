@@ -109,6 +109,64 @@ test(
 );
 
 test(
+  "a full search navigation permits one explicit fresh results inspection without replay",
+  { timeout: 15_000 },
+  async () => {
+    let browser: Browser | undefined;
+    try {
+      browser = await chromium.launch({ headless: true, channel: "chromium" });
+      const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+      await page.route("https://www.youtube.com/**", (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: route.request().url().includes("/results?")
+            ? `<a href="/watch?v=abcdefghijk" title="Observed public title">Observed public title</a>`
+            : fixture
+                .replace(
+                  /window\.effects\.searches\+\+;/,
+                  "sessionStorage.setItem('searchClicks', String(Number(sessionStorage.getItem('searchClicks') || 0) + 1));",
+                )
+                .replace(
+                  /history\.pushState\(\{\}, '', '\/results\?search_query=' \+ encodeURIComponent\(value\)\);/,
+                  "location.href = '/results?search_query=' + encodeURIComponent(value);",
+                ),
+        }),
+      );
+      await page.goto(home);
+      await page.addScriptTag({ path: controller });
+      const first = await dispatch(page, { type: "inspect", actionId: id() }, home);
+      const search = dispatch(
+        page,
+        {
+          type: "searchObserved",
+          actionId: id(),
+          snapshotId: first.snapshotId,
+          controlId: first.searchControl.id,
+          query,
+        },
+        home,
+      ).catch(() => undefined);
+      await page.waitForURL(results, { waitUntil: "domcontentloaded" });
+      await search;
+      assert.equal(await page.evaluate(() => sessionStorage.getItem("searchClicks")), "1");
+      await page.addScriptTag({ path: controller });
+      const observed = await dispatch(page, { type: "inspect", actionId: id() }, results);
+      assert.equal(observed.site.page, "results");
+      assert.equal(
+        observed.candidates.filter(
+          (entry: { title: string }) => entry.title === "Observed public title",
+        ).length,
+        1,
+      );
+      assert.equal(await page.evaluate(() => sessionStorage.getItem("searchClicks")), "1");
+    } finally {
+      await browser?.close();
+    }
+  },
+);
+
+test(
   "YouTube changed, covered or ambiguous search controls do not dispatch",
   { timeout: 15_000 },
   async () => {

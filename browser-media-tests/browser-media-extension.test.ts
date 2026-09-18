@@ -677,6 +677,10 @@ test("popup submits only the search control from its fresh observed page", async
   assert.equal(sent[1].command.controlId, "observed-search");
   assert.equal(sent[1].command.query, "NASA Artemis official launch");
   assert.equal(elements.get("observed-search").hidden, true);
+  assert.equal(
+    elements.get("status").textContent,
+    "Search outcome unverified. Inspect the current page before another action.",
+  );
   await elements.get("search-submit").onclick();
   assert.equal(sent.length, 2, "a consumed observation cannot dispatch a second search");
 });
@@ -791,6 +795,7 @@ async function fixture(
     stableNativePort?: boolean;
     companionOnly?: boolean;
     companionArming?: boolean;
+    youtubeSearch?: boolean;
     youtubeTVOnly?: boolean;
     disneyOnly?: boolean;
   } = {},
@@ -835,6 +840,9 @@ async function fixture(
   assert.equal(background.split(tabGetNeedle).length - 1, 1);
   const effectNeedle = "  authorizeEffect?.();";
   assert.equal(background.split(effectNeedle).length - 1, 1);
+  const youtubeSearchNeedle =
+    'command.type === "searchObserved" && new URL(before.url).origin === "https://www.youtube.com"';
+  assert.equal(background.split(youtubeSearchNeedle).length - 1, 1);
   await writeFile(
     backgroundPath,
     background
@@ -858,6 +866,12 @@ async function fixture(
         options.companionOnly || options.youtubeTVOnly || options.disneyOnly
           ? 'const companionBindingOrigins = new Set(["http://127.0.0.1:PORT"]);'
           : companionNeedle,
+      )
+      .replace(
+        youtubeSearchNeedle,
+        options.youtubeSearch
+          ? 'command.type === "searchObserved" && new URL(before.url).origin === "http://127.0.0.1:PORT"'
+          : youtubeSearchNeedle,
       )
       .replace(
         'new URL(before.url).origin === "https://tv.youtube.com"',
@@ -1197,10 +1211,10 @@ async function showPlayer(){
 addEventListener('click',e=>{const a=e.target.closest('a');if(a){e.preventDefault();history.pushState({},'',a.href);showPlayer()}});
 </script>`;
 
-async function launch(extension: string, root: string) {
+async function launch(extension: string, root: string, sitePage?: (path: string) => string) {
   const server = createServer((request, response) => {
     response.writeHead(200, { "content-type": "text/html" });
-    response.end(html);
+    response.end(sitePage ? sitePage(request.url ?? "/") : html);
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -1264,6 +1278,77 @@ async function command(harness: Page, tabId: number, value: Record<string, unkno
     { tabId, value },
   );
 }
+
+test(
+  "popup search survives full synthetic results navigation with one click and a fresh read",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ youtubeSearch: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    const sitePage = (path: string) =>
+      path.startsWith("/results?")
+        ? `<a href="/watch?v=abcdefghijk" title="Observed public title">Observed public title</a>`
+        : `<!doctype html><style>
+      .ytSearchboxComponentInputContainer {display:flex;gap:8px;margin:16px}
+      input,button {width:280px;height:42px}
+    </style><div class="ytSearchboxComponentInputContainer">
+      <div><form action="/results"><input name="search_query" role="combobox" type="text" placeholder="Search"></form></div>
+      <button id="submit" aria-label="Search">Search</button>
+    </div><script>
+      document.querySelector('#submit').addEventListener('click', event => {
+        event.preventDefault();
+        sessionStorage.setItem('searchClicks', String(Number(sessionStorage.getItem('searchClicks') || 0) + 1));
+        location.href = '/results?search_query=' + encodeURIComponent(document.querySelector('input').value);
+      });
+    </script>`;
+    try {
+      const launched = await launch(owned.extension, owned.root, sitePage);
+      ({ context, server } = launched);
+      const initialUrl = launched.page.url();
+      await launched.harness.evaluate(async () => {
+        await (document.querySelector("#inspect") as HTMLButtonElement).onclick?.(
+          new MouseEvent("click"),
+        );
+      });
+      assert.equal(await launched.harness.locator("#observed-search").isVisible(), true);
+      const query = "NASA Artemis official launch";
+      const navigation = launched.page.waitForURL(
+        new RegExp(`/results\\?search_query=${encodeURIComponent(query)}$`),
+        { waitUntil: "domcontentloaded" },
+      );
+      await launched.harness.evaluate(async (value) => {
+        (document.querySelector("#search-query") as HTMLInputElement).value = value;
+        await (document.querySelector("#search-submit") as HTMLButtonElement).onclick?.(
+          new MouseEvent("click"),
+        );
+      }, query);
+      await navigation;
+      assert.notEqual(launched.page.url(), initialUrl);
+      assert.equal(await launched.page.evaluate(() => sessionStorage.getItem("searchClicks")), "1");
+      assert.equal(
+        await launched.harness.locator("#status").textContent(),
+        "Search outcome unverified. Inspect the current page before another action.",
+        "destroying the dispatched page context leaves the original action outcome unknown",
+      );
+      assert.equal(await launched.harness.locator("#observed-search").isVisible(), false);
+      await launched.harness.evaluate(async () => {
+        await (document.querySelector("#inspect") as HTMLButtonElement).onclick?.(
+          new MouseEvent("click"),
+        );
+      });
+      assert.deepEqual(
+        await launched.harness.locator("#titles li button:first-child").allTextContents(),
+        ["Observed public title"],
+      );
+      assert.equal(await launched.page.evaluate(() => sessionStorage.getItem("searchClicks")), "1");
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
 
 test(
   "companion inspects visible results when body scrolling is propagated to the viewport",
