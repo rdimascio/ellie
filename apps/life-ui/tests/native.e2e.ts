@@ -210,7 +210,12 @@ try {
     path: join(artifactDir, "native-life-desktop.png"),
     fullPage: false,
   });
-  await macPage.getByRole("button", { name: /Add or make an app/ }).click();
+  // The mobile redesign replaces the dashboard "Add or make an app" widget with
+  // Settings -> Open custom tools; both open the same custom-tools view.
+  await macPage.locator("aside .settings-link").click();
+  const macLibrary = macPage.locator(".library-settings");
+  if ((await macLibrary.getAttribute("open")) === null) await macLibrary.locator("summary").click();
+  await macLibrary.getByRole("button", { name: "Open custom tools", exact: true }).click();
   await macPage
     .getByPlaceholder(/family board/)
     .fill("Build an arcade game with a persistent high score");

@@ -11,7 +11,7 @@
   --coral: #ef713b;
   --moss: #176b68;
   --rule: #cfdddd;
-  --soft: #dce8e8;
+  --soft: #1a2940;
   --mist: #edf3f3;
   --harbor: #173f48;
   --slate: #536b70;
@@ -113,15 +113,15 @@ aside {
   padding: 5px;
 }
 .board-list > div.selected {
-  border-color: #d3dfdf;
-  background: white;
+  border-color: var(--rule);
+  background: var(--paper);
 }
 .board-list button {
   width: 30px;
   height: 30px;
   border: 0;
   border-radius: 8px;
-  background: #dce8e8;
+  background: var(--soft);
   color: var(--harbor);
   font-weight: 700;
 }
@@ -141,7 +141,7 @@ aside {
 .board-manager .new-board {
   width: 100%;
   margin-top: 8px;
-  border: 1px dashed #b7c8c8;
+  border: 1px dashed var(--rule);
   border-radius: 8px;
   background: transparent;
   padding: 8px;
@@ -155,7 +155,7 @@ aside {
 }
 .board-manager form input {
   min-width: 0;
-  border: 1px solid #aabdbf;
+  border: 1px solid var(--rule);
   border-radius: 8px 0 0 8px;
   padding: 8px;
 }
@@ -190,7 +190,7 @@ aside nav {
 .life-dashboard {
   min-height: 100dvh;
   padding: 42px clamp(20px, 4vw, 64px) 64px;
-  background: #dce8e8;
+  background: var(--soft);
 }
 .dashboard-title {
   display: flex;
@@ -214,7 +214,7 @@ aside nav {
 }
 .dashboard-title button,
 .life-widget header button {
-  border: 1px solid #b7c8c8;
+  border: 1px solid var(--rule);
   border-radius: 8px;
   background: transparent;
   padding: 8px 11px;
@@ -231,9 +231,9 @@ aside nav {
 .dashboard-chat-attention {
   width: 100%;
   margin: 4px 0 10px;
-  border: 1px solid #efc3b1;
+  border: 1px solid var(--rule);
   border-radius: 9px;
-  background: #fff5f1;
+  background: var(--soft);
   padding: 9px 12px;
   color: var(--focus);
   text-align: left;
@@ -381,7 +381,7 @@ aside nav {
   width: min(390px, calc(100vw - 48px));
   border: 1px solid var(--rule);
   border-radius: 14px;
-  background: white;
+  background: var(--paper);
   padding: 14px;
   box-shadow: 0 18px 44px rgb(7 30 44 / 18%);
 }
@@ -397,7 +397,7 @@ aside nav {
 .provisional-reply b {
   display: block;
   margin-bottom: 5px;
-  color: #6551bd;
+  color: #bcb6ff;
   font-size: 11px;
   letter-spacing: 0.04em;
 }
@@ -423,9 +423,9 @@ aside nav {
   position: relative;
   min-width: 0;
   min-height: 220px;
-  border: 1px solid #d2dede;
+  border: 1px solid var(--rule);
   border-radius: 18px;
-  background: white;
+  background: var(--paper);
   padding: 20px;
   color: var(--harbor);
   text-align: left;
@@ -478,9 +478,9 @@ button.life-widget {
   display: flex;
   gap: 4px;
   padding: 4px;
-  border: 1px solid #d5dfdf;
+  border: 1px solid var(--rule);
   border-radius: 9px;
-  background: white;
+  background: var(--paper);
   box-shadow: 0 4px 12px rgb(23 63 72 / 10%);
 }
 .dashboard-widget-tools button {
@@ -488,7 +488,7 @@ button.life-widget {
   height: 30px;
   border: 0;
   border-radius: 6px;
-  background: #f1f6f6;
+  background: var(--soft);
 }
 .chat-widget > header {
   display: flex;
@@ -511,7 +511,7 @@ button.life-widget {
 }
 .dashboard-messages article.you {
   margin-left: auto;
-  background: #f8ece7;
+  background: var(--soft);
 }
 .dashboard-messages article b {
   font-size: 10px;
@@ -528,10 +528,10 @@ button.life-widget {
 }
 .dashboard-composer input {
   min-width: 0;
-  border: 1px solid #aabdbf;
+  border: 1px solid var(--rule);
   border-radius: 10px;
   padding: 13px 14px;
-  background: #f7fafa;
+  background: var(--mist);
 }
 .dashboard-composer button {
   border: 0;
@@ -593,9 +593,9 @@ button.life-widget {
   }
   .mobile-board-select select {
     max-width: 130px;
-    border: 1px solid #b7c8c8;
+    border: 1px solid var(--rule);
     border-radius: 7px;
-    background: white;
+    background: var(--paper);
     padding: 5px;
     font-size: 12px;
   }
@@ -671,7 +671,7 @@ aside nav button b {
 }
 aside nav button.active {
   color: var(--ink);
-  background: rgba(255, 253, 248, 0.75);
+  background: var(--soft);
 }
 .scope {
   margin-top: auto;
@@ -1205,7 +1205,7 @@ main {
   align-items: end;
   gap: 8px;
   background: var(--paper);
-  border: 1px solid #cfc8bd;
+  border: 1px solid var(--rule);
   border-radius: 22px;
   padding: 9px 9px 9px 18px;
   box-shadow: 0 8px 30px rgba(62, 50, 37, 0.09);
@@ -1311,7 +1311,7 @@ main {
 }
 .source-warning {
   display: block;
-  color: #a13f32;
+  color: #ffb0a7;
   font-size: 12px;
   margin-top: 7px;
 }
@@ -1382,7 +1382,7 @@ main {
   margin: 18px 0 22px;
   border: 1px solid var(--rule);
   border-radius: 10px;
-  background: white;
+  background: var(--paper);
   padding: 12px 14px;
 }
 .conversation-memory summary {
@@ -1429,7 +1429,7 @@ main {
 }
 .drop {
   display: block;
-  border: 1px dashed #bdb4a7;
+  border: 1px dashed var(--rule);
   margin-top: 32px;
   padding: 22px;
   text-align: center;
@@ -1447,7 +1447,7 @@ main {
 }
 .import-warning,
 .import-items em {
-  color: #9b4b38;
+  color: #ffb0a7;
   font-size: 12px;
 }
 .import-items {
@@ -1867,7 +1867,7 @@ main {
 }
 .settings-error {
   display: block;
-  color: #a1362d;
+  color: #ffb0a7;
   margin-bottom: 12px;
 }
 .impact {
@@ -1998,13 +1998,13 @@ main {
 .danger {
   border: 0;
   background: transparent;
-  color: #9c362e;
+  color: #ffb0a7;
 }
 .modal iframe {
   border: 0;
   width: 100%;
   flex: 1;
-  background: white;
+  background: var(--paper);
 }
 .state {
   min-height: 100dvh;
@@ -2095,7 +2095,7 @@ main {
     grid-template-columns: repeat(2, minmax(0, 1fr)) 68px repeat(2, minmax(0, 1fr));
     z-index: 8;
     inset: auto 0 0;
-    background: rgba(255, 253, 248, 0.96);
+    background: var(--paper);
     border-top: 1px solid var(--rule);
     padding: 6px 4px calc(6px + env(safe-area-inset-bottom));
   }
@@ -2642,7 +2642,7 @@ main {
 }
 .connection-list span {
   margin-top: 4px;
-  color: #9c362e;
+  color: #ffb0a7;
   font-size: 12px;
 }
 .connection-list label {
@@ -2782,7 +2782,7 @@ main {
   margin-top: 18px;
 }
 .danger-solid {
-  background: #9c362e !important;
+  background: #ffb0a7 !important;
   color: white;
   padding: 10px 15px;
   border-radius: 7px;
@@ -2836,7 +2836,7 @@ main {
 .queue-notice {
   margin: 0;
   padding: 9px 2px;
-  color: #9c362e;
+  color: #ffb0a7;
   font-size: 12px;
   border-top: 1px solid var(--rule);
 }
@@ -2864,7 +2864,7 @@ main {
   text-transform: capitalize;
 }
 .upload-queue article em {
-  color: #9c362e;
+  color: #ffb0a7;
   font-size: 12px;
   font-style: normal;
 }

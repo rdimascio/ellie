@@ -8,8 +8,9 @@ import {
   type GmailMessageDetail as MessageDetail,
 } from "./api";
 import { GmailMessageDetail } from "./GmailMessageDetail";
+import { InterfaceIcon } from "./InterfaceIcon";
 
-export function Connections() {
+export function Connections({ standalone = false }: { standalone?: boolean }) {
   const [connections, setConnections] = useState<ConnectorConnection[]>([]);
   const [providers, setProviders] = useState<ConnectorProvider[]>([]);
   const [connectMode, setConnectMode] = useState<ConnectorMode>("prepare");
@@ -290,13 +291,29 @@ export function Connections() {
   };
 
   return (
-    <section className="connections" id="connected-accounts">
-      <header>
-        <div>
-          <span>Private connections</span>
-          <h2>Connected accounts</h2>
+    <section
+      className={`connections ${standalone ? "connections-page" : ""}`}
+      id="connected-accounts"
+    >
+      {standalone ? (
+        <div className="integration-intro">
+          <span className="integration-intro-symbol">
+            <InterfaceIcon name="integrations" />
+          </span>
+          <h2>
+            A little more connected.
+            <br />A lot more useful.
+          </h2>
+          <p>Give Ellie the context to help with your day.</p>
         </div>
-      </header>
+      ) : (
+        <header>
+          <div>
+            <span>Private connections</span>
+            <h2>Connected accounts</h2>
+          </div>
+        </header>
+      )}
       <p>
         Connect once and Ellie can keep read-only context current automatically. Ellie never sends
         messages, moves money, or changes a connected account.
