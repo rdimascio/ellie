@@ -79,6 +79,18 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Initialize cold CoreSimulator runtime inventory
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          subprocess.run(
+              ["xcrun", "simctl", "list", "runtimes", "--json"],
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+              timeout=60, check=True,
+          )
+          PY
       - name: Test native iPhone dashboard app
         id: native_ios_ui
         env:
@@ -113,6 +125,18 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Initialize cold CoreSimulator runtime inventory
+        env:
+          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          subprocess.run(
+              ["xcrun", "simctl", "list", "runtimes", "--json"],
+              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+              timeout=60, check=True,
+          )
+          PY
       - name: Test native iPhone pinned HTTPS and Keychain
         id: native_ios_ats
         run: bun run test:ios-ats
