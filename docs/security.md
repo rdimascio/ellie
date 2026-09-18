@@ -83,3 +83,9 @@ Only the controller may request inference across the worker pool. Enrollment plu
 Telemetry is self-reported by a trusted enrolled node, not remotely attested. Required memory budgets are explicit local policy and are checked again at dispatch. Unknown optional sensors are labeled as such. A failed inference is never replayed automatically. Revocation rejects subsequent worker requests; an already running model request may continue until cancellation or its deadline reaches the runner.
 
 The old LibreSSL initialization command may have left a file literally named `-` in the application directory. Treat it as possible private-key material, do not share it, and remove it if confirmed to be the failed initialization output. New generation never writes private keys into the checkout; the legacy filename is now ignored.
+
+## Experimental distributed inference
+
+Distributed MLX additionally requires an explicitly configured group/model and matching local consent on every member. Network jobs cannot select a Python executable, model path, topology file, or communication endpoint. The rank helper uses offline model loading with remote model/tokenizer code disabled; prompts travel over stdin and library stderr is discarded. The coordinator reserves the entire group and never retries an individual rank. Job metadata contains no prompts, responses, or local paths.
+
+MLX data traffic uses its own TCP or RDMA transport, outside Ellie's authenticated HTTPS control channel. Restrict it to a trusted isolated interconnect. Qualification metrics and plan revisions are operator-supplied assertions, not attestation. Cancellation is propagated by heartbeat and local deadline, and the node waits for subprocess exit before reporting teardown. A hard crash or revocation can leave a group reserved until explicit recovery; see [the distributed lifecycle](distributed-mlx-reference.md#lifecycle-and-recovery).

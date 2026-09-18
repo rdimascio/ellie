@@ -4,10 +4,11 @@ import type { Result, ComputeCapabilities, Telemetry } from "@ellie/protocol";
 import type { Preferences } from "@ellie/config";
 import type { Executor } from "@ellie/macos";
 import { authorize } from "@ellie/permissions";
-import { computeEligible } from "@ellie/compute";
+import { computeEligible, distributedMemberEligible } from "@ellie/compute";
 import type { Client } from "@ellie/transport";
 import type { InferenceWorker } from "./inference.ts";
 import { collectTelemetry } from "./telemetry.ts";
+import type { DistributedWorker } from "./distributed.ts";
 
 export function reconnectDelay(
   attempt: number,
@@ -33,6 +34,7 @@ export async function runNode(options: {
   client: Client;
   executor?: Executor;
   worker?: InferenceWorker;
+  distributedWorker?: DistributedWorker;
   preferences: Preferences;
   signal: AbortSignal;
   health?: () => Promise<unknown>;
@@ -43,7 +45,23 @@ export async function runNode(options: {
   onStatus?: (message: string) => void;
   onEvent?: (event: "connected" | "reconnecting") => void;
 }): Promise<void> {
-  const { client, executor, worker, signal } = options;
+  const { client, executor, worker, distributedWorker, signal } = options;
+  const stoppedRanks = new Map<string, Result>();
+  const flushStoppedRanks = async () => {
+    for (const [id, outcome] of stoppedRanks) {
+      // Process teardown is complete. Permit one bounded acknowledgement even during shutdown.
+      await client.call("POST", "/v1/result", { id, result: outcome }, { timeoutMs: 5000 });
+      stoppedRanks.delete(id);
+    }
+  };
+  const advertiseDistributed = async () => {
+    if (!distributedWorker) return undefined;
+    try {
+      return await distributedWorker.advertise(signal);
+    } catch {
+      return [];
+    }
+  };
   const seen = new Set<string>();
   let activeJobs = 0;
   let roundTripMs: number | null = null;
@@ -76,19 +94,22 @@ export async function runNode(options: {
           capabilities: granted,
           executionCapabilities: granted,
           computeCapabilities: await advertise(),
-          telemetry: worker ? await metrics() : undefined,
+          distributedCapabilities: await advertiseDistributed(),
+          telemetry: worker || distributedWorker ? await metrics() : undefined,
         },
         { signal: connectionSignal },
       );
+      await flushStoppedRanks();
       const beat = async () => {
         const computeCapabilities = await advertise();
-        const telemetry = worker ? await metrics() : undefined;
+        const distributedCapabilities = await advertiseDistributed();
+        const telemetry = worker || distributedWorker ? await metrics() : undefined;
         const start = performance.now();
         const reply = record(
           await client.call(
             "POST",
             "/v1/heartbeat",
-            { computeCapabilities, telemetry },
+            { computeCapabilities, distributedCapabilities, telemetry },
             { signal: connectionSignal },
           ),
         );
@@ -131,54 +152,90 @@ export async function runNode(options: {
           if (seen.has(task.id)) throw new Error("Duplicate job blocked.");
           seen.add(task.id);
           if (seen.size > 1024) seen.delete(seen.values().next().value!);
-          const start = record(
-            await client.call("POST", "/v1/start", { id: task.id }, { signal: connectionSignal }),
-          );
-          if (start.cancel === true) jobAbort.abort();
-          if (jobAbort.signal.aborted) throw new Error("Command cancelled before execution.");
-          if ("kind" in task) {
-            if (!worker) throw new Error("Inference is not enabled on this node.");
-            const compute = await advertise();
-            const telemetry = await metrics();
-            if (
-              !computeEligible(
-                {
-                  id: "self",
-                  capabilities: granted,
-                  executionCapabilities: granted,
-                  computeCapabilities: compute,
-                  telemetry,
-                  telemetryReceivedAt: Date.now(),
-                  lastSeen: Date.now(),
-                },
-                task.request.model,
-              )
-            )
-              throw new Error("Local compute policy rejected this job.");
+          if ("kind" in task && task.assignment) {
+            if (!distributedWorker) throw new Error("Distributed compute is disabled locally.");
+            const a = task.assignment;
+            const local = {
+              id: a.plan.nodeIds[a.rank]!,
+              capabilities: granted,
+              executionCapabilities: granted,
+              distributedCapabilities: await advertiseDistributed(),
+              telemetry: await metrics(),
+              telemetryReceivedAt: Date.now(),
+              lastSeen: Date.now(),
+            };
+            if (!distributedMemberEligible(local, a.plan))
+              throw new Error("Local shard policy rejected the job.");
             activeJobs = 1;
-            const remaining = task.expiresAt - Date.now();
-            if (remaining <= 0) throw new Error("Inference expired before execution.");
             const deadline = AbortSignal.any([
               connectionSignal,
               jobAbort.signal,
-              AbortSignal.timeout(Math.min(remaining, 30_000)),
+              AbortSignal.timeout(Math.max(1, Math.min(120_000, task.expiresAt - Date.now()))),
             ]);
-            outcome = result(await worker.execute(task.request, deadline));
+            await distributedWorker.prepare(task, deadline);
+            while (true) {
+              const start = record(
+                await client.call("POST", "/v1/start", { id: task.id }, { signal: deadline }),
+              );
+              if (start.cancel === true) throw new Error("Distributed job cancelled before start.");
+              if (start.ready === true) break;
+              await delay(100, undefined, { signal: deadline });
+            }
+            local.telemetry = await metrics();
+            local.telemetryReceivedAt = local.lastSeen = Date.now();
+            if (!distributedMemberEligible(local, a.plan, Date.now(), true))
+              throw new Error("Local shard policy changed at the start barrier.");
+            outcome = result(await distributedWorker.execute(task, deadline));
           } else {
-            if (!executor) throw new Error("Desktop execution is disabled on this node.");
-            authorize(task.actions, granted, options.preferences);
-            activeJobs = 1;
-            outcome = { ok: true, message: "Done." };
-            const executionSignal = AbortSignal.any([
-              connectionSignal,
-              jobAbort.signal,
-              AbortSignal.timeout(Math.max(1, Math.ceil(task.expiresAt - Date.now()))),
-            ]);
-            for (const action of task.actions) {
-              if (executionSignal.aborted || Date.now() >= task.expiresAt)
-                throw new Error("Command cancelled or expired.");
-              outcome = await executor.execute(action, executionSignal);
-              if (!outcome.ok) break;
+            const start = record(
+              await client.call("POST", "/v1/start", { id: task.id }, { signal: connectionSignal }),
+            );
+            if (start.cancel === true) jobAbort.abort();
+            if (jobAbort.signal.aborted) throw new Error("Command cancelled before execution.");
+            if ("kind" in task) {
+              if (!worker) throw new Error("Inference is not enabled on this node.");
+              const compute = await advertise();
+              const telemetry = await metrics();
+              if (
+                !computeEligible(
+                  {
+                    id: "self",
+                    capabilities: granted,
+                    executionCapabilities: granted,
+                    computeCapabilities: compute,
+                    telemetry,
+                    telemetryReceivedAt: Date.now(),
+                    lastSeen: Date.now(),
+                  },
+                  task.request.model,
+                )
+              )
+                throw new Error("Local compute policy rejected this job.");
+              activeJobs = 1;
+              const remaining = task.expiresAt - Date.now();
+              if (remaining <= 0) throw new Error("Inference expired before execution.");
+              const deadline = AbortSignal.any([
+                connectionSignal,
+                jobAbort.signal,
+                AbortSignal.timeout(Math.min(remaining, 30_000)),
+              ]);
+              outcome = result(await worker.execute(task.request, deadline));
+            } else {
+              if (!executor) throw new Error("Desktop execution is disabled on this node.");
+              authorize(task.actions, granted, options.preferences);
+              activeJobs = 1;
+              outcome = { ok: true, message: "Done." };
+              const executionSignal = AbortSignal.any([
+                connectionSignal,
+                jobAbort.signal,
+                AbortSignal.timeout(Math.max(1, Math.ceil(task.expiresAt - Date.now()))),
+              ]);
+              for (const action of task.actions) {
+                if (executionSignal.aborted || Date.now() >= task.expiresAt)
+                  throw new Error("Command cancelled or expired.");
+                outcome = await executor.execute(action, executionSignal);
+                if (!outcome.ok) break;
+              }
             }
           }
         } catch (error) {
@@ -193,12 +250,16 @@ export async function runNode(options: {
           activeJobs = 0;
           if (currentJob?.id === task.id) currentJob = undefined;
         }
-        await client.call(
-          "POST",
-          "/v1/result",
-          { id: task.id, result: outcome },
-          { signal: connectionSignal },
-        );
+        if ("kind" in task && task.assignment) {
+          stoppedRanks.set(task.id, outcome);
+          await flushStoppedRanks();
+        } else
+          await client.call(
+            "POST",
+            "/v1/result",
+            { id: task.id, result: outcome },
+            { signal: connectionSignal },
+          );
         await beat();
         reconnectAttempt = 0;
       }

@@ -558,6 +558,22 @@ function openApi(): Json {
           },
         }),
       },
+      "/v1/groups": {
+        get: operation({
+          operationId: "listDistributedGroups",
+          summary: "Inspect explicitly configured MLX groups and teardown reservations",
+          description:
+            "Controller bearer identity required. Qualification and local consent are checked at each placement.",
+          responses: {
+            "200": response("Group readiness and payload-free rank state.", {
+              type: "array",
+              maxItems: 8,
+              items: ref("DistributedGroupStatus"),
+            }),
+            ...errors("400", "401", "403", "404"),
+          },
+        }),
+      },
       "/v1/heartbeat": {
         post: operation({
           operationId: "heartbeatNode",
@@ -882,6 +898,94 @@ function openApi(): Json {
             models: { type: "array", maxItems: 32, items: ref("InstalledModel") },
           },
         },
+        DistributedMlxPlan: {
+          type: "object",
+          required: [
+            "mode",
+            "id",
+            "planId",
+            "nodeIds",
+            "model",
+            "backend",
+            "strategy",
+            "explicitlyEnabled",
+          ],
+          properties: {
+            mode: { const: "distributed-mlx" },
+            id: identifier,
+            planId: identifier,
+            nodeIds: {
+              type: "array",
+              minItems: 2,
+              maxItems: 8,
+              uniqueItems: true,
+              items: identifier,
+            },
+            model: boundedString(200),
+            backend: { enum: ["ring", "jaccl"] },
+            strategy: { enum: ["pipeline", "tensor"] },
+            explicitlyEnabled: { const: true },
+          },
+          allOf: [
+            {
+              if: { properties: { strategy: { const: "tensor" } } },
+              // oxlint-disable-next-line unicorn/no-thenable -- JSON Schema conditional keyword.
+              then: { properties: { backend: { const: "jaccl" } } },
+            },
+          ],
+        },
+        DistributedCapability: {
+          type: "object",
+          required: ["plan", "rank", "requiredFreeMemoryBytes"],
+          properties: {
+            plan: ref("DistributedMlxPlan"),
+            rank: { type: "integer", minimum: 0, maximum: 7 },
+            requiredFreeMemoryBytes: {
+              type: "number",
+              minimum: 1,
+              maximum: Number.MAX_SAFE_INTEGER,
+            },
+          },
+          description:
+            "Rank must index this node's identity in the plan's ordered nodeIds. Group IDs are unique per node.",
+        },
+        DistributedAssignment: {
+          type: "object",
+          required: ["plan", "rank", "leaseId"],
+          properties: {
+            plan: ref("DistributedMlxPlan"),
+            rank: { type: "integer", minimum: 0, maximum: 7 },
+            leaseId: identifier,
+          },
+        },
+        DistributedGroupStatus: {
+          type: "object",
+          required: ["id", "model", "planId", "nodeIds", "backend", "strategy", "problem", "jobs"],
+          properties: {
+            id: identifier,
+            model: boundedString(200),
+            planId: identifier,
+            nodeIds: { type: "array", items: identifier },
+            backend: { enum: ["ring", "jaccl"] },
+            strategy: { enum: ["pipeline", "tensor"] },
+            problem: { type: ["string", "null"] },
+            jobs: {
+              type: "array",
+              maxItems: 8,
+              items: {
+                type: "object",
+                required: ["id", "nodeId", "ready", "stopped", "cancelling"],
+                properties: {
+                  id: identifier,
+                  nodeId: identifier,
+                  ready: { type: "boolean" },
+                  stopped: { type: "boolean" },
+                  cancelling: { type: "boolean" },
+                },
+              },
+            },
+          },
+        },
         Power: {
           type: "object",
           required: ["source", "batteryPercent", "lowPowerMode"],
@@ -922,7 +1026,10 @@ function openApi(): Json {
         },
         Registration: {
           type: "object",
-          dependentRequired: { computeCapabilities: ["telemetry"] },
+          dependentRequired: {
+            computeCapabilities: ["telemetry"],
+            distributedCapabilities: ["telemetry"],
+          },
           properties: {
             capabilities: {
               type: "array",
@@ -935,14 +1042,27 @@ function openApi(): Json {
               items: ref("Capability"),
             },
             computeCapabilities: ref("ComputeCapabilities"),
+            distributedCapabilities: {
+              type: "array",
+              maxItems: 8,
+              items: ref("DistributedCapability"),
+            },
             telemetry: ref("Telemetry"),
           },
         },
         Heartbeat: {
           type: "object",
-          dependentRequired: { computeCapabilities: ["telemetry"] },
+          dependentRequired: {
+            computeCapabilities: ["telemetry"],
+            distributedCapabilities: ["telemetry"],
+          },
           properties: {
             computeCapabilities: ref("ComputeCapabilities"),
+            distributedCapabilities: {
+              type: "array",
+              maxItems: 8,
+              items: ref("DistributedCapability"),
+            },
             telemetry: ref("Telemetry"),
           },
         },
@@ -962,7 +1082,13 @@ function openApi(): Json {
         StartResponse: {
           type: "object",
           required: ["cancel"],
-          properties: { cancel: { type: "boolean" } },
+          properties: {
+            cancel: { type: "boolean" },
+            ready: {
+              type: "boolean",
+              description: "Distributed jobs must wait until every member is ready.",
+            },
+          },
         },
         JobMetadata: {
           type: "object",
@@ -994,6 +1120,11 @@ function openApi(): Json {
             capabilities: { type: "array", items: ref("Capability") },
             executionCapabilities: { type: "array", items: ref("Capability") },
             computeCapabilities: ref("ComputeCapabilities"),
+            distributedCapabilities: {
+              type: "array",
+              maxItems: 8,
+              items: ref("DistributedCapability"),
+            },
             telemetry: ref("Telemetry"),
             telemetryReceivedAt: finiteNumber,
             lastSeen: finiteNumber,
@@ -1003,11 +1134,19 @@ function openApi(): Json {
           type: "object",
           required: ["model", "prompt"],
           properties: {
-            mode: { const: "independent", default: "independent" },
+            mode: { enum: ["independent", "distributed-mlx"], default: "independent" },
+            groupId: identifier,
             model: boundedString(200),
             prompt: boundedString(4000),
             maxTokens: { type: "integer", minimum: 1, maximum: 2048, default: 256 },
           },
+          allOf: [
+            {
+              if: { required: ["mode"], properties: { mode: { const: "distributed-mlx" } } },
+              // oxlint-disable-next-line unicorn/no-thenable -- JSON Schema conditional keyword.
+              then: { required: ["groupId"] },
+            },
+          ],
         },
         InferenceJob: {
           type: "object",
@@ -1018,7 +1157,23 @@ function openApi(): Json {
             id: identifier,
             expiresAt: finiteNumber,
             request: ref("InferenceRequest"),
+            assignment: ref("DistributedAssignment"),
           },
+          allOf: [
+            {
+              if: {
+                properties: {
+                  request: {
+                    required: ["mode"],
+                    properties: { mode: { const: "distributed-mlx" } },
+                  },
+                },
+              },
+              // oxlint-disable-next-line unicorn/no-thenable -- JSON Schema conditional keyword.
+              then: { required: ["assignment"] },
+              else: { not: { required: ["assignment"] } },
+            },
+          ],
         },
         PollResponse: {
           type: "object",
@@ -1038,6 +1193,9 @@ function openApi(): Json {
             ok: { type: "boolean" },
             message: jsonSchema(OPERATION_REGISTRY.operations[0].output.properties.message),
             workerId: identifier,
+            groupId: identifier,
+            workerIds: { type: "array", minItems: 2, maxItems: 8, items: identifier },
+            jobIds: { type: "array", minItems: 2, maxItems: 8, items: identifier },
           },
         },
         CommandRequest: {

@@ -12,7 +12,10 @@ import { generateCertificate } from "../apps/cli/src/certificate.ts";
 
 export async function fixture(
   timeout = 2000,
-  options: Pick<Parameters<typeof createEllieServer>[0], "decisionRouting"> = {},
+  options: Pick<
+    Parameters<typeof createEllieServer>[0],
+    "decisionRouting" | "distributedGroups"
+  > = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), "ellie-e2e-"));
   const { key, cert } = await generateCertificate();

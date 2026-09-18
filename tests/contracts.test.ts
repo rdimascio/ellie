@@ -182,6 +182,7 @@ test("generated JSON Schema and OpenAPI stay aligned with the registry and actua
     "/v1/speech/authorities/revoke",
     "/v1/nodes",
     "/v1/register",
+    "/v1/groups",
     "/v1/heartbeat",
     "/v1/poll",
     "/v1/result",

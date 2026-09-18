@@ -56,6 +56,8 @@ export class LocalInferenceWorker implements InferenceWorker {
     };
   }
   async execute(request: InferenceRequest, signal: AbortSignal): Promise<Result> {
+    if (request.mode !== "independent")
+      throw new Error("Distributed requests require the shard runner.");
     // Recheck inventory: never request a model that the runner would need to download.
     if (!(await this.advertise(signal)).models.some((m) => m.id === request.model))
       throw new Error("Requested model is not installed and locally enabled.");
