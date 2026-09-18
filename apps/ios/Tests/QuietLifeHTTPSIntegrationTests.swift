@@ -29,7 +29,7 @@ final class QuietLifeHTTPSIntegrationTests: XCTestCase {
   }
 
   @MainActor
-  func testPinnedSessionsReadVerifiedActivityAndReconcileOneReviewedVoiceTurnAfterRelaunch() async throws {
+  func testPinnedSessionsReadVerifiedActivityAndReconcileOneReviewedVoiceTurnAfterStoreReconstruction() async throws {
     let allowed = try credential("allowed")
     let sessions = IOSQuietSessionsStore()
     sessions.bind(allowed)
@@ -61,32 +61,32 @@ final class QuietLifeHTTPSIntegrationTests: XCTestCase {
     first.restore()
     XCTAssertTrue(first.canSend)
     first.sendReviewed("What is the family plan?")
-    try await waitForCounter("chat-response-held/\(before.nativeChatPosts + 1)", credential: allowed)
+    try await waitForCounter("chat-response-held/\(before.chatResponseHeld + 1)", credential: allowed)
     XCTAssertEqual(first.phase, .sending)
     first.background()
     XCTAssertEqual(first.phase, .unknown)
 
-    let relaunched = IOSQuietVoiceStore(credential: allowed, journal: journal)
-    relaunched.restore()
-    XCTAssertEqual(relaunched.phase, .unknown)
-    relaunched.reconcile()
+    let reconstructed = IOSQuietVoiceStore(credential: allowed, journal: journal)
+    reconstructed.restore()
+    XCTAssertEqual(reconstructed.phase, .unknown)
+    reconstructed.reconcile()
     try await eventually {
-      if case .completed = relaunched.phase { return true }
+      if case .completed = reconstructed.phase { return true }
       return false
     }
-    guard case .completed(let answer) = relaunched.phase else {
+    guard case .completed(let answer) = reconstructed.phase else {
       XCTFail("A durable read-only reply did not reconcile")
       return
     }
     XCTAssertEqual(answer.reply, "Family 👩‍👩‍👧‍👧\r\n日本語 read-only answer.")
     XCTAssertFalse(answer.needsMacReview)
     try await control("release-chat-response", credential: allowed)
-    try await waitForCounter("chat-response-released/1", credential: allowed)
+    try await waitForCounter("chat-response-released/\(before.chatResponseReleased + 1)", credential: allowed)
     let after = try await control("stats", credential: allowed)
     XCTAssertEqual(after.nativeChatPosts, before.nativeChatPosts + 1,
-      "Relaunch must read durable status without a second POST")
+      "Store reconstruction must read durable status without a second POST")
     XCTAssertEqual(after.durableTurns, before.durableTurns + 1)
-    XCTAssertTrue(relaunched.canSend == false)
+    XCTAssertFalse(reconstructed.canSend)
 
     do {
       let denied = try credential("denied")
