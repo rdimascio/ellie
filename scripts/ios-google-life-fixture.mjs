@@ -8,6 +8,7 @@ import { MLBAdapter, PluginStore } from "../packages/life-plugins/src/index.ts";
 import { TaskRuntime } from "../packages/task-runtime/src/index.ts";
 import { createLifeServer } from "../apps/life/src/server.ts";
 import { NativeLifeAuthority } from "../apps/server/src/native-life.ts";
+import { createIOSQuietLifeFixture } from "./ios-quiet-life-fixture.mjs";
 
 const actorId = "ios-google-fixture-owner";
 const calendarScope = "https://www.googleapis.com/auth/calendar.readonly";
@@ -33,7 +34,12 @@ class MemoryVault {
 }
 
 /** Synthetic providers behind the real embedded Life routes; no Google network or OAuth. */
-export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grantedClientIds }) {
+export async function createIOSGoogleLifeFixture({
+  directory,
+  nativeAuth,
+  grantedClientIds,
+  quiet = false,
+}) {
   const now = Date.now();
   const vault = new MemoryVault();
   const reads = new Map();
@@ -130,10 +136,19 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
       return { status: "plain", text: "Late private fixture body" };
     },
   };
-  let life, plugins, tasks, connectorStore, connectors, nativeLife, server, connectionIds;
+  let life,
+    plugins,
+    tasks,
+    connectorStore,
+    connectors,
+    nativeLife,
+    server,
+    connectionIds,
+    quietFixture;
   let failServerCloseOnce = false;
   async function closeOwned() {
     heldRead?.();
+    quietFixture?.releaseAll();
     for (const close of [
       () => {
         if (failServerCloseOnce) {
@@ -222,6 +237,7 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
       userId: actorId,
     });
     await server.prepareEmbedded();
+    if (quiet) quietFixture = await createIOSQuietLifeFixture({ life, tasks, actorId });
   } catch (error) {
     try {
       await closeOwned();
@@ -240,13 +256,17 @@ export async function createIOSGoogleLifeFixture({ directory, nativeAuth, grante
           request.url?.split("?", 1)[0] ?? "",
         );
         try {
-          return await server.handleEmbedded(request, response, context);
+          const perform = () => server.handleEmbedded(request, response, context);
+          return quietFixture
+            ? await quietFixture.handle(request, response, perform)
+            : await perform();
         } finally {
           if (held) heldHandled += 1;
         }
       },
     },
     connectionIds,
+    quiet: quietFixture,
     control: {
       chatEvidence: () => ({
         plans: chatPlans,
