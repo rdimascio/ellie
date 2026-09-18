@@ -126,6 +126,7 @@ final class PhoneControlStore: ObservableObject {
         if expected != generation, phase == .cancelling { phase = .idle }
       }
       do {
+        try Task.checkCancellation()
         let received = try await transport.nodes(for: credential)
         guard expected == generation else { return }
         nodes = received
@@ -165,6 +166,7 @@ final class PhoneControlStore: ObservableObject {
         activeCommand = nil
       }
       do {
+        try Task.checkCancellation()
         let result = try await operation()
         if expected == generation { phase = result }
       } catch {

@@ -223,6 +223,30 @@ final class PhoneControlStoreTests: XCTestCase {
     XCTAssertEqual(commandCalls, 1)
   }
 
+  @MainActor
+  func testCredentialChangeBeforeQueuedTransportCallsUsesNoOldToken() async {
+    let inventoryTransport = PhoneControlFakeTransport(nodes: [node("mac-a")])
+    let inventory = PhoneControlStore(credential: credential(), transport: inventoryTransport)
+    inventory.refresh()
+    inventory.credentialDidChange()
+    await eventually { inventory.phase == .idle }
+    let inventoryCalls = await inventoryTransport.nodeCalls
+    XCTAssertEqual(inventoryCalls, 0)
+
+    let commandTransport = PhoneControlFakeTransport(nodes: [node("mac-a")])
+    let command = PhoneControlStore(credential: credential(), transport: commandTransport)
+    command.refresh()
+    await eventually { command.phase == .ready }
+    command.selectedNodeID = "mac-a"
+    command.send()
+    command.credentialDidChange()
+    await eventually {
+      command.phase == .outcome(.unknown, nodeID: "mac-a", app: .safari)
+    }
+    let commandCalls = await commandTransport.commandCalls
+    XCTAssertTrue(commandCalls.isEmpty)
+  }
+
   private func credential() -> NativeEnrollmentCredential {
     let grants = [
       NativeGrant(target: "mac-a", capabilities: ["app.open"]),

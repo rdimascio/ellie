@@ -432,6 +432,8 @@ final class BrowserPhoneControlStore: ObservableObject {
       self.pendingBrowserWarningError = nil
       let status = try await self.transport.execute(
         .refresh, nodeID: node.id, credential: self.credential)
+      try Task.checkCancellation()
+      guard !self.credentialChanged else { throw CancellationError() }
       guard case .status(let source, true, let revision?) = status else {
         throw PhoneControlFailure.rejected
       }
