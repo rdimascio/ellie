@@ -56,8 +56,6 @@ jobs:
         run: bun run desktop:test
       - name: Build and verify native dashboard app
         run: bun run desktop:build
-      - name: Build native iPhone dashboard app
-        run: bun run ios:build
   native_ios:
     runs-on: macos-15
     # The UI runner permits 30 minutes; ATS follows on its warmed host with bounded cleanup.
@@ -79,17 +77,30 @@ jobs:
         with:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build native iPhone dashboard app
+        run: bun run ios:build
       - name: Initialize cold CoreSimulator runtime inventory
         env:
           DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
         run: |
           python3 - <<'PY'
           import subprocess
-          subprocess.run(
-              ["xcrun", "simctl", "list", "runtimes", "--json"],
-              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-              timeout=60, check=True,
-          )
+          import sys
+
+          command = ["xcrun", "simctl", "list", "runtimes", "--json"]
+          try:
+              result = subprocess.run(
+                  command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                  timeout=60, check=False,
+              )
+          except subprocess.TimeoutExpired as error:
+              detail = (error.stderr or b"")[-2048:].decode("utf-8", "replace")
+              print(f"CoreSimulator inventory timed out after 60s; stderr: {detail or '(empty)'}", file=sys.stderr)
+              raise SystemExit(1)
+          if result.returncode != 0:
+              detail = result.stderr[-2048:].decode("utf-8", "replace")
+              print(f"CoreSimulator inventory exited {result.returncode}; stderr: {detail or '(empty)'}", file=sys.stderr)
+              raise SystemExit(1)
           PY
       - name: Test native iPhone dashboard app
         id: native_ios_ui
