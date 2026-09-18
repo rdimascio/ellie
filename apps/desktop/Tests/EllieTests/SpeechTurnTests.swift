@@ -229,6 +229,36 @@ final class SpeechTurnTests: XCTestCase {
   }
 
   @MainActor
+  func testLateArtifactDisposalFailureKeepsChangedCredentialBlockedForCleanup() async {
+    let recorder = SpeechFakeRecorder(holdStop: true)
+    let transport = SpeechFakeTransport()
+    let store = SpeechTurnStore(credential: credential(), recorder: recorder, transport: transport)
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { await recorder.stopPending }
+
+    await recorder.setFailDispose(true)
+    store.credentialDidChange()
+    await eventually { await recorder.cancelCalls == 1 }
+    await recorder.finishStop() // stop() creates a new artifact after cancel() succeeded.
+    await eventually { store.phase == .cleanupRequired }
+    let directoryExists = await recorder.directoryExists
+    let transcriptions = await transport.transcriptionTokens
+    XCTAssertTrue(directoryExists, "late private audio must not be treated as removed")
+    XCTAssertTrue(transcriptions.isEmpty)
+    store.checkAvailability()
+    XCTAssertEqual(store.phase, .cleanupRequired)
+
+    store.retryCleanup()
+    await eventually { store.phase == .credentialChanged }
+    let remainingDirectory = await recorder.directoryExists
+    XCTAssertFalse(remainingDirectory)
+  }
+
+  @MainActor
   func testCredentialChangeDuringTranscriptionDisposesAudioWithoutLatePrivateText() async {
     let old = credential()
     let recorder = SpeechFakeRecorder()
@@ -408,7 +438,9 @@ private actor SpeechFakeRecorder: SpeechRecording {
   let file: URL
   var startCalls = 0
   var disposals = 0
+  var cancelCalls = 0
   var failCleanup = false
+  private var failDispose = false
   private let holdStop: Bool
   private var stopContinuation: CheckedContinuation<Void, Never>?
   var stopPending: Bool { stopContinuation != nil }
@@ -439,13 +471,18 @@ private actor SpeechFakeRecorder: SpeechRecording {
     stopContinuation?.resume()
     stopContinuation = nil
   }
-  func cancel() async throws { try cleanup() }
+  func cancel() async throws {
+    cancelCalls += 1
+    try cleanup()
+  }
   func dispose(_ artifact: SpeechAudioArtifact) async throws {
     guard artifact.url.standardizedFileURL == file.standardizedFileURL else { return }
     disposals += 1
+    if failDispose { throw SpeechTurnFailure.cleanupFailed }
     try cleanup()
   }
   func setFailCleanup(_ value: Bool) { failCleanup = value }
+  func setFailDispose(_ value: Bool) { failDispose = value }
   private func cleanup() throws {
     if failCleanup { throw SpeechTurnFailure.cleanupFailed }
     try? FileManager.default.removeItem(at: file)
