@@ -847,6 +847,19 @@ final class EllieIOSUITests: XCTestCase {
             XCTFail("The edited spoken search must be exact before reviewing a command")
             return
         }
+        let done = app.buttons["speech-transcript-done"]
+        guard done.waitForExistence(timeout: 5) else {
+            XCTFail("Reviewing an edited transcript must offer keyboard Done")
+            return
+        }
+        done.tap()
+        let keyboardGone = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"), object: app.keyboards.firstMatch)
+        guard XCTWaiter.wait(for: [keyboardGone], timeout: 5) == .completed else {
+            XCTFail("Done must dismiss the keyboard without sending the transcript")
+            return
+        }
+        XCTAssertEqual(count.label, "Fixture mutations: 0")
         let run = revealSpeechReviewButton("speech-browser-run", in: app)
         XCTAssertFalse(run.isEnabled, "A spoken search requires an observed selected document")
         XCTAssertEqual(count.label, "Fixture mutations: 0")
