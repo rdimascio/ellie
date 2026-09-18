@@ -74,6 +74,7 @@ struct DashboardSyncView: View {
 
       status
     }
+    .ellieScreen()
     .navigationTitle("Dashboard Sync")
     .confirmationDialog(
       "Replace local dashboards?", isPresented: $replacing, titleVisibility: .visible

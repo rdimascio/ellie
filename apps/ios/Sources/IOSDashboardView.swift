@@ -15,23 +15,64 @@ struct IOSDashboardList: View {
 
     var body: some View {
         NavigationStack {
-            List {
-                Section {
-                    ForEach(store.state.dashboards) { dashboard in
-                        NavigationLink {
-                            IOSDashboardDetail(store: store, dashboardID: dashboard.id)
-                        } label: {
-                            Label(dashboard.name, systemImage: dashboard.id == store.state.dashboards.first?.id ? "house" : "rectangle.3.group")
-                        }
-                        .accessibilityIdentifier("dashboard-\(dashboard.id)")
+            ScrollView {
+                VStack(alignment: .leading, spacing: 26) {
+                    homeInvitation
+                    HStack {
+                        Text("Your dashboards").font(.headline)
+                        Spacer()
+                        Image(systemName: "square.grid.2x2").foregroundStyle(ElliePalette.muted)
                     }
-                } header: { Text("Dashboards") }
-                footer: { Text("Layouts and notes stay on this iPhone until you export them.") }
-                Section("Coordinator") {
-                    NavigationLink { NativeEnrollmentView(store: enrollment, dashboards: store) } label: { Label("Pair this iPhone", systemImage: "link") }
-                        .accessibilityIdentifier("coordinator-enrollment")
+                    VStack(spacing: 12) {
+                        ForEach(store.state.dashboards) { dashboard in
+                            NavigationLink {
+                                IOSDashboardDetail(store: store, dashboardID: dashboard.id)
+                            } label: {
+                                HStack(spacing: 16) {
+                                    Image(systemName: dashboard.id == store.state.dashboards.first?.id ? "house" : "rectangle.3.group")
+                                        .font(.title3)
+                                        .foregroundStyle(ElliePalette.accent)
+                                        .frame(width: 44, height: 44)
+                                        .background(ElliePalette.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(dashboard.name).font(.headline).foregroundStyle(.white)
+                                        Text("\(dashboard.widgets.count) widgets")
+                                            .font(.caption).foregroundStyle(ElliePalette.muted)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                                }
+                                .ellieCard()
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(dashboard.name)
+                            .accessibilityIdentifier("dashboard-\(dashboard.id)")
+                        }
+                    }
+                    NavigationLink {
+                        NativeEnrollmentView(store: enrollment, dashboards: store)
+                    } label: {
+                        HStack(spacing: 14) {
+                            Image(systemName: "link").foregroundStyle(ElliePalette.accent)
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(coordinatorTitle).font(.subheadline.weight(.semibold)).foregroundStyle(.white)
+                                Text("Your devices, working together")
+                                    .font(.caption).foregroundStyle(ElliePalette.muted)
+                            }
+                            Spacer(minLength: 8)
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(ElliePalette.muted)
+                        }
+                        .ellieCard()
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("coordinator-enrollment")
+                    Label("Layouts and notes stay on this iPhone until you export or sync them.", systemImage: "lock")
+                        .font(.caption).foregroundStyle(ElliePalette.muted)
+                        .padding(.horizontal, 4)
                 }
+                .padding(24)
             }
+            .ellieScreen()
             .navigationTitle("Ellie")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -88,6 +129,47 @@ struct IOSDashboardList: View {
         }
     }
 
+    private var coordinatorTitle: String {
+        if case .enrolled = enrollment.phase { return "Your coordinator" }
+        return "Pair this iPhone"
+    }
+
+    private var homeInvitation: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 8) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("A little more\nheadspace.")
+                        .font(.largeTitle.weight(.medium))
+                        .tracking(-1)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Your spaces. Your devices.\nAll a little closer.")
+                        .font(.subheadline).foregroundStyle(ElliePalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                EllieNativePresence().frame(width: 110, height: 125)
+            }
+            if case .enrolled(let credential) = enrollment.phase {
+                NavigationLink {
+                    LifeWebView(credential: LifeWebCredential(enrollment: credential))
+                        .id(credential.client.id)
+                } label: {
+                    Label("Open Ellie Life", systemImage: "sparkle")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.vertical, 12).padding(.horizontal, 16)
+                        .foregroundStyle(ElliePalette.background)
+                        .background(ElliePalette.accent, in: RoundedRectangle(cornerRadius: 13))
+                }
+            } else {
+                Text("Connect your coordinator to bring Ellie with you.")
+                    .font(.caption).foregroundStyle(ElliePalette.accent)
+            }
+        }
+        .padding(24)
+        .background(LinearGradient(colors: [ElliePalette.surface, Color(red: 0.12, green: 0.14, blue: 0.26)], startPoint: .topLeading, endPoint: .bottomTrailing), in: RoundedRectangle(cornerRadius: 28))
+        .overlay(RoundedRectangle(cornerRadius: 28).strokeBorder(ElliePalette.violet.opacity(0.3), lineWidth: 1))
+    }
+
     private func prepareExport() {
         do { exportDocument = DashboardExportDocument(data: try store.exportData()); exporting = true }
         catch { store.error = "Dashboards could not be prepared for export." }
@@ -129,7 +211,7 @@ private struct IOSDashboardDetail: View {
             }
             .padding()
         }
-        .background(Color(uiColor: .systemGroupedBackground))
+        .ellieScreen()
         .navigationTitle(dashboard?.name ?? "Dashboard")
         .navigationBarTitleDisplayMode(.large)
         .onAppear(perform: select)

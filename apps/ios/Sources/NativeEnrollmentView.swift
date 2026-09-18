@@ -109,6 +109,7 @@ struct NativeEnrollmentView: View {
         ).font(.footnote).foregroundStyle(.secondary)
       }
     }
+    .ellieScreen()
     .navigationTitle("Coordinator")
     .sheet(
       isPresented: Binding(

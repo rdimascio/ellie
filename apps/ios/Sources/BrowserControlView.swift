@@ -75,6 +75,7 @@ struct BrowserControlView: View {
         Section { Button("Stop waiting", role: .cancel) { browser.cancel() } }
       }
     }
+    .ellieScreen()
     .navigationTitle("Browser control")
     .onChange(of: controls.selectedNodeID) { _, value in browser.clearIfTargetChanged(to: value) }
     .onChange(of: scenePhase) { _, phase in

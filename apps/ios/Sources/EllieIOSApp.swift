@@ -45,6 +45,7 @@ private struct EllieIOSNormalRoot: View {
 
     var body: some View {
         IOSDashboardList(store: store, enrollment: enrollment)
-            .tint(Color(red: 0.88, green: 0.37, blue: 0.16))
+            .tint(ElliePalette.accent)
+            .preferredColorScheme(.dark)
     }
 }
