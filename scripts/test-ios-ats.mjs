@@ -108,7 +108,7 @@ function endpointStage(request) {
     path?.startsWith("/__ellie-test/google/") ||
     path?.startsWith("/__ellie-test/chores/") ||
     path?.startsWith("/native/v1/household/") ||
-    quietControlRoute.test(path ?? "") ||
+    quietControlRoute.test(request.url ?? "") ||
     /^\/api\/life\/native\/sessions(?:$|\/[^/]+$)/.test(path ?? "")
   ) {
     return undefined;
@@ -1022,6 +1022,10 @@ if (audio[44] >= 3) {
   ) {
     throw new Error("The pinned Quiet fixture did not traverse the expected finite lifecycle.");
   }
+  console.log(
+    `ATS Quiet HTTPS: ${quietControls} controls, ${googleLife.quiet.control.detailStarted()} held details, ` +
+      `${googleLife.quiet.control.nativeChatPosts()} reviewed chat POST.`,
+  );
   if (
     chores.counts.writes !== 3 ||
     chores.counts.dropped !== 1 ||
