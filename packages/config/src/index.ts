@@ -205,8 +205,11 @@ export function preferences(value: unknown): Preferences {
   const browser = identifier(v.browser);
   const siteBrowsers = v.siteBrowsers === undefined ? undefined : record(v.siteBrowsers);
   if (siteBrowsers)
-    for (const [name, bundle] of Object.entries(siteBrowsers)) {
-      if (!Object.hasOwn(sites, name)) throw new Error("Unknown site alias for a site browser.");
+    for (const [url, bundle] of Object.entries(siteBrowsers)) {
+      // Keyed by site URL, which is the identity the allowlist and the router both use.
+      // Aliases are many-to-one onto URLs, so keying by alias would let synonyms disagree.
+      if (!Object.values(sites).includes(url))
+        throw new Error("Site browser must name a configured site URL.");
       // Only an already-configured application may be targeted, so a site override
       // cannot introduce a new bundle identifier.
       if (identifier(bundle) !== browser && !Object.values(apps).includes(bundle))

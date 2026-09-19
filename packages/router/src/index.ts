@@ -1,6 +1,6 @@
 import { action } from "@ellie/protocol";
 import type { Context, Plan, Layout, Monitor } from "@ellie/protocol";
-import { browserForSite, defaults } from "@ellie/config/defaults";
+import { browserForUrl, defaults } from "@ellie/config/defaults";
 import type { Preferences } from "@ellie/config/defaults";
 
 /** Pure, anchored grammar. Unknown text never becomes executable code or shell input. */
@@ -31,7 +31,7 @@ export function route(
     if (app) return { actions: [action({ tool: "app.open", app })], nextContext: { lastApp: app } };
     const url = Object.hasOwn(prefs.sites, name) ? prefs.sites[name] : undefined;
     if (url) {
-      const browser = browserForSite(name, prefs);
+      const browser = browserForUrl(url, prefs);
       return {
         actions: [action({ tool: "url.open", app: browser, url })],
         nextContext: { lastApp: browser },

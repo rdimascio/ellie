@@ -3,15 +3,14 @@ export interface Preferences {
   browser: string;
   apps: Record<string, string>;
   sites: Record<string, string>;
-  /** Optional per-site browser overrides keyed by site alias; falls back to `browser`. */
+  /** Optional browser per configured site URL; falls back to `browser`. */
   siteBrowsers?: Record<string, string>;
 }
 
-/** The browser configured for one site alias, falling back to the default browser. */
-export function browserForSite(alias: string | undefined, prefs: Preferences): string {
+/** The browser configured for one site URL, falling back to the default browser. */
+export function browserForUrl(url: string, prefs: Preferences): string {
   const overrides = prefs.siteBrowsers;
-  if (alias && overrides && Object.hasOwn(overrides, alias)) return overrides[alias]!;
-  return prefs.browser;
+  return overrides && Object.hasOwn(overrides, url) ? overrides[url]! : prefs.browser;
 }
 export const defaults: Preferences = {
   personality: "ellie",

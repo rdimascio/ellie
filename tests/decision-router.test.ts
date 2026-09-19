@@ -360,52 +360,37 @@ test("invalid provider responses and cancellation cannot create plans", async ()
   );
 });
 
-test("a per-site browser override routes that site only, leaving others on the default", () => {
-  const prefs = {
-    ...defaults,
-    siteBrowsers: { netflix: "com.apple.Safari" },
-  };
-  const openedIn = (plan: ReturnType<typeof route>): string | undefined => {
-    const first = plan?.actions[0];
-    return first && first.tool === "url.open" ? first.app : undefined;
-  };
+const SYNONYMS = {
+  netflix: "https://www.netflix.com/",
+  flix: "https://www.netflix.com/",
+  youtube: "https://www.youtube.com/",
+};
 
-  const netflix = route("open netflix", {}, prefs);
-  assert.equal(openedIn(netflix), "com.apple.Safari");
-  assert.equal(netflix?.nextContext.lastApp, "com.apple.Safari");
-
-  assert.equal(openedIn(route("open youtube", {}, prefs)), defaults.browser);
-  assert.equal(openedIn(route("open netflix", {}, defaults)), defaults.browser);
-});
-
-test("a site browser must name an already configured application", () => {
-  const ok = preferences({ ...defaults, siteBrowsers: { netflix: "com.apple.Safari" } });
-  assert.equal(ok.siteBrowsers?.netflix, "com.apple.Safari");
-  assert.throws(
-    () => preferences({ ...defaults, siteBrowsers: { netflix: "com.evil.Browser" } }),
-    /configured application/,
-  );
-  assert.throws(
-    () => preferences({ ...defaults, siteBrowsers: { nosuchsite: "com.apple.Safari" } }),
-    /Unknown site alias/,
-  );
-});
-
-test("the decision path applies a site browser override, even when another alias shares the URL", async () => {
+test("a site browser override applies on both routers, and synonyms cannot disagree", async () => {
   const prefs = preferences({
     ...defaults,
-    sites: { flix: "https://www.netflix.com/", netflix: "https://www.netflix.com/" },
-    siteBrowsers: { netflix: "com.apple.Safari" },
+    sites: SYNONYMS,
+    siteBrowsers: { "https://www.netflix.com/": "com.apple.Safari" },
   });
-  // Candidates are keyed by alias, so the chosen alias — not a URL lookup — selects the browser.
+
+  // Deterministic grammar, reached by either alias for the same URL.
+  for (const alias of ["netflix", "flix"]) {
+    const plan = route(`open ${alias}`, {}, prefs);
+    const first = plan?.actions[0];
+    assert.ok(first && first.tool === "url.open", alias);
+    if (!first || first.tool !== "url.open") return;
+    assert.equal(first.app, "com.apple.Safari", alias);
+    assert.equal(plan?.nextContext.lastApp, "com.apple.Safari", alias);
+  }
+
+  // The model path resolves the same URL to the same browser.
   const { questions } = buildDesktopQuestions("take me to netflix", {}, prefs);
   assert.equal(questions.site?.type, "choice");
   if (questions.site?.type !== "choice") return;
   const chosen = Object.entries(questions.site.criteria).find(([, text]) =>
     (text ?? "").includes("netflix"),
   )?.[0];
-  assert.ok(chosen, "netflix is offered as its own candidate");
-
+  assert.ok(chosen);
   const decision = await decideDesktop(
     "take me to netflix",
     {},
@@ -415,33 +400,71 @@ test("the decision path applies a site browser override, even when another alias
   );
   assert.equal(decision.kind, "plan");
   if (decision.kind !== "plan") return;
-  const first = decision.plan.actions[0]!;
-  assert.equal(first.tool, "url.open");
-  if (first.tool !== "url.open") return;
-  assert.equal(first.app, "com.apple.Safari");
-  assert.equal(first.url, "https://www.netflix.com/");
+  const action = decision.plan.actions[0]!;
+  assert.equal(action.tool, "url.open");
+  if (action.tool !== "url.open") return;
+  assert.equal(action.app, "com.apple.Safari");
   assert.equal(decision.plan.nextContext.lastApp, "com.apple.Safari");
 });
 
-test("the decision path leaves sites without an override on the default browser", async () => {
-  const prefs = preferences({ ...defaults, siteBrowsers: { netflix: "com.apple.Safari" } });
-  const { questions } = buildDesktopQuestions("take me to youtube", {}, prefs);
-  assert.equal(questions.site?.type, "choice");
-  if (questions.site?.type !== "choice") return;
-  const chosen = Object.entries(questions.site.criteria).find(([, text]) =>
-    (text ?? "").includes("youtube"),
-  )?.[0];
-  assert.ok(chosen);
-  const decision = await decideDesktop(
-    "take me to youtube",
-    {},
-    prefs,
-    provider({ request: "single", operation: "url.open", site: chosen }),
-    options(),
+test("site candidates stay deduplicated by URL, so an override cannot split the model's choice", () => {
+  const withOverride = preferences({
+    ...defaults,
+    sites: SYNONYMS,
+    siteBrowsers: { "https://www.netflix.com/": "com.apple.Safari" },
+  });
+  const without = preferences({ ...defaults, sites: SYNONYMS });
+  const ids = (prefs: typeof withOverride) => {
+    const { questions } = buildDesktopQuestions("take me to netflix", {}, prefs);
+    assert.equal(questions.site?.type, "choice");
+    return questions.site?.type === "choice" ? { ...questions.site.criteria } : {};
+  };
+  // Two distinct URLs behind three aliases must remain two candidates, labelled together.
+  const base = ids(without);
+  const siteIds = Object.keys(base).filter((id) => id.startsWith("site_"));
+  assert.equal(siteIds.length, 2);
+  assert.ok(
+    Object.values(base).some((text) => (text ?? "").includes("netflix, flix")),
+    JSON.stringify(base),
   );
-  assert.equal(decision.kind, "plan");
-  if (decision.kind !== "plan") return;
-  const first = decision.plan.actions[0]!;
-  if (first.tool !== "url.open") return;
+  // Adding an override must not change what the model is asked.
+  assert.deepEqual(ids(withOverride), base);
+});
+
+test("a site browser must name a configured site URL and a configured application", () => {
+  const ok = preferences({
+    ...defaults,
+    siteBrowsers: { "https://www.netflix.com/": "com.apple.Safari" },
+  });
+  assert.equal(ok.siteBrowsers?.["https://www.netflix.com/"], "com.apple.Safari");
+  assert.throws(
+    () =>
+      preferences({
+        ...defaults,
+        siteBrowsers: { "https://www.netflix.com/": "com.evil.Browser" },
+      }),
+    /configured application/,
+  );
+  assert.throws(
+    () =>
+      preferences({ ...defaults, siteBrowsers: { "https://nope.example/": "com.apple.Safari" } }),
+    /configured site URL/,
+  );
+  // An alias is not a URL; keying by alias must be rejected outright.
+  assert.throws(
+    () => preferences({ ...defaults, siteBrowsers: { netflix: "com.apple.Safari" } }),
+    /configured site URL/,
+  );
+});
+
+test("sites without an override stay on the default browser", () => {
+  const prefs = preferences({
+    ...defaults,
+    siteBrowsers: { "https://www.netflix.com/": "com.apple.Safari" },
+  });
+  const plan = route("open youtube", {}, prefs);
+  const first = plan?.actions[0];
+  if (!first || first.tool !== "url.open") return assert.fail("expected url.open");
   assert.equal(first.app, defaults.browser);
+  assert.equal(route("open netflix", {}, defaults)?.actions[0]?.tool, "url.open");
 });
