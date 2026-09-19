@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildDesktopQuestions, decideDesktop } from "@ellie/router/decision";
-import { defaults } from "@ellie/config";
+import { route } from "@ellie/router";
+import { defaults, preferences } from "@ellie/config";
 import type { DecisionProvider, DecisionQuestion, DecisionResponse } from "@ellie/decisions";
 
 function response(
@@ -356,5 +357,36 @@ test("invalid provider responses and cancellation cannot create plans", async ()
   await assert.rejects(
     decideDesktop("Open Notes", {}, defaults, delayed, { signal: controller.signal }),
     /cancelled/,
+  );
+});
+
+test("a per-site browser override routes that site only, leaving others on the default", () => {
+  const prefs = {
+    ...defaults,
+    siteBrowsers: { netflix: "com.apple.Safari" },
+  };
+  const openedIn = (plan: ReturnType<typeof route>): string | undefined => {
+    const first = plan?.actions[0];
+    return first && first.tool === "url.open" ? first.app : undefined;
+  };
+
+  const netflix = route("open netflix", {}, prefs);
+  assert.equal(openedIn(netflix), "com.apple.Safari");
+  assert.equal(netflix?.nextContext.lastApp, "com.apple.Safari");
+
+  assert.equal(openedIn(route("open youtube", {}, prefs)), defaults.browser);
+  assert.equal(openedIn(route("open netflix", {}, defaults)), defaults.browser);
+});
+
+test("a site browser must name an already configured application", () => {
+  const ok = preferences({ ...defaults, siteBrowsers: { netflix: "com.apple.Safari" } });
+  assert.equal(ok.siteBrowsers?.netflix, "com.apple.Safari");
+  assert.throws(
+    () => preferences({ ...defaults, siteBrowsers: { netflix: "com.evil.Browser" } }),
+    /configured application/,
+  );
+  assert.throws(
+    () => preferences({ ...defaults, siteBrowsers: { nosuchsite: "com.apple.Safari" } }),
+    /Unknown site alias/,
   );
 });
