@@ -86,6 +86,35 @@ test("opaque allowlist IDs assemble only a single protocol action", async () => 
   }
 });
 
+test("the configured default browser is labelled so unqualified browser requests resolve to it", () => {
+  const { questions } = buildDesktopQuestions("fire up the browser", {}, defaults);
+  assert.equal(questions.app?.type, "choice");
+  if (questions.app?.type !== "choice") return;
+  const entries = Object.entries(questions.app.criteria);
+  const labelled = entries.filter(([, text]) => (text ?? "").includes("default browser"));
+  assert.equal(labelled.length, 1, "exactly one candidate is the default browser");
+  const [id, text] = labelled[0]!;
+  // "arc" is the alias configured for defaults.browser, so the labelled candidate is that app.
+  assert.ok((text ?? "").includes("arc"), text ?? "");
+  for (const [other, otherText] of entries)
+    if (other !== id) assert.ok(!(otherText ?? "").includes("default browser"), other);
+});
+
+test("the default browser label does not displace the previous-application hint", () => {
+  const { questions } = buildDesktopQuestions(
+    "put it beside the browser",
+    { lastApp: defaults.browser },
+    defaults,
+  );
+  assert.equal(questions.app?.type, "choice");
+  if (questions.app?.type !== "choice") return;
+  const both = Object.values(questions.app.criteria).filter(
+    (text) =>
+      (text ?? "").includes("default browser") && (text ?? "").includes("previous application"),
+  );
+  assert.equal(both.length, 1, "the same candidate carries both hints");
+});
+
 test("layout, monitor, and previous application remain distinct bounded choices", async () => {
   const context = { lastApp: "com.apple.Notes" };
   const placement = await decideDesktop(
