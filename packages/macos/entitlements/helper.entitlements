@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Keychain items are addressed by team access group rather than by the creating
+    binary, so a signed update reads what the previous build wrote. Without this
+    entitlement the helper falls back to the login keychain and behaves as before.
+  -->
+  <key>keychain-access-groups</key>
+  <array>
+    <string>$(AppIdentifierPrefix)org.ellie</string>
+  </array>
+</dict>
+</plist>
