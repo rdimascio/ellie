@@ -1,6 +1,6 @@
 import { action, LAYOUTS, MONITORS } from "@ellie/protocol";
 import type { Context, Layout, Monitor, Plan } from "@ellie/protocol";
-import { browserForSite, siteAliasForUrl } from "@ellie/config/defaults";
+import { browserForSite } from "@ellie/config/defaults";
 import type { Preferences } from "@ellie/config/defaults";
 import { validateDecisionResponse } from "@ellie/decisions";
 import type { DecisionProvider, DecisionQuestion, DecisionResponse } from "@ellie/decisions";
@@ -52,16 +52,19 @@ function appCandidates(context: Context, prefs: Preferences): Map<string, string
   return candidates(apps.slice(0, MAX_CHOICES - 2), "app");
 }
 
+/** Keyed by site alias, so the alias survives into the plan and can select its browser. */
 function siteCandidates(prefs: Preferences): Map<string, string> {
-  const valid = Object.values(prefs.sites).filter((url) => {
-    try {
-      const parsed = new URL(url);
-      return parsed.protocol === "https:" && !parsed.username && !parsed.password;
-    } catch {
-      return false;
-    }
-  });
-  return candidates([...new Set(valid)].slice(0, MAX_CHOICES - 2), "site");
+  const valid = Object.entries(prefs.sites)
+    .filter(([, url]) => {
+      try {
+        const parsed = new URL(url);
+        return parsed.protocol === "https:" && !parsed.username && !parsed.password;
+      } catch {
+        return false;
+      }
+    })
+    .map(([alias]) => alias);
+  return candidates(valid.slice(0, MAX_CHOICES - 2), "site");
 }
 
 function namesFor(value: string, aliases: Record<string, string>): string {
@@ -112,10 +115,7 @@ export function buildDesktopQuestions(
       ),
       site: choice(
         "Select the requested configured website; never substitute a listed site for an unlisted site.",
-        [...sites].map(([id, url]): [string, string] => [
-          id,
-          `Website ${namesFor(url, prefs.sites) || url}`,
-        ]),
+        [...sites].map(([id, alias]): [string, string] => [id, `Website ${alias}`]),
       ),
       layout: choice(
         "Select the requested window layout. Keep fullscreen distinct from maximize. Select none if no layout is requested.",
@@ -297,7 +297,7 @@ export async function decideDesktop(
   const apps = appCandidates(context, prefs);
   const sites = siteCandidates(prefs);
   const app = apps.get(selected(response, "app"));
-  const site = sites.get(selected(response, "site"));
+  const siteAlias = sites.get(selected(response, "site"));
   const anchor = apps.get(selected(response, "anchor"));
   if (
     (references.target && app !== (references.localApp ?? priorApp)) ||
@@ -307,10 +307,10 @@ export async function decideDesktop(
   let plan: Plan | undefined;
   if (operation === "app.open" && app)
     plan = { actions: [action({ tool: "app.open", app })], nextContext: { lastApp: app } };
-  else if (operation === "url.open" && site) {
-    const browser = browserForSite(siteAliasForUrl(site, prefs), prefs);
+  else if (operation === "url.open" && siteAlias) {
+    const browser = browserForSite(siteAlias, prefs);
     plan = {
-      actions: [action({ tool: "url.open", app: browser, url: site })],
+      actions: [action({ tool: "url.open", app: browser, url: prefs.sites[siteAlias]! })],
       nextContext: { lastApp: browser },
     };
   } else if (

@@ -390,3 +390,58 @@ test("a site browser must name an already configured application", () => {
     /Unknown site alias/,
   );
 });
+
+test("the decision path applies a site browser override, even when another alias shares the URL", async () => {
+  const prefs = preferences({
+    ...defaults,
+    sites: { flix: "https://www.netflix.com/", netflix: "https://www.netflix.com/" },
+    siteBrowsers: { netflix: "com.apple.Safari" },
+  });
+  // Candidates are keyed by alias, so the chosen alias — not a URL lookup — selects the browser.
+  const { questions } = buildDesktopQuestions("take me to netflix", {}, prefs);
+  assert.equal(questions.site?.type, "choice");
+  if (questions.site?.type !== "choice") return;
+  const chosen = Object.entries(questions.site.criteria).find(([, text]) =>
+    (text ?? "").includes("netflix"),
+  )?.[0];
+  assert.ok(chosen, "netflix is offered as its own candidate");
+
+  const decision = await decideDesktop(
+    "take me to netflix",
+    {},
+    prefs,
+    provider({ request: "single", operation: "url.open", site: chosen }),
+    options(),
+  );
+  assert.equal(decision.kind, "plan");
+  if (decision.kind !== "plan") return;
+  const first = decision.plan.actions[0]!;
+  assert.equal(first.tool, "url.open");
+  if (first.tool !== "url.open") return;
+  assert.equal(first.app, "com.apple.Safari");
+  assert.equal(first.url, "https://www.netflix.com/");
+  assert.equal(decision.plan.nextContext.lastApp, "com.apple.Safari");
+});
+
+test("the decision path leaves sites without an override on the default browser", async () => {
+  const prefs = preferences({ ...defaults, siteBrowsers: { netflix: "com.apple.Safari" } });
+  const { questions } = buildDesktopQuestions("take me to youtube", {}, prefs);
+  assert.equal(questions.site?.type, "choice");
+  if (questions.site?.type !== "choice") return;
+  const chosen = Object.entries(questions.site.criteria).find(([, text]) =>
+    (text ?? "").includes("youtube"),
+  )?.[0];
+  assert.ok(chosen);
+  const decision = await decideDesktop(
+    "take me to youtube",
+    {},
+    prefs,
+    provider({ request: "single", operation: "url.open", site: chosen }),
+    options(),
+  );
+  assert.equal(decision.kind, "plan");
+  if (decision.kind !== "plan") return;
+  const first = decision.plan.actions[0]!;
+  if (first.tool !== "url.open") return;
+  assert.equal(first.app, defaults.browser);
+});
