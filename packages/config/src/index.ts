@@ -202,11 +202,25 @@ export function preferences(value: unknown): Preferences {
     if (url.protocol !== "https:" || url.username || url.password)
       throw new Error("Invalid site URL.");
   }
+  const browser = identifier(v.browser);
+  const siteBrowsers = v.siteBrowsers === undefined ? undefined : record(v.siteBrowsers);
+  if (siteBrowsers)
+    for (const [url, bundle] of Object.entries(siteBrowsers)) {
+      // Keyed by site URL, which is the identity the allowlist and the router both use.
+      // Aliases are many-to-one onto URLs, so keying by alias would let synonyms disagree.
+      if (!Object.values(sites).includes(url))
+        throw new Error("Site browser must name a configured site URL.");
+      // Only an already-configured application may be targeted, so a site override
+      // cannot introduce a new bundle identifier.
+      if (identifier(bundle) !== browser && !Object.values(apps).includes(bundle))
+        throw new Error("Site browser must be a configured application.");
+    }
   return {
     personality: identifier(v.personality),
-    browser: identifier(v.browser),
+    browser,
     apps: { ...apps } as Record<string, string>,
     sites: { ...sites } as Record<string, string>,
+    ...(siteBrowsers ? { siteBrowsers: { ...siteBrowsers } as Record<string, string> } : {}),
   };
 }
 export function serverConfig(value: unknown): ServerConfig {
