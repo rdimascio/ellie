@@ -338,3 +338,5 @@ export async function decideDesktop(
   if (!plan) return { kind: "clarify", message: CLARIFY, response };
   return { kind: "plan", plan, ...confidence, response };
 }
+
+export { choice as decisionChoice, gate as decisionGate, selected as decisionSelected };
