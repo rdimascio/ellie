@@ -31,7 +31,6 @@ import { BrowserWebMCPOperations } from "../../node/src/browser-operations.ts";
 import { BrowserAccessibilityRuntime } from "../../node/src/browser-accessibility-runtime.ts";
 import { BrowserOperationSelector } from "../../node/src/browser-operation-selector.ts";
 import { BrowserCompanionOperations } from "../../node/src/browser-companion-operations.ts";
-import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
 import { startBrowserKernelBridge } from "../../node/src/browser-kernel-bridge.ts";
 import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
 import {
@@ -39,6 +38,7 @@ import {
   installBrowserNativeHost,
   uninstallBrowserNativeHost,
 } from "./browser-native-host-management.ts";
+import { reviewedBrowserBindings } from "./browser-registry-source.ts";
 import { packagedBrowserHelpers } from "./browser-runtime-paths.ts";
 
 import { generateCertificate } from "./certificate.ts";
@@ -723,18 +723,8 @@ async function main(): Promise<void> {
     let nodeFailure: unknown;
     let nodeFailed = false;
     try {
-      const browserRegistryPath = join(stateDir, "browser-operations.json");
-      const browserEnabled =
-        config.executionEnabled &&
-        (await lstat(browserRegistryPath).then(
-          () => true,
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return false;
-            throw new Error("Reviewed browser configuration is unavailable.");
-          },
-        ));
-      const browserRegistry = browserEnabled
-        ? loadReviewedBrowserRegistry(browserRegistryPath)
+      const browserRegistry = config.executionEnabled
+        ? await reviewedBrowserBindings(stateDir)
         : undefined;
       const browserHelpers = browserRegistry ? packagedBrowserHelpers() : undefined;
       browserBridge = browserRegistry
