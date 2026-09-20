@@ -1534,6 +1534,13 @@ if (await isDirectEntry()) {
       console.error(
         "Service payload build failed. Verify the clean source, explicit Node archive and checksum, Bun 1.4.2, Xcode tools, and output path.",
       );
+      // Say which check actually refused. The advice above fits every failure equally, so
+      // without this the only way to find out is to run the whole build again. Failures
+      // before the scratch exists carry their own message; later ones are wrapped so the
+      // retained scratch can be reported, and the real reason is the cause.
+      for (let current = error; current; current = current.cause)
+        if (typeof current.message === "string" && !(current instanceof ServicePayloadBuildFailure))
+          console.error(current.message);
       if (error instanceof ServicePayloadBuildFailure)
         console.error(`Retained owned scratch: ${error.retainedScratch}`);
       process.exitCode = 1;
