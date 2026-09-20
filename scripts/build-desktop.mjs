@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { machOFiles, stageRuntime } from "./bundle-runtime.mjs";
+import { embeddedCode, stageRuntime } from "./bundle-runtime.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagePath = join(repositoryRoot, "apps/desktop");
@@ -211,10 +211,16 @@ async function main() {
     );
 
     run("/usr/bin/plutil", ["-lint", join(contents, "Info.plist")]);
-    // Inside out: an embedded runtime is sealed as resources, not walked as nested code,
-    // so its executables are signed one at a time before the bundle seals them.
-    for (const executable of runtime ? await machOFiles(join(resourcesDirectory, "runtime")) : [])
-      run("/usr/bin/codesign", ["--force", "--sign", "-", executable]);
+    // Verify rather than re-sign. The payload builder signs its own helpers, launchers and
+    // installer, and `node` arrives with the Node Foundation's signature; force-signing
+    // those replaces real identities with ad-hoc ones and tells us nothing we did not
+    // already know. What the bundle owes is the check `codesign --deep` will not do for a
+    // plain Mach-O under Resources: refuse to ship an embedded executable nothing signed.
+    if (runtime) {
+      const code = await embeddedCode(join(resourcesDirectory, "runtime"));
+      for (const path of [...code.bundles, ...code.executables])
+        run("/usr/bin/codesign", ["--verify", "--strict", path]);
+    }
     run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", stagedBundle]);
     run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", stagedBundle]);
     await assertMissing(options.output);

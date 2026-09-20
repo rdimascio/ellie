@@ -62,20 +62,30 @@ export async function stageRuntime(source, resourcesDirectory) {
 
 // Mach-O and universal-binary magics, read as a big-endian word.
 const MACH_O = new Set([0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca]);
+const BUNDLE = /\.(app|framework|xpc|bundle)$/;
 
 /**
- * Lists the executables inside a staged tree. `codesign --deep` walks only the nested code
- * locations macOS recognizes, so a binary under `Contents/Resources` is sealed as a resource
- * and never signed. Unsigned helpers have no Team ID, which is the identity the Keychain
- * access group and every future notarization depend on, so each one is signed on its own.
+ * Splits the code inside a staged tree into nested bundles and loose executables.
+ *
+ * `codesign --deep` descends into nested bundles wherever they sit, but skips a plain
+ * Mach-O file under `Contents/Resources`, so the two need different treatment. A bundle is
+ * a unit: signing or verifying its inner executable on its own says nothing about the seal
+ * that actually covers it, so the walk stops at one rather than reaching inside.
  */
-export async function machOFiles(root, current = root) {
-  const found = [];
+export async function embeddedCode(root, current = root) {
+  const bundles = [];
+  const executables = [];
   for (const name of (await readdir(current)).sort()) {
     const path = join(current, name);
     const info = await lstat(path);
     if (info.isDirectory()) {
-      found.push(...(await machOFiles(root, path)));
+      if (BUNDLE.test(name)) {
+        bundles.push(path);
+        continue;
+      }
+      const nested = await embeddedCode(root, path);
+      bundles.push(...nested.bundles);
+      executables.push(...nested.executables);
       continue;
     }
     if (!info.isFile() || info.size < 4) continue;
@@ -83,10 +93,10 @@ export async function machOFiles(root, current = root) {
     try {
       const head = Buffer.alloc(4);
       const { bytesRead } = await handle.read(head, 0, 4, 0);
-      if (bytesRead === 4 && MACH_O.has(head.readUInt32BE(0))) found.push(path);
+      if (bytesRead === 4 && MACH_O.has(head.readUInt32BE(0))) executables.push(path);
     } finally {
       await handle.close();
     }
   }
-  return found;
+  return { bundles, executables };
 }
