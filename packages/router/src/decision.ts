@@ -80,7 +80,7 @@ export function buildDesktopQuestions(
   const sites = siteCandidates(prefs);
   const appEntries = [...apps].map(([id, value]): [string, string] => [
     id,
-    `Application ${namesFor(value, prefs.apps) || value}${context.lastApp === value ? "; previous application (it/that)" : ""}`,
+    `Application ${namesFor(value, prefs.apps) || value}${value === prefs.browser ? "; default browser (the browser)" : ""}${context.lastApp === value ? "; previous application (it/that)" : ""}`,
   ]);
   return {
     state: {
