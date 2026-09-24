@@ -46,12 +46,31 @@ export async function runNode(options: {
   onEvent?: (event: "connected" | "reconnecting") => void;
 }): Promise<void> {
   const { client, executor, worker, distributedWorker, signal } = options;
-  const stoppedRanks = new Map<string, Result>();
-  const flushStoppedRanks = async () => {
-    for (const [id, outcome] of stoppedRanks) {
-      // Process teardown is complete. Permit one bounded acknowledgement even during shutdown.
-      await client.call("POST", "/v1/result", { id, result: outcome }, { timeoutMs: 5000 });
-      stoppedRanks.delete(id);
+  const stoppedResults = new Map<string, Result>();
+  const flushStoppedResults = async () => {
+    for (const [id, outcome] of stoppedResults) {
+      // Execution is complete. Retain its outcome until one bounded acknowledgement succeeds,
+      // including during shutdown, so reconnect never needs to execute the job again.
+      try {
+        await client.call("POST", "/v1/result", { id, result: outcome }, { timeoutMs: 5000 });
+      } catch (error) {
+        let stored: Record<string, unknown> | undefined;
+        try {
+          stored = record(
+            await client.call("GET", `/v1/jobs/${encodeURIComponent(id)}`, undefined, {
+              timeoutMs: 5000,
+            }),
+          );
+        } catch {}
+        if (
+          stored?.id !== id ||
+          !["completed", "failed", "cancelled", "expired", "unknown"].includes(
+            String(stored?.state),
+          )
+        )
+          throw error;
+      }
+      stoppedResults.delete(id);
     }
   };
   const advertiseDistributed = async () => {
@@ -99,7 +118,7 @@ export async function runNode(options: {
         },
         { signal: connectionSignal },
       );
-      await flushStoppedRanks();
+      await flushStoppedResults();
       const beat = async () => {
         const computeCapabilities = await advertise();
         const distributedCapabilities = await advertiseDistributed();
@@ -250,16 +269,8 @@ export async function runNode(options: {
           activeJobs = 0;
           if (currentJob?.id === task.id) currentJob = undefined;
         }
-        if ("kind" in task && task.assignment) {
-          stoppedRanks.set(task.id, outcome);
-          await flushStoppedRanks();
-        } else
-          await client.call(
-            "POST",
-            "/v1/result",
-            { id: task.id, result: outcome },
-            { signal: connectionSignal },
-          );
+        stoppedResults.set(task.id, outcome);
+        await flushStoppedResults();
         await beat();
         reconnectAttempt = 0;
       }
