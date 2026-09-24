@@ -181,6 +181,37 @@ test(
         agenda.json.events.map((event: { title: string }) => event.title),
         ["Selected family visit 👩‍👩‍👧‍👦"],
       );
+      fixture.control.armCalendarChangeAfterNextList();
+      const staleListing = await call(port, tls.rootCert, "/api/connections", { cookie });
+      assert.equal(
+        staleListing.json.connections.find(
+          (connection: { id: string }) => connection.id === fixture!.connectionIds.calendar,
+        ).selectedCalendarId,
+        "selected@example.test",
+      );
+      const changedAgenda = await call(
+        port,
+        tls.rootCert,
+        `/api/connections/${fixture.connectionIds.calendar}/agenda?timeZone=America%2FLos_Angeles`,
+        { cookie },
+      );
+      assert.equal(changedAgenda.status, 200);
+      assert.equal(changedAgenda.json.selectedCalendarId, "primary");
+      assert.equal(
+        changedAgenda.json.events.some(
+          (event: { title: string }) => event.title === "Selected family visit 👩‍👩‍👧‍👦",
+        ),
+        false,
+        "the changed-calendar response must not retain the prior calendar's event",
+      );
+      assert.equal(fixture.control.calendarChanges(), 1);
+      const restoredListing = await call(port, tls.rootCert, "/api/connections", { cookie });
+      assert.equal(
+        restoredListing.json.connections.find(
+          (connection: { id: string }) => connection.id === fixture!.connectionIds.calendar,
+        ).selectedCalendarId,
+        "selected@example.test",
+      );
       const preview = await call(
         port,
         tls.rootCert,

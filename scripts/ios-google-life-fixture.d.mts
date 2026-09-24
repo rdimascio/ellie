@@ -13,6 +13,8 @@ export interface IOSGoogleLifeFixture {
     heldReadStarted(): number;
     heldReadCompleted(): number;
     heldHandled(): number;
+    armCalendarChangeAfterNextList(): void;
+    calendarChanges(): number;
     releaseHeld(): void;
     failNextServerCloseForTest(): void;
   };

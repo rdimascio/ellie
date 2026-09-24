@@ -691,7 +691,7 @@ if (audio[44] >= 3) {
       return;
     }
     const googleControl =
-      /^\/__ellie-test\/google\/(held-started\/[123]|settled\/[123]|release)$/.exec(
+      /^\/__ellie-test\/google\/(held-started\/[123]|settled\/[123]|release|calendar-change-after-list|calendar-changed\/1)$/.exec(
         request.url ?? "",
       );
     if (googleControl) {
@@ -710,15 +710,19 @@ if (audio[44] >= 3) {
           return;
         }
         if (googleControl[1] === "release") googleLife.control.releaseHeld();
+        else if (googleControl[1] === "calendar-change-after-list")
+          googleLife.control.armCalendarChangeAfterNextList();
         else {
           const target = Number(googleControl[1].at(-1));
           const deadline = Date.now() + 5_000;
           const ready = () =>
-            googleControl[1].startsWith("held-started/")
-              ? googleLife.control.heldReadStarted() >= target
-              : googleLife.control.heldReadCompleted() >= target &&
-                googleLife.control.heldHandled() >= target &&
-                heldResponsesClosed >= target;
+            googleControl[1] === "calendar-changed/1"
+              ? googleLife.control.calendarChanges() >= target
+              : googleControl[1].startsWith("held-started/")
+                ? googleLife.control.heldReadStarted() >= target
+                : googleLife.control.heldReadCompleted() >= target &&
+                  googleLife.control.heldHandled() >= target &&
+                  heldResponsesClosed >= target;
           while (Date.now() < deadline && !ready())
             await new Promise((resolveWait) => setTimeout(resolveWait, 20));
           if (!ready()) {

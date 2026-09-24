@@ -47,6 +47,10 @@ export async function createIOSGoogleLifeFixture({
   let heldReadStarted = 0;
   let heldReadCompleted = 0;
   let heldHandled = 0;
+  let changeCalendarAfterNextList = false;
+  let calendarChanges = 0;
+  let calendarChange;
+  let restoreCalendarAfterNextAgenda = false;
   let chatPlans = 0;
   const event = (sourceKey, title, startAt) => ({
     sourceKey,
@@ -252,14 +256,43 @@ export async function createIOSGoogleLifeFixture({
     nativeLife,
     lifeApplication: {
       async handle(request, response, context) {
-        const held = /^\/api\/connections\/[^/]+\/messages\/held_message$/.test(
-          request.url?.split("?", 1)[0] ?? "",
-        );
+        const path = request.url?.split("?", 1)[0] ?? "";
+        const held = /^\/api\/connections\/[^/]+\/messages\/held_message$/.test(path);
+        const changeCalendar =
+          request.method === "GET" && path === "/api/connections" && changeCalendarAfterNextList;
+        const agenda = request.method === "GET" && /^\/api\/connections\/[^/]+\/agenda$/.test(path);
+        let finishCalendarChange;
+        if (changeCalendar) changeCalendarAfterNextList = false;
+        if (changeCalendar)
+          calendarChange = new Promise((resolve) => {
+            finishCalendarChange = resolve;
+          });
         try {
+          if (agenda && calendarChange) await calendarChange;
+          const restoreCalendar = agenda && restoreCalendarAfterNextAgenda;
+          if (restoreCalendar) restoreCalendarAfterNextAgenda = false;
           const perform = () => server.handleEmbedded(request, response, context);
-          return quietFixture
+          const result = quietFixture
             ? await quietFixture.handle(request, response, perform)
             : await perform();
+          if (changeCalendar) {
+            calendarChange = connectors.selectCalendar(actorId, connectionIds.calendar, "primary");
+            try {
+              await calendarChange;
+              restoreCalendarAfterNextAgenda = true;
+            } finally {
+              finishCalendarChange();
+              calendarChange = undefined;
+            }
+          } else if (restoreCalendar) {
+            await connectors.selectCalendar(
+              actorId,
+              connectionIds.calendar,
+              "selected@example.test",
+            );
+            calendarChanges += 1;
+          }
+          return result;
         } finally {
           if (held) heldHandled += 1;
         }
@@ -284,6 +317,10 @@ export async function createIOSGoogleLifeFixture({
       heldReadStarted: () => heldReadStarted,
       heldReadCompleted: () => heldReadCompleted,
       heldHandled: () => heldHandled,
+      armCalendarChangeAfterNextList: () => {
+        changeCalendarAfterNextList = true;
+      },
+      calendarChanges: () => calendarChanges,
       releaseHeld: () => {
         const release = heldRead;
         heldRead = undefined;
