@@ -76,7 +76,10 @@ final class VoiceTurnStore: ObservableObject {
         Task { await recorder.cancel(); await transcriber.cancel(); _ = await active?.value; if self.revision == cancellation { self.phase = .idle } }
     }
 
-    var reviewedApp: NativeApp? { Self.parse(transcript) }
+    var reviewedApp: NativeApp? {
+        guard phase == .reviewing else { return nil }
+        return Self.parse(transcript)
+    }
     static func parse(_ value: String) -> NativeApp? {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let pattern = #"^(open|launch|start)\s+(arc|safari|messages)[.!?]?$"#

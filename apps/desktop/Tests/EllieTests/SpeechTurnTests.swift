@@ -70,6 +70,12 @@ final class SpeechTurnTests: XCTestCase {
     XCTAssertFalse(directoryExists)
     store.transcript = "Open Calculator"
     XCTAssertNil(store.reviewedApp)
+    store.transcript = "Open Safari"
+    XCTAssertEqual(store.reviewedApp, .safari)
+    store.discardReview()
+    XCTAssertEqual(store.phase, .ready)
+    store.transcript = "Open Safari" // Simulate a stale editor write after the review was removed.
+    XCTAssertNil(store.reviewedApp, "discarded text cannot retain reviewed-command authority")
   }
 
   @MainActor
