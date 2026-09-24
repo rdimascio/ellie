@@ -37,6 +37,20 @@ lists in the builder while rejecting a missing controller. An older release with
 remains valid for rollback, but does not provide a packaged companion. Loading the extension in a
 browser is a separate attended step using the same exact release as its native messaging host.
 
+The payload carries the reviewed browser registry at `payload/browser-operations.json`, copied from
+the tracked `apps/node/reviewed-browser-operations.json`. A node resolves it from its own
+executable, the same way it resolves its helpers, so browser capability belongs to an installation
+rather than to a file someone copied into private state by hand. A registry in `~/.ellie` still
+overrides the installed one, which is how a binding is reviewed before it ships. The shipped
+registry currently declares no WebMCP bindings: its presence is what enables the browser bridge and
+the accessibility path, not a claim that any site tool has been reviewed.
+
+Because installed content is readable by every account on the Mac, the installed registry cannot use
+the `0700`/`0600` contract that private state does. It is trusted when the file and every directory
+above it are owned by root or the running account and are not writable by any other account, with
+sticky shared directories exempted from that last rule. Private state keeps its original contract
+unchanged.
+
 The development payload has a finite inventory budget shared by the builder, native inspector,
 and bundled launchers: at most 3,072 files and 4,096 total file/directory entries, depth 16,
 128 MiB per file, 512 MiB of files in total, and a 4 MiB manifest. The builder rejects an

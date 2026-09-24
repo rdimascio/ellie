@@ -742,6 +742,23 @@ async function verifiedProviderUtilsLicense(source, name, value) {
   return bytes;
 }
 
+/**
+ * The reviewed browser registry is what turns browser capability on. Staging it at the
+ * payload root means an installation carries its own reviewed bindings and resolves them
+ * from the running executable, the same way it resolves its helpers. A registry in
+ * private Ellie state still overrides this one.
+ */
+export async function stageReviewedBrowserRegistry(source, destination) {
+  const bytes = await readFile(join(source, "apps/node/reviewed-browser-operations.json"));
+  if (!bytes.length || bytes.length > 32 * 1024)
+    throw new Error("The reviewed browser registry is missing or implausibly large.");
+  await writeFile(join(destination, "browser-operations.json"), bytes, {
+    mode: 0o644,
+    flag: "wx",
+  });
+  await chmod(join(destination, "browser-operations.json"), 0o644);
+}
+
 export async function stageApplication(source, destination, metadata = {}) {
   const closure = await productionClosure(source);
   const root = join(destination, "lib/ellie");
@@ -1183,6 +1200,7 @@ export async function buildServicePayload(options) {
     const components = await stageApplication(buildSource, payload, {
       created,
     });
+    await stageReviewedBrowserRegistry(buildSource, payload);
     await verifyStagedLifeRuntime(payload, join(scratch, "runtime-check"));
     await mkdir(join(payload, "helpers"), { mode: 0o755 });
     command(
