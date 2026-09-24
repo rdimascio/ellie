@@ -190,12 +190,27 @@ test(
       assert.equal(preview.status, 200);
       assert.equal(preview.json.items.length, 4);
       assert.deepEqual(fixture.control.bodyReads(), {}, "list and preview must not fetch bodies");
-      const detail = await call(
-        port,
-        tls.rootCert,
-        `/api/connections/${fixture.connectionIds.gmail}/messages/unicode_message`,
-        { cookie },
+      const messagePath = `/api/connections/${fixture.connectionIds.gmail}/messages/unicode_message`;
+      const unauthenticatedDraft = await call(port, tls.rootCert, `${messagePath}/draft`, {
+        body: { to: ["recipient@example.test"], text: "Synthetic draft" },
+      });
+      assert.equal(unauthenticatedDraft.status, 403);
+      const rejectedDraft = await call(port, tls.rootCert, `${messagePath}/draft`, {
+        cookie,
+        body: { to: ["recipient@example.test"], text: "Synthetic draft" },
+      });
+      assert.equal(rejectedDraft.status, 404);
+      const rejectedSend = await call(port, tls.rootCert, `${messagePath}/send`, {
+        cookie,
+        body: { confirmed: true },
+      });
+      assert.equal(rejectedSend.status, 404);
+      assert.deepEqual(
+        fixture.control.bodyReads(),
+        {},
+        "unsupported draft/send requests must not fetch or act on a message",
       );
+      const detail = await call(port, tls.rootCert, messagePath, { cookie });
       assert.equal(detail.status, 200);
       assert.equal(detail.json.text, "Line one\r\nLine two 👩‍👩‍👧‍👦\n");
       const partial = await call(
