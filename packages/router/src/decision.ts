@@ -247,9 +247,9 @@ export async function decideDesktop(
   provider: DecisionProvider,
   options: { signal: AbortSignal; minProbability?: number; minMargin?: number },
 ): Promise<DesktopDecision> {
+  if (options.signal.aborted) throw new Error("Desktop decision cancelled.");
   const early = obviousRejection(input, prefs);
   if (early) return { kind: early, message: early === "clarify" ? CLARIFY : UNSUPPORTED };
-  if (options.signal.aborted) throw new Error("Desktop decision cancelled.");
   const minProbability = options.minProbability ?? 0.98;
   const minMargin = options.minMargin ?? 0.2;
   if (
