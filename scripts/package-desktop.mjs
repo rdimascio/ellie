@@ -3,8 +3,15 @@
 import { execFileSync } from "node:child_process";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { measureTree } from "./bundle-runtime.mjs";
+
+const argv = process.argv.slice(2);
+if (argv.length && (argv.length !== 2 || argv[0] !== "--runtime" || !isAbsolute(argv[1])))
+  throw new Error("Usage: node scripts/package-desktop.mjs [--runtime /absolute/path/payload]");
+const runtimeSource = argv.length ? resolve(argv[1]) : undefined;
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const revision = execFileSync("/usr/bin/git", ["rev-parse", "HEAD"], {
@@ -30,10 +37,16 @@ const scratch = await mkdtemp(join(tmpdir(), "ellie-package-"));
 try {
   await mkdir(dirname(destination), { recursive: true });
   const app = join(scratch, "Ellie.app");
-  execFileSync(process.execPath, [join(root, "scripts", "build-desktop.mjs"), "--output", app], {
-    cwd: root,
-    stdio: "inherit",
-  });
+  execFileSync(
+    process.execPath,
+    [
+      join(root, "scripts", "build-desktop.mjs"),
+      "--output",
+      app,
+      ...(runtimeSource ? ["--runtime", runtimeSource] : []),
+    ],
+    { cwd: root, stdio: "inherit" },
+  );
   execFileSync("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", app], {
     stdio: "inherit",
   });
@@ -63,13 +76,28 @@ try {
     await readFile(join(archivedApp, "Contents", "Resources", "build-provenance.json"), "utf8"),
   );
   if (
-    Object.keys(provenance).sort().join() !== "bundleId,sourceModified,sourceRevision,version" ||
+    Object.keys(provenance).sort().join() !==
+      "bundleId,runtime,sourceModified,sourceRevision,version" ||
     provenance.bundleId !== "org.ellie.dashboard" ||
     provenance.sourceModified !== false ||
     provenance.sourceRevision !== revision ||
     provenance.version !== "0.1.0"
   )
     throw new Error("Packaged archive provenance does not match its clean source revision.");
+  // Re-measure what survived the archive round trip rather than trusting the record the
+  // build wrote, so a truncated or padded runtime cannot ship as a complete one.
+  const archivedRuntime = join(archivedApp, "Contents", "Resources", "runtime");
+  const embedded = await lstat(archivedRuntime).then(
+    () => measureTree(archivedRuntime),
+    (error) => {
+      if (error?.code === "ENOENT") return null;
+      throw error;
+    },
+  );
+  if (JSON.stringify(embedded) !== JSON.stringify(provenance.runtime ?? null))
+    throw new Error("Packaged archive runtime does not match its recorded provenance.");
+  if (Boolean(runtimeSource) !== Boolean(embedded))
+    throw new Error("Packaged archive runtime does not match what was requested.");
   const digest = execFileSync("/usr/bin/shasum", ["-a", "256", archive], {
     encoding: "utf8",
   })
@@ -84,7 +112,9 @@ try {
   await writeFile(join(staged, "SHA256SUMS"), `${digest}  ${archiveName}\n`, { mode: 0o644 });
   await writeFile(
     join(staged, "SOURCE.txt"),
-    `Ellie 0.1.0 development candidate\nSource revision: ${revision}\nBundle: org.ellie.dashboard\nSignature: ad hoc (not notarized)\n`,
+    `Ellie 0.1.0 development candidate\nSource revision: ${revision}\nBundle: org.ellie.dashboard\nRuntime: ${
+      embedded ? `embedded, ${embedded.files} files` : "not embedded"
+    }\nSignature: ad hoc (not notarized)\n`,
     { mode: 0o644 },
   );
   try {

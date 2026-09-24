@@ -1,4 +1,13 @@
-import { closeSync, constants, fstatSync, lstatSync, openSync, readSync } from "node:fs";
+import {
+  type BigIntStats,
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import { dirname } from "node:path";
 
 export const BROWSER_OPERATION_REGISTRY_MAXIMUM_BYTES = 32 * 1024;
@@ -118,20 +127,111 @@ export function canonicalReviewedBrowserRegistry(value: ReviewedBrowserRegistry)
   return Buffer.from(canonical(value) + "\n");
 }
 
+/**
+ * How a registry file earns trust. The reviewed bindings decide what Ellie is allowed to
+ * drive in a browser, so anyone who can write the file can widen that -- the path itself
+ * has to carry the guarantee.
+ */
+type RegistryTrust = {
+  directory(value: BigIntStats): boolean;
+  file(value: BigIntStats): boolean;
+  directoryFailure: string;
+  fileFailure: string;
+  /** Walk every directory up to the root, for registries readable by other accounts. */
+  ancestors?: boolean;
+};
+
+/**
+ * Private state: the registry lives in a directory only this account can reach, so the
+ * mode bits are the whole argument for trusting it.
+ */
+const privateState: RegistryTrust = {
+  directoryFailure: "Reviewed browser registry directory is not private.",
+  fileFailure: "Reviewed browser registry is not a private regular file.",
+  directory: (value) => value.uid === self() && (value.mode & 0o777n) === 0o700n,
+  file: (value) => value.uid === self() && (value.mode & 0o777n) === 0o600n,
+};
+
+/**
+ * Installed bundle: the registry is sealed inside signed, read-only application content
+ * that the installing account or root owns. It cannot be 0600 in a directory everyone
+ * reads, so trust comes from ownership and from no one else being able to write it --
+ * including through any parent directory on the way down.
+ */
+const installedBundle: RegistryTrust = {
+  directoryFailure: "Reviewed browser registry directory is writable by other accounts.",
+  fileFailure: "Reviewed browser registry is writable by other accounts.",
+  directory: (value) => owned(value) && writableOnlyByOwner(value),
+  file: (value) => owned(value) && (value.mode & 0o022n) === 0n,
+  ancestors: true,
+};
+
+function self(): bigint {
+  return BigInt(process.getuid?.() ?? -1);
+}
+
+function owned(value: BigIntStats): boolean {
+  return value.uid === 0n || value.uid === self();
+}
+
+/**
+ * A shared directory such as /tmp is world writable but sticky, which means another
+ * account cannot rename or delete an entry it does not own. Rejecting sticky directories
+ * would rule out paths macOS itself hands out while protecting nothing.
+ */
+function writableOnlyByOwner(value: BigIntStats): boolean {
+  return (value.mode & 0o022n) === 0n || (value.mode & 0o1000n) !== 0n;
+}
+
+/**
+ * A trusted file below an untrusted directory is not trusted: anyone who can write an
+ * ancestor can replace the directory the registry sits in. The walk follows the resolved
+ * chain, because macOS reaches real directories through symbolic links such as /var and
+ * it is the real directory an attacker would have to own.
+ */
+function assertTrustedAncestors(start: string, trust: RegistryTrust): void {
+  let current = realpathSync(start);
+  for (;;) {
+    const parent = dirname(current);
+    if (parent === current) return;
+    const value = lstatSync(parent, { bigint: true });
+    if (!value.isDirectory() || value.isSymbolicLink() || !trust.directory(value))
+      throw new Error(trust.directoryFailure);
+    current = parent;
+  }
+}
+
+/** Reads the reviewed registry a user placed in their own private Ellie state. */
 export function loadReviewedBrowserRegistry(
   path: string,
   testHooks: { beforeFinalValidation?(): void } = {},
 ): ReviewedBrowserRegistry {
+  return readRegistry(path, privateState, testHooks);
+}
+
+/**
+ * Reads the reviewed registry shipped inside an installed Ellie runtime. An installation
+ * carries its own reviewed bindings so browser capability does not depend on a file the
+ * person copied in by hand.
+ */
+export function loadInstalledBrowserRegistry(
+  path: string,
+  testHooks: { beforeFinalValidation?(): void } = {},
+): ReviewedBrowserRegistry {
+  return readRegistry(path, installedBundle, testHooks);
+}
+
+function readRegistry(
+  path: string,
+  trust: RegistryTrust,
+  testHooks: { beforeFinalValidation?(): void },
+): ReviewedBrowserRegistry {
   if (!path.startsWith("/") || path.includes("\0"))
     throw new Error("Invalid reviewed browser registry path.");
   const parent = lstatSync(dirname(path), { bigint: true });
-  if (
-    !parent.isDirectory() ||
-    parent.isSymbolicLink() ||
-    parent.uid !== BigInt(process.getuid?.() ?? -1) ||
-    (parent.mode & 0o777n) !== 0o700n
-  )
-    throw new Error("Reviewed browser registry directory is not private.");
+  if (!parent.isDirectory() || parent.isSymbolicLink() || !trust.directory(parent))
+    throw new Error(trust.directoryFailure);
+  if (trust.ancestors) assertTrustedAncestors(dirname(path), trust);
   const descriptor = openSync(
     path,
     constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
@@ -141,13 +241,12 @@ export function loadReviewedBrowserRegistry(
     if (
       !before.isFile() ||
       before.isSymbolicLink() ||
-      before.uid !== BigInt(process.getuid?.() ?? -1) ||
+      !trust.file(before) ||
       before.nlink !== 1n ||
-      (before.mode & 0o777n) !== 0o600n ||
       before.size < 1n ||
       before.size > BigInt(BROWSER_OPERATION_REGISTRY_MAXIMUM_BYTES)
     )
-      throw new Error("Reviewed browser registry is not a private regular file.");
+      throw new Error(trust.fileFailure);
     const data = Buffer.alloc(Number(before.size));
     let offset = 0;
     while (offset < data.length) {

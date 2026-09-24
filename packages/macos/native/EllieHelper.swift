@@ -130,39 +130,115 @@ func place(_ window: AXUIElement, layout: String, monitor: String) throws {
     try move(window, to: tileRect(area, layout: layout))
     if layout == "fullscreen" { try fullscreen(window, true) }
 }
+/// The team this helper is signed with, when it has one. An ad-hoc development build
+/// has no team, and its identity is its cdhash, which changes on every rebuild.
+func signingTeam() -> String? {
+    var code: SecCode?
+    guard SecCodeCopySelf(SecCSFlags(), &code) == errSecSuccess, let code else { return nil }
+    var still: SecStaticCode?
+    guard SecCodeCopyStaticCode(code, SecCSFlags(), &still) == errSecSuccess, let still else { return nil }
+    var information: CFDictionary?
+    guard SecCodeCopySigningInformation(still, SecCSFlags(rawValue: kSecCSSigningInformation), &information) == errSecSuccess,
+          let attributes = information as? [String: Any],
+          let team = attributes["teamid"] as? String, !team.isEmpty else { return nil }
+    return team
+}
+
+let keychainService = "org.ellie.assistant"
+
+/// A team-signed helper addresses the data-protection keychain by access group, so any
+/// build signed by the same team reads the same items. The legacy login keychain instead
+/// binds each item to the exact binary that created it, which is why an updated or
+/// repackaged helper was refused, and why a background agent could never answer the
+/// resulting prompt.
+func keychainQuery(_ account: String, group: String?) -> [String: Any] {
+    var query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: keychainService,
+        kSecAttrAccount as String: account,
+    ]
+    if let group {
+        query[kSecUseDataProtectionKeychain as String] = true
+        query[kSecAttrAccessGroup as String] = group
+    }
+    return query
+}
+
+/// A team-signed build without the matching keychain-access-groups entitlement cannot use
+/// the group, so treat that as "no group" rather than as a failure.
+func unavailableGroup(_ status: OSStatus) -> Bool {
+    status == errSecMissingEntitlement || status == errSecParam || status == errSecNotAvailable
+}
+
 func keychain(_ request: [String: Any], command: String) throws {
     let account = try text(request, "account")
     guard account.range(of: "^[a-zA-Z0-9._-]{1,100}$", options: .regularExpression) != nil else { throw fail("Invalid Keychain account.") }
-    let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: "org.ellie.assistant", kSecAttrAccount as String: account]
-    if command == "keychain.set" {
-        let value = Data(try text(request, "value").utf8)
-        var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: value] as CFDictionary)
-        if status == errSecItemNotFound {
-            var item = query; item[kSecValueData as String] = value
-            status = SecItemAdd(item as CFDictionary, nil)
+    let group = signingTeam().map { "\($0).org.ellie" }
+    let query = keychainQuery(account, group: group)
+    let legacy = keychainQuery(account, group: nil)
+    // Every write targets the group when one is usable, and falls back to the login
+    // keychain otherwise, so an ad-hoc development build keeps working unchanged.
+    // With no usable group there is one place to look, and behaviour is identical to
+    // before this helper knew about access groups.
+    let candidates = group == nil ? [legacy] : [query, legacy]
+    func write(_ value: Data, addOnly: Bool) -> OSStatus {
+        var status = errSecParam
+        for candidate in candidates {
+            if addOnly {
+                var item = candidate; item[kSecValueData as String] = value
+                status = SecItemAdd(item as CFDictionary, nil)
+            } else {
+                status = SecItemUpdate(candidate as CFDictionary, [kSecValueData as String: value] as CFDictionary)
+                if status == errSecItemNotFound {
+                    var item = candidate; item[kSecValueData as String] = value
+                    status = SecItemAdd(item as CFDictionary, nil)
+                }
+            }
+            if !unavailableGroup(status) { return status }
         }
-        guard status == errSecSuccess else { throw fail("Unable to save to macOS Keychain.") }
-        emit(["value": ""])
-    } else if command == "keychain.add" {
-        let value = Data(try text(request, "value").utf8)
-        var item = query; item[kSecValueData as String] = value
-        guard SecItemAdd(item as CFDictionary, nil) == errSecSuccess else { throw fail("Unable to add macOS Keychain item.") }
-        emit(["value": ""])
-    } else if command == "keychain.has" {
-        let status = SecItemCopyMatching(query as CFDictionary, nil)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw fail("Unable to inspect macOS Keychain.") }
-        emit(["value": status == errSecSuccess ? "true" : "false"])
-    } else if command == "keychain.delete" {
-        let status = SecItemDelete(query as CFDictionary)
-        guard status == errSecSuccess || status == errSecItemNotFound else { throw fail("Unable to remove macOS Keychain item.") }
-        emit(["value": ""])
-    } else {
-        var lookup = query
+        return status
+    }
+    func read(_ candidate: [String: Any]) -> (OSStatus, Data?) {
+        var lookup = candidate
         lookup[kSecReturnData as String] = true
         lookup[kSecMatchLimit as String] = kSecMatchLimitOne
         var item: CFTypeRef?
-        guard SecItemCopyMatching(lookup as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data, let value = String(data: data, encoding: .utf8) else { throw fail("Keychain credential unavailable.") }
+        let status = SecItemCopyMatching(lookup as CFDictionary, &item)
+        return (status, item as? Data)
+    }
+    if command == "keychain.set" {
+        let value = Data(try text(request, "value").utf8)
+        guard write(value, addOnly: false) == errSecSuccess else { throw fail("Unable to save to macOS Keychain.") }
+        emit(["value": ""])
+    } else if command == "keychain.add" {
+        let value = Data(try text(request, "value").utf8)
+        guard write(value, addOnly: true) == errSecSuccess else { throw fail("Unable to add macOS Keychain item.") }
+        emit(["value": ""])
+    } else if command == "keychain.has" {
+        var (status, _) = read(query)
+        if status != errSecSuccess { (status, _) = read(legacy) }
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw fail("Unable to inspect macOS Keychain.") }
+        emit(["value": status == errSecSuccess ? "true" : "false"])
+    } else if command == "keychain.delete" {
+        // Remove both, so a migrated item cannot be resurrected by a later fallback read.
+        let statuses = candidates.map { SecItemDelete($0 as CFDictionary) }
+        guard statuses.allSatisfy({ $0 == errSecSuccess || $0 == errSecItemNotFound || unavailableGroup($0) }),
+              statuses.contains(where: { $0 == errSecSuccess || $0 == errSecItemNotFound }) else {
+            throw fail("Unable to remove macOS Keychain item.")
+        }
+        emit(["value": ""])
+    } else {
+        var (status, data) = read(query)
+        if status != errSecSuccess {
+            // An item created by an earlier build lives in the login keychain. Carry it
+            // across on first read so an update never looks like lost credentials.
+            let (fallback, legacyData) = read(legacy)
+            if fallback == errSecSuccess, let legacyData {
+                if group != nil { _ = write(legacyData, addOnly: true) }
+                (status, data) = (fallback, legacyData)
+            }
+        }
+        guard status == errSecSuccess, let data, let value = String(data: data, encoding: .utf8) else { throw fail("Keychain credential unavailable.") }
         emit(["value": value])
     }
 }

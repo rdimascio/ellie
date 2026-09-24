@@ -2,6 +2,15 @@
 
 Run `bun run desktop:package` on macOS with Node.js 24 and the full Xcode command-line tools. The command builds the release Swift product, embeds the local speech bridge resources, ad-hoc signs the app, verifies the signature, and creates `dist/release/Ellie-0.1.0-dev-REVISION/` containing the app, ZIP archive, SHA-256 checksum, and source record. It refuses to replace an existing candidate directory.
 
+`node scripts/package-desktop.mjs --runtime /absolute/path/payload` embeds a service payload built by
+`scripts/build-service-payload.mjs` at `Ellie.app/Contents/Resources/runtime`, keeping the payload's
+own layout so the CLI, its helpers and the reviewed browser registry all resolve from the running
+executable. The candidate then carries the Ellie runtime rather than expecting a checkout on the
+Mac that installs it. Only complete payloads are embedded, nothing but plain files and directories
+is copied, and the packager re-measures the runtime that survives the archive round trip against the
+record the build wrote. Without the option the bundle is the dashboard alone, which is what the
+existing candidates are.
+
 The earlier `88d15685` artifact predates the clean-source and archive round-trip review and is superseded. Do not overwrite it or use it as release evidence. Create a new candidate from a committed, completely clean working tree; packaging refuses modified or untracked files. The packager expands its generated ZIP in an owned temporary directory and rechecks the contained app layout, plist, source provenance, and code signature before publishing it.
 
 Before testing an upgrade, quit Ellie and copy the existing `Ellie.app` to a separately named backup such as `Ellie.previous.app`. Verify the archive with `shasum -a 256 -c SHA256SUMS`, expand it, and copy the resulting `Ellie.app` into the desired test location. This development candidate can run from any ordinary local folder; moving it does not move or reset application data.

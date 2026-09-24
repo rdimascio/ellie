@@ -6,23 +6,38 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { machOFiles, stageRuntime } from "./bundle-runtime.mjs";
+
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagePath = join(repositoryRoot, "apps/desktop");
 const iconSource = join(repositoryRoot, "packages/macos/assets/Ellie.png");
 
 function usage() {
   return `Usage: node scripts/build-desktop.mjs [--output /absolute/path/Ellie.app] [--bundle-id ID]
+                                     [--runtime /absolute/path/payload]
 
 Builds and ad-hoc signs the native Ellie macOS application. The default output is
-dist/desktop/Ellie.app. A custom output must be an absolute, non-existing .app path.`;
+dist/desktop/Ellie.app. A custom output must be an absolute, non-existing .app path.
+
+--runtime embeds a service payload built by scripts/build-service-payload.mjs, so the
+installed application carries the Ellie runtime, its helpers and its reviewed browser
+registry instead of expecting a checkout. Without it the bundle is the dashboard alone.`;
 }
 
 function parseArgs(argv) {
   let output = join(repositoryRoot, "dist/desktop/Ellie.app");
   let bundleId = "org.ellie.dashboard";
+  let runtime;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--help") return { help: true, output };
+    if (argument === "--runtime") {
+      const value = argv[index + 1];
+      if (!value || !isAbsolute(value)) throw new Error("--runtime requires an absolute path.");
+      runtime = resolve(value);
+      index += 1;
+      continue;
+    }
     if (argument === "--bundle-id") {
       const value = argv[index + 1];
       if (!value || !/^[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)+$/.test(value))
@@ -41,7 +56,7 @@ function parseArgs(argv) {
   if (!output.endsWith(".app") || basename(output) === ".app") {
     throw new Error("The output must be a named .app bundle.");
   }
-  return { help: false, output, bundleId };
+  return { help: false, output, bundleId, runtime };
 }
 
 function run(file, args) {
@@ -160,9 +175,12 @@ async function main() {
     await cp(join(binaryPath, "Ellie"), join(macOSDirectory, "Ellie"));
     await chmod(join(macOSDirectory, "Ellie"), 0o755);
     await createIcon(workDirectory, resourcesDirectory);
+    const runtime = options.runtime
+      ? await stageRuntime(options.runtime, resourcesDirectory)
+      : null;
     await writeFile(
       join(resourcesDirectory, "build-provenance.json"),
-      `${JSON.stringify({ bundleId: options.bundleId, sourceModified, sourceRevision, version: "0.1.0" }, null, 2)}\n`,
+      `${JSON.stringify({ bundleId: options.bundleId, runtime, sourceModified, sourceRevision, version: "0.1.0" }, null, 2)}\n`,
       { mode: 0o644 },
     );
     await writeFile(
@@ -193,11 +211,19 @@ async function main() {
     );
 
     run("/usr/bin/plutil", ["-lint", join(contents, "Info.plist")]);
+    // Inside out: an embedded runtime is sealed as resources, not walked as nested code,
+    // so its executables are signed one at a time before the bundle seals them.
+    for (const executable of runtime ? await machOFiles(join(resourcesDirectory, "runtime")) : [])
+      run("/usr/bin/codesign", ["--force", "--sign", "-", executable]);
     run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", stagedBundle]);
     run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", stagedBundle]);
     await assertMissing(options.output);
     await rename(stagedBundle, options.output);
-    console.log(`Built ${options.output}`);
+    console.log(
+      runtime
+        ? `Built ${options.output} with an embedded runtime of ${runtime.files} files.`
+        : `Built ${options.output}`,
+    );
   } finally {
     await rm(workDirectory, { recursive: true, force: true });
   }
