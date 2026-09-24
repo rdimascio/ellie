@@ -290,6 +290,7 @@ export async function createIOSGoogleLifeFixture({
               connectionIds.calendar,
               "selected@example.test",
             );
+            await connectors.sync(actorId, connectionIds.calendar);
             calendarChanges += 1;
           }
           return result;

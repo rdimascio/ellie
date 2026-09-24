@@ -212,6 +212,18 @@ test(
         ).selectedCalendarId,
         "selected@example.test",
       );
+      const restoredAgenda = await call(
+        port,
+        tls.rootCert,
+        `/api/connections/${fixture.connectionIds.calendar}/agenda?timeZone=America%2FLos_Angeles`,
+        { cookie },
+      );
+      assert.equal(restoredAgenda.status, 200);
+      assert.deepEqual(
+        restoredAgenda.json.events.map((event: { title: string }) => event.title),
+        ["Selected family visit 👩‍👩‍👧‍👦"],
+        "restoring the fixture calendar must also restore its evidence for later tests",
+      );
       const preview = await call(
         port,
         tls.rootCert,
