@@ -51,22 +51,24 @@ final class DashboardStore: ObservableObject {
     }
 
     func createDashboard(name: String) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         performMutation { state in
             guard state.dashboards.count < DashboardModel.maximumDashboards else {
                 throw DashboardModelError.tooManyDashboards
             }
-            let dashboard = Dashboard(id: Self.uniqueID(prefix: "dashboard"), name: name, widgets: [])
+            let dashboard = Dashboard(id: Self.uniqueID(prefix: "dashboard"), name: cleanName, widgets: [])
             state.dashboards.append(dashboard)
             selectedID = dashboard.id
         }
     }
 
     func renameDashboard(id: String, name: String) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         performMutation { state in
             guard let index = state.dashboards.firstIndex(where: { $0.id == id }) else {
                 throw DashboardModelError.unknownDashboard
             }
-            state.dashboards[index].name = name
+            state.dashboards[index].name = cleanName
         }
     }
 
