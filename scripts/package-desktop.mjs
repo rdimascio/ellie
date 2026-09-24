@@ -113,7 +113,9 @@ try {
   await writeFile(
     join(staged, "SOURCE.txt"),
     `Ellie 0.1.0 development candidate\nSource revision: ${revision}\nBundle: org.ellie.dashboard\nRuntime: ${
-      embedded ? `embedded, ${embedded.files} files` : "not embedded"
+      embedded
+        ? `embedded, ${embedded.files} files, tree SHA-256 ${embedded.sha256}`
+        : "not embedded"
     }\nSignature: ad hoc (not notarized)\n`,
     { mode: 0o644 },
   );
