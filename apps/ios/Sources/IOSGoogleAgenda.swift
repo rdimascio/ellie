@@ -226,6 +226,10 @@ final class IOSGoogleAgendaStore: ObservableObject {
     private var operation: Task<Void, Never>?
     private var generation = 0
 
+    var snapshotProvenance: String {
+        isRefreshing || message != nil ? "Cached this session" : "Current read"
+    }
+
     init(client: IOSAgendaClient = IOSPinnedAgendaClient(), defaults: UserDefaults = .standard) {
         self.client = client
         self.defaults = defaults
@@ -370,7 +374,7 @@ struct IOSGoogleAgendaWidget: View {
                         Text("Mac import: \(last.formatted(date: .abbreviated, time: .shortened))")
                             .font(.caption).foregroundStyle(.secondary)
                     }
-                    Text("Read here: \(store.refreshedAt?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown") · \(store.message == nil ? "Current read" : "Cached this session")")
+                    Text("Read here: \(store.refreshedAt?.formatted(date: .abbreviated, time: .shortened) ?? "Unknown") · \(store.snapshotProvenance)")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let message = store.message {
