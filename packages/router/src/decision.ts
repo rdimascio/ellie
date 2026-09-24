@@ -1,5 +1,6 @@
 import { action, LAYOUTS, MONITORS } from "@ellie/protocol";
 import type { Context, Layout, Monitor, Plan } from "@ellie/protocol";
+import { browserForUrl } from "@ellie/config/defaults";
 import type { Preferences } from "@ellie/config/defaults";
 import { validateDecisionResponse } from "@ellie/decisions";
 import type { DecisionProvider, DecisionQuestion, DecisionResponse } from "@ellie/decisions";
@@ -306,12 +307,13 @@ export async function decideDesktop(
   let plan: Plan | undefined;
   if (operation === "app.open" && app)
     plan = { actions: [action({ tool: "app.open", app })], nextContext: { lastApp: app } };
-  else if (operation === "url.open" && site)
+  else if (operation === "url.open" && site) {
+    const browser = browserForUrl(site, prefs);
     plan = {
-      actions: [action({ tool: "url.open", app: prefs.browser, url: site })],
-      nextContext: { lastApp: prefs.browser },
+      actions: [action({ tool: "url.open", app: browser, url: site })],
+      nextContext: { lastApp: browser },
     };
-  else if (
+  } else if (
     operation === "window.place" &&
     app &&
     LAYOUTS.includes(selected(response, "layout") as Layout) &&

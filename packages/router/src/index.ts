@@ -1,6 +1,6 @@
 import { action } from "@ellie/protocol";
 import type { Context, Plan, Layout, Monitor } from "@ellie/protocol";
-import { defaults } from "@ellie/config/defaults";
+import { browserForUrl, defaults } from "@ellie/config/defaults";
 import type { Preferences } from "@ellie/config/defaults";
 
 /** Pure, anchored grammar. Unknown text never becomes executable code or shell input. */
@@ -30,11 +30,13 @@ export function route(
     const app = appAlias(name);
     if (app) return { actions: [action({ tool: "app.open", app })], nextContext: { lastApp: app } };
     const url = Object.hasOwn(prefs.sites, name) ? prefs.sites[name] : undefined;
-    if (url)
+    if (url) {
+      const browser = browserForUrl(url, prefs);
       return {
-        actions: [action({ tool: "url.open", app: prefs.browser, url })],
-        nextContext: { lastApp: prefs.browser },
+        actions: [action({ tool: "url.open", app: browser, url })],
+        nextContext: { lastApp: browser },
       };
+    }
   }
   if ((m = text.match(/^put ([a-z0-9 -]+) next to (it|that|[a-z0-9 -]+)$/))) {
     const app = resolve(m[1]!);
