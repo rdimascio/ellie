@@ -344,6 +344,26 @@ test("obvious compound, negated, and quoted requests are rejected before provide
   assert.equal(contraction.kind, "plan");
 });
 
+test("an already-cancelled request returns no local or provider routing result", async () => {
+  let called = 0;
+  const stub: DecisionProvider = {
+    id: "stub",
+    locality: "local",
+    async evaluate(request) {
+      called++;
+      return response(request.questions, {});
+    },
+  };
+  const controller = new AbortController();
+  controller.abort();
+  for (const input of ["Open Notes and delete files", "Open Notes"])
+    await assert.rejects(
+      decideDesktop(input, {}, defaults, stub, { signal: controller.signal }),
+      /cancelled/,
+    );
+  assert.equal(called, 0);
+});
+
 test("candidate generation caps choices and cannot inherit prototype properties", () => {
   const apps = Object.fromEntries(
     Array.from({ length: 300 }, (_, i) => [`app${i}`, `org.example.App${i}`]),
