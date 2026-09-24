@@ -26,6 +26,7 @@ import { readJson } from "@ellie/transport";
 import { selectWorker } from "@ellie/compute";
 import type { Auth, Identity } from "./auth.ts";
 import { handleBrowserManagement } from "./browser-management.ts";
+import { handleBrowserStepDecision } from "./browser-step.ts";
 import { handleNativeManagement } from "./native-management.ts";
 import { handleHouseholdManagement } from "./household-management.ts";
 import { handleSpeechManagement } from "./speech-management.ts";
@@ -328,6 +329,33 @@ export function createEllieServer(options: {
           options.browser,
         );
         if (lifeManagement) return send(res, lifeManagement.status, lifeManagement.body);
+        if (path === "/v1/decisions/browser-step") {
+          const abort = new AbortController();
+          const onClose = () => {
+            if (!res.writableEnded) abort.abort();
+          };
+          res.once("close", onClose);
+          const timer = setTimeout(() => abort.abort(), options.decisionRouting?.timeoutMs ?? 3000);
+          try {
+            const step = await handleBrowserStepDecision(req, path, identity.role, {
+              routing: options.decisionRouting,
+              node: (id) => {
+                const target = sessions.get(id);
+                return target
+                  ? {
+                      capabilities: target.info.capabilities,
+                      stale: Date.now() - target.info.lastSeen > 60_000,
+                    }
+                  : undefined;
+              },
+              signal: abort.signal,
+            });
+            if (step) return send(res, step.status, step.body);
+          } finally {
+            clearTimeout(timer);
+            res.off("close", onClose);
+          }
+        }
         if (req.method === "POST" && path === "/v1/invite" && identity.role === "controller")
           return send(res, 200, await auth.invite());
         if (req.method === "POST" && path === "/v1/revoke" && identity.role === "controller") {
