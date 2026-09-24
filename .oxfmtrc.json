@@ -3,6 +3,7 @@
   "ignorePatterns": [
     "bun.lock",
     "contracts/*.json",
+    "apps/node/reviewed-browser-operations.json",
     "apps/life-ui/tests/fixtures/sdk-water-counter-v3.json"
   ]
 }

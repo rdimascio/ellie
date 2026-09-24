@@ -31,7 +31,6 @@ import { BrowserWebMCPOperations } from "../../node/src/browser-operations.ts";
 import { BrowserAccessibilityRuntime } from "../../node/src/browser-accessibility-runtime.ts";
 import { BrowserOperationSelector } from "../../node/src/browser-operation-selector.ts";
 import { BrowserCompanionOperations } from "../../node/src/browser-companion-operations.ts";
-import { loadReviewedBrowserRegistry } from "../../node/src/browser-operation-registry.ts";
 import { startBrowserKernelBridge } from "../../node/src/browser-kernel-bridge.ts";
 import { runBrowserWebMCPNativeHost } from "../../node/src/browser-native-host.ts";
 import {
@@ -39,6 +38,7 @@ import {
   installBrowserNativeHost,
   uninstallBrowserNativeHost,
 } from "./browser-native-host-management.ts";
+import { reviewedBrowserBindings } from "./browser-registry-source.ts";
 import { packagedBrowserHelpers } from "./browser-runtime-paths.ts";
 
 import { generateCertificate } from "./certificate.ts";
@@ -56,6 +56,7 @@ import { parsePursueCommand, runBrowserPursuit } from "./browser-pursue.ts";
 import { parseNativeCommand, runNativeCommand } from "./native-commands.ts";
 import { parseHouseholdCommand, runHouseholdCommand } from "./household-commands.ts";
 import { parseSpeechCommand, runSpeechCommand } from "./speech-commands.ts";
+import { loadAgentRole, parseAgentCommand, saveAgentRole } from "./agent-role.ts";
 import { Services, run, serviceRole } from "./services.ts";
 import { packagedServiceContext, packagedServiceStatus } from "./packaged-service-status.ts";
 import { ServiceLog, failureEvent, serviceLogs } from "./service-logs.ts";
@@ -341,6 +342,24 @@ async function main(): Promise<void> {
     });
     return;
   }
+  if (args[0] === "agent") {
+    const command = parseAgentCommand(args);
+    if (command.setRole) {
+      const saved = await saveAgentRole(command.setRole);
+      console.log(
+        `This Mac is configured as the ${saved.role}. Start it with: bun run ellie agent`,
+      );
+      return;
+    }
+    const configured = await loadAgentRole();
+    if (!configured)
+      throw new Error(
+        "This Mac has no Ellie role yet. Choose one with: bun run ellie agent --set-role coordinator|node",
+      );
+    // One launch agent runs whichever role this Mac was given, so the installed
+    // bundle never needs a per-role service definition.
+    args.splice(0, args.length, "service", "run", configured.role);
+  }
   if (args[0] === "service") {
     const action = args[1];
     if (action === "test") {
@@ -483,6 +502,24 @@ async function main(): Promise<void> {
       preferences: defaults,
     });
     console.log("Server initialized. Start it with: bun run ellie server start");
+    return;
+  }
+  if (args[0] === "server" && args[1] === "configure") {
+    const lan = args.includes("--lan");
+    if (args.length !== 3 || (!lan && !args.includes("--local")))
+      throw new Error("Use: bun run ellie server configure --lan | --local");
+    const config = serverConfig(await privateConfig("server.json"));
+    const host = lan ? "0.0.0.0" : "127.0.0.1";
+    if (config.host === host) {
+      console.log(`Coordinator already listens on ${host}. Nothing was changed.`);
+      return;
+    }
+    // Only the listening address changes. Clients pin the certificate rather than a
+    // hostname, so the existing identity, pairings and credentials stay valid.
+    await save("server.json", { ...config, host });
+    console.log(
+      `Coordinator will listen on ${host} after an explicit restart. Existing identity and pairings were preserved.`,
+    );
     return;
   }
   if (args[0] === "server" && args[1] === "start") {
@@ -718,18 +755,8 @@ async function main(): Promise<void> {
     let nodeFailure: unknown;
     let nodeFailed = false;
     try {
-      const browserRegistryPath = join(stateDir, "browser-operations.json");
-      const browserEnabled =
-        config.executionEnabled &&
-        (await lstat(browserRegistryPath).then(
-          () => true,
-          (error: NodeJS.ErrnoException) => {
-            if (error.code === "ENOENT") return false;
-            throw new Error("Reviewed browser configuration is unavailable.");
-          },
-        ));
-      const browserRegistry = browserEnabled
-        ? loadReviewedBrowserRegistry(browserRegistryPath)
+      const browserRegistry = config.executionEnabled
+        ? await reviewedBrowserBindings(stateDir)
         : undefined;
       const browserHelpers = browserRegistry ? packagedBrowserHelpers() : undefined;
       browserBridge = browserRegistry
@@ -883,7 +910,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  server init [--lan]   Generate private config and Keychain identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  browser pursue --max-steps N --allow-page-content "goal" [--node ID]  Bounded AX click loop\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up direct Jev in shadow mode\n  routing gateway --allow-cloud   Set up Jev through AI Gateway in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  server init [--lan]   Generate private config and Keychain identity\n  server configure --lan | --local  Change the listening address, preserving identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  browser pursue --max-steps N --allow-page-content "goal" [--node ID]  Bounded AX click loop\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  agent [--set-role R]  Run this Mac's configured role, or record it\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up direct Jev in shadow mode\n  routing gateway --allow-cloud   Set up Jev through AI Gateway in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
   console.log(
     "  transcribe --audio WAV --model PATH --executable PATH\n" +
