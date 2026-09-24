@@ -90,6 +90,7 @@ final class WatchMediaPhoneController {
       guard currentActivation == activation, self.targetID == targetID,
         self.epoch == epoch, request.expiresAt > now(), reachable()
       else { return reply(.stale) }
+      guard credential.client.expiresAt > now() else { return reply(.blocked) }
       guard let selected = nodes.first(where: { $0.id == targetID }), selected.online else {
         return reply(.unavailable)
       }
