@@ -61,7 +61,9 @@ export async function stageRuntime(source, resourcesDirectory) {
 }
 
 // Mach-O and universal-binary magics, read as a big-endian word.
-const MACH_O = new Set([0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca]);
+const MACH_O = new Set([
+  0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca,
+]);
 
 /**
  * Lists the executables inside a staged tree. `codesign --deep` walks only the nested code

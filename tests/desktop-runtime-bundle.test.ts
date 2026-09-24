@@ -95,3 +95,19 @@ test("executables inside an embedded runtime are found wherever they sit", async
   // The reviewed registry and the staged sources are data and must not be signed.
   assert.ok(!found.some((path: string) => path.endsWith(".json") || path.endsWith(".ts")));
 });
+
+test("64-bit universal binaries inside an embedded runtime are found for signing", async (t) => {
+  const root = await scratch(t);
+  const directory = await payload(root);
+  const binaries = [
+    ["helpers/universal-64", [0xca, 0xfe, 0xba, 0xbf]],
+    ["helpers/universal-64-swapped", [0xbf, 0xba, 0xfe, 0xca]],
+  ] as const;
+  for (const [path, magic] of binaries) await writeFile(join(directory, path), Buffer.from(magic));
+
+  const found = await machOFiles(directory);
+  assert.deepEqual(
+    found.map((path: string) => path.slice(directory.length + 1)),
+    binaries.map(([path]) => path),
+  );
+});
