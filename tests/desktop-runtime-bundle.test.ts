@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { copyFile, lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -86,7 +86,7 @@ test("executables inside an embedded runtime are found wherever they sit", async
   // `codesign --deep` walks nested code locations, not Resources, so the bundle builder has
   // to find these itself or they ship unsigned and carry no Team ID.
   for (const executable of ["bin/node", "helpers/ellie-browser-runtime-broker"])
-    await copyFile("/usr/bin/true", join(directory, executable));
+    await writeFile(join(directory, executable), Buffer.from([0xcf, 0xfa, 0xed, 0xfe]));
   const found = await machOFiles(directory);
   assert.deepEqual(
     found.map((path: string) => path.slice(directory.length + 1)),
