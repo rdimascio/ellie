@@ -7,6 +7,8 @@ const READ_VIEW = "summary";
 const USAGE =
   'Use: bun run ellie browser pursue --node ID --max-steps N --allow-page-content "goal" (N is 1-8, no default)';
 
+class PursuitDeadlineExpired extends Error {}
+
 export type PursueOutcome =
   | "satisfied_unverified"
   | "blocked"
@@ -180,12 +182,17 @@ export async function runBrowserPursuit(
   let dispatched = 0;
   let priorAtRevision: { revision: string; signature: string } | undefined;
 
-  const call = (action: unknown): Promise<unknown> =>
+  const requestTimeout = (): number => {
+    const remaining = Math.floor(deadline - now());
+    if (remaining <= 0) throw new PursuitDeadlineExpired();
+    return Math.min(PER_REQUEST_TIMEOUT_MS, remaining);
+  };
+  const call = (action: unknown, timeoutMs = requestTimeout()): Promise<unknown> =>
     client.call(
       "POST",
       "/v1/commands",
       { nodeId: options.nodeId, action },
-      { signal: options.signal, timeoutMs: PER_REQUEST_TIMEOUT_MS },
+      { signal: options.signal, timeoutMs },
     );
 
   const finish = (
@@ -204,8 +211,11 @@ export async function runBrowserPursuit(
     let status: Result;
     try {
       status = result(await call({ tool: "browser.status" }));
-    } catch {
-      return finish("unavailable", stepIndex);
+    } catch (error) {
+      return finish(
+        error instanceof PursuitDeadlineExpired || now() >= deadline ? "exhausted" : "unavailable",
+        stepIndex,
+      );
     }
     if (!("browser" in status)) return finish("unavailable", stepIndex);
     if (status.browser.operation !== "status") return finish("unavailable", stepIndex);
@@ -215,11 +225,16 @@ export async function runBrowserPursuit(
     if (revision === undefined || url === undefined) return finish("unavailable", stepIndex);
 
     if (options.signal.aborted) return finish("cancelled", stepIndex, url);
+    if (now() >= deadline) return finish("exhausted", stepIndex, url);
     let read: Result;
     try {
       read = result(await call({ tool: "browser.read", view: READ_VIEW, revision }));
-    } catch {
-      return finish("unavailable", stepIndex, url);
+    } catch (error) {
+      return finish(
+        error instanceof PursuitDeadlineExpired || now() >= deadline ? "exhausted" : "unavailable",
+        stepIndex,
+        url,
+      );
     }
     if (!("browser" in read)) return finish("unavailable", stepIndex, url);
     if (read.browser.operation !== "read") return finish("unavailable", stepIndex, url);
@@ -243,6 +258,7 @@ export async function runBrowserPursuit(
     priorAtRevision = { revision, signature: sig };
 
     if (options.signal.aborted) return finish("cancelled", stepIndex, url);
+    if (now() >= deadline) return finish("exhausted", stepIndex, url);
     const alreadySelected = [...dispatchedItems]
       .filter((key) => key.startsWith(`${revision}:`))
       .map((key) => key.slice(revision.length + 1));
@@ -258,11 +274,15 @@ export async function runBrowserPursuit(
             observation,
             position: { stepIndex, maxSteps: options.maxSteps, alreadySelected },
           },
-          { signal: options.signal, timeoutMs: PER_REQUEST_TIMEOUT_MS },
+          { signal: options.signal, timeoutMs: requestTimeout() },
         ),
       );
-    } catch {
-      return finish("unavailable", stepIndex, url);
+    } catch (error) {
+      return finish(
+        error instanceof PursuitDeadlineExpired || now() >= deadline ? "exhausted" : "unavailable",
+        stepIndex,
+        url,
+      );
     }
 
     const step = decision.step;
@@ -301,6 +321,12 @@ export async function runBrowserPursuit(
     if (repeatKey && dispatchedItems.has(repeatKey)) return finish("ambiguous", stepIndex + 1, url);
 
     if (options.signal.aborted) return finish("cancelled", stepIndex, url);
+    let dispatchTimeoutMs: number;
+    try {
+      dispatchTimeoutMs = requestTimeout();
+    } catch {
+      return finish("exhausted", stepIndex, url);
+    }
     const action =
       step.kind === "select"
         ? { tool: "browser.select", itemId: step.itemId, revision }
@@ -309,7 +335,7 @@ export async function runBrowserPursuit(
     let dispatchRaw: unknown;
     let transportFailed = false;
     try {
-      dispatchRaw = await call(action);
+      dispatchRaw = await call(action, dispatchTimeoutMs);
     } catch {
       transportFailed = true;
     }

@@ -438,6 +438,87 @@ test("cancellation between steps dispatches nothing further", async () => {
   }
 });
 
+test("the total deadline clamps every request and forbids a mutation after expiry", async () => {
+  let clock = 0;
+  const calls: { path: string; tool?: string; timeoutMs?: number }[] = [];
+  const client: PursueClient = {
+    async call(_method, path, body, options) {
+      const action =
+        body && typeof body === "object" && "action" in body ? record(body.action) : undefined;
+      calls.push({
+        path,
+        ...(action ? { tool: String(action.tool) } : {}),
+        ...(options?.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      });
+      clock += 10_000;
+      if (path === "/v1/decisions/browser-step")
+        return {
+          ok: true,
+          mode: "execute",
+          step: {
+            kind: "select",
+            itemId: "aaaaaaaa-0000-4000-8000-000000000001",
+            label: "A video",
+            probability: 0.995,
+            margin: 0.99,
+          },
+        };
+      if (action?.tool === "browser.status")
+        return {
+          ok: true,
+          message: "Browser tab connected.",
+          browser: {
+            source: "accessibility",
+            operation: "status",
+            status: "connected",
+            revision: "rev0",
+            origin: "https://www.youtube.com",
+          },
+        };
+      if (action?.tool === "browser.read")
+        return {
+          ok: true,
+          message: "Browser view read.",
+          browser: {
+            source: "accessibility",
+            operation: "read",
+            status: "completed",
+            revision: "rev0",
+            view: {
+              items: [{ id: "aaaaaaaa-0000-4000-8000-000000000001", label: "A video" }],
+              axScrollDirections: [],
+            },
+          },
+        };
+      throw new Error("A mutation was dispatched after the total deadline.");
+    },
+  };
+
+  const report = await runBrowserPursuit(client, {
+    nodeId: "node-1",
+    goal: "open a video",
+    maxSteps: 2,
+    signal: new AbortController().signal,
+    totalTimeoutMs: 25_000,
+    now: () => clock,
+  });
+
+  assert.equal(report.outcome, "exhausted");
+  assert.equal(report.dispatched, 0);
+  assert.deepEqual(
+    calls.map(({ path, tool }) => ({ path, tool })),
+    [
+      { path: "/v1/commands", tool: "browser.status" },
+      { path: "/v1/commands", tool: "browser.read" },
+      { path: "/v1/decisions/browser-step", tool: undefined },
+    ],
+  );
+  assert.deepEqual(
+    calls.map((call) => call.timeoutMs),
+    [20_000, 15_000, 5_000],
+  );
+});
+
 test("a changed revision between read and select fails closed without a retry", async () => {
   const provider = scriptedProvider([{ progress: "unsatisfied", step: "item_0" }]);
   const f = await fixture(5000, { decisionRouting: { mode: "execute", provider } });
