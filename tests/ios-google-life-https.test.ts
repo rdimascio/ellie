@@ -181,6 +181,7 @@ test(
         agenda.json.events.map((event: { title: string }) => event.title),
         ["Selected family visit 👩‍👩‍👧‍👦"],
       );
+      const evidenceBeforeCalendarChange = fixture.control.chatEvidence();
       fixture.control.armCalendarChangeAfterNextList();
       const staleListing = await call(port, tls.rootCert, "/api/connections", { cookie });
       assert.equal(
@@ -223,6 +224,11 @@ test(
         restoredAgenda.json.events.map((event: { title: string }) => event.title),
         ["Selected family visit 👩‍👩‍👧‍👦"],
         "restoring the fixture calendar must also restore its evidence for later tests",
+      );
+      assert.deepEqual(
+        fixture.control.chatEvidence(),
+        evidenceBeforeCalendarChange,
+        "the calendar race fixture must not enqueue unrelated research or mutate Life evidence",
       );
       const preview = await call(
         port,

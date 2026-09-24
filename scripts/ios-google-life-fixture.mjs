@@ -276,18 +276,27 @@ export async function createIOSGoogleLifeFixture({
             ? await quietFixture.handle(request, response, perform)
             : await perform();
           if (changeCalendar) {
-            calendarChange = connectors.selectCalendar(actorId, connectionIds.calendar, "primary");
             try {
-              await calendarChange;
+              const current = connectorStore.require(actorId, connectionIds.calendar);
+              // Change only the owned fixture connection. Broker selection also schedules
+              // research, which is unrelated to this list/agenda consistency race.
+              connectorStore.selectCalendar(
+                actorId,
+                connectionIds.calendar,
+                current.generation,
+                "primary",
+              );
               restoreCalendarAfterNextAgenda = true;
             } finally {
               finishCalendarChange();
               calendarChange = undefined;
             }
           } else if (restoreCalendar) {
-            await connectors.selectCalendar(
+            const current = connectorStore.require(actorId, connectionIds.calendar);
+            connectorStore.selectCalendar(
               actorId,
               connectionIds.calendar,
+              current.generation,
               "selected@example.test",
             );
             await connectors.sync(actorId, connectionIds.calendar);
