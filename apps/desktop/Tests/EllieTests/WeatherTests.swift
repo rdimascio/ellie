@@ -132,6 +132,76 @@ final class WeatherTests: XCTestCase {
         XCTAssertFalse(persisted.enabled)
     }
 
+    @MainActor
+    func testFailedDisablePreservesEnabledMemoryAndDurableState() async throws {
+        let transport = FixtureTransport(json: forecast)
+        let url = temporaryURL()
+        let now = Date(timeIntervalSince1970: 1_789_300_000)
+        let initial = WeatherStore(
+            fileURL: url, client: OpenMeteoClient(transport: transport), now: { now })
+        XCTAssertTrue(initial.configure(
+            name: "Test City", latitudeText: "1", longitudeText: "2"))
+        await eventually { initial.state.snapshot != nil }
+        let committed = initial.state
+
+        let store = WeatherStore(
+            fileURL: url, client: OpenMeteoClient(transport: transport), now: { now },
+            setFileAttributes: { attributes, path in
+                if URL(fileURLWithPath: path).lastPathComponent.hasPrefix(".weather-") {
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                try FileManager.default.setAttributes(attributes, ofItemAtPath: path)
+            })
+        XCTAssertEqual(store.state, committed)
+
+        XCTAssertFalse(store.disable())
+
+        XCTAssertEqual(store.state, committed,
+            "a rejected disable must not diverge the visible state from the saved state")
+        XCTAssertTrue(store.state.enabled)
+        XCTAssertEqual(store.message,
+            "Weather could not be disabled. Its saved place and forecast remain enabled.")
+        XCTAssertEqual(WeatherStore(fileURL: url, now: { now }).state, committed,
+            "relaunch must agree that weather remains enabled")
+    }
+
+    @MainActor
+    func testFailedDisableDoesNotCancelEnabledRefresh() async throws {
+        let url = temporaryURL()
+        let now = Date(timeIntervalSince1970: 1_789_300_000)
+        let initial = WeatherStore(
+            fileURL: url, client: OpenMeteoClient(transport: FixtureTransport(json: forecast)),
+            now: { now })
+        XCTAssertTrue(initial.configure(name: "Test City", latitudeText: "1", longitudeText: "2"))
+        await eventually { initial.state.snapshot != nil }
+
+        let transport = LateTransport()
+        var rejectNextStagedFile = true
+        let store = WeatherStore(
+            fileURL: url, client: OpenMeteoClient(transport: transport), now: { now },
+            setFileAttributes: { attributes, path in
+                if rejectNextStagedFile,
+                   URL(fileURLWithPath: path).lastPathComponent.hasPrefix(".weather-") {
+                    rejectNextStagedFile = false
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                try FileManager.default.setAttributes(attributes, ofItemAtPath: path)
+            })
+        store.refresh(force: true)
+        await eventually { await transport.isWaiting() }
+
+        XCTAssertFalse(store.disable())
+        XCTAssertTrue(store.isRefreshing,
+            "a rejected disable must leave the enabled refresh operation running")
+
+        await transport.finish(with: Data(forecast.replacingOccurrences(of: "72.4", with: "75.5").utf8))
+        await eventually { !store.isRefreshing }
+        XCTAssertEqual(store.state.snapshot?.temperature, 75.5)
+        XCTAssertTrue(store.fetchedInCurrentSession)
+        XCTAssertEqual(WeatherStore(fileURL: url, now: { now }).state.snapshot?.temperature, 75.5,
+            "the surviving refresh must commit through the normal durable path")
+    }
+
     func testValidationRejectsInvalidPlaceAndProviderPayload() async throws {
         XCTAssertThrowsError(try WeatherPlace.validated(name: " ", latitude: 0, longitude: 0))
         XCTAssertThrowsError(try WeatherPlace.validated(name: "Somewhere", latitude: 91, longitude: 0))

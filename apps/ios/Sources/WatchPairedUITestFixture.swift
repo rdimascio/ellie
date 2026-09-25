@@ -89,8 +89,54 @@ enum WatchPairedUITestReadiness {
   }
 }
 
-/// Only the inventory and browser result are synthetic. The installed iPhone and Watch apps
-/// still exchange the production WatchMediaRequest/Reply through their real WCSession delegates.
+/// Only the inventory and browser result are synthetic. The read-unknown mode forwards the real
+/// WCSession request through the production phone bridge, then replaces only its reviewed read
+/// reply so the Watch receives a valid unknown result over the paired transport.
+private final class WatchPairedReadUnknownDelegate: NSObject, WCSessionDelegate {
+  private let bridge: WatchMediaPhoneBridge
+
+  init(bridge: WatchMediaPhoneBridge) { self.bridge = bridge }
+
+  nonisolated func session(
+    _ session: WCSession, activationDidCompleteWith activationState: WCSessionActivationState,
+    error: Error?
+  ) {
+    bridge.session(session, activationDidCompleteWith: activationState, error: error)
+  }
+
+  nonisolated func sessionReachabilityDidChange(_ session: WCSession) {
+    bridge.sessionReachabilityDidChange(session)
+  }
+
+  nonisolated func sessionWatchStateDidChange(_ session: WCSession) {
+    bridge.sessionWatchStateDidChange(session)
+  }
+
+  nonisolated func sessionDidBecomeInactive(_ session: WCSession) {
+    bridge.sessionDidBecomeInactive(session)
+  }
+
+  nonisolated func sessionDidDeactivate(_ session: WCSession) {
+    bridge.sessionDidDeactivate(session)
+  }
+
+  nonisolated func session(
+    _ session: WCSession, didReceiveMessage message: [String: Any],
+    replyHandler: @escaping ([String: Any]) -> Void
+  ) {
+    let decoded = WatchMediaRequest.decode(message)
+    bridge.session(session, didReceiveMessage: message) { response in
+      guard let decoded, decoded.operation == .read,
+        WatchMediaReply.decode(response, expectedID: decoded.id)?.state == .observed
+      else {
+        replyHandler(response)
+        return
+      }
+      replyHandler(WatchMediaReply(id: decoded.id, state: .unknown, observation: nil).message)
+    }
+  }
+}
+
 @MainActor
 private final class WatchPairedUITestFixture {
   static let shared = WatchPairedUITestFixture()
@@ -99,6 +145,7 @@ private final class WatchPairedUITestFixture {
   let credential: NativeEnrollmentCredential
   let controller: WatchMediaPhoneController
   let validRun: Bool
+  private let readUnknownDelegate: WatchPairedReadUnknownDelegate?
 
   private init() {
     let arguments = ProcessInfo.processInfo.arguments
@@ -106,6 +153,7 @@ private final class WatchPairedUITestFixture {
     let runID = marker.flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
     validRun = runID.flatMap(UUID.init(uuidString:)) != nil
     let targetB = arguments.contains("--ellie-ui-watch-target-b")
+    let readUnknown = arguments.contains("--ellie-ui-watch-read-unknown")
     target = PhoneControlNode(
       id: targetB ? "watch-fixture-mac-b" : "watch-fixture-mac-a",
       label: targetB ? "Fixture Mac B" : "Fixture Mac A", online: true,
@@ -129,6 +177,12 @@ private final class WatchPairedUITestFixture {
         BrowserPhoneControlStore(
           credential: credential, transport: transport, uncertainty: uncertainty)
       })
+    readUnknownDelegate = readUnknown
+      ? WatchPairedReadUnknownDelegate(bridge: WatchMediaPhoneBridge.shared) : nil
+  }
+
+  func installTransportMode() {
+    if let readUnknownDelegate { WCSession.default.delegate = readUnknownDelegate }
   }
 }
 
@@ -164,6 +218,7 @@ struct WatchPairedUITestFixtureView: View {
     guard fixture.validRun else { return }
     if !installed {
       bridge.installPairedTestController(fixture.controller)
+      fixture.installTransportMode()
       installed = true
     }
     if bridge.available && bridge.enabledTargetID != fixture.target.id {

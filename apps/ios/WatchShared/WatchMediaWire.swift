@@ -127,6 +127,12 @@ struct WatchMediaReply {
 }
 
 enum WatchMediaWire {
+  static func unknownStatus(for operation: WatchMediaOperation) -> String {
+    operation == .read
+      ? "The iPhone did not return a fresh page. Read again."
+      : "The command may have run. Read the page before another action."
+  }
+
   static func now() -> Int64 { Int64(Date().timeIntervalSince1970 * 1_000) }
   static func validUUID(_ value: String) -> Bool {
     value.range(of: "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",

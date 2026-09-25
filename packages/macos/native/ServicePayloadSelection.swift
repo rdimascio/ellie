@@ -20,6 +20,9 @@ private struct SelectionPreflightReport: Codable {
   let roles: [String]
   let ready: Bool
   let status: SelectionPreflightStatus
+  let role: String?
+  let reason: String?
+  let details: [String]?
 }
 private let selectionError = "Ellie service selection failed; existing services were preserved."
 
@@ -76,6 +79,43 @@ private struct Journal: Codable {
   let roles: [SelectedRole]
   let oldReceipt: Data
   let newReceipt: Data
+  let previouslyDisabled: [SelectedRole]?
+
+  private enum CodingKeys: String, CodingKey {
+    case version, transactionID, roles, oldReceipt, newReceipt, previouslyDisabled
+  }
+  init(
+    version: Int, transactionID: String, roles: [SelectedRole], oldReceipt: Data,
+    newReceipt: Data, previouslyDisabled: [SelectedRole]? = nil
+  ) {
+    self.version = version
+    self.transactionID = transactionID
+    self.roles = roles
+    self.oldReceipt = oldReceipt
+    self.newReceipt = newReceipt
+    self.previouslyDisabled = previouslyDisabled
+  }
+  init(from decoder: Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    version = try values.decode(Int.self, forKey: .version)
+    transactionID = try values.decode(String.self, forKey: .transactionID)
+    roles = try values.decode([SelectedRole].self, forKey: .roles)
+    oldReceipt = try values.decode(Data.self, forKey: .oldReceipt)
+    newReceipt = try values.decode(Data.self, forKey: .newReceipt)
+    previouslyDisabled = try values.decodeIfPresent(
+      [SelectedRole].self, forKey: .previouslyDisabled)
+  }
+  func encode(to encoder: Encoder) throws {
+    var values = encoder.container(keyedBy: CodingKeys.self)
+    try values.encode(version, forKey: .version)
+    try values.encode(transactionID, forKey: .transactionID)
+    try values.encode(roles, forKey: .roles)
+    try values.encode(oldReceipt, forKey: .oldReceipt)
+    try values.encode(newReceipt, forKey: .newReceipt)
+    if let previouslyDisabled {
+      try values.encode(previouslyDisabled, forKey: .previouslyDisabled)
+    }
+  }
 }
 private struct SelectionPaths {
   let home: String
@@ -503,43 +543,97 @@ private func plistData(role: SelectedRole, release: SelectionRelease, app: Strin
     """.utf8)
 }
 
-private func roleLoaded(_ role: SelectedRole, testLoaded: Set<SelectedRole>) throws -> Bool {
+private struct SelectionLaunchState {
+  let loaded: Bool
+  let disabled: Bool
+}
+
+private func selectionLaunchState(
+  _ role: SelectedRole, testLoaded: Set<SelectedRole>, testLaunchctl: String?
+) throws -> SelectionLaunchState {
   #if ELLIE_INSTALLER_TESTING
-    return testLoaded.contains(role)
-  #else
-    func query(_ target: String) throws -> Int32 {
-      var actions: posix_spawn_file_actions_t?
-      posix_spawn_file_actions_init(&actions)
-      defer { posix_spawn_file_actions_destroy(&actions) }
-      posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0)
-      posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0)
-      var values = [strdup("/bin/launchctl"), strdup("print"), strdup(target), nil]
-      defer { values.compactMap { $0 }.forEach { free($0) } }
-      var pid: pid_t = 0
-      guard posix_spawn(&pid, "/bin/launchctl", &actions, nil, &values, environ) == 0 else {
-        throw SelectionFailure.launchctlUnavailable
-      }
-      let deadline = DispatchTime.now() + .seconds(2)
-      var status: Int32 = 0
-      while waitpid(pid, &status, WNOHANG) == 0 {
-        if DispatchTime.now() >= deadline {
-          kill(pid, SIGKILL)
-          _ = waitpid(pid, &status, 0)
-          throw SelectionFailure.launchctlUnavailable
-        }
-        usleep(10_000)
-      }
-      guard (status & 0x7f) == 0 else { throw SelectionFailure.launchctlUnavailable }
-      let result = (status >> 8) & 0xff
-      return result
+    if testLaunchctl == nil {
+      return SelectionLaunchState(loaded: testLoaded.contains(role), disabled: true)
     }
-    let domain = "gui/\(getuid())"
-    guard try query(domain) == 0 else { throw SelectionFailure.launchctlUnavailable }
-    let result = try query(domain + "/" + role.label)
-    if result == 0 { return true }
-    if result == 113 { return false }
-    throw SelectionFailure.launchctlUnavailable
   #endif
+  let executable = testLaunchctl ?? "/bin/launchctl"
+  do {
+    let domain = "gui/\(getuid())"
+    let gui = try runLaunchctl(executable, ["print", domain], timeout: 2, capture: false)
+    guard !gui.timedOut, gui.code == 0 else { throw SelectionFailure.launchctlUnavailable }
+    let disabledResult = try runLaunchctl(
+      executable, ["print-disabled", domain], timeout: 2)
+    guard !disabledResult.timedOut, disabledResult.code == 0 else {
+      throw SelectionFailure.launchctlUnavailable
+    }
+    let isDisabled = try launchctlDisabled(
+      try launchctlText(disabledResult.output), label: role.label)
+    let result = try runLaunchctl(
+      executable, ["print", domain + "/" + role.label], timeout: 2, capture: false)
+    if result.code == 0 && !result.timedOut {
+      return SelectionLaunchState(loaded: true, disabled: isDisabled)
+    }
+    guard result.code == 113, !result.timedOut else {
+      throw SelectionFailure.launchctlUnavailable
+    }
+    return SelectionLaunchState(loaded: false, disabled: isDisabled)
+  } catch is SelectionFailure {
+    throw SelectionFailure.launchctlUnavailable
+  } catch {
+    throw SelectionFailure.launchctlUnavailable
+  }
+}
+
+private func roleLoaded(
+  _ role: SelectedRole, testLoaded: Set<SelectedRole>, testLaunchctl: String? = nil
+) throws -> Bool {
+  #if ELLIE_INSTALLER_TESTING
+    if testLaunchctl == nil { return testLoaded.contains(role) }
+  #endif
+  let executable = testLaunchctl ?? "/bin/launchctl"
+  do {
+    let domain = "gui/\(getuid())"
+    let gui = try runLaunchctl(executable, ["print", domain], timeout: 2, capture: false)
+    guard !gui.timedOut, gui.code == 0 else { throw SelectionFailure.launchctlUnavailable }
+    let result = try runLaunchctl(
+      executable, ["print", domain + "/" + role.label], timeout: 2, capture: false)
+    if result.code == 0 && !result.timedOut { return true }
+    guard result.code == 113, !result.timedOut else {
+      throw SelectionFailure.launchctlUnavailable
+    }
+    return false
+  } catch is SelectionFailure {
+    throw SelectionFailure.launchctlUnavailable
+  } catch {
+    throw SelectionFailure.launchctlUnavailable
+  }
+}
+
+private func setSelectionDisabled(
+  _ disabled: Bool, role: SelectedRole, testLoaded: Set<SelectedRole>, testLaunchctl: String?
+) throws {
+  #if ELLIE_INSTALLER_TESTING
+    if testLaunchctl == nil { return }
+  #endif
+  let executable = testLaunchctl ?? "/bin/launchctl"
+  let target = "gui/\(getuid())/\(role.label)"
+  do {
+    let result = try runLaunchctl(
+      executable, [disabled ? "disable" : "enable", target], timeout: 20,
+      capture: false)
+    guard !result.timedOut, result.code == 0 else {
+      throw SelectionFailure.launchctlUnavailable
+    }
+    let state = try selectionLaunchState(
+      role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+    guard !state.loaded, state.disabled == disabled else {
+      throw state.loaded ? SelectionFailure.loaded : SelectionFailure.launchctlUnavailable
+    }
+  } catch let error as SelectionFailure {
+    throw error
+  } catch {
+    throw SelectionFailure.launchctlUnavailable
+  }
 }
 
 private func selectionPaths(testHome: String?) throws -> SelectionPaths {
@@ -757,12 +851,23 @@ private func validateSelection(
 
 private func selectionPreflightReport(
   releaseID: String, roles: [SelectedRole], testHome: String?, testLoaded: Set<SelectedRole>,
-  testUnavailable: Bool, testBeforeFinal: String?
+  testLaunchctl: String?, testUnavailable: Bool, testBeforeFinal: String?
 ) -> SelectionPreflightReport {
-  func report(_ status: SelectionPreflightStatus) -> SelectionPreflightReport {
+  func report(
+    _ status: SelectionPreflightStatus, recovery: LifecycleSelectionRecovery? = nil
+  ) -> SelectionPreflightReport {
     SelectionPreflightReport(
       version: 1, command: "preflight-select", releaseID: releaseID,
-      roles: roles.map(\.rawValue), ready: status == .ready, status: status)
+      roles: roles.map(\.rawValue), ready: status == .ready, status: status,
+      role: recovery?.role, reason: recovery?.reason, details: recovery?.details)
+  }
+  func recovery(
+    role: SelectedRole? = nil, reason: String, details: [String]
+  ) -> SelectionPreflightReport {
+    report(
+      .recoveryRequired,
+      recovery: LifecycleSelectionRecovery(
+        role: (role ?? roles[0]).rawValue, reason: reason, details: details))
   }
   func migrationPreparationPending(_ services: Int32) throws -> Bool {
     guard
@@ -792,17 +897,23 @@ private func selectionPreflightReport(
     defer { close(services) }
     var servicesInfo = stat()
     guard fstat(services, &servicesInfo) == 0, (servicesInfo.st_mode & 0o7777) == 0o700 else {
-      return report(.recoveryRequired)
+      return recovery(reason: "topology_mismatch", details: ["services_directory"])
     }
 
-    if try migrationSwitchPending(services) { return report(.recoveryRequired) }
-    if try entry(services, paths.journalName) != nil { return report(.recoveryRequired) }
-    if try migrationPreparationPending(services) { return report(.recoveryRequired) }
+    if try migrationSwitchPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
+    if try entry(services, paths.journalName) != nil {
+      return recovery(reason: "journal_pending", details: ["selection"])
+    }
+    if try migrationPreparationPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
 
     let lockInfo = try entry(services, "selection.lock")
     let receiptsInfo = try entry(services, "receipts")
     guard (lockInfo == nil) == (receiptsInfo == nil) else {
-      return report(.recoveryRequired)
+      return recovery(reason: "receipt_mismatch", details: ["selection_layout"])
     }
     var lock: Int32 = -1
     if lockInfo != nil {
@@ -814,13 +925,15 @@ private func selectionPreflightReport(
         (verified.st_mode & 0o7777) == 0o600
       else {
         if lock >= 0 { close(lock) }
-        return report(.recoveryRequired)
+        return recovery(reason: "receipt_mismatch", details: ["selection_lock"])
       }
       if flock(lock, LOCK_SH | LOCK_NB) != 0 {
         let lockError = errno
         close(lock)
         lock = -1
-        return report(lockError == EWOULDBLOCK ? .busy : .recoveryRequired)
+        return lockError == EWOULDBLOCK
+          ? report(.busy)
+          : recovery(reason: "receipt_mismatch", details: ["selection_lock"])
       }
     }
     defer {
@@ -830,9 +943,15 @@ private func selectionPreflightReport(
       }
     }
 
-    if try migrationSwitchPending(services) { return report(.recoveryRequired) }
-    if try entry(services, paths.journalName) != nil { return report(.recoveryRequired) }
-    if try migrationPreparationPending(services) { return report(.recoveryRequired) }
+    if try migrationSwitchPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
+    if try entry(services, paths.journalName) != nil {
+      return recovery(reason: "journal_pending", details: ["selection"])
+    }
+    if try migrationPreparationPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
 
     // Candidate verification is deliberately the existing development-v1 policy.
     do {
@@ -844,12 +963,14 @@ private func selectionPreflightReport(
 
     let receipts = try selectionOpenOwnedDirectoryIfPresent(parent: services, name: "receipts")
     defer { if let receipts { close(receipts) } }
-    guard (lock >= 0) == (receipts != nil) else { return report(.recoveryRequired) }
+    guard (lock >= 0) == (receipts != nil) else {
+      return recovery(reason: "receipt_mismatch", details: ["selection_layout"])
+    }
     if let receipts {
       var info = stat()
       guard fstat(receipts, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
         info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o700
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["receipt_layout"]) }
     }
     let applications = try selectionOpenOwnedDirectoryIfPresent(parent: home, name: "Applications")
     defer { if let applications { close(applications) } }
@@ -858,20 +979,30 @@ private func selectionPreflightReport(
     let receiptData = try receipts.flatMap {
       try readPrivateAt($0, paths.receiptName, maximum: 32 * 1024, missing: true)
     }
-    let receipt = try decodedReceipt(receiptData)
+    let receipt: Receipt
+    do { receipt = try decodedReceipt(receiptData) } catch {
+      return recovery(reason: "receipt_mismatch", details: ["encoding_or_value"])
+    }
     for role in SelectedRole.allCases {
       if let record = receipt[role] {
-        guard let applications, let agents else { return report(.recoveryRequired) }
+        guard let applications, let agents else {
+          return recovery(
+            role: role, reason: "topology_mismatch", details: ["selected_role_assets"])
+        }
         let directories = SelectionDirectories(
           services: services, receipts: receipts!, applications: applications, agents: agents)
         do {
           try validateAsset(
             paths: paths, directories: directories, role: role, record: record,
-            asset: .application, name: role.appName)
+            asset: .application, name: role.appName, diagnostics: true)
           try validateAsset(
             paths: paths, directories: directories, role: role, record: record,
-            asset: .plist, name: role.plistName)
-        } catch { return report(.recoveryRequired) }
+            asset: .plist, name: role.plistName, diagnostics: true)
+        } catch let error as LifecycleSelectionRecovery {
+          return report(.recoveryRequired, recovery: error)
+        } catch {
+          return recovery(role: role, reason: "selection_mismatch", details: ["unclassified"])
+        }
       } else {
         if let applications, try entry(applications, role.appName) != nil {
           return report(.destinationConflict)
@@ -883,7 +1014,9 @@ private func selectionPreflightReport(
     }
     for role in roles {
       if testUnavailable { return report(.unavailable) }
-      if try roleLoaded(role, testLoaded: testLoaded) { return report(.loaded) }
+      let state = try selectionLaunchState(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      if state.loaded { return report(.loaded) }
     }
 
     #if ELLIE_INSTALLER_TESTING
@@ -892,14 +1025,20 @@ private func selectionPreflightReport(
         switch testBeforeFinal {
         case "services-mode": target = services
         case "receipts-mode":
-          guard let receipts else { return report(.recoveryRequired) }
+          guard let receipts else {
+            return recovery(reason: "receipt_mismatch", details: ["receipt_layout"])
+          }
           target = receipts
         case "lock-mode":
-          guard lock >= 0 else { return report(.recoveryRequired) }
+          guard lock >= 0 else {
+            return recovery(reason: "receipt_mismatch", details: ["selection_lock"])
+          }
           target = lock
-        default: return report(.recoveryRequired)
+        default: return recovery(reason: "selection_mismatch", details: ["unclassified"])
         }
-        guard fchmod(target, 0o755) == 0 else { return report(.recoveryRequired) }
+        guard fchmod(target, 0o755) == 0 else {
+          return recovery(reason: "selection_mismatch", details: ["unclassified"])
+        }
       }
     #endif
 
@@ -910,7 +1049,10 @@ private func selectionPreflightReport(
       var second = stat()
       guard fstat(held, &first) == 0, fstat(fresh, &second) == 0,
         first.st_dev == second.st_dev, first.st_ino == second.st_ino
-      else { throw SelectionFailure.recoveryRequired }
+      else {
+        throw LifecycleSelectionRecovery(
+          role: roles[0].rawValue, reason: "selection_mismatch", details: ["snapshot_changed"])
+      }
     }
     let freshHome = try selectionOpenDirectory(paths.home, privateMode: false)
     defer { close(freshHome) }
@@ -932,11 +1074,16 @@ private func selectionPreflightReport(
     guard fstat(freshServices, &finalServicesInfo) == 0,
       (finalServicesInfo.st_mode & S_IFMT) == S_IFDIR, finalServicesInfo.st_uid == getuid(),
       (finalServicesInfo.st_mode & 0o7777) == 0o700
-    else { return report(.recoveryRequired) }
-    guard try entry(freshServices, paths.journalName) == nil,
-      try migrationSwitchPending(freshServices) == false
-    else { return report(.recoveryRequired) }
-    if try migrationPreparationPending(freshServices) { return report(.recoveryRequired) }
+    else { return recovery(reason: "topology_mismatch", details: ["services_directory"]) }
+    guard try entry(freshServices, paths.journalName) == nil else {
+      return recovery(reason: "journal_pending", details: ["selection"])
+    }
+    guard try migrationSwitchPending(freshServices) == false else {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
+    if try migrationPreparationPending(freshServices) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
     if lock >= 0 {
       var heldLock = stat()
       guard fstat(lock, &heldLock) == 0, let namedLock = try entry(freshServices, "selection.lock"),
@@ -949,11 +1096,11 @@ private func selectionPreflightReport(
         heldLock.st_mtimespec.tv_nsec == namedLock.st_mtimespec.tv_nsec,
         heldLock.st_ctimespec.tv_sec == namedLock.st_ctimespec.tv_sec,
         heldLock.st_ctimespec.tv_nsec == namedLock.st_ctimespec.tv_nsec
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["selection_lock"]) }
     } else if let appearedLock = try entry(freshServices, "selection.lock") {
       guard (appearedLock.st_mode & S_IFMT) == S_IFREG, appearedLock.st_uid == getuid(),
         appearedLock.st_nlink == 1, (appearedLock.st_mode & 0o7777) == 0o600
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["selection_lock"]) }
       return report(.busy)
     }
     let freshReceipts = try selectionOpenOwnedDirectoryIfPresent(
@@ -963,7 +1110,7 @@ private func selectionPreflightReport(
       var info = stat()
       guard fstat(freshReceipts, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
         info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o700
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["receipt_layout"]) }
     }
     let freshApplications = try selectionOpenOwnedDirectoryIfPresent(
       parent: freshHome, name: "Applications")
@@ -974,7 +1121,7 @@ private func selectionPreflightReport(
     if let receipts, let freshReceipts {
       try sameDirectory(receipts, freshReceipts)
     } else if (receipts == nil) != (freshReceipts == nil) {
-      return report(.recoveryRequired)
+      return recovery(reason: "receipt_mismatch", details: ["selection_layout"])
     }
     if let applications, let freshApplications {
       try sameDirectory(applications, freshApplications)
@@ -989,7 +1136,9 @@ private func selectionPreflightReport(
     let freshReceiptData = try freshReceipts.flatMap {
       try readPrivateAt($0, paths.receiptName, maximum: 32 * 1024, missing: true)
     }
-    guard freshReceiptData == receiptData else { return report(.recoveryRequired) }
+    guard freshReceiptData == receiptData else {
+      return recovery(reason: "receipt_mismatch", details: ["snapshot_changed"])
+    }
     for role in roles {
       do {
         _ = try verifiedSelectionRelease(
@@ -999,7 +1148,8 @@ private func selectionPreflightReport(
     for role in SelectedRole.allCases {
       if let record = receipt[role] {
         guard let freshApplications, let freshAgents, let freshReceipts else {
-          return report(.recoveryRequired)
+          return recovery(
+            role: role, reason: "topology_mismatch", details: ["selected_role_assets"])
         }
         let fresh = SelectionDirectories(
           services: freshServices, receipts: freshReceipts, applications: freshApplications,
@@ -1007,11 +1157,15 @@ private func selectionPreflightReport(
         do {
           try validateAsset(
             paths: paths, directories: fresh, role: role, record: record,
-            asset: .application, name: role.appName)
+            asset: .application, name: role.appName, diagnostics: true)
           try validateAsset(
             paths: paths, directories: fresh, role: role, record: record, asset: .plist,
-            name: role.plistName)
-        } catch { return report(.recoveryRequired) }
+            name: role.plistName, diagnostics: true)
+        } catch let error as LifecycleSelectionRecovery {
+          return report(.recoveryRequired, recovery: error)
+        } catch {
+          return recovery(role: role, reason: "selection_mismatch", details: ["unclassified"])
+        }
       } else {
         if let freshApplications, try entry(freshApplications, role.appName) != nil {
           return report(.destinationConflict)
@@ -1024,11 +1178,13 @@ private func selectionPreflightReport(
     return report(.ready)
   } catch is LifecycleSelectionBusy {
     return report(.busy)
+  } catch let error as LifecycleSelectionRecovery {
+    return report(.recoveryRequired, recovery: error)
   } catch let error as SelectionFailure {
     if case .launchctlUnavailable = error { return report(.unavailable) }
-    return report(.recoveryRequired)
+    return recovery(reason: "selection_mismatch", details: ["unclassified"])
   } catch {
-    return report(.recoveryRequired)
+    return recovery(reason: "selection_mismatch", details: ["unclassified"])
   }
 }
 
@@ -1038,6 +1194,7 @@ func runSelectionPreflightCommand(_ input: [String]) -> Never {
   args.removeFirst()
   var testHome: String?
   var testLoaded = Set<SelectedRole>()
+  var testLaunchctl: String?
   var testUnavailable = false
   var testBeforeFinal: String?
   #if ELLIE_INSTALLER_TESTING
@@ -1051,6 +1208,10 @@ func runSelectionPreflightCommand(_ input: [String]) -> Never {
         failSelectionCommand(SelectionFailure.rejected)
       }
       testLoaded = Set(values.compactMap(SelectedRole.init(rawValue:)))
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-launchctl"), index + 1 < args.count {
+      testLaunchctl = args[index + 1]
       args.removeSubrange(index...index + 1)
     }
     if let index = args.firstIndex(of: "--test-preflight-launchctl-unavailable") {
@@ -1078,7 +1239,8 @@ func runSelectionPreflightCommand(_ input: [String]) -> Never {
   }
   let value = selectionPreflightReport(
     releaseID: args[0], roles: roles, testHome: testHome, testLoaded: testLoaded,
-    testUnavailable: testUnavailable, testBeforeFinal: testBeforeFinal)
+    testLaunchctl: testLaunchctl, testUnavailable: testUnavailable,
+    testBeforeFinal: testBeforeFinal)
   guard let data = try? canonical(value) else { failSelectionCommand(SelectionFailure.rejected) }
   FileHandle.standardOutput.write(data)
   exit(value.ready ? 0 : 1)
@@ -1257,7 +1419,8 @@ private func recoverAsset(
 }
 
 private func recover(
-  paths: SelectionPaths, directories: SelectionDirectories, testLoaded: Set<SelectedRole>
+  paths: SelectionPaths, directories: SelectionDirectories, testLoaded: Set<SelectedRole>,
+  testLaunchctl: String?
 ) throws {
   guard
     let journalData = try readPrivateAt(
@@ -1267,10 +1430,23 @@ private func recover(
   }
   let journal = try JSONDecoder().decode(Journal.self, from: journalData)
   let transaction = UUID(uuidString: journal.transactionID)
-  guard journal.version == 1, transaction?.uuidString.lowercased() == journal.transactionID,
+  guard [1, 2].contains(journal.version),
+    transaction?.uuidString.lowercased() == journal.transactionID,
     !journal.roles.isEmpty, journal.roles == SelectedRole.allCases.filter(journal.roles.contains),
     Set(journal.roles).count == journal.roles.count, try canonical(journal) == journalData
   else { throw SelectionFailure.recoveryRequired }
+  let previouslyDisabled: Set<SelectedRole>?
+  if journal.version == 1 {
+    guard journal.previouslyDisabled == nil else { throw SelectionFailure.recoveryRequired }
+    previouslyDisabled = nil
+  } else {
+    guard let disabled = journal.previouslyDisabled,
+      disabled == SelectedRole.allCases.filter(disabled.contains),
+      Set(disabled).count == disabled.count,
+      disabled.allSatisfy({ journal.roles.contains($0) })
+    else { throw SelectionFailure.recoveryRequired }
+    previouslyDisabled = Set(disabled)
+  }
   let old = try decodedReceipt(journal.oldReceipt)
   let new = try decodedReceipt(journal.newReceipt)
   for role in SelectedRole.allCases {
@@ -1283,8 +1459,21 @@ private func recover(
       try validateRole(paths: paths, directories: directories, receipt: old, role: role)
     }
   }
-  for role in journal.roles where try roleLoaded(role, testLoaded: testLoaded) {
-    throw SelectionFailure.loaded
+  if journal.version == 2 {
+    guard journal.roles.allSatisfy({ new[$0] != nil }) else {
+      throw SelectionFailure.recoveryRequired
+    }
+  }
+  for role in journal.roles {
+    if previouslyDisabled == nil {
+      if try roleLoaded(role, testLoaded: testLoaded, testLaunchctl: testLaunchctl) {
+        throw SelectionFailure.loaded
+      }
+    } else {
+      let state = try selectionLaunchState(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      if state.loaded { throw SelectionFailure.loaded }
+    }
   }
   let receipt =
     try
@@ -1297,6 +1486,15 @@ private func recover(
     committed = false
   } else {
     throw SelectionFailure.recoveryRequired
+  }
+  if committed, previouslyDisabled != nil {
+    for role in journal.roles {
+      let state = try selectionLaunchState(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      guard !state.loaded, state.disabled else {
+        throw state.loaded ? SelectionFailure.loaded : SelectionFailure.recoveryRequired
+      }
+    }
   }
   for role in journal.roles {
     for asset in [SelectionAsset.application, .plist] {
@@ -1315,6 +1513,25 @@ private func recover(
     try validateSelection(paths: paths, directories: directories, receipt: committed ? new : old)
   } catch {
     throw SelectionFailure.recoveryRequired
+  }
+  if let previouslyDisabled {
+    for role in journal.roles {
+      var state = try selectionLaunchState(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      if state.loaded { throw SelectionFailure.loaded }
+      let expectedDisabled = committed || previouslyDisabled.contains(role)
+      if state.disabled != expectedDisabled {
+        guard !committed else { throw SelectionFailure.recoveryRequired }
+        try setSelectionDisabled(
+          expectedDisabled, role: role, testLoaded: testLoaded,
+          testLaunchctl: testLaunchctl)
+        state = try selectionLaunchState(
+          role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      }
+      guard !state.loaded, state.disabled == expectedDisabled else {
+        throw state.loaded ? SelectionFailure.loaded : SelectionFailure.recoveryRequired
+      }
+    }
   }
   guard unlinkat(directories.services, paths.journalName, 0) == 0 else {
     throw SelectionFailure.recoveryRequired
@@ -2449,6 +2666,7 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
   let command = args.removeFirst()
   var testHome: String?
   var testLoaded = Set<SelectedRole>()
+  var testLaunchctl: String?
   var testLoadAfterPreflight = false
   var testFault: String?
   var testHoldLockMilliseconds = 0
@@ -2462,6 +2680,10 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     if let index = args.firstIndex(of: "--test-loaded"), index + 1 < args.count {
       testLoaded = Set(
         args[index + 1].split(separator: ",").compactMap { SelectedRole(rawValue: String($0)) })
+      args.removeSubrange(index...index + 1)
+    }
+    if let index = args.firstIndex(of: "--test-launchctl"), index + 1 < args.count {
+      testLaunchctl = args[index + 1]
       args.removeSubrange(index...index + 1)
     }
     if let index = args.firstIndex(of: "--test-fault"), index + 1 < args.count {
@@ -2558,14 +2780,18 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
       usleep(useconds_t(testHoldLockMilliseconds * 1_000))
     }
   #endif
-  try recover(paths: paths, directories: directories, testLoaded: testLoaded)
+  try recover(
+    paths: paths, directories: directories, testLoaded: testLoaded,
+    testLaunchctl: testLaunchctl)
   if command == "recover" {
     print("Selection recovery complete.")
     exit(0)
   }
   if command == "unselect" {
     guard let role = roles.first else { throw SelectionFailure.rejected }
-    if try roleLoaded(role, testLoaded: testLoaded) { throw SelectionFailure.loaded }
+    if try roleLoaded(
+      role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+    { throw SelectionFailure.loaded }
     let oldData =
       try
       (readPrivateAt(directories.receipts, paths.receiptName, maximum: 32 * 1024, missing: true)
@@ -2588,7 +2814,9 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     do {
       if testFailAfterJournal { throw SelectionFailure.rejected }
       if testLoadAfterPreflight { throw SelectionFailure.loaded }
-      if try roleLoaded(role, testLoaded: testLoaded) { throw SelectionFailure.loaded }
+      if try roleLoaded(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      { throw SelectionFailure.loaded }
       try unsealApplication(
         paths: paths, directories: directories, role: role, record: oldRecord,
         name: role.appName)
@@ -2605,7 +2833,9 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
         directories.receipts, name: paths.receiptName, data: nextData,
         replace: true, transaction: transaction)
       fault("after-receipt")
-      try recover(paths: paths, directories: directories, testLoaded: testLoaded)
+      try recover(
+        paths: paths, directories: directories, testLoaded: testLoaded,
+        testLaunchctl: testLaunchctl)
       print("Unselected \(role.rawValue); its managed LaunchAgent remains unloaded.")
       exit(0)
     } catch let error {
@@ -2614,8 +2844,10 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     }
   }
   guard let releaseID else { throw SelectionFailure.rejected }
-  for role in roles where try roleLoaded(role, testLoaded: testLoaded) {
-    throw SelectionFailure.loaded
+  for role in roles {
+    if try roleLoaded(role, testLoaded: testLoaded, testLaunchctl: testLaunchctl) {
+      throw SelectionFailure.loaded
+    }
   }
   let oldData =
     try
@@ -2635,13 +2867,20 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     next[role] = RoleReceipt(releaseID: release.id, appSHA256: appHash, plistSHA256: hash(plist))
   }
   let nextData = try canonical(next)
-  if oldData == nextData {
-    print("Selection already matches the requested release.")
-    exit(0)
+  var launchBefore: [SelectedRole: SelectionLaunchState] = [:]
+  for role in roles {
+    let state = try selectionLaunchState(
+      role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+    guard !state.loaded else { throw SelectionFailure.loaded }
+    launchBefore[role] = state
   }
+  let alreadyMatches = oldData == nextData
   let journal = Journal(
-    version: 1, transactionID: transaction, roles: roles, oldReceipt: oldData,
-    newReceipt: nextData)
+    version: 2, transactionID: transaction, roles: roles, oldReceipt: oldData,
+    newReceipt: nextData,
+    previouslyDisabled: SelectedRole.allCases.filter {
+      roles.contains($0) && launchBefore[$0]?.disabled == true
+    })
   try writeJournalAt(
     directories.services, name: paths.journalName, data: try canonical(journal),
     beforeSync: { fault("before-journal-fsync") },
@@ -2649,6 +2888,25 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
   fault("after-journal")
   do {
     if testFailAfterJournal { throw SelectionFailure.rejected }
+    for role in roles where launchBefore[role]?.disabled == false {
+      try setSelectionDisabled(
+        true, role: role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      fault("after-disable-\(role.rawValue)")
+    }
+    for role in roles {
+      let state = try selectionLaunchState(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      guard !state.loaded, state.disabled else {
+        throw state.loaded ? SelectionFailure.loaded : SelectionFailure.recoveryRequired
+      }
+    }
+    if alreadyMatches {
+      try recover(
+        paths: paths, directories: directories, testLoaded: testLoaded,
+        testLaunchctl: testLaunchctl)
+      print("Selection already matches the requested release and remains disabled and unloaded.")
+      exit(0)
+    }
     for role in roles {
       guard let release = releases[role] else { throw SelectionFailure.rejected }
       let stagedApp = (paths.stagedApp(role, transaction) as NSString).lastPathComponent
@@ -2665,7 +2923,11 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
     }
     for role in roles {
       if testLoadAfterPreflight { throw SelectionFailure.loaded }
-      if try roleLoaded(role, testLoaded: testLoaded) { throw SelectionFailure.loaded }
+      let state = try selectionLaunchState(
+        role, testLoaded: testLoaded, testLaunchctl: testLaunchctl)
+      guard !state.loaded, state.disabled else {
+        throw state.loaded ? SelectionFailure.loaded : SelectionFailure.recoveryRequired
+      }
     }
     for role in roles {
       let stagedApp = (paths.stagedApp(role, transaction) as NSString).lastPathComponent
@@ -2705,7 +2967,9 @@ func runSelectionCommand(_ input: [String]) throws -> Never {
       transaction: transaction)
     fault("after-receipt")
     try reject("after-receipt")
-    try recover(paths: paths, directories: directories, testLoaded: testLoaded)
+    try recover(
+      paths: paths, directories: directories, testLoaded: testLoaded,
+      testLaunchctl: testLaunchctl)
     print(
       "Selected \(roles.map(\.rawValue).joined(separator: ",")) at \(releaseID); selected managed LaunchAgents remain unloaded."
     )

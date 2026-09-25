@@ -1852,6 +1852,23 @@ test(
         );
         return { home, services };
       };
+      const prepareSelected = async (name: string) => {
+        const value = await prepareHome(name, true);
+        const selected = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          value.home,
+        ]);
+        assert.equal(selected.status, 0, selected.stderr);
+        return {
+          ...value,
+          app: join(value.home, "Applications/Ellie Coordinator.app"),
+          plist: join(value.home, "Library/LaunchAgents/org.ellie.assistant.coordinator.plist"),
+        };
+      };
       const preflight = (
         home: string,
         roles: "coordinator" | "node" | "coordinator,node",
@@ -1865,6 +1882,11 @@ test(
           | "unavailable",
         extra: string[] = [],
         releaseID = id,
+        recovery?: {
+          role: "coordinator" | "node";
+          reason: string;
+          details: readonly string[];
+        },
       ) => {
         const result = run(installer, [
           "preflight-select",
@@ -1880,6 +1902,7 @@ test(
         assert.equal(result.status, status === "ready" ? 0 : 1, result.stderr);
         const expected = {
           command: "preflight-select",
+          ...recovery,
           ready: status === "ready",
           releaseID,
           roles: roles.split(","),
@@ -1888,6 +1911,16 @@ test(
         };
         assert.equal(result.stdout, canonicalJSON(expected));
         assert.deepEqual(JSON.parse(result.stdout), expected);
+        if (recovery) {
+          assert.equal(status, "recovery_required");
+          const diagnostic = JSON.stringify(recovery);
+          assert.doesNotMatch(
+            diagnostic,
+            /Applications|LaunchAgents|[a-f0-9]{40,}|preflight-|ellie-stage|ellie-backup/,
+          );
+        } else {
+          assert.notEqual(status, "recovery_required");
+        }
       };
 
       const fresh = await prepareHome("preflight-fresh");
@@ -1922,11 +1955,19 @@ test(
 
       const lockOnly = await prepareHome("preflight-lock-only");
       await writeFile(join(lockOnly.services, "selection.lock"), "", { mode: 0o600 });
-      preflight(lockOnly.home, "coordinator", "recovery_required");
+      preflight(lockOnly.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["selection_layout"],
+      });
 
       const receiptsOnly = await prepareHome("preflight-receipts-only");
       await mkdir(join(receiptsOnly.services, "receipts"), { mode: 0o700 });
-      preflight(receiptsOnly.home, "coordinator", "recovery_required");
+      preflight(receiptsOnly.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["selection_layout"],
+      });
 
       const selected = await prepareHome("preflight-selected", true);
       assert.equal(
@@ -1947,17 +1988,42 @@ test(
       const selectedLock = join(selected.services, "selection.lock");
       const selectedReceipts = join(selected.services, "receipts");
       await rm(selectedLock);
-      preflight(selected.home, "coordinator", "recovery_required");
+      preflight(selected.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["selection_layout"],
+      });
       await writeFile(selectedLock, "", { mode: 0o600 });
       await chmod(selectedReceipts, 0o755);
-      preflight(selected.home, "coordinator", "recovery_required");
+      preflight(selected.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["receipt_layout"],
+      });
       await chmod(selectedReceipts, 0o700);
 
-      for (const target of ["services-mode", "receipts-mode", "lock-mode"]) {
-        preflight(selected.home, "coordinator", "recovery_required", [
-          "--test-preflight-before-final",
-          target,
-        ]);
+      for (const [target, recovery] of [
+        [
+          "services-mode",
+          { role: "coordinator", reason: "topology_mismatch", details: ["services_directory"] },
+        ],
+        [
+          "receipts-mode",
+          { role: "coordinator", reason: "receipt_mismatch", details: ["receipt_layout"] },
+        ],
+        [
+          "lock-mode",
+          { role: "coordinator", reason: "receipt_mismatch", details: ["selection_lock"] },
+        ],
+      ] as const) {
+        preflight(
+          selected.home,
+          "coordinator",
+          "recovery_required",
+          ["--test-preflight-before-final", target],
+          id,
+          recovery,
+        );
         await chmod(
           target === "services-mode"
             ? selected.services
@@ -1980,9 +2046,61 @@ test(
       await chmod(receipt, 0o600);
       await writeFile(receipt, "malformed\n");
       const receiptBefore = await exactTree(selected.home);
-      preflight(selected.home, "coordinator", "recovery_required");
+      preflight(selected.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["encoding_or_value"],
+      });
       assert.deepEqual(await exactTree(selected.home), receiptBefore);
       await writeFile(receipt, receiptBytes);
+
+      const modeMismatch = await prepareSelected("preflight-application-mode");
+      await chmod(modeMismatch.app, 0o700);
+      const modeMismatchBefore = await exactTree(modeMismatch.home);
+      preflight(modeMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "application_mismatch",
+        details: ["mode"],
+      });
+      assert.deepEqual(await exactTree(modeMismatch.home), modeMismatchBefore);
+
+      const contentMismatch = await prepareSelected("preflight-application-content");
+      const executable = join(contentMismatch.app, "Contents/MacOS/EllieService");
+      const executableBytes = await readFile(executable);
+      await chmod(executable, 0o644);
+      executableBytes[0] = executableBytes[0]! ^ 1;
+      await writeFile(executable, executableBytes);
+      await chmod(executable, 0o555);
+      const contentMismatchBefore = await exactTree(contentMismatch.home);
+      preflight(contentMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "application_mismatch",
+        details: ["content", "signature"],
+      });
+      assert.deepEqual(await exactTree(contentMismatch.home), contentMismatchBefore);
+
+      const topologyMismatch = await prepareSelected("preflight-topology");
+      await rename(
+        join(topologyMismatch.home, "Applications"),
+        join(topologyMismatch.home, "Applications-preserved"),
+      );
+      const topologyMismatchBefore = await exactTree(topologyMismatch.home);
+      preflight(topologyMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "topology_mismatch",
+        details: ["selected_role_assets"],
+      });
+      assert.deepEqual(await exactTree(topologyMismatch.home), topologyMismatchBefore);
+
+      const plistMismatch = await prepareSelected("preflight-plist");
+      await writeFile(plistMismatch.plist, "changed\n", { mode: 0o600 });
+      const plistMismatchBefore = await exactTree(plistMismatch.home);
+      preflight(plistMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "plist_mismatch",
+        details: ["content"],
+      });
+      assert.deepEqual(await exactTree(plistMismatch.home), plistMismatchBefore);
 
       const collision = await prepareHome("preflight-collision", true);
       await mkdir(join(collision.home, "Applications/Ellie Coordinator.app"), { mode: 0o700 });
@@ -1991,24 +2109,32 @@ test(
       assert.deepEqual(await exactTree(collision.home), collisionBefore);
 
       const pending = await prepareHome("preflight-pending");
-      for (const relativeName of [
-        "selection-journal.json",
-        "migration-switch-journal.json",
-        "legacy-restore-journal.json",
-        "migrations/migration-preparation.json",
-      ]) {
+      for (const [relativeName, detail] of [
+        ["selection-journal.json", "selection"],
+        ["migration-switch-journal.json", "migration"],
+        ["legacy-restore-journal.json", "migration"],
+        ["migrations/migration-preparation.json", "migration"],
+      ] as const) {
         const path = join(pending.services, relativeName);
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
         await writeFile(path, "malformed\n", { mode: 0o600 });
         const before = await exactTree(pending.home);
-        preflight(pending.home, "coordinator", "recovery_required");
+        preflight(pending.home, "coordinator", "recovery_required", [], id, {
+          role: "coordinator",
+          reason: "journal_pending",
+          details: [detail],
+        });
         assert.deepEqual(await exactTree(pending.home), before);
         await rm(path);
       }
       await writeFile(join(pending.services, "selection-journal.json"), "malformed\n", {
         mode: 0o600,
       });
-      preflight(pending.home, "coordinator", "recovery_required", [], `${id}-missing`);
+      preflight(pending.home, "coordinator", "recovery_required", [], `${id}-missing`, {
+        role: "coordinator",
+        reason: "journal_pending",
+        details: ["selection"],
+      });
       await rm(join(pending.services, "selection-journal.json"));
 
       const contention = await prepareHome("preflight-contention");
@@ -2074,6 +2200,203 @@ test(
         );
         return { home: candidate, services: candidateServices };
       };
+      const launchctlRoot = join(root, "selection-launchctl");
+      const launchctl = join(launchctlRoot, "launchctl");
+      const launchctlLog = join(launchctlRoot, "calls.log");
+      const shell = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+      const uid = process.getuid!();
+      await mkdir(launchctlRoot, { mode: 0o700 });
+      await writeFile(
+        launchctl,
+        `#!/bin/sh
+printf '%s\\n' "$*" >> ${shell(launchctlLog)}
+domain=gui/${uid}
+coordinator=org.ellie.assistant.coordinator
+node=org.ellie.assistant.node
+role=
+case "$2" in
+  "$domain/$coordinator") role=coordinator ;;
+  "$domain/$node") role=node ;;
+esac
+if [ "$1" = print ] && [ "$2" = "$domain" ] && [ "$#" = 2 ]; then exit 0; fi
+if [ "$1" = print-disabled ] && [ "$2" = "$domain" ] && [ "$#" = 2 ]; then
+  coordinatorValue=enabled
+  nodeValue=enabled
+  [ -f ${shell(join(launchctlRoot, "coordinator.disabled"))} ] && coordinatorValue=disabled
+  [ -f ${shell(join(launchctlRoot, "node.disabled"))} ] && nodeValue=disabled
+  printf 'disabled services = {\\n\\t\\t"%s" => %s\\n\\t\\t"%s" => %s\\n}\\n' "$coordinator" "$coordinatorValue" "$node" "$nodeValue"
+  exit 0
+fi
+if [ "$1" = print ] && [ -n "$role" ] && [ "$#" = 2 ]; then exit 113; fi
+if [ "$1" = disable ] && [ -n "$role" ] && [ "$#" = 2 ]; then
+  /usr/bin/touch ${shell(launchctlRoot)}/$role.disabled
+  [ -f ${shell(join(launchctlRoot, "fail-disable"))} ] && exit 64
+  exit 0
+fi
+if [ "$1" = enable ] && [ -n "$role" ] && [ "$#" = 2 ]; then
+  [ -f ${shell(join(launchctlRoot, "fail-enable"))} ] && exit 64
+  /bin/rm -f ${shell(launchctlRoot)}/$role.disabled
+  exit 0
+fi
+exit 64
+`,
+        { mode: 0o700 },
+      );
+      const launchctlArgs = ["--test-launchctl", launchctl];
+
+      const enabledSelection = await prepareSelectionHome("enabled-selection");
+      const enabledPreflight = run(installer, [
+        "preflight-select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        enabledSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.equal(enabledPreflight.status, 0, enabledPreflight.stderr);
+      assert.equal(JSON.parse(enabledPreflight.stdout).status, "ready");
+      assert.equal(
+        await lstat(join(launchctlRoot, "coordinator.disabled"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+        "read-only preflight must not alter an enabled unloaded role",
+      );
+      assert.doesNotMatch(await readFile(launchctlLog, "utf8"), /disable /);
+      const selectedDisabled = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        enabledSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.equal(selectedDisabled.status, 0, selectedDisabled.stderr);
+      assert.equal(await lstat(join(launchctlRoot, "coordinator.disabled")).then(() => true), true);
+      assert.equal(
+        await lstat(join(enabledSelection.services, "selection-journal.json"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      const firstCalls = await readFile(launchctlLog, "utf8");
+      assert.match(
+        firstCalls,
+        new RegExp(`disable gui/${uid}/org\\.ellie\\.assistant\\.coordinator`),
+      );
+      assert.doesNotMatch(firstCalls, /bootstrap/);
+
+      await rm(join(launchctlRoot, "coordinator.disabled"));
+      const rollbackSelection = await prepareSelectionHome("enabled-selection-rollback");
+      const interruptedBeforeCommit = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        rollbackSelection.home,
+        ...launchctlArgs,
+        "--test-fault",
+        "after-disable-coordinator",
+      ]);
+      assert.equal(interruptedBeforeCommit.status, 86, interruptedBeforeCommit.stderr);
+      assert.equal(await lstat(join(launchctlRoot, "coordinator.disabled")).then(() => true), true);
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", rollbackSelection.home, ...launchctlArgs])
+          .status,
+        0,
+      );
+      assert.equal(
+        await lstat(join(launchctlRoot, "coordinator.disabled"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+        "an uncommitted selection must restore the prior enabled override without starting it",
+      );
+      assert.equal(
+        await lstat(join(rollbackSelection.home, "Applications/Ellie Coordinator.app"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const committedSelection = await prepareSelectionHome("enabled-selection-committed");
+      const interruptedAfterCommit = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        committedSelection.home,
+        ...launchctlArgs,
+        "--test-fault",
+        "after-receipt",
+      ]);
+      assert.equal(interruptedAfterCommit.status, 86, interruptedAfterCommit.stderr);
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", committedSelection.home, ...launchctlArgs])
+          .status,
+        0,
+      );
+      assert.equal(
+        await lstat(join(launchctlRoot, "coordinator.disabled")).then(() => true),
+        true,
+        "a committed selection must remain disabled until explicit start",
+      );
+      assert.equal(
+        await lstat(join(committedSelection.home, "Applications/Ellie Coordinator.app")).then(
+          () => true,
+        ),
+        true,
+      );
+
+      await rm(join(launchctlRoot, "coordinator.disabled"));
+      const uncertainSelection = await prepareSelectionHome("enabled-selection-uncertain");
+      await writeFile(join(launchctlRoot, "fail-disable"), "fail\n");
+      const uncertainDisable = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        uncertainSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.notEqual(uncertainDisable.status, 0);
+      assert.equal(
+        await lstat(join(uncertainSelection.services, "selection-journal.json")).then(() => true),
+        true,
+        "an uncertain disable must retain the durable transaction",
+      );
+      assert.equal(
+        await lstat(join(uncertainSelection.home, "Applications/Ellie Coordinator.app"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      await rm(join(launchctlRoot, "fail-disable"));
+      await writeFile(join(launchctlRoot, "fail-enable"), "fail\n");
+      const uncertainRollback = run(installer, [
+        "recover",
+        "--test-home-root",
+        uncertainSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.notEqual(uncertainRollback.status, 0);
+      assert.equal(
+        await lstat(join(uncertainSelection.services, "selection-journal.json")).then(() => true),
+        true,
+        "an uncertain enabled-state rollback must retain the transaction",
+      );
+      await rm(join(launchctlRoot, "fail-enable"));
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", uncertainSelection.home, ...launchctlArgs])
+          .status,
+        0,
+      );
+
       const home = join(root, "selection-home");
       const services = join(home, "Library/Application Support/Ellie/Services");
       await mkdir(services, { recursive: true, mode: 0o700 });
