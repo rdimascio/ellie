@@ -15,10 +15,12 @@ import { MacOSExecutor } from "@ellie/macos";
 import { Client } from "@ellie/transport";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
 import { packagedServiceContext, packagedServiceStatus } from "./packaged-service-status.ts";
+import { loadLifeHostConfig } from "./life-config.ts";
 import { privatePath, run, Services } from "./services.ts";
 import type { Run, ServiceRole, ServiceStatus } from "./services.ts";
 import { serviceCredentialState as recordedCredentialState } from "./service-attention.ts";
 import type { ServiceCredentialState } from "./service-attention.ts";
+import { selectedServiceLifeConfig } from "./service-life-config.ts";
 
 export interface DiagnosticReport {
   ok: boolean;
@@ -29,6 +31,8 @@ interface DiagnosticClient {
   call(method: "GET" | "POST", path: string, body?: unknown): Promise<unknown>;
   close(): void;
 }
+
+type GoogleSetupStatus = "life-disabled" | "client-unconfigured" | "client-configured";
 
 export interface DiagnosticDependencies {
   stateDir: string;
@@ -44,6 +48,7 @@ export interface DiagnosticDependencies {
   run: Run;
   client: (origin: string, cert: string, token: string) => DiagnosticClient;
   inferenceHealth: (config: InferenceWorkerConfig) => Promise<boolean>;
+  googleSetupStatus: () => Promise<GoogleSetupStatus>;
 }
 
 function dependencies(overrides: Partial<DiagnosticDependencies>): DiagnosticDependencies {
@@ -69,6 +74,11 @@ function dependencies(overrides: Partial<DiagnosticDependencies>): DiagnosticDep
     inferenceHealth: async (config) => {
       const models = await new LocalInferenceWorker(config).advertise(AbortSignal.timeout(4_000));
       return models.models.length > 0;
+    },
+    googleSetupStatus: async () => {
+      const selected = await selectedServiceLifeConfig(dir);
+      if (!selected) return "life-disabled";
+      return loadLifeHostConfig(selected).googleOAuth ? "client-configured" : "client-unconfigured";
     },
     ...overrides,
   };
@@ -388,6 +398,32 @@ export async function doctorService(
     }
   } else if (!coordinator && config) {
     warn("Optional local inference is not configured; desktop commands are unaffected.");
+  }
+
+  if (coordinator) {
+    try {
+      const setup = await environment.googleSetupStatus();
+      if (setup === "life-disabled")
+        warn(
+          "No private Life host config is selected for the coordinator's next explicit start. Check any currently running Life account state with life settings.",
+        );
+      else if (setup === "client-unconfigured")
+        warn(
+          "The selected private Life host config has no registered Google desktop OAuth client. Google Calendar and Gmail setup will remain unavailable after the next explicit coordinator restart.",
+        );
+      else {
+        pass(
+          "The selected private Life host config includes a Google desktop OAuth client registration.",
+        );
+        warn(
+          "Selection does not prove the running coordinator loaded it, account consent, or current read authority. After any required explicit restart, run life settings to verify connection state, Calendar to read, and Gmail's private read-only connection.",
+        );
+      }
+    } catch {
+      fail(
+        "The selected private Life or Google OAuth client configuration is unavailable, invalid, or unsafe.",
+      );
+    }
   }
 
   return { ok, lines };
