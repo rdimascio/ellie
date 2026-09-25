@@ -105,6 +105,34 @@ final class DashboardModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCommittedReplacementDoesNotDependOnPostCommitPermissionRepair() async throws {
+        let location = temporaryLocation()
+        let initial = DashboardStore(fileURL: location)
+        initial.renameDashboard(id: "home", name: "Downstairs")
+        XCTAssertNil(initial.error)
+        var committedPathAttributeAttempts = 0
+        let store = DashboardStore(fileURL: location) { attributes, path in
+            if path == location.path {
+                committedPathAttributeAttempts += 1
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            try FileManager.default.setAttributes(attributes, ofItemAtPath: path)
+        }
+
+        store.renameDashboard(id: "home", name: "Kitchen")
+
+        XCTAssertEqual(committedPathAttributeAttempts, 0,
+            "all throwing permission checks must finish before the durable file is replaced")
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.selectedDashboard?.name, "Kitchen")
+        XCTAssertEqual(DashboardStore(fileURL: location).selectedDashboard?.name, "Kitchen")
+        let fileMode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: location.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(fileMode.intValue & 0o777, 0o600,
+            "the committed staging file must already carry its final private mode")
+    }
+
+    @MainActor
     func testCreateAndRenameNormalizeIncidentalWhitespaceBeforePersisting() async throws {
         let location = temporaryLocation()
         let store = DashboardStore(fileURL: location)
