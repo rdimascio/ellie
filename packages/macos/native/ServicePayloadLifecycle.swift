@@ -1,12 +1,12 @@
 import Darwin
 import Foundation
 
-private enum LifecycleFailure: Error {
+enum LifecycleFailure: Error {
   case rejected, recoveryRequired, busy, unavailable, unmanaged, enableRolledBack, partialEnable,
     partialDisable
   case enableUnknown, disableUnknown, startUnknown, stopUnknown
 }
-private struct LaunchResult {
+struct LaunchResult {
   let code: Int32
   let output: Data
   let timedOut: Bool
@@ -57,7 +57,7 @@ private func lifecycleFail(_ error: Error) -> Never {
   exit(1)
 }
 
-private func runLaunchctl(
+func runLaunchctl(
   _ executable: String, _ arguments: [String], timeout: TimeInterval, capture: Bool = true
 ) throws -> LaunchResult {
   var output = [Int32](repeating: -1, count: 2)
@@ -191,13 +191,13 @@ private func runLaunchctl(
   return LaunchResult(code: (status >> 8) & 0xff, output: bytes, timedOut: false)
 }
 
-private func text(_ data: Data) throws -> String {
+func launchctlText(_ data: Data) throws -> String {
   guard let value = String(data: data, encoding: .utf8), !value.contains("\0") else {
     throw LifecycleFailure.unavailable
   }
   return value
 }
-private func disabled(_ output: String, label: String) throws -> Bool {
+func launchctlDisabled(_ output: String, label: String) throws -> Bool {
   let escaped = NSRegularExpression.escapedPattern(for: label)
   let lineExpression = try NSRegularExpression(
     pattern: "^\\t\\t\\\"[^\\\"\\r\\n]{1,256}\\\" => (enabled|disabled|true|false)$")
@@ -241,7 +241,8 @@ private func observation(
   guard !disabledResult.timedOut, disabledResult.code == 0 else {
     throw LifecycleFailure.unavailable
   }
-  let isDisabled = try disabled(try text(disabledResult.output), label: selected.label)
+  let isDisabled = try launchctlDisabled(
+    try launchctlText(disabledResult.output), label: selected.label)
   let target = domain + "/" + selected.label
   let result = try runLaunchctl(executable, ["print", target], timeout: 2)
   if result.code == 113 && !result.timedOut {
@@ -249,7 +250,7 @@ private func observation(
       loaded: false, selectedPath: false, running: false, enabled: !isDisabled)
   }
   guard !result.timedOut, result.code == 0 else { throw LifecycleFailure.unavailable }
-  let value = try text(result.output)
+  let value = try launchctlText(result.output)
   var lines = value.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
   if lines.last == "" { lines.removeLast() }
   guard lines.first == "\(target) = {", lines.last == "}", lines.count <= 256 else {

@@ -2200,6 +2200,203 @@ test(
         );
         return { home: candidate, services: candidateServices };
       };
+      const launchctlRoot = join(root, "selection-launchctl");
+      const launchctl = join(launchctlRoot, "launchctl");
+      const launchctlLog = join(launchctlRoot, "calls.log");
+      const shell = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
+      const uid = process.getuid!();
+      await mkdir(launchctlRoot, { mode: 0o700 });
+      await writeFile(
+        launchctl,
+        `#!/bin/sh
+printf '%s\\n' "$*" >> ${shell(launchctlLog)}
+domain=gui/${uid}
+coordinator=org.ellie.assistant.coordinator
+node=org.ellie.assistant.node
+role=
+case "$2" in
+  "$domain/$coordinator") role=coordinator ;;
+  "$domain/$node") role=node ;;
+esac
+if [ "$1" = print ] && [ "$2" = "$domain" ] && [ "$#" = 2 ]; then exit 0; fi
+if [ "$1" = print-disabled ] && [ "$2" = "$domain" ] && [ "$#" = 2 ]; then
+  coordinatorValue=enabled
+  nodeValue=enabled
+  [ -f ${shell(join(launchctlRoot, "coordinator.disabled"))} ] && coordinatorValue=disabled
+  [ -f ${shell(join(launchctlRoot, "node.disabled"))} ] && nodeValue=disabled
+  printf 'disabled services = {\\n\\t\\t"%s" => %s\\n\\t\\t"%s" => %s\\n}\\n' "$coordinator" "$coordinatorValue" "$node" "$nodeValue"
+  exit 0
+fi
+if [ "$1" = print ] && [ -n "$role" ] && [ "$#" = 2 ]; then exit 113; fi
+if [ "$1" = disable ] && [ -n "$role" ] && [ "$#" = 2 ]; then
+  /usr/bin/touch ${shell(launchctlRoot)}/$role.disabled
+  [ -f ${shell(join(launchctlRoot, "fail-disable"))} ] && exit 64
+  exit 0
+fi
+if [ "$1" = enable ] && [ -n "$role" ] && [ "$#" = 2 ]; then
+  [ -f ${shell(join(launchctlRoot, "fail-enable"))} ] && exit 64
+  /bin/rm -f ${shell(launchctlRoot)}/$role.disabled
+  exit 0
+fi
+exit 64
+`,
+        { mode: 0o700 },
+      );
+      const launchctlArgs = ["--test-launchctl", launchctl];
+
+      const enabledSelection = await prepareSelectionHome("enabled-selection");
+      const enabledPreflight = run(installer, [
+        "preflight-select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        enabledSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.equal(enabledPreflight.status, 0, enabledPreflight.stderr);
+      assert.equal(JSON.parse(enabledPreflight.stdout).status, "ready");
+      assert.equal(
+        await lstat(join(launchctlRoot, "coordinator.disabled"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+        "read-only preflight must not alter an enabled unloaded role",
+      );
+      assert.doesNotMatch(await readFile(launchctlLog, "utf8"), /disable /);
+      const selectedDisabled = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        enabledSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.equal(selectedDisabled.status, 0, selectedDisabled.stderr);
+      assert.equal(await lstat(join(launchctlRoot, "coordinator.disabled")).then(() => true), true);
+      assert.equal(
+        await lstat(join(enabledSelection.services, "selection-journal.json"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      const firstCalls = await readFile(launchctlLog, "utf8");
+      assert.match(
+        firstCalls,
+        new RegExp(`disable gui/${uid}/org\\.ellie\\.assistant\\.coordinator`),
+      );
+      assert.doesNotMatch(firstCalls, /bootstrap/);
+
+      await rm(join(launchctlRoot, "coordinator.disabled"));
+      const rollbackSelection = await prepareSelectionHome("enabled-selection-rollback");
+      const interruptedBeforeCommit = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        rollbackSelection.home,
+        ...launchctlArgs,
+        "--test-fault",
+        "after-disable-coordinator",
+      ]);
+      assert.equal(interruptedBeforeCommit.status, 86, interruptedBeforeCommit.stderr);
+      assert.equal(await lstat(join(launchctlRoot, "coordinator.disabled")).then(() => true), true);
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", rollbackSelection.home, ...launchctlArgs])
+          .status,
+        0,
+      );
+      assert.equal(
+        await lstat(join(launchctlRoot, "coordinator.disabled"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+        "an uncommitted selection must restore the prior enabled override without starting it",
+      );
+      assert.equal(
+        await lstat(join(rollbackSelection.home, "Applications/Ellie Coordinator.app"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+
+      const committedSelection = await prepareSelectionHome("enabled-selection-committed");
+      const interruptedAfterCommit = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        committedSelection.home,
+        ...launchctlArgs,
+        "--test-fault",
+        "after-receipt",
+      ]);
+      assert.equal(interruptedAfterCommit.status, 86, interruptedAfterCommit.stderr);
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", committedSelection.home, ...launchctlArgs])
+          .status,
+        0,
+      );
+      assert.equal(
+        await lstat(join(launchctlRoot, "coordinator.disabled")).then(() => true),
+        true,
+        "a committed selection must remain disabled until explicit start",
+      );
+      assert.equal(
+        await lstat(join(committedSelection.home, "Applications/Ellie Coordinator.app")).then(
+          () => true,
+        ),
+        true,
+      );
+
+      await rm(join(launchctlRoot, "coordinator.disabled"));
+      const uncertainSelection = await prepareSelectionHome("enabled-selection-uncertain");
+      await writeFile(join(launchctlRoot, "fail-disable"), "fail\n");
+      const uncertainDisable = run(installer, [
+        "select",
+        id,
+        "--roles",
+        "coordinator",
+        "--test-home-root",
+        uncertainSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.notEqual(uncertainDisable.status, 0);
+      assert.equal(
+        await lstat(join(uncertainSelection.services, "selection-journal.json")).then(() => true),
+        true,
+        "an uncertain disable must retain the durable transaction",
+      );
+      assert.equal(
+        await lstat(join(uncertainSelection.home, "Applications/Ellie Coordinator.app"))
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      await rm(join(launchctlRoot, "fail-disable"));
+      await writeFile(join(launchctlRoot, "fail-enable"), "fail\n");
+      const uncertainRollback = run(installer, [
+        "recover",
+        "--test-home-root",
+        uncertainSelection.home,
+        ...launchctlArgs,
+      ]);
+      assert.notEqual(uncertainRollback.status, 0);
+      assert.equal(
+        await lstat(join(uncertainSelection.services, "selection-journal.json")).then(() => true),
+        true,
+        "an uncertain enabled-state rollback must retain the transaction",
+      );
+      await rm(join(launchctlRoot, "fail-enable"));
+      assert.equal(
+        run(installer, ["recover", "--test-home-root", uncertainSelection.home, ...launchctlArgs])
+          .status,
+        0,
+      );
+
       const home = join(root, "selection-home");
       const services = join(home, "Library/Application Support/Ellie/Services");
       await mkdir(services, { recursive: true, mode: 0o700 });
