@@ -30,7 +30,8 @@ type FixtureMode =
   | "split"
   | "build-failure"
   | "test-failure"
-  | "test-suite-timeout";
+  | "test-suite-timeout"
+  | "transient-descendant";
 
 async function fixture(mode: FixtureMode) {
   const root = await mkdtemp(join(tmpdir(), "ellie-ios-runner-test-"));
@@ -69,7 +70,7 @@ async function fixture(mode: FixtureMode) {
     assert.equal(shortened.includes("}, 7_000);"), false);
     runner = shortened;
   }
-  if (mode === "descendant" || mode === "cleanup-failure") {
+  if (mode === "descendant" || mode === "transient-descendant" || mode === "cleanup-failure") {
     const isolated = runner.replace(
       "mkdtempSync(`${tmpdir()}/ellie-ios-derived-`)",
       "mkdtempSync(`${root}/owned-derived-`)",
@@ -94,8 +95,12 @@ if [ "$1 $2 $3 $4" = "simctl list runtimes --json" ]; then
   if [ "$ELLIE_RUNNER_TEST_MODE" = "nonzero" ]; then exit 7; fi
   if [ "$ELLIE_RUNNER_TEST_MODE" = "descendant" ]; then
     printf '%s\n' "$$" > "$ELLIE_RUNNER_TEST_ROOT/descendant.pgid"
-    (/bin/sleep 0.2; /usr/bin/touch "$ELLIE_RUNNER_TEST_ROOT/descendant.done") >/dev/null 2>&1 &
+    (/bin/sleep 3; /usr/bin/touch "$ELLIE_RUNNER_TEST_ROOT/descendant.done") >/dev/null 2>&1 &
     exit 7
+  fi
+  if [ "$ELLIE_RUNNER_TEST_MODE" = "transient-descendant" ]; then
+    printf '%s\n' "$$" > "$ELLIE_RUNNER_TEST_ROOT/descendant.pgid"
+    (/bin/sleep 0.2; /usr/bin/touch "$ELLIE_RUNNER_TEST_ROOT/descendant.done") >/dev/null 2>&1 &
   fi
   if [ "$ELLIE_RUNNER_TEST_MODE" = "overflow" ]; then
     exec awk 'BEGIN { for (i = 0; i < 1100000; i++) printf "x" }'
@@ -205,7 +210,7 @@ async function runFixture(mode: FixtureMode, keepResult = "") {
       "utf8",
     );
     const retainedDerived =
-      mode === "descendant" || mode === "cleanup-failure"
+      mode === "descendant" || mode === "transient-descendant" || mode === "cleanup-failure"
         ? (await readdir(owned.root)).filter((name) => name.startsWith("owned-derived-")).length
         : 0;
     const retainedEvidence =
@@ -237,7 +242,7 @@ async function runFixture(mode: FixtureMode, keepResult = "") {
   }
   let cleanupError: unknown;
   try {
-    if (mode === "descendant") {
+    if (mode === "descendant" || mode === "transient-descendant") {
       const deadline = performance.now() + 2_000;
       while (performance.now() < deadline) {
         try {
@@ -479,6 +484,14 @@ test("a reaped leader with a still-observable finite child retains owned evidenc
   assert.match(diagnostic, /cleanup=derived-retained/);
   assert.match(result.stderr.toString(), /ownership is uncertain/);
   assert.equal(retainedDerived, 1);
+});
+
+test("a short-lived process-group member can settle before cleanup is classified", async () => {
+  const { diagnostic, result, retainedDerived } = await runFixture("transient-descendant");
+  assert.equal(result.status, 0);
+  assert.match(diagnostic, /outcome=passed/);
+  assert.match(diagnostic, /cleanup=shutdown-complete,delete-complete,derived-removed/);
+  assert.equal(retainedDerived, 0);
 });
 
 test("a prior retained result blocks a new run without replacing evidence", async () => {

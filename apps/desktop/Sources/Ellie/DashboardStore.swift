@@ -63,6 +63,9 @@ final class DashboardStore: ObservableObject {
             guard state.dashboards.count < DashboardModel.maximumDashboards else {
                 throw DashboardModelError.tooManyDashboards
             }
+            guard !state.dashboards.contains(where: { Self.namesCollide($0.name, cleanName) }) else {
+                throw DashboardStoreError.duplicateDashboardName
+            }
             let dashboard = Dashboard(id: Self.uniqueID(prefix: "dashboard"), name: cleanName, widgets: [])
             state.dashboards.append(dashboard)
             selectedID = dashboard.id
@@ -74,6 +77,11 @@ final class DashboardStore: ObservableObject {
         performMutation { state in
             guard let index = state.dashboards.firstIndex(where: { $0.id == id }) else {
                 throw DashboardModelError.unknownDashboard
+            }
+            guard !state.dashboards.contains(where: {
+                $0.id != id && Self.namesCollide($0.name, cleanName)
+            }) else {
+                throw DashboardStoreError.duplicateDashboardName
             }
             state.dashboards[index].name = cleanName
         }
@@ -261,6 +269,14 @@ final class DashboardStore: ObservableObject {
         "\(prefix)-\(UUID().uuidString.lowercased())"
     }
 
+    private static func namesCollide(_ first: String, _ second: String) -> Bool {
+        let locale = Locale(identifier: "en_US_POSIX")
+        return first.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive], locale: locale)
+            == second.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive], locale: locale)
+    }
+
     private static func defaultTitle(for kind: WidgetKind) -> String {
         switch kind {
         case .clock: "Clock"
@@ -274,7 +290,7 @@ final class DashboardStore: ObservableObject {
 }
 
 private enum DashboardStoreError: LocalizedError {
-    case unsafeStateFile, recoveryRequired
+    case unsafeStateFile, recoveryRequired, duplicateDashboardName
 
     var errorDescription: String? {
         switch self {
@@ -282,6 +298,8 @@ private enum DashboardStoreError: LocalizedError {
             "The dashboard state path is not a regular file."
         case .recoveryRequired:
             "Saved dashboards are still unreadable. Import a valid export or reset before making changes."
+        case .duplicateDashboardName:
+            "Choose a dashboard name that is different from the existing dashboards."
         }
     }
 }

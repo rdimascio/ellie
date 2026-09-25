@@ -158,6 +158,33 @@ final class DashboardModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCreateAndRenameRejectNormalizedNameCollisionsWithoutChangingDurableState() throws {
+        let location = temporaryLocation()
+        let store = DashboardStore(fileURL: location)
+        store.renameDashboard(id: "home", name: "Family")
+        store.createDashboard(name: "Evening")
+        let eveningID = try XCTUnwrap(store.selectedID)
+        let durableBeforeCreateCollision = try Data(contentsOf: location)
+
+        store.createDashboard(name: "  family  ")
+
+        XCTAssertNotNil(store.error)
+        XCTAssertEqual(store.selectedID, eveningID)
+        XCTAssertEqual(store.state.dashboards.map(\.name), ["Family", "Evening"])
+        XCTAssertEqual(try Data(contentsOf: location), durableBeforeCreateCollision)
+
+        store.error = nil
+        let durableBeforeRenameCollision = try Data(contentsOf: location)
+        store.renameDashboard(id: eveningID, name: "\n FAMILY \t")
+
+        XCTAssertNotNil(store.error)
+        XCTAssertEqual(store.selectedID, eveningID)
+        XCTAssertEqual(store.state.dashboards.map(\.name), ["Family", "Evening"])
+        XCTAssertEqual(try Data(contentsOf: location), durableBeforeRenameCollision)
+        XCTAssertEqual(DashboardStore(fileURL: location).state, store.state)
+    }
+
+    @MainActor
     func testCorruptSavedFileIsPreservedAndReported() async throws {
         let location = temporaryLocation()
         try FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)
