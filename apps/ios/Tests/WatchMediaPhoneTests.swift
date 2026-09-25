@@ -49,6 +49,18 @@ final class WatchMediaPhoneTests: XCTestCase {
     XCTAssertNil(WatchMediaReply.decode(invented, expectedID: read.id))
   }
 
+  func testUnknownReplyCopyDistinguishesReadFromPlaybackMutation() {
+    XCTAssertEqual(
+      WatchMediaWire.unknownStatus(for: .read),
+      "The iPhone did not return a fresh page. Read again.")
+    XCTAssertEqual(
+      WatchMediaWire.unknownStatus(for: .play),
+      "The command may have run. Read the page before another action.")
+    XCTAssertEqual(
+      WatchMediaWire.unknownStatus(for: .pause),
+      "The command may have run. Read the page before another action.")
+  }
+
   @MainActor
   func testExplicitReadThenOneRevisionBoundMutationNeedsFreshObservation() async {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,

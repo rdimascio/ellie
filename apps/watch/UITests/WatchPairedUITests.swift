@@ -1,7 +1,8 @@
 import XCTest
 
-/// These tests must run on an installed paired Watch Simulator with the DEBUG Ellie iPhone
-/// fixture already launched. The paired runner rejects skipped or zero-test results.
+/// The paired cases require the DEBUG Ellie iPhone fixture. The read-unknown presentation case
+/// is a Watch-only DEBUG fixture. The paired runner selects its cases explicitly and rejects
+/// skipped or zero-test results.
 final class WatchPairedUITests: XCTestCase {
   override func setUp() {
     super.setUp()
@@ -69,6 +70,20 @@ final class WatchPairedUITests: XCTestCase {
       XCTAssertTrue(waitForLabel(status, contains: "unreachable", timeout: 5),
                     "A stopped iPhone process may remain unreachable; action authority still stays cleared")
     }
+    XCTAssertFalse(app.staticTexts["watch-observed-title"].exists)
+    XCTAssertFalse(app.buttons["watch-play"].isEnabled)
+    XCTAssertFalse(app.buttons["watch-pause"].isEnabled)
+  }
+
+  func testReadUnknownShowsNoFreshObservationWithoutMutationClaim() {
+    let app = XCUIApplication()
+    app.launchArguments = ["--ellie-watch-read-unknown-fixture"]
+    app.launch()
+
+    let status = app.staticTexts["watch-media-status"]
+    XCTAssertTrue(status.waitForExistence(timeout: 15))
+    XCTAssertEqual(status.label, "The iPhone did not return a fresh page. Read again.")
+    XCTAssertFalse(status.label.contains("may have run"))
     XCTAssertFalse(app.staticTexts["watch-observed-title"].exists)
     XCTAssertFalse(app.buttons["watch-play"].isEnabled)
     XCTAssertFalse(app.buttons["watch-pause"].isEnabled)
