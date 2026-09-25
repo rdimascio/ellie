@@ -21,6 +21,17 @@ export function reconnectDelay(
   return Math.min(maximum, Math.max(base, Math.round(exponential * (0.75 + random() * 0.5))));
 }
 
+export function reconnectAttemptAfterDisconnect(
+  attempt: number,
+  connectedAt: number,
+  lastSuccessfulTrafficAt: number,
+  stableConnectionMs: number,
+): number {
+  return connectedAt > 0 && lastSuccessfulTrafficAt - connectedAt >= stableConnectionMs
+    ? 0
+    : attempt;
+}
+
 function desktopFailureMessage(error: unknown): string {
   if (!(error instanceof Error)) return "Native action failed.";
   try {
@@ -101,6 +112,7 @@ export async function runNode(options: {
   };
   while (!signal.aborted) {
     let connectedAt = 0;
+    let lastSuccessfulTrafficAt = 0;
     const connected = new AbortController();
     const connectionSignal = AbortSignal.any([signal, connected.signal]);
     let heartbeat: Promise<void> | undefined;
@@ -132,6 +144,7 @@ export async function runNode(options: {
             { signal: connectionSignal },
           ),
         );
+        if (connectedAt) lastSuccessfulTrafficAt = Date.now();
         const cancellations = Array.isArray(reply.cancelJobIds)
           ? reply.cancelJobIds.map((id) => String(id))
           : [];
@@ -150,6 +163,7 @@ export async function runNode(options: {
         }
       })();
       connectedAt = Date.now();
+      lastSuccessfulTrafficAt = connectedAt;
       if (connectionState !== "connected") {
         options.onStatus?.("Node connected. Ready for commands and enabled compute work.");
         options.onEvent?.("connected");
@@ -159,6 +173,7 @@ export async function runNode(options: {
         const reply = record(
           await client.call("GET", "/v1/poll", undefined, { signal: connectionSignal }),
         );
+        lastSuccessfulTrafficAt = Date.now();
         if (!reply.job) continue;
         const wire = record(reply.job);
         const task = wire.kind === "inference" ? inferenceJob(wire) : job(wire);
@@ -287,8 +302,12 @@ export async function runNode(options: {
       await heartbeat;
     }
     if (!signal.aborted) {
-      if (connectedAt && Date.now() - connectedAt >= (options.stableConnectionMs ?? 30_000))
-        reconnectAttempt = 0;
+      reconnectAttempt = reconnectAttemptAfterDisconnect(
+        reconnectAttempt,
+        connectedAt,
+        lastSuccessfulTrafficAt,
+        options.stableConnectionMs ?? 30_000,
+      );
       const wait = reconnectDelay(reconnectAttempt, options.reconnect?.random, options.reconnect);
       reconnectAttempt++;
       await delay(wait, undefined, { signal }).catch(() => {});

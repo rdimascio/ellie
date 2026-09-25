@@ -9,7 +9,11 @@ import { defaults } from "@ellie/config";
 import { CAPABILITIES, VERSION, job, record } from "@ellie/protocol";
 import type { Action } from "@ellie/protocol";
 import type { Client } from "@ellie/transport";
-import { runNode, reconnectDelay } from "../apps/node/src/index.ts";
+import {
+  runNode,
+  reconnectDelay,
+  reconnectAttemptAfterDisconnect,
+} from "../apps/node/src/index.ts";
 import { JobStore } from "../apps/server/src/jobs.ts";
 import { fixture } from "./helpers.ts";
 
@@ -423,6 +427,25 @@ test("reconnect delay is exponentially bounded and jittered", () => {
     reconnectDelay(20, () => 1, { baseMs: 100, maxMs: 1000 }),
     1000,
   );
+});
+
+test("reconnect backoff resets only after successful traffic spans the stability window", () => {
+  assert.equal(
+    reconnectAttemptAfterDisconnect(4, 1_000, 1_000, 30_000),
+    4,
+    "elapsed sleep or network-refusal time must not make a connection stable",
+  );
+  assert.equal(
+    reconnectAttemptAfterDisconnect(4, 1_000, 30_999, 30_000),
+    4,
+    "successful traffic short of the stability window preserves accumulated backoff",
+  );
+  assert.equal(
+    reconnectAttemptAfterDisconnect(4, 1_000, 31_000, 30_000),
+    0,
+    "repeated successful coordinator traffic can reset accumulated backoff",
+  );
+  assert.equal(reconnectAttemptAfterDisconnect(4, 0, 31_000, 30_000), 4);
 });
 
 test("transport uses an absolute deadline and releases an interrupted long poll", async () => {
