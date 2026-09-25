@@ -20,6 +20,9 @@ private struct SelectionPreflightReport: Codable {
   let roles: [String]
   let ready: Bool
   let status: SelectionPreflightStatus
+  let role: String?
+  let reason: String?
+  let details: [String]?
 }
 private let selectionError = "Ellie service selection failed; existing services were preserved."
 
@@ -759,10 +762,21 @@ private func selectionPreflightReport(
   releaseID: String, roles: [SelectedRole], testHome: String?, testLoaded: Set<SelectedRole>,
   testUnavailable: Bool, testBeforeFinal: String?
 ) -> SelectionPreflightReport {
-  func report(_ status: SelectionPreflightStatus) -> SelectionPreflightReport {
+  func report(
+    _ status: SelectionPreflightStatus, recovery: LifecycleSelectionRecovery? = nil
+  ) -> SelectionPreflightReport {
     SelectionPreflightReport(
       version: 1, command: "preflight-select", releaseID: releaseID,
-      roles: roles.map(\.rawValue), ready: status == .ready, status: status)
+      roles: roles.map(\.rawValue), ready: status == .ready, status: status,
+      role: recovery?.role, reason: recovery?.reason, details: recovery?.details)
+  }
+  func recovery(
+    role: SelectedRole? = nil, reason: String, details: [String]
+  ) -> SelectionPreflightReport {
+    report(
+      .recoveryRequired,
+      recovery: LifecycleSelectionRecovery(
+        role: (role ?? roles[0]).rawValue, reason: reason, details: details))
   }
   func migrationPreparationPending(_ services: Int32) throws -> Bool {
     guard
@@ -792,17 +806,23 @@ private func selectionPreflightReport(
     defer { close(services) }
     var servicesInfo = stat()
     guard fstat(services, &servicesInfo) == 0, (servicesInfo.st_mode & 0o7777) == 0o700 else {
-      return report(.recoveryRequired)
+      return recovery(reason: "topology_mismatch", details: ["services_directory"])
     }
 
-    if try migrationSwitchPending(services) { return report(.recoveryRequired) }
-    if try entry(services, paths.journalName) != nil { return report(.recoveryRequired) }
-    if try migrationPreparationPending(services) { return report(.recoveryRequired) }
+    if try migrationSwitchPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
+    if try entry(services, paths.journalName) != nil {
+      return recovery(reason: "journal_pending", details: ["selection"])
+    }
+    if try migrationPreparationPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
 
     let lockInfo = try entry(services, "selection.lock")
     let receiptsInfo = try entry(services, "receipts")
     guard (lockInfo == nil) == (receiptsInfo == nil) else {
-      return report(.recoveryRequired)
+      return recovery(reason: "receipt_mismatch", details: ["selection_layout"])
     }
     var lock: Int32 = -1
     if lockInfo != nil {
@@ -814,13 +834,15 @@ private func selectionPreflightReport(
         (verified.st_mode & 0o7777) == 0o600
       else {
         if lock >= 0 { close(lock) }
-        return report(.recoveryRequired)
+        return recovery(reason: "receipt_mismatch", details: ["selection_lock"])
       }
       if flock(lock, LOCK_SH | LOCK_NB) != 0 {
         let lockError = errno
         close(lock)
         lock = -1
-        return report(lockError == EWOULDBLOCK ? .busy : .recoveryRequired)
+        return lockError == EWOULDBLOCK
+          ? report(.busy)
+          : recovery(reason: "receipt_mismatch", details: ["selection_lock"])
       }
     }
     defer {
@@ -830,9 +852,15 @@ private func selectionPreflightReport(
       }
     }
 
-    if try migrationSwitchPending(services) { return report(.recoveryRequired) }
-    if try entry(services, paths.journalName) != nil { return report(.recoveryRequired) }
-    if try migrationPreparationPending(services) { return report(.recoveryRequired) }
+    if try migrationSwitchPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
+    if try entry(services, paths.journalName) != nil {
+      return recovery(reason: "journal_pending", details: ["selection"])
+    }
+    if try migrationPreparationPending(services) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
 
     // Candidate verification is deliberately the existing development-v1 policy.
     do {
@@ -844,12 +872,14 @@ private func selectionPreflightReport(
 
     let receipts = try selectionOpenOwnedDirectoryIfPresent(parent: services, name: "receipts")
     defer { if let receipts { close(receipts) } }
-    guard (lock >= 0) == (receipts != nil) else { return report(.recoveryRequired) }
+    guard (lock >= 0) == (receipts != nil) else {
+      return recovery(reason: "receipt_mismatch", details: ["selection_layout"])
+    }
     if let receipts {
       var info = stat()
       guard fstat(receipts, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
         info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o700
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["receipt_layout"]) }
     }
     let applications = try selectionOpenOwnedDirectoryIfPresent(parent: home, name: "Applications")
     defer { if let applications { close(applications) } }
@@ -858,20 +888,30 @@ private func selectionPreflightReport(
     let receiptData = try receipts.flatMap {
       try readPrivateAt($0, paths.receiptName, maximum: 32 * 1024, missing: true)
     }
-    let receipt = try decodedReceipt(receiptData)
+    let receipt: Receipt
+    do { receipt = try decodedReceipt(receiptData) } catch {
+      return recovery(reason: "receipt_mismatch", details: ["encoding_or_value"])
+    }
     for role in SelectedRole.allCases {
       if let record = receipt[role] {
-        guard let applications, let agents else { return report(.recoveryRequired) }
+        guard let applications, let agents else {
+          return recovery(
+            role: role, reason: "topology_mismatch", details: ["selected_role_assets"])
+        }
         let directories = SelectionDirectories(
           services: services, receipts: receipts!, applications: applications, agents: agents)
         do {
           try validateAsset(
             paths: paths, directories: directories, role: role, record: record,
-            asset: .application, name: role.appName)
+            asset: .application, name: role.appName, diagnostics: true)
           try validateAsset(
             paths: paths, directories: directories, role: role, record: record,
-            asset: .plist, name: role.plistName)
-        } catch { return report(.recoveryRequired) }
+            asset: .plist, name: role.plistName, diagnostics: true)
+        } catch let error as LifecycleSelectionRecovery {
+          return report(.recoveryRequired, recovery: error)
+        } catch {
+          return recovery(role: role, reason: "selection_mismatch", details: ["unclassified"])
+        }
       } else {
         if let applications, try entry(applications, role.appName) != nil {
           return report(.destinationConflict)
@@ -892,14 +932,20 @@ private func selectionPreflightReport(
         switch testBeforeFinal {
         case "services-mode": target = services
         case "receipts-mode":
-          guard let receipts else { return report(.recoveryRequired) }
+          guard let receipts else {
+            return recovery(reason: "receipt_mismatch", details: ["receipt_layout"])
+          }
           target = receipts
         case "lock-mode":
-          guard lock >= 0 else { return report(.recoveryRequired) }
+          guard lock >= 0 else {
+            return recovery(reason: "receipt_mismatch", details: ["selection_lock"])
+          }
           target = lock
-        default: return report(.recoveryRequired)
+        default: return recovery(reason: "selection_mismatch", details: ["unclassified"])
         }
-        guard fchmod(target, 0o755) == 0 else { return report(.recoveryRequired) }
+        guard fchmod(target, 0o755) == 0 else {
+          return recovery(reason: "selection_mismatch", details: ["unclassified"])
+        }
       }
     #endif
 
@@ -910,7 +956,10 @@ private func selectionPreflightReport(
       var second = stat()
       guard fstat(held, &first) == 0, fstat(fresh, &second) == 0,
         first.st_dev == second.st_dev, first.st_ino == second.st_ino
-      else { throw SelectionFailure.recoveryRequired }
+      else {
+        throw LifecycleSelectionRecovery(
+          role: roles[0].rawValue, reason: "selection_mismatch", details: ["snapshot_changed"])
+      }
     }
     let freshHome = try selectionOpenDirectory(paths.home, privateMode: false)
     defer { close(freshHome) }
@@ -932,11 +981,16 @@ private func selectionPreflightReport(
     guard fstat(freshServices, &finalServicesInfo) == 0,
       (finalServicesInfo.st_mode & S_IFMT) == S_IFDIR, finalServicesInfo.st_uid == getuid(),
       (finalServicesInfo.st_mode & 0o7777) == 0o700
-    else { return report(.recoveryRequired) }
-    guard try entry(freshServices, paths.journalName) == nil,
-      try migrationSwitchPending(freshServices) == false
-    else { return report(.recoveryRequired) }
-    if try migrationPreparationPending(freshServices) { return report(.recoveryRequired) }
+    else { return recovery(reason: "topology_mismatch", details: ["services_directory"]) }
+    guard try entry(freshServices, paths.journalName) == nil else {
+      return recovery(reason: "journal_pending", details: ["selection"])
+    }
+    guard try migrationSwitchPending(freshServices) == false else {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
+    if try migrationPreparationPending(freshServices) {
+      return recovery(reason: "journal_pending", details: ["migration"])
+    }
     if lock >= 0 {
       var heldLock = stat()
       guard fstat(lock, &heldLock) == 0, let namedLock = try entry(freshServices, "selection.lock"),
@@ -949,11 +1003,11 @@ private func selectionPreflightReport(
         heldLock.st_mtimespec.tv_nsec == namedLock.st_mtimespec.tv_nsec,
         heldLock.st_ctimespec.tv_sec == namedLock.st_ctimespec.tv_sec,
         heldLock.st_ctimespec.tv_nsec == namedLock.st_ctimespec.tv_nsec
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["selection_lock"]) }
     } else if let appearedLock = try entry(freshServices, "selection.lock") {
       guard (appearedLock.st_mode & S_IFMT) == S_IFREG, appearedLock.st_uid == getuid(),
         appearedLock.st_nlink == 1, (appearedLock.st_mode & 0o7777) == 0o600
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["selection_lock"]) }
       return report(.busy)
     }
     let freshReceipts = try selectionOpenOwnedDirectoryIfPresent(
@@ -963,7 +1017,7 @@ private func selectionPreflightReport(
       var info = stat()
       guard fstat(freshReceipts, &info) == 0, (info.st_mode & S_IFMT) == S_IFDIR,
         info.st_uid == getuid(), (info.st_mode & 0o7777) == 0o700
-      else { return report(.recoveryRequired) }
+      else { return recovery(reason: "receipt_mismatch", details: ["receipt_layout"]) }
     }
     let freshApplications = try selectionOpenOwnedDirectoryIfPresent(
       parent: freshHome, name: "Applications")
@@ -974,7 +1028,7 @@ private func selectionPreflightReport(
     if let receipts, let freshReceipts {
       try sameDirectory(receipts, freshReceipts)
     } else if (receipts == nil) != (freshReceipts == nil) {
-      return report(.recoveryRequired)
+      return recovery(reason: "receipt_mismatch", details: ["selection_layout"])
     }
     if let applications, let freshApplications {
       try sameDirectory(applications, freshApplications)
@@ -989,7 +1043,9 @@ private func selectionPreflightReport(
     let freshReceiptData = try freshReceipts.flatMap {
       try readPrivateAt($0, paths.receiptName, maximum: 32 * 1024, missing: true)
     }
-    guard freshReceiptData == receiptData else { return report(.recoveryRequired) }
+    guard freshReceiptData == receiptData else {
+      return recovery(reason: "receipt_mismatch", details: ["snapshot_changed"])
+    }
     for role in roles {
       do {
         _ = try verifiedSelectionRelease(
@@ -999,7 +1055,8 @@ private func selectionPreflightReport(
     for role in SelectedRole.allCases {
       if let record = receipt[role] {
         guard let freshApplications, let freshAgents, let freshReceipts else {
-          return report(.recoveryRequired)
+          return recovery(
+            role: role, reason: "topology_mismatch", details: ["selected_role_assets"])
         }
         let fresh = SelectionDirectories(
           services: freshServices, receipts: freshReceipts, applications: freshApplications,
@@ -1007,11 +1064,15 @@ private func selectionPreflightReport(
         do {
           try validateAsset(
             paths: paths, directories: fresh, role: role, record: record,
-            asset: .application, name: role.appName)
+            asset: .application, name: role.appName, diagnostics: true)
           try validateAsset(
             paths: paths, directories: fresh, role: role, record: record, asset: .plist,
-            name: role.plistName)
-        } catch { return report(.recoveryRequired) }
+            name: role.plistName, diagnostics: true)
+        } catch let error as LifecycleSelectionRecovery {
+          return report(.recoveryRequired, recovery: error)
+        } catch {
+          return recovery(role: role, reason: "selection_mismatch", details: ["unclassified"])
+        }
       } else {
         if let freshApplications, try entry(freshApplications, role.appName) != nil {
           return report(.destinationConflict)
@@ -1024,11 +1085,13 @@ private func selectionPreflightReport(
     return report(.ready)
   } catch is LifecycleSelectionBusy {
     return report(.busy)
+  } catch let error as LifecycleSelectionRecovery {
+    return report(.recoveryRequired, recovery: error)
   } catch let error as SelectionFailure {
     if case .launchctlUnavailable = error { return report(.unavailable) }
-    return report(.recoveryRequired)
+    return recovery(reason: "selection_mismatch", details: ["unclassified"])
   } catch {
-    return report(.recoveryRequired)
+    return recovery(reason: "selection_mismatch", details: ["unclassified"])
   }
 }
 
