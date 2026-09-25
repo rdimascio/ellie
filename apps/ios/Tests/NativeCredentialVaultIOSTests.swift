@@ -171,3 +171,25 @@ private struct KeychainTestError: Error {
   let status: OSStatus
   init(_ status: OSStatus) { self.status = status }
 }
+
+final class WatchMediaPhoneSessionLifecycleTests: XCTestCase {
+  func testLateInactiveEventUsesCurrentSessionStateAndPreservesNewActivation() {
+    XCTAssertTrue(
+      watchMediaSessionIsAvailable(
+        activated: true, paired: true, watchAppInstalled: true),
+      "an older inactive callback must not disable a target enabled after reactivation")
+    XCTAssertFalse(watchMediaSessionNeedsActivation(.activated))
+
+    XCTAssertFalse(
+      watchMediaSessionIsAvailable(
+        activated: false, paired: true, watchAppInstalled: true))
+    XCTAssertFalse(
+      watchMediaSessionIsAvailable(
+        activated: true, paired: false, watchAppInstalled: true))
+    XCTAssertFalse(
+      watchMediaSessionIsAvailable(
+        activated: true, paired: true, watchAppInstalled: false))
+    XCTAssertTrue(watchMediaSessionNeedsActivation(.inactive))
+    XCTAssertTrue(watchMediaSessionNeedsActivation(.notActivated))
+  }
+}
