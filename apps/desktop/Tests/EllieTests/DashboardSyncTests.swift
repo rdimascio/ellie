@@ -327,6 +327,40 @@ final class DashboardSyncTests: XCTestCase {
     XCTAssertEqual(transport.calls, ["read"])
   }
 
+  func testFailedFreshReadRemovesStaleServerCopyBeforeItCanReplaceLocalDashboards() async throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent("EllieDashboardStaleImportTests-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let localFile = directory.appendingPathComponent("local.json")
+    let dashboards = DashboardStore(fileURL: localFile)
+    dashboards.renameDashboard(id: "home", name: "Keep local")
+    let localState = dashboards.state
+    let transport = SyncTransport()
+    transport.document = HouseholdDashboardDocument(
+      profile: .shared, revision: 4,
+      value: DashboardState(dashboards: [Dashboard(id: "remote", name: "Old server copy", widgets: [])]))
+    let store = DashboardSyncStore(
+      credential: credential(), transport: transport, persistence: SyncPersistence())
+    store.readServerCopy()
+    await settle(store)
+    XCTAssertEqual(store.remote?.revision, 4)
+
+    transport.readFailure = .unavailable
+    store.readServerCopy()
+    XCTAssertNil(store.remote, "starting a fresh read must immediately withdraw the old import source")
+    await settle(store)
+
+    if let importable = store.remote {
+      dashboards.importData(try DashboardModel.encode(importable.value))
+    }
+
+    XCTAssertNil(store.remote, "a failed refresh must not republish the stale server copy")
+    XCTAssertEqual(store.phase, .failed(DashboardSyncFailure.unavailable.localizedDescription))
+    XCTAssertEqual(dashboards.state, localState)
+    XCTAssertEqual(DashboardStore(fileURL: localFile).state, localState)
+    XCTAssertEqual(transport.calls, ["read", "read"])
+  }
+
   func testCancelledOldReadCannotReplaceNewerRead() async {
     let transport = SyncTransport()
     let oldRead = SyncReadGate()
