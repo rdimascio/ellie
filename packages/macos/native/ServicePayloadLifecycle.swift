@@ -356,13 +356,15 @@ private func emitStatus(_ role: String, selected: LifecycleSelectedRole?, value:
 }
 
 private func restoreDisabledAfterUnstartedEnable(
-  executable: String, uid: uid_t, selected: LifecycleSelectedRole
+  executable: String, uid: uid_t, selected: LifecycleSelectedRole, prior: LaunchObservation
 ) -> Bool {
   let target = "gui/\(uid)/\(selected.label)"
   do {
     let result = try runLaunchctl(executable, ["disable", target], timeout: 20)
     guard !result.timedOut, result.code == 0 else { return false }
-    return try !observation(executable: executable, uid: uid, selected: selected).enabled
+    let restored = try observation(executable: executable, uid: uid, selected: selected)
+    return !restored.enabled && restored.loaded == prior.loaded
+      && (!restored.loaded || restored.selectedPath)
   } catch {
     return false
   }
@@ -432,7 +434,7 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
                 emitStatus(role, selected: selected, value: afterEnable)
               } catch {
                 if restoreDisabledAfterUnstartedEnable(
-                  executable: executable, uid: getuid(), selected: selected)
+                  executable: executable, uid: getuid(), selected: selected, prior: initial)
                 {
                   throw LifecycleFailure.enableRolledBack
                 }
@@ -457,7 +459,7 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
           } catch {
             if enableConfirmed {
               if restoreDisabledAfterUnstartedEnable(
-                executable: executable, uid: getuid(), selected: selected)
+                executable: executable, uid: getuid(), selected: selected, prior: initial)
               {
                 throw LifecycleFailure.enableRolledBack
               }
