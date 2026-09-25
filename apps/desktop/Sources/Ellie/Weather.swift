@@ -237,10 +237,6 @@ final class WeatherStore: ObservableObject {
 
     @discardableResult
     func disable() -> Bool {
-        refreshTask?.cancel()
-        refreshTask = nil
-        refreshID = nil
-        isRefreshing = false
         guard !recoveryRequired else {
             message = "Weather is off, but the unreadable settings file was preserved and may still contain the previous place."
             return false
@@ -248,6 +244,10 @@ final class WeatherStore: ObservableObject {
         let candidate = WeatherState()
         do {
             try persist(candidate)
+            refreshTask?.cancel()
+            refreshTask = nil
+            refreshID = nil
+            isRefreshing = false
             state = candidate
             fetchedInCurrentSession = false
             message = nil
