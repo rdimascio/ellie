@@ -15,6 +15,8 @@ final class BrowserVoiceIntentTests: XCTestCase {
             ("scroll right", .scroll(.right), "Scroll right"),
             ("open result three", .openResult(index: 3), "Open result 3"),
             ("open the tenth result.", .openResult(index: 10), "Open result 10"),
+            ("open that", .openSelectedResult, "Open selected result"),
+            ("Open that!", .openSelectedResult, "Open selected result"),
             ("play", .play, "Play"),
             ("pause.", .pause, "Pause"),
             ("go back", .back, "Back"),
@@ -76,7 +78,6 @@ final class BrowserVoiceIntentTests: XCTestCase {
             #"\"refresh\""#,
             "play and pause",
             "scroll down then open result 1",
-            "open that",
             "open the selected title",
             "right and play",
         ] {

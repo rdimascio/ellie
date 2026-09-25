@@ -29,7 +29,9 @@ struct EllieIOSApp: App {
                     netflixSearch: ProcessInfo.processInfo.arguments.contains(
                         "--ellie-ui-browser-netflix-voice-search"),
                     youtubeSearch: ProcessInfo.processInfo.arguments.contains(
-                        "--ellie-ui-browser-youtube-voice-search"))
+                        "--ellie-ui-browser-youtube-voice-search"),
+                    openThat: ProcessInfo.processInfo.arguments.contains(
+                        "--ellie-ui-browser-voice-open-that"))
             } else if ProcessInfo.processInfo.arguments.contains("--ellie-ui-browser-composed-fixture") {
                 if let identifier = BrowserUnknownRelaunchUITestStorage.identifier(
                     from: ProcessInfo.processInfo.arguments,

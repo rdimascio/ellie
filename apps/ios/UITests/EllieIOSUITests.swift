@@ -730,6 +730,59 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Play"].isEnabled)
     }
 
+    func testReviewedOpenThatRequiresObservedChoiceAndExplicitRunWithoutReplay() {
+        let app = XCUIApplication()
+        app.launchArguments = [
+            "--ellie-ui-reviewed-browser-fixture", "--ellie-ui-browser-voice-open-that",
+        ]
+        app.launch()
+
+        XCTAssertTrue(app.buttons["speech-check"].waitForExistence(timeout: 5))
+        app.buttons["speech-check"].tap()
+        XCTAssertTrue(app.buttons["speech-record"].waitForExistence(timeout: 5))
+        app.buttons["speech-record"].tap()
+        XCTAssertTrue(app.buttons["speech-stop"].waitForExistence(timeout: 5))
+        app.buttons["speech-stop"].tap()
+        XCTAssertTrue(app.textViews["speech-transcript"].waitForExistence(timeout: 5))
+        XCTAssertEqual(app.textViews["speech-transcript"].value as? String, "Open that")
+
+        let run = revealSpeechReviewButton("speech-browser-run", in: app)
+        XCTAssertFalse(run.isEnabled)
+        revealSpeechReviewButton("speech-browser-read", in: app, forTap: true).tap()
+        let second = revealSpeechReviewButton("speech-browser-result-2", in: app, forTap: true)
+        XCTAssertTrue(second.isEnabled)
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0")
+
+        second.tap()
+        let review = app.staticTexts["speech-browser-selected-result-review"]
+        XCTAssertTrue(review.waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            review.label, "Run will open Second observed result on Fixture Mac A.")
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-mutation-count"].label, "Fixture mutations: 0",
+            "Choosing a referent must not dispatch")
+        let enabledRun = revealSpeechReviewButton("speech-browser-run", in: app, forTap: true)
+        XCTAssertTrue(enabledRun.isEnabled)
+        enabledRun.tap()
+
+        let count = app.staticTexts["browser-fixture-mutation-count"]
+        let dispatched = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label == %@", "Fixture mutations: 1"), object: count)
+        XCTAssertEqual(XCTWaiter.wait(for: [dispatched], timeout: 5), .completed)
+        XCTAssertTrue(
+            app.descendants(matching: .any)["browser-status-unknown"].waitForExistence(timeout: 5))
+        XCTAssertEqual(
+            app.staticTexts["browser-fixture-action-history"].label,
+            "Fixture actions: read.results,select.public-video-b")
+        let noReplay = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "label != %@", "Fixture mutations: 1"), object: count)
+        noReplay.isInverted = true
+        XCTAssertEqual(XCTWaiter.wait(for: [noReplay], timeout: 1), .completed)
+        XCTAssertTrue(app.buttons["speech-browser-read-updated"].exists)
+        XCTAssertFalse(app.buttons["speech-browser-run"].exists)
+    }
+
     func testReviewedNetflixVoiceScrollRequiresExplicitRowChoiceAndRun() {
         let app = XCUIApplication()
         app.launchArguments = [
