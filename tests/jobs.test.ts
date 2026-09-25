@@ -509,6 +509,79 @@ test("node stop aborts an active long poll and connection events do not spam ret
   assert.deepEqual(events, ["reconnecting", "connected"]);
 });
 
+test("a lost result acknowledgement is retried after reconnect without replaying the action", async () => {
+  const f = await fixture();
+  const stop = new AbortController();
+  let agent: Promise<void> | undefined;
+  let executions = 0;
+  let resultPosts = 0;
+  let registrations = 0;
+  let settleRead!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settleRead = resolve;
+  });
+  try {
+    const node = await f.pair("result-reconnect-node");
+    const client = {
+      call: async (
+        method: "GET" | "POST",
+        path: string,
+        body?: unknown,
+        options?: { signal?: AbortSignal; timeoutMs?: number },
+      ): Promise<unknown> => {
+        if (path === "/v1/result") resultPosts++;
+        if (path.startsWith("/v1/jobs/") && registrations < 2)
+          throw new Error("synthetic interrupted connection");
+        const reply = await node.call(method, path, body, options);
+        if (path === "/v1/register") registrations++;
+        if (path === "/v1/result" && resultPosts === 1)
+          throw new Error("synthetic lost acknowledgement");
+        if (path.startsWith("/v1/jobs/")) settleRead();
+        return reply;
+      },
+    } as Client;
+    let ready!: () => void;
+    const connected = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    agent = runNode({
+      client,
+      preferences: defaults,
+      signal: stop.signal,
+      heartbeatMs: 10,
+      reconnect: { baseMs: 1, maxMs: 1, random: () => 0.5 },
+      executor: {
+        capabilities: async () => [...CAPABILITIES],
+        execute: async () => {
+          executions++;
+          return { ok: true, message: "Done." };
+        },
+      },
+      onEvent: (event) => {
+        if (event === "connected") ready();
+      },
+    });
+    await connected;
+    const command = record(
+      await f.controller.call("POST", "/v1/commands", {
+        nodeId: "result-reconnect-node",
+        text: "open Arc",
+      }),
+    );
+    assert.equal(command.ok, true);
+    await settled;
+    assert.equal(executions, 1);
+    assert.equal(resultPosts, 2);
+    assert.equal(registrations, 2);
+    assert.equal(f.jobStore.list()[0]?.state, "completed");
+    assert.equal(f.jobStore.list()[0]?.outcomeCode, "succeeded");
+  } finally {
+    stop.abort();
+    await f.close();
+    await agent;
+  }
+});
+
 test("desktop job expiry aborts an active executor before a later action", async () => {
   const stop = new AbortController();
   let executions = 0;
