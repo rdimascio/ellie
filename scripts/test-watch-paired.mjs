@@ -21,12 +21,14 @@ import {
   phoneFixtureContinuity,
   waitForPhoneReadiness,
 } from "./watch-paired-readiness.mjs";
+import { requireReadUnknownEvents } from "./watch-paired-events.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const project = join(root, "apps/ios/EllieIOS.xcodeproj");
 const bundle = "org.ellie.dashboard.ios";
 const watchBundle = `${bundle}.watchkitapp`;
 const runID = randomUUID();
+const readUnknownRunID = randomUUID();
 const started = performance.now();
 const totalDeadline = started + 25 * 60_000;
 const options = Object.fromEntries(
@@ -77,6 +79,8 @@ for (const name of [
   "scripts/watch-paired-readiness.mjs",
   "scripts/test-watch-paired-readiness.test.mjs",
   "scripts/test-watch-paired-process.test.mjs",
+  "scripts/watch-paired-events.mjs",
+  "scripts/test-watch-paired-events.test.mjs",
   "apps/ios/Sources/EllieIOSApp.swift",
   "apps/ios/Sources/WatchMediaPhoneBridge.swift",
   "apps/ios/Sources/WatchMediaPhoneController.swift",
@@ -128,6 +132,7 @@ async function readyStage(name, target) {
     receipt.phoneReadiness = state;
     receipt.stages.push({ name, ok: true, elapsedMs: Math.round(performance.now() - begun) });
     persist();
+    return state;
   } catch (error) {
     receipt.stages.push({
       name,
@@ -138,6 +143,56 @@ async function readyStage(name, target) {
     persist();
     throw error;
   }
+}
+async function waitForReadUnknownEvidence(eventFile, readinessFile, before, timeout = 5_000) {
+  if (
+    before.messagesReceived !== 0 ||
+    before.messagesDecoded !== 0 ||
+    before.replyHandlersInvoked !== 0 ||
+    before.lastReplyState !== "none"
+  ) {
+    throw new Error("Paired read-unknown fixture did not begin with zero request counters.");
+  }
+  const deadline = performance.now() + timeout;
+  let latest;
+  while (performance.now() < deadline) {
+    try {
+      const counts = requireReadUnknownEvents(
+        readFileSync(eventFile, "utf8"),
+        "watch-fixture-mac-a",
+      );
+      latest = parsePhoneReadiness(readFileSync(readinessFile, "utf8"));
+      if (
+        latest.processInstance === before.processInstance &&
+        latest.messagesReceived === 1 &&
+        latest.messagesDecoded === 1 &&
+        latest.replyHandlersInvoked === 1 &&
+        latest.lastReplyState === "observed"
+      ) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 750));
+        const settledCounts = requireReadUnknownEvents(
+          readFileSync(eventFile, "utf8"),
+          "watch-fixture-mac-a",
+        );
+        const settled = parsePhoneReadiness(readFileSync(readinessFile, "utf8"));
+        if (
+          settled.processInstance !== before.processInstance ||
+          settled.messagesReceived !== 1 ||
+          settled.messagesDecoded !== 1 ||
+          settled.replyHandlersInvoked !== 1
+        ) {
+          throw new Error("Paired read-unknown request replayed after its first reply.");
+        }
+        return { counts: settledCounts, phone: settled };
+      }
+    } catch (error) {
+      latest = error;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  throw new Error(
+    `Paired read-unknown evidence was incomplete by deadline: ${String(latest?.message ?? latest ?? "missing")}`,
+  );
 }
 const uuid = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 function createdID(value, kind) {
@@ -456,6 +511,42 @@ try {
     throw new Error("Reconnect did not show B's fresh read, or crossed action authority to B.");
   }
   receipt.events = events;
+  await simctl("terminate-phone-B", ["terminate", phoneID, bundle]);
+  const readUnknownEventPath = join(
+    container,
+    "Library/Application Support/Ellie/WatchPaired",
+    `${readUnknownRunID}.jsonl`,
+  );
+  readinessPath = join(
+    container,
+    "Library/Application Support/Ellie/WatchPaired",
+    `${readUnknownRunID}.readiness.json`,
+  );
+  await simctl("launch-read-unknown", [
+    "launch",
+    phoneID,
+    bundle,
+    "--ellie-ui-watch-paired-fixture",
+    readUnknownRunID,
+    "--ellie-ui-watch-read-unknown",
+  ]);
+  const readUnknownBefore = await readyStage("phone-ready-read-unknown", "watch-fixture-mac-a");
+  await watchTest("testReadUnknownShowsNoFreshObservationWithoutMutationClaim");
+  const readUnknownEvidence = await waitForReadUnknownEvidence(
+    readUnknownEventPath,
+    readinessPath,
+    readUnknownBefore,
+  );
+  receipt.readUnknown = {
+    transport: "production-wcsession-via-phone-bridge-fixture-reply-adapter",
+    watchAssertedUnknownCopy: true,
+    bridgeReplyBeforeFixtureAdapter: readUnknownEvidence.phone.lastReplyState,
+    ...readUnknownEvidence.counts,
+    messagesReceived: readUnknownEvidence.phone.messagesReceived,
+    messagesDecoded: readUnknownEvidence.phone.messagesDecoded,
+    replyHandlersInvoked: readUnknownEvidence.phone.replyHandlersInvoked,
+    noReplayAfterMilliseconds: 750,
+  };
   receipt.status = "passed-synthetic-backend-real-paired-ui-wcsession";
 } catch (error) {
   if (readinessPath) {
