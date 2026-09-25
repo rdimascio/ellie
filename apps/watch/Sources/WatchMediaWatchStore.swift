@@ -43,6 +43,14 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
 
   func activate() {
     foreground = true
+    #if DEBUG
+    if ProcessInfo.processInfo.arguments.contains("--ellie-watch-read-unknown-fixture") {
+      reachable = false
+      installReadUnknownFixture()
+      updatePairedDiagnostic(nil)
+      return
+    }
+    #endif
     guard WCSession.isSupported() else {
       updatePairedDiagnostic(nil)
       return
@@ -164,7 +172,7 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
       observation = observed
       status = "Fresh page observation"
     case .unknown:
-      status = "The command may have run. Read the page before another action."
+      status = WatchMediaWire.unknownStatus(for: request.operation)
     case .blocked:
       status = "Watch control is disabled or no longer authorized on iPhone."
     case .stale:
@@ -173,6 +181,19 @@ final class WatchMediaWatchStore: NSObject, ObservableObject, WCSessionDelegate 
       status = "No reviewed player is available. Check Ellie on iPhone."
     }
   }
+
+  #if DEBUG
+  private func installReadUnknownFixture() {
+    let request = WatchMediaRequest.make(.read)
+    observation = nil
+    pendingID = request.id
+    pendingOperation = .read
+    waiting = true
+    receive(
+      WatchMediaReply(id: request.id, state: .unknown, observation: nil).message,
+      request: request)
+  }
+  #endif
 
   private func finishUncertain(_ operation: WatchMediaOperation) {
     timeout?.cancel()
