@@ -184,6 +184,7 @@ final class WeatherStore: ObservableObject {
     let fileURL: URL
     private let client: OpenMeteoClient
     private let now: @Sendable () -> Date
+    private let setFileAttributes: ([FileAttributeKey: Any], String) throws -> Void
     private var refreshTask: Task<Void, Never>?
     private var refreshID: UUID?
     private var recoveryRequired = false
@@ -191,10 +192,14 @@ final class WeatherStore: ObservableObject {
     static let maximumFileBytes = 32 * 1024
 
     init(fileURL: URL? = nil, client: OpenMeteoClient = OpenMeteoClient(),
-         now: @escaping @Sendable () -> Date = { Date() }) {
+         now: @escaping @Sendable () -> Date = { Date() },
+         setFileAttributes: @escaping ([FileAttributeKey: Any], String) throws -> Void = {
+             try FileManager.default.setAttributes($0, ofItemAtPath: $1)
+         }) {
         self.fileURL = fileURL ?? Self.defaultFileURL()
         self.client = client
         self.now = now
+        self.setFileAttributes = setFileAttributes
         do { state = try Self.load(from: self.fileURL, now: now()) }
         catch {
             state = WeatherState()
@@ -318,13 +323,15 @@ final class WeatherStore: ObservableObject {
         let staging = directory.appendingPathComponent(".weather-\(UUID().uuidString).tmp")
         do {
             try data.write(to: staging, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
+            try setFileAttributes([.posixPermissions: 0o600], staging.path)
+            // The staged file already has its final private metadata. Keep the
+            // replacement as the commit boundary: a later throwing operation
+            // could report failure after the durable state has already changed.
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 let values = try fileURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
                 guard values.isRegularFile == true, values.isSymbolicLink != true else { throw WeatherError.invalidState }
                 _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: staging, backupItemName: nil, options: .usingNewMetadataOnly)
             } else { try FileManager.default.moveItem(at: staging, to: fileURL) }
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch { try? FileManager.default.removeItem(at: staging); throw error }
     }
 
