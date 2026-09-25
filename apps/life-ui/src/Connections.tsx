@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type ConnectionPreview,
@@ -46,13 +46,25 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
   const [calendarChoice, setCalendarChoice] = useState("");
   const [detailError, setDetailError] = useState("");
   const detailSync = connections.find((item) => item.id === detailId)?.lastSyncAt;
-  const clearMessage = () => {
+  const clearMessage = useCallback(() => {
     messageRequest.current++;
     setSelectedMessageId("");
     setMessageDetail(null);
     setMessageLoading(false);
     setMessageError("");
-  };
+  }, []);
+  useEffect(() => {
+    const pageHidden = () => clearMessage();
+    const visibilityChanged = () => {
+      if (document.visibilityState !== "visible") pageHidden();
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    window.addEventListener("pagehide", pageHidden);
+    return () => {
+      document.removeEventListener("visibilitychange", visibilityChanged);
+      window.removeEventListener("pagehide", pageHidden);
+    };
+  }, [clearMessage]);
   const applyConnections = (value: ConnectorConnection[]) => {
     currentConnections.current = value;
     if (
@@ -172,6 +184,8 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
     try {
       await operation();
       await load();
+      if (key.startsWith("cancel:"))
+        setNotice("Google connection setup did not finish. You can start again.");
       if (detailId && !key.startsWith("revoke:") && !key.startsWith("cancel:"))
         await openDetails(detailId);
       else if (key.startsWith("revoke:") || key.startsWith("cancel:")) {
@@ -406,14 +420,26 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                     connection.state === "connected" && (
                       <span role="status">{calendarReadiness(connection)}</span>
                     )}
-                  {connection.error && <span role="alert">{connection.error}</span>}
+                  {connection.error && (
+                    <span role="alert">{connectionIssueMessage(connection.error)}</span>
+                  )}
+                  {connection.state === "connecting" && pending?.connectionId !== connection.id && (
+                    <span role="status">
+                      Google sign-in is still pending. Finish it in the browser, or stop setup and
+                      start again if the link expired or closed.
+                    </span>
+                  )}
                 </div>
               </div>
               <label>
                 Mode
                 <select
                   value={connection.mode}
-                  disabled={busy !== "" || connection.state === "revoked"}
+                  disabled={
+                    busy !== "" ||
+                    connection.state === "connecting" ||
+                    connection.state === "revoked"
+                  }
                   onChange={(event) =>
                     void run(`mode:${connection.id}`, () =>
                       api.connections.mode(connection.id, event.target.value as ConnectorMode),
@@ -425,7 +451,7 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                 </select>
               </label>
               <div className="connection-actions">
-                {connection.state !== "revoked" && (
+                {connection.state !== "connecting" && connection.state !== "revoked" && (
                   <button
                     type="button"
                     disabled={busy !== ""}
@@ -445,7 +471,11 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                   </button>
                 )}
                 <button
-                  disabled={busy !== "" || connection.state === "revoked"}
+                  disabled={
+                    busy !== "" ||
+                    connection.state === "connecting" ||
+                    connection.state === "revoked"
+                  }
                   onClick={() =>
                     void run(`refresh:${connection.id}`, () =>
                       api.connections.refresh(connection.id),
@@ -454,15 +484,24 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                 >
                   {busy === `refresh:${connection.id}` ? "Refreshing…" : "Refresh"}
                 </button>
-                <button
-                  className="danger"
-                  disabled={busy !== ""}
-                  onClick={() =>
-                    void run(`revoke:${connection.id}`, () => api.connections.revoke(connection.id))
-                  }
-                >
-                  Disconnect
-                </button>
+                {pending?.connectionId !== connection.id && (
+                  <button
+                    className="danger"
+                    disabled={busy !== ""}
+                    onClick={() =>
+                      void run(
+                        `${connection.state === "connecting" ? "cancel" : "revoke"}:${connection.id}`,
+                        () => api.connections.revoke(connection.id),
+                      )
+                    }
+                  >
+                    {busy === `cancel:${connection.id}`
+                      ? "Stopping…"
+                      : connection.state === "connecting"
+                        ? "Stop setup"
+                        : "Disconnect"}
+                  </button>
+                )}
               </div>
               {detailId === connection.id && (
                 <div className="connection-status">
@@ -641,6 +680,12 @@ function calendarReadiness(connection: ConnectorConnection) {
         ? "Non-primary calendar selected. Open imported activity to see or change it."
         : "No calendar is selected. Open imported activity to choose one.";
   return `${selection} ${connection.lastSyncAt ? "Latest import is shown above." : "No completed import yet; use Refresh."}`;
+}
+
+function connectionIssueMessage(error: string) {
+  if (error === "revoked")
+    return "Account access expired or was revoked. Disconnect, then connect again to review access.";
+  return error;
 }
 
 function IntegrationMark({ provider }: { provider: string }) {

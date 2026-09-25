@@ -492,6 +492,28 @@ try {
     1,
     "a delayed pre-start list must not clear the current setup",
   );
+  await page.reload();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await openSettings();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  const pendingGmailArticle = page.locator(".connection-list article").filter({ hasText: "Gmail" });
+  await pendingGmailArticle
+    .getByRole("status")
+    .getByText(
+      "Google sign-in is still pending. Finish it in the browser, or stop setup and start again if the link expired or closed.",
+    )
+    .waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "a restored pending setup keeps one explicit cancellation action",
+  );
+  assert.equal(
+    await pendingGmailArticle.getByRole("button", { name: "View imported activity" }).count(),
+    0,
+    "pending consent must not offer imported activity",
+  );
+  await expect(pendingGmailArticle.getByRole("button", { name: "Refresh" })).toBeDisabled();
   const cancelRoute = "**/api/connections/*/revoke";
   await page.route(cancelRoute, (route) =>
     route.fulfill({
@@ -572,6 +594,35 @@ try {
     .getByText("Private fixture body, fetched only after selection.")
     .waitFor();
   assert.equal(explicitFullReads, 1);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(
+    gmailArticle.getByText("Private fixture body, fetched only after selection."),
+  ).toHaveCount(0);
+  await expect(
+    gmailArticle.getByRole("button", { name: /Private fixture subject.*sender@example.test/ }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  assert.equal(explicitFullReads, 1, "foregrounding must not refetch or redisplay a Gmail body");
+  assert.equal(
+    await gmailArticle.getByText("Private fixture body, fetched only after selection.").count(),
+    0,
+    "foregrounding requires another explicit message selection",
+  );
   await calendarArticle.getByRole("button", { name: "View imported activity" }).click();
   assert.equal(
     await gmailArticle.getByText("Private fixture body, fetched only after selection.").count(),
@@ -849,6 +900,26 @@ try {
   await page.getByRole("alert").getByText("Calendar disconnect is unavailable.").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
   await page.unroute(cancelRoute);
+  const connectedCalendar = connectorStore.get(actorId, connection.id)!;
+  connectorStore.update(
+    actorId,
+    connection.id,
+    connectedCalendar.generation,
+    { state: "error", error: "revoked" },
+    true,
+  );
+  await page.getByText(/Google Calendar · Needs attention/).waitFor({ timeout: 10_000 });
+  await calendarArticle
+    .getByRole("alert")
+    .getByText(
+      "Account access expired or was revoked. Disconnect, then connect again to review access.",
+    )
+    .waitFor();
+  assert.equal(
+    await calendarArticle.getByRole("alert").getByText("revoked", { exact: true }).count(),
+    0,
+    "revoked credentials must show a recovery action instead of a machine code",
+  );
   await calendarArticle.getByRole("button", { name: "Disconnect" }).click();
   await page
     .locator(".provider-list article")
