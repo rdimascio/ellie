@@ -28,6 +28,7 @@ final class SpeechTurnTests: XCTestCase {
       try SpeechTransport.decodeCancel(Data(#"{"ok":true,"cancelled":false,"turnId":"x"}"#.utf8)))
   }
 
+  @MainActor
   func testVoiceIdentityMetadataCannotEnterReviewedCommandAuthority() throws {
     let turn = UUID().uuidString.lowercased()
     for metadata in [
