@@ -124,8 +124,22 @@ struct LifecycleSelectedRole {
 }
 struct LifecycleSelectionBusy: Error {}
 
+struct LifecycleSelectionRecovery: Error {
+  let role: String
+  let reason: String
+  let details: [String]
+}
+
+private func lifecycleSelectionRecovery(
+  role: String, reason: String, details: [String], diagnostics: Bool
+) -> Error {
+  diagnostics
+    ? LifecycleSelectionRecovery(role: role, reason: reason, details: details)
+    : SelectionFailure.recoveryRequired
+}
+
 func withLifecycleSelection<T>(
-  role roleName: String, testHome: String?, exclusive: Bool,
+  role roleName: String, testHome: String?, exclusive: Bool, diagnostics: Bool = false,
   _ action: (LifecycleSelectedRole?, () throws -> Void) throws -> T
 ) throws -> T {
   guard let role = SelectedRole(rawValue: roleName) else { throw SelectionFailure.rejected }
@@ -139,7 +153,9 @@ func withLifecycleSelection<T>(
       defer { close(applications) }
       for candidate in SelectedRole.allCases where try entry(applications, candidate.appName) != nil
       {
-        throw SelectionFailure.recoveryRequired
+        throw lifecycleSelectionRecovery(
+          role: candidate.rawValue, reason: "topology_mismatch",
+          details: ["unexpected_application"], diagnostics: diagnostics)
       }
     }
     if let library,
@@ -147,7 +163,9 @@ func withLifecycleSelection<T>(
     {
       defer { close(agents) }
       for candidate in SelectedRole.allCases where try entry(agents, candidate.plistName) != nil {
-        throw SelectionFailure.recoveryRequired
+        throw lifecycleSelectionRecovery(
+          role: candidate.rawValue, reason: "topology_mismatch",
+          details: ["unexpected_plist"], diagnostics: diagnostics)
       }
     }
     return try action(nil, { throw SelectionFailure.recoveryRequired })
@@ -172,24 +190,36 @@ func withLifecycleSelection<T>(
   defer { close(services) }
   var servicesInfo = stat()
   guard fstat(services, &servicesInfo) == 0, (servicesInfo.st_mode & 0o7777) == 0o700 else {
-    throw SelectionFailure.recoveryRequired
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "topology_mismatch", details: ["services_directory"],
+      diagnostics: diagnostics)
   }
   if try migrationSwitchPending(services) { throw MigrationSwitchPendingFailure() }
   let lockInfo = try entry(services, "selection.lock")
   let receiptsInfo = try entry(services, "receipts")
   if lockInfo == nil && receiptsInfo == nil {
     guard try entry(services, paths.journalName) == nil else {
-      throw SelectionFailure.recoveryRequired
+      throw lifecycleSelectionRecovery(
+        role: role.rawValue, reason: "journal_pending", details: ["selection"],
+        diagnostics: diagnostics)
     }
     return try unselected(library)
   }
-  guard lockInfo != nil, receiptsInfo != nil else { throw SelectionFailure.recoveryRequired }
+  guard lockInfo != nil, receiptsInfo != nil else {
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "receipt_mismatch", details: ["selection_layout"],
+      diagnostics: diagnostics)
+  }
   let receipts = try selectionOpenOwnedDirectory(parent: services, name: "receipts")
   defer { close(receipts) }
   var receiptsMode = stat()
   guard fstat(receipts, &receiptsMode) == 0, (receiptsMode.st_mode & 0o7777) == 0o700,
     try entry(receipts, paths.receiptName) != nil
-  else { throw SelectionFailure.recoveryRequired }
+  else {
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "receipt_mismatch", details: ["receipt_layout"],
+      diagnostics: diagnostics)
+  }
   let applications = try selectionOpenOwnedDirectory(parent: home, name: "Applications")
   defer { close(applications) }
   let agents = try selectionOpenOwnedDirectory(parent: library, name: "LaunchAgents")
@@ -205,23 +235,42 @@ func withLifecycleSelection<T>(
     (verifiedLock.st_mode & 0o7777) == 0o600
   else {
     if lock >= 0 { close(lock) }
-    throw SelectionFailure.recoveryRequired
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "receipt_mismatch", details: ["selection_lock"],
+      diagnostics: diagnostics)
   }
   if flock(lock, exclusive ? LOCK_EX | LOCK_NB : LOCK_SH | LOCK_NB) != 0 {
     close(lock)
     if errno == EWOULDBLOCK { throw LifecycleSelectionBusy() }
-    throw SelectionFailure.recoveryRequired
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "receipt_mismatch", details: ["selection_lock"],
+      diagnostics: diagnostics)
   }
   defer {
     flock(lock, LOCK_UN)
     close(lock)
   }
   if try migrationSwitchPending(services) { throw MigrationSwitchPendingFailure() }
-  guard try entry(services, paths.journalName) == nil,
-    let receiptData = try readPrivateAt(receipts, paths.receiptName, maximum: 32 * 1024)
-  else { throw SelectionFailure.recoveryRequired }
-  let receipt = try decodedReceipt(receiptData)
-  try validateSelection(paths: paths, directories: directories, receipt: receipt)
+  guard try entry(services, paths.journalName) == nil else {
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "journal_pending", details: ["selection"],
+      diagnostics: diagnostics)
+  }
+  guard let receiptData = try readPrivateAt(
+    receipts, paths.receiptName, maximum: 32 * 1024)
+  else {
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "receipt_mismatch", details: ["missing"],
+      diagnostics: diagnostics)
+  }
+  let receipt: Receipt
+  do { receipt = try decodedReceipt(receiptData) } catch {
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "receipt_mismatch", details: ["encoding_or_value"],
+      diagnostics: diagnostics)
+  }
+  try validateSelection(
+    paths: paths, directories: directories, receipt: receipt, diagnostics: diagnostics)
   func sameDirectory(_ first: Int32, _ second: Int32) throws {
     var left = stat()
     var right = stat()
@@ -587,22 +636,68 @@ private func decodedReceipt(_ data: Data?) throws -> Receipt {
 private enum SelectionAsset { case application, plist }
 private func validateAsset(
   paths: SelectionPaths, directories: SelectionDirectories, role: SelectedRole,
-  record: RoleReceipt, asset: SelectionAsset, name: String, applicationRootMode: mode_t = 0o555
+  record: RoleReceipt, asset: SelectionAsset, name: String, applicationRootMode: mode_t = 0o555,
+  diagnostics: Bool = false
 ) throws {
-  let release = try verifiedSelectionRelease(
-    servicesRoot: paths.services, releaseID: record.releaseID, role: role.rawValue)
+  let release: SelectionRelease
+  do {
+    release = try verifiedSelectionRelease(
+      servicesRoot: paths.services, releaseID: record.releaseID, role: role.rawValue)
+  } catch {
+    throw lifecycleSelectionRecovery(
+      role: role.rawValue, reason: "release_mismatch", details: ["selected_release"],
+      diagnostics: diagnostics)
+  }
   switch asset {
   case .application:
-    let value = try selectionApplicationDigest(
-      parent: directories.applications, name: name, files: release.applicationFiles,
-      identifier: role.identifier, rootMode: applicationRootMode)
-    guard value == record.appSHA256 else { throw SelectionFailure.recoveryRequired }
+    if diagnostics {
+      let details = selectionApplicationDiagnostics(
+        parent: directories.applications, name: name, files: release.applicationFiles,
+        identifier: role.identifier, rootMode: applicationRootMode).map(\.rawValue)
+      if !details.isEmpty {
+        throw lifecycleSelectionRecovery(
+          role: role.rawValue, reason: "application_mismatch", details: details,
+          diagnostics: true)
+      }
+    }
+    let value: String
+    do {
+      value = try selectionApplicationDigest(
+        parent: directories.applications, name: name, files: release.applicationFiles,
+        identifier: role.identifier, rootMode: applicationRootMode)
+    } catch {
+      throw lifecycleSelectionRecovery(
+        role: role.rawValue, reason: "application_mismatch", details: ["unclassified"],
+        diagnostics: diagnostics)
+    }
+    guard value == record.appSHA256 else {
+      throw lifecycleSelectionRecovery(
+        role: role.rawValue, reason: "receipt_mismatch", details: ["application_digest"],
+        diagnostics: diagnostics)
+    }
   case .plist:
     let expected = plistData(role: role, release: release, app: paths.app(role), home: paths.home)
-    guard
-      let bytes = try readPrivateAt(directories.agents, name, maximum: 32 * 1024),
-      bytes == expected, hash(bytes) == record.plistSHA256
-    else { throw SelectionFailure.recoveryRequired }
+    let bytes: Data
+    do {
+      guard let value = try readPrivateAt(directories.agents, name, maximum: 32 * 1024) else {
+        throw SelectionFailure.recoveryRequired
+      }
+      bytes = value
+    } catch {
+      throw lifecycleSelectionRecovery(
+        role: role.rawValue, reason: "plist_mismatch", details: ["metadata_or_topology"],
+        diagnostics: diagnostics)
+    }
+    guard bytes == expected else {
+      throw lifecycleSelectionRecovery(
+        role: role.rawValue, reason: "plist_mismatch", details: ["content"],
+        diagnostics: diagnostics)
+    }
+    guard hash(bytes) == record.plistSHA256 else {
+      throw lifecycleSelectionRecovery(
+        role: role.rawValue, reason: "receipt_mismatch", details: ["plist_digest"],
+        diagnostics: diagnostics)
+    }
   }
 }
 private func unsealApplication(
@@ -637,20 +732,25 @@ private func applicationMode(_ parent: Int32, _ name: String) throws -> mode_t? 
   return value.st_mode & 0o7777
 }
 private func validateSelection(
-  paths: SelectionPaths, directories: SelectionDirectories, receipt: Receipt
+  paths: SelectionPaths, directories: SelectionDirectories, receipt: Receipt,
+  diagnostics: Bool = false
 ) throws {
   for role in SelectedRole.allCases {
     if let record = receipt[role] {
       try validateAsset(
         paths: paths, directories: directories, role: role, record: record,
-        asset: .application, name: role.appName)
+        asset: .application, name: role.appName, diagnostics: diagnostics)
       try validateAsset(
         paths: paths, directories: directories, role: role, record: record, asset: .plist,
-        name: role.plistName)
+        name: role.plistName, diagnostics: diagnostics)
     } else {
       guard try entry(directories.applications, role.appName) == nil,
         try entry(directories.agents, role.plistName) == nil
-      else { throw SelectionFailure.rejected }
+      else {
+        throw lifecycleSelectionRecovery(
+          role: role.rawValue, reason: "topology_mismatch",
+          details: ["unselected_role_asset"], diagnostics: diagnostics)
+      }
     }
   }
 }

@@ -355,6 +355,18 @@ private func emitStatus(_ role: String, selected: LifecycleSelectedRole?, value:
   FileHandle.standardOutput.write(data + Data("\n".utf8))
 }
 
+private func emitRecoveryStatus(_ value: LifecycleSelectionRecovery) {
+  let object: [String: Any] = [
+    "details": value.details,
+    "reason": value.reason,
+    "role": value.role,
+    "status": "recovery_required",
+    "version": 1,
+  ]
+  let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+  FileHandle.standardOutput.write(data + Data("\n".utf8))
+}
+
 private func restoreDisabledAfterUnstartedEnable(
   executable: String, uid: uid_t, selected: LifecycleSelectedRole, prior: LaunchObservation
 ) -> Bool {
@@ -395,7 +407,10 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
   }
   for role in roles {
     do {
-      try withLifecycleSelection(role: role, testHome: testHome, exclusive: command != "status") {
+      try withLifecycleSelection(
+        role: role, testHome: testHome, exclusive: command != "status",
+        diagnostics: command == "status"
+      ) {
         selected, revalidate in
         guard let selected else {
           if command == "status" {
@@ -524,12 +539,27 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
         }
       }
     } catch let error as LifecycleFailure { throw error } catch let error
+      as LifecycleSelectionRecovery
+    {
+      if command == "status" { emitRecoveryStatus(error) }
+      throw LifecycleFailure.recoveryRequired
+    } catch let error
       as MigrationSwitchPendingFailure
     {
+      if command == "status" {
+        emitRecoveryStatus(
+          LifecycleSelectionRecovery(
+            role: role, reason: "journal_pending", details: ["migration"]))
+      }
       throw error
     } catch is LifecycleSelectionBusy {
       throw LifecycleFailure.busy
     } catch {
+      if command == "status" {
+        emitRecoveryStatus(
+          LifecycleSelectionRecovery(
+            role: role, reason: "selection_mismatch", details: ["unclassified"]))
+      }
       throw LifecycleFailure.recoveryRequired
     }
   }
