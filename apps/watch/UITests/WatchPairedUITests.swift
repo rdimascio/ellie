@@ -77,11 +77,20 @@ final class WatchPairedUITests: XCTestCase {
 
   func testReadUnknownShowsNoFreshObservationWithoutMutationClaim() {
     let app = XCUIApplication()
-    app.launchArguments = ["--ellie-watch-read-unknown-fixture"]
+    app.launchArguments = ["--ellie-watch-paired-diagnostic"]
     app.launch()
 
+    let read = app.buttons["watch-read"]
+    XCTAssertTrue(read.waitForExistence(timeout: 15))
+    guard waitForEnabled(read, timeout: 25) else {
+      XCTFail(
+        "WCSession did not reach the paired iPhone: "
+          + "\(app.staticTexts["watch-media-status"].value ?? "missing")")
+      return
+    }
+    read.tap()
     let status = app.staticTexts["watch-media-status"]
-    XCTAssertTrue(status.waitForExistence(timeout: 15))
+    XCTAssertTrue(waitForLabel(status, contains: "did not return a fresh page", timeout: 15))
     XCTAssertEqual(status.label, "The iPhone did not return a fresh page. Read again.")
     XCTAssertFalse(status.label.contains("may have run"))
     XCTAssertFalse(app.staticTexts["watch-observed-title"].exists)
