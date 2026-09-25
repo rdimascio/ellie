@@ -807,6 +807,26 @@ try {
   await page.getByRole("alert").getByText("Calendar disconnect is unavailable.").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
   await page.unroute(cancelRoute);
+  const connectedCalendar = connectorStore.get(actorId, connection.id)!;
+  connectorStore.update(
+    actorId,
+    connection.id,
+    connectedCalendar.generation,
+    { state: "error", error: "revoked" },
+    true,
+  );
+  await page.getByText(/Google Calendar · Needs attention/).waitFor({ timeout: 10_000 });
+  await calendarArticle
+    .getByRole("alert")
+    .getByText(
+      "Account access expired or was revoked. Disconnect, then connect again to review access.",
+    )
+    .waitFor();
+  assert.equal(
+    await calendarArticle.getByRole("alert").getByText("revoked", { exact: true }).count(),
+    0,
+    "revoked credentials must show a recovery action instead of a machine code",
+  );
   await calendarArticle.getByRole("button", { name: "Disconnect" }).click();
   await page
     .locator(".provider-list article")
