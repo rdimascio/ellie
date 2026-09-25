@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { crc32 } from "node:zlib";
 import { createServer as createHttpServer } from "node:http";
-import { chromium, expect } from "@playwright/test";
+import { chromium, expect, type Route } from "@playwright/test";
 import { LifeStore } from "../../../packages/life-core/src/index.ts";
 import { createLifeHarness } from "../../../packages/life-harness/src/index.ts";
 import { extractDocument } from "../../../packages/life-ingest/src/index.ts";
@@ -620,13 +620,45 @@ try {
     .filter({ hasText: /water the fern/i })
     .waitFor();
   assert.equal(await page.getByLabel("Message Ellie").inputValue(), "");
+  const detailRefreshStarted = Promise.withResolvers<void>();
+  const releaseDetailRefresh = Promise.withResolvers<void>();
+  const detailRefreshFinished = Promise.withResolvers<void>();
+  let heldDetailRefresh = false;
+  const detailPath = `/api/life/conversations/${fernConversation}`;
+  const detailRoute = (url: URL) => url.pathname === detailPath;
+  const holdDetailRefresh = async (route: Route) => {
+    if (!heldDetailRefresh && new URL(route.request().url()).pathname === detailPath) {
+      heldDetailRefresh = true;
+      detailRefreshStarted.resolve();
+      await releaseDetailRefresh.promise;
+    }
+    await route.continue();
+    detailRefreshFinished.resolve();
+  };
+  await page.route(detailRoute, holdDetailRefresh);
   await page.getByLabel("Message Ellie").fill("sometime later");
   await page.getByRole("button", { name: "Send message" }).click();
-  await page
-    .locator(".intent-strip")
-    .filter({ hasText: /water the fern/i })
-    .waitFor();
-  await page.getByRole("button", { name: /Clear draft reminder: water the fern/i }).click();
+  const detailRefreshDeadline = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("post-send conversation refresh did not start")), 5_000),
+  );
+  const clearFernDraft = page.getByRole("button", {
+    name: /Clear draft reminder: water the fern/i,
+  });
+  try {
+    await Promise.race([detailRefreshStarted.promise, detailRefreshDeadline]);
+    await expect(clearFernDraft).toBeDisabled();
+  } finally {
+    releaseDetailRefresh.resolve();
+    await Promise.race([
+      detailRefreshFinished.promise,
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("post-send conversation refresh did not finish")), 5_000),
+      ),
+    ]);
+    await page.unroute(detailRoute, holdDetailRefresh);
+  }
+  await expect(clearFernDraft).toBeEnabled();
+  await clearFernDraft.click();
   await page.getByText("Draft cleared").waitFor();
   await page.locator(".intent-strip").waitFor({ state: "detached" });
   assert.equal(

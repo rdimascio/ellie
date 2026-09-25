@@ -955,7 +955,13 @@ export function App() {
               pendingIntent={pendingIntent}
               pendingIntentState={pendingIntentState}
               clearPendingIntent={async () => {
-                if (!conversation || !pendingIntent || pendingIntent.state !== "awaiting-fields")
+                if (
+                  !conversation ||
+                  !pendingIntent ||
+                  pendingIntent.state !== "awaiting-fields" ||
+                  chatInFlight.current ||
+                  busy
+                )
                   return;
                 const generation = scopeGeneration.current;
                 const epoch = chatEpoch.current;
@@ -1843,6 +1849,7 @@ function Chat({
         <PendingIntentStrip
           intent={pendingIntent}
           state={pendingIntentState}
+          busy={busy}
           clear={clearPendingIntent}
           retry={() => openConversation(active.id)}
         />
@@ -1961,11 +1968,13 @@ function Chat({
 function PendingIntentStrip({
   intent,
   state,
+  busy,
   clear,
   retry,
 }: {
   intent: PendingIntent | null;
   state: "idle" | "loading" | "error";
+  busy: boolean;
   clear: () => Promise<void>;
   retry: () => Promise<void>;
 }) {
@@ -1982,7 +1991,9 @@ function PendingIntentStrip({
           <strong>Draft status unavailable</strong>
           <span>Ellie could not verify whether this conversation has a saved draft.</span>
         </div>
-        <button onClick={() => void retry()}>Try again</button>
+        <button onClick={() => void retry()} disabled={busy}>
+          Try again
+        </button>
       </div>
     );
   if (!intent) return null;
@@ -2005,7 +2016,11 @@ function PendingIntentStrip({
         </span>
       </div>
       {intent.state === "awaiting-fields" && (
-        <button onClick={() => void clear()} aria-label={`Clear draft ${kind}: ${intent.title}`}>
+        <button
+          onClick={() => void clear()}
+          disabled={busy}
+          aria-label={`Clear draft ${kind}: ${intent.title}`}
+        >
           Clear draft
         </button>
       )}
