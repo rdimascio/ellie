@@ -2466,6 +2466,114 @@ test(
 );
 
 test(
+  "installed status reports closed recovery reason codes without exposing asset data",
+  { ...options, timeout: 30_000 },
+  async (t) => {
+    await withFixture(t, async ({ root, release, installer, id }) => {
+      const prepare = async (name: string) => {
+        const home = join(root, `diagnostic-${name}`);
+        const services = join(home, "Library/Application Support/Ellie/Services");
+        await mkdir(services, { recursive: true, mode: 0o700 });
+        await chmod(join(home, "Library"), 0o700);
+        await chmod(join(home, "Library/Application Support"), 0o700);
+        await chmod(join(home, "Library/Application Support/Ellie"), 0o700);
+        await mkdir(join(home, "Applications"), { mode: 0o700 });
+        await mkdir(join(home, "Library/LaunchAgents"), { mode: 0o700 });
+        assert.equal(
+          run(installer, ["stage", release, "--test-services-root", services]).status,
+          0,
+        );
+        const selected = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          home,
+        ]);
+        assert.equal(selected.status, 0, selected.stderr);
+        return {
+          home,
+          services,
+          app: join(home, "Applications/Ellie Coordinator.app"),
+          plist: join(home, "Library/LaunchAgents/org.ellie.assistant.coordinator.plist"),
+          receipt: join(services, "receipts/installed.json"),
+        };
+      };
+      const status = (home: string) =>
+        run(installer, [
+          "status",
+          "all",
+          "--test-home-root",
+          home,
+          "--test-launchctl",
+          join(root, "diagnostic-launchctl-must-not-run"),
+        ]);
+      const reason = (
+        result: ReturnType<typeof run>,
+        expectedReason: string,
+        expectedDetail: string,
+      ) => {
+        assert.equal(result.status, 1);
+        assert.equal(result.signal, null);
+        assert.equal(result.error, undefined);
+        assert.equal(
+          result.stderr,
+          "Ellie service lifecycle requires selection recovery; no lifecycle command was sent.\n",
+        );
+        const value = JSON.parse(result.stdout.trim());
+        assert.deepEqual(Object.keys(value).sort(), [
+          "details",
+          "reason",
+          "role",
+          "status",
+          "version",
+        ]);
+        assert.equal(value.version, 1);
+        assert.equal(value.role, "coordinator");
+        assert.equal(value.status, "recovery_required");
+        assert.equal(value.reason, expectedReason);
+        assert.equal(value.details.includes(expectedDetail), true);
+        assert.doesNotMatch(result.stdout, /Applications|LaunchAgents|[a-f0-9]{40,}|diagnostic-/);
+      };
+
+      const modeHome = await prepare("mode");
+      await chmod(modeHome.app, 0o700);
+      reason(status(modeHome.home), "application_mismatch", "mode");
+
+      const contentHome = await prepare("content");
+      const executable = join(contentHome.app, "Contents/MacOS/EllieService");
+      const executableBytes = await readFile(executable);
+      await chmod(executable, 0o644);
+      executableBytes[0] = executableBytes[0]! ^ 1;
+      await writeFile(executable, executableBytes);
+      await chmod(executable, 0o555);
+      reason(status(contentHome.home), "application_mismatch", "content");
+
+      const topologyHome = await prepare("topology");
+      await chmod(topologyHome.app, 0o700);
+      await writeFile(join(topologyHome.app, "unexpected"), "fixture\n", { mode: 0o444 });
+      await chmod(topologyHome.app, 0o555);
+      reason(status(topologyHome.home), "application_mismatch", "topology");
+
+      const plistHome = await prepare("plist");
+      await writeFile(plistHome.plist, "changed\n", { mode: 0o600 });
+      reason(status(plistHome.home), "plist_mismatch", "content");
+
+      const receiptHome = await prepare("receipt");
+      await writeFile(receiptHome.receipt, "{}\n", { mode: 0o600 });
+      reason(status(receiptHome.home), "receipt_mismatch", "encoding_or_value");
+
+      const journalHome = await prepare("journal");
+      await writeFile(join(journalHome.services, "selection-journal.json"), "{}\n", {
+        mode: 0o600,
+      });
+      reason(status(journalHome.home), "journal_pending", "selection");
+    });
+  },
+);
+
+test(
   "native lifecycle validates selection and sends only fixed bounded launchctl operations",
   // This aggregate includes native fixture compilation/signing and intentionally slow lifecycle probes.
   { ...options, timeout: 30_000 },

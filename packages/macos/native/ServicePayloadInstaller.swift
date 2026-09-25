@@ -125,6 +125,10 @@ struct SelectionRelease {
   let applicationFiles: [SelectionFile]
 }
 
+enum SelectionApplicationMismatch: String, CaseIterable {
+  case content, mode, signature, topology, unavailable
+}
+
 private func fail(_ error: Error? = nil) -> Never {
   let message: String
   switch error as? InstallerFailure {
@@ -629,6 +633,138 @@ func selectionApplicationDigest(
   }
   try validateSignature(path: try pathFromFD(root), identifier: identifier)
   return digest.finalize().map { String(format: "%02x", $0) }.joined()
+}
+
+func selectionApplicationDiagnostics(
+  parent: Int32, name: String, files: [SelectionFile], identifier: String,
+  rootMode: mode_t = 0o555
+) -> [SelectionApplicationMismatch] {
+  var mismatches = Set<SelectionApplicationMismatch>()
+  let root = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+  guard root >= 0 else { return [.topology] }
+  defer { closeFD(root) }
+  var rootInfo = stat()
+  guard fstat(root, &rootInfo) == 0, (rootInfo.st_mode & S_IFMT) == S_IFDIR,
+    rootInfo.st_uid == getuid()
+  else { return [.topology] }
+  if (rootInfo.st_mode & 0o7777) != rootMode { mismatches.insert(.mode) }
+
+  var expected: [String: SelectionFile] = [:]
+  var allowedDirectories = Set<String>()
+  for file in files {
+    if expected.updateValue(file, forKey: file.path) != nil {
+      mismatches.insert(.topology)
+    }
+    do { try validatePath(file.path) } catch {
+      mismatches.insert(.topology)
+      continue
+    }
+    var parts = file.path.split(separator: "/").map(String.init)
+    parts.removeLast()
+    while !parts.isEmpty {
+      allowedDirectories.insert(parts.joined(separator: "/"))
+      parts.removeLast()
+    }
+  }
+  var observed = Set<String>()
+  var count = 0
+  func inspect(_ directory: Int32, prefix: String = "", depth: Int = 0) {
+    guard depth <= maximumPayloadDepth else {
+      mismatches.insert(.topology)
+      return
+    }
+    guard let stream = fdopendir(dup(directory)) else {
+      mismatches.insert(.unavailable)
+      return
+    }
+    defer { closedir(stream) }
+    while true {
+      errno = 0
+      guard let item = readdir(stream) else {
+        if errno != 0 { mismatches.insert(.unavailable) }
+        break
+      }
+      let entryName = withUnsafePointer(to: &item.pointee.d_name) {
+        $0.withMemoryRebound(to: CChar.self, capacity: Int(MAXNAMLEN) + 1) {
+          String(cString: $0)
+        }
+      }
+      if entryName == "." || entryName == ".." { continue }
+      count += 1
+      guard count <= maximumPayloadEntries else {
+        mismatches.insert(.topology)
+        return
+      }
+      guard (try? checkedComponent(entryName)) != nil else {
+        mismatches.insert(.topology)
+        continue
+      }
+      var info = stat()
+      guard fstatat(directory, entryName, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
+        mismatches.insert(.unavailable)
+        continue
+      }
+      let path = prefix.isEmpty ? entryName : "\(prefix)/\(entryName)"
+      if (info.st_mode & S_IFMT) == S_IFDIR {
+        if !allowedDirectories.contains(path) || info.st_uid != getuid() {
+          mismatches.insert(.topology)
+        }
+        if (info.st_mode & 0o7777) != 0o555 { mismatches.insert(.mode) }
+        do {
+          let child = try openDirectory(at: directory, entryName)
+          inspect(child, prefix: path, depth: depth + 1)
+          closeFD(child)
+        } catch { mismatches.insert(.topology) }
+      } else if (info.st_mode & S_IFMT) == S_IFREG {
+        guard let file = expected[path] else {
+          mismatches.insert(.topology)
+          continue
+        }
+        if !observed.insert(path).inserted || info.st_uid != getuid() || info.st_nlink != 1 {
+          mismatches.insert(.topology)
+        }
+        let expectedMode: mode_t = file.mode == 0o755 ? 0o555 : 0o444
+        if (info.st_mode & 0o7777) != expectedMode { mismatches.insert(.mode) }
+        if info.st_size < 0 || UInt64(info.st_size) != file.size {
+          mismatches.insert(.content)
+          continue
+        }
+        do {
+          let fd = try fileDescriptor(at: directory, path: entryName)
+          defer { closeFD(fd) }
+          var digest = SHA256()
+          var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+          var total: UInt64 = 0
+          while true {
+            let amount = buffer.withUnsafeMutableBytes {
+              Darwin.read(fd, $0.baseAddress!, $0.count)
+            }
+            if amount == 0 { break }
+            guard amount > 0 else {
+              mismatches.insert(.unavailable)
+              break
+            }
+            total += UInt64(amount)
+            guard total <= file.size else {
+              mismatches.insert(.content)
+              break
+            }
+            digest.update(data: Data(buffer[0..<amount]))
+          }
+          let value = digest.finalize().map { String(format: "%02x", $0) }.joined()
+          if total != file.size || value != file.sha256 { mismatches.insert(.content) }
+        } catch { mismatches.insert(.topology) }
+      } else {
+        mismatches.insert(.topology)
+      }
+    }
+  }
+  inspect(root)
+  if observed != Set(expected.keys) { mismatches.insert(.topology) }
+  do { try validateSignature(path: try pathFromFD(root), identifier: identifier) } catch {
+    mismatches.insert(.signature)
+  }
+  return SelectionApplicationMismatch.allCases.filter { mismatches.contains($0) }
 }
 func selectionValidatePartialApplication(source: SelectionRelease, parent: Int32, name: String)
   throws
