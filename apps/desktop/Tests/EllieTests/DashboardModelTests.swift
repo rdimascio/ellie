@@ -185,6 +185,29 @@ final class DashboardModelTests: XCTestCase {
     }
 
     @MainActor
+    func testStaleDetailSelectionCannotReplaceCurrentSelectionAfterImport() throws {
+        let location = temporaryLocation()
+        let store = DashboardStore(fileURL: location)
+        store.renameDashboard(id: "home", name: "Keep local")
+        store.createDashboard(name: "Removed by import")
+        let staleID = try XCTUnwrap(store.selectedID)
+        let imported = DashboardState(dashboards: [
+            Dashboard(id: "home", name: "Imported home", widgets: []),
+        ])
+        store.importData(try DashboardModel.encode(imported))
+        let durableBeforeStaleAction = try Data(contentsOf: location)
+
+        XCTAssertFalse(store.selectDashboard(id: staleID))
+
+        XCTAssertEqual(store.selectedID, "home")
+        XCTAssertEqual(store.state, imported)
+        XCTAssertEqual(try Data(contentsOf: location), durableBeforeStaleAction)
+        XCTAssertEqual(DashboardStore(fileURL: location).state, imported,
+            "a rejected stale detail action must not change the last durable dashboards")
+        XCTAssertEqual(store.error, DashboardModelError.unknownDashboard.localizedDescription)
+    }
+
+    @MainActor
     func testCorruptSavedFileIsPreservedAndReported() async throws {
         let location = temporaryLocation()
         try FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)

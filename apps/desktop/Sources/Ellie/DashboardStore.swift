@@ -15,6 +15,16 @@ final class DashboardStore: ObservableObject {
         state.dashboards.first { $0.id == selectedID }
     }
 
+    @discardableResult
+    func selectDashboard(id: String) -> Bool {
+        guard state.dashboards.contains(where: { $0.id == id }) else {
+            error = DashboardModelError.unknownDashboard.localizedDescription
+            return false
+        }
+        selectedID = id
+        return true
+    }
+
     init(
         fileURL: URL? = nil,
         setFileAttributes: @escaping ([FileAttributeKey: Any], String) throws -> Void = {
