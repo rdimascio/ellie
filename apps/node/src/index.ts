@@ -21,6 +21,17 @@ export function reconnectDelay(
   return Math.min(maximum, Math.max(base, Math.round(exponential * (0.75 + random() * 0.5))));
 }
 
+export function reconnectAttemptAfterDisconnect(
+  attempt: number,
+  connectedAt: number,
+  lastSuccessfulTrafficAt: number,
+  stableConnectionMs: number,
+): number {
+  return connectedAt > 0 && lastSuccessfulTrafficAt - connectedAt >= stableConnectionMs
+    ? 0
+    : attempt;
+}
+
 function desktopFailureMessage(error: unknown): string {
   if (!(error instanceof Error)) return "Native action failed.";
   try {
@@ -46,12 +57,31 @@ export async function runNode(options: {
   onEvent?: (event: "connected" | "reconnecting") => void;
 }): Promise<void> {
   const { client, executor, worker, distributedWorker, signal } = options;
-  const stoppedRanks = new Map<string, Result>();
-  const flushStoppedRanks = async () => {
-    for (const [id, outcome] of stoppedRanks) {
-      // Process teardown is complete. Permit one bounded acknowledgement even during shutdown.
-      await client.call("POST", "/v1/result", { id, result: outcome }, { timeoutMs: 5000 });
-      stoppedRanks.delete(id);
+  const stoppedResults = new Map<string, Result>();
+  const flushStoppedResults = async () => {
+    for (const [id, outcome] of stoppedResults) {
+      // Execution is complete. Retain its outcome until one bounded acknowledgement succeeds,
+      // including during shutdown, so reconnect never needs to execute the job again.
+      try {
+        await client.call("POST", "/v1/result", { id, result: outcome }, { timeoutMs: 5000 });
+      } catch (error) {
+        let stored: Record<string, unknown> | undefined;
+        try {
+          stored = record(
+            await client.call("GET", `/v1/jobs/${encodeURIComponent(id)}`, undefined, {
+              timeoutMs: 5000,
+            }),
+          );
+        } catch {}
+        if (
+          stored?.id !== id ||
+          !["completed", "failed", "cancelled", "expired", "unknown"].includes(
+            String(stored?.state),
+          )
+        )
+          throw error;
+      }
+      stoppedResults.delete(id);
     }
   };
   const advertiseDistributed = async () => {
@@ -82,6 +112,7 @@ export async function runNode(options: {
   };
   while (!signal.aborted) {
     let connectedAt = 0;
+    let lastSuccessfulTrafficAt = 0;
     const connected = new AbortController();
     const connectionSignal = AbortSignal.any([signal, connected.signal]);
     let heartbeat: Promise<void> | undefined;
@@ -99,7 +130,7 @@ export async function runNode(options: {
         },
         { signal: connectionSignal },
       );
-      await flushStoppedRanks();
+      await flushStoppedResults();
       const beat = async () => {
         const computeCapabilities = await advertise();
         const distributedCapabilities = await advertiseDistributed();
@@ -113,6 +144,7 @@ export async function runNode(options: {
             { signal: connectionSignal },
           ),
         );
+        if (connectedAt) lastSuccessfulTrafficAt = Date.now();
         const cancellations = Array.isArray(reply.cancelJobIds)
           ? reply.cancelJobIds.map((id) => String(id))
           : [];
@@ -131,6 +163,7 @@ export async function runNode(options: {
         }
       })();
       connectedAt = Date.now();
+      lastSuccessfulTrafficAt = connectedAt;
       if (connectionState !== "connected") {
         options.onStatus?.("Node connected. Ready for commands and enabled compute work.");
         options.onEvent?.("connected");
@@ -140,6 +173,7 @@ export async function runNode(options: {
         const reply = record(
           await client.call("GET", "/v1/poll", undefined, { signal: connectionSignal }),
         );
+        lastSuccessfulTrafficAt = Date.now();
         if (!reply.job) continue;
         const wire = record(reply.job);
         const task = wire.kind === "inference" ? inferenceJob(wire) : job(wire);
@@ -250,16 +284,8 @@ export async function runNode(options: {
           activeJobs = 0;
           if (currentJob?.id === task.id) currentJob = undefined;
         }
-        if ("kind" in task && task.assignment) {
-          stoppedRanks.set(task.id, outcome);
-          await flushStoppedRanks();
-        } else
-          await client.call(
-            "POST",
-            "/v1/result",
-            { id: task.id, result: outcome },
-            { signal: connectionSignal },
-          );
+        stoppedResults.set(task.id, outcome);
+        await flushStoppedResults();
         await beat();
         reconnectAttempt = 0;
       }
@@ -276,8 +302,12 @@ export async function runNode(options: {
       await heartbeat;
     }
     if (!signal.aborted) {
-      if (connectedAt && Date.now() - connectedAt >= (options.stableConnectionMs ?? 30_000))
-        reconnectAttempt = 0;
+      reconnectAttempt = reconnectAttemptAfterDisconnect(
+        reconnectAttempt,
+        connectedAt,
+        lastSuccessfulTrafficAt,
+        options.stableConnectionMs ?? 30_000,
+      );
       const wait = reconnectDelay(reconnectAttempt, options.reconnect?.random, options.reconnect);
       reconnectAttempt++;
       await delay(wait, undefined, { signal }).catch(() => {});

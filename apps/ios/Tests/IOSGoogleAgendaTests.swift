@@ -206,6 +206,41 @@ final class IOSGoogleAgendaTests: XCTestCase {
             ["list", "list", "agenda:calendar_123", "list", "agenda:calendar_123"])
     }
 
+    @MainActor
+    func testRetainedSnapshotStaysCachedUntilExplicitRefreshCompletes() async throws {
+        let client = AgendaFixtureClient()
+        let original = snapshot()
+        await client.configure([account], result: original)
+        let suite = "ellie-agenda-test-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = IOSGoogleAgendaStore(client: client, defaults: defaults)
+        store.bind(credential())
+        store.refresh(); await eventually { !store.isRefreshing }
+        store.select(account.id)
+        store.refresh(); await eventually { !store.isRefreshing }
+        XCTAssertEqual(store.snapshot, original)
+        XCTAssertEqual(store.snapshotProvenance, "Current read")
+
+        await client.configure([account], result: original, holdAgenda: true)
+        store.refresh()
+        for _ in 0..<100 {
+            if await client.awaitingAgenda() { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        let waiting = await client.awaitingAgenda()
+        XCTAssertTrue(waiting)
+        XCTAssertEqual(store.snapshot, original)
+        XCTAssertTrue(store.isRefreshing)
+        XCTAssertEqual(store.snapshotProvenance, "Cached this session",
+            "a retained snapshot must not be relabeled as a current read while a replacement is pending")
+
+        await client.release(original)
+        await eventually { !store.isRefreshing }
+        XCTAssertEqual(store.snapshot, original)
+        XCTAssertEqual(store.snapshotProvenance, "Current read")
+    }
+
     func testWireRejectsForeignIdentityAndUnknownOrOversizedEvents() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         let start = Int(now.timeIntervalSince1970 * 1_000)

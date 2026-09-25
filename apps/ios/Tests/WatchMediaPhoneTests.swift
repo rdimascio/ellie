@@ -92,6 +92,40 @@ final class WatchMediaPhoneTests: XCTestCase {
   }
 
   @MainActor
+  func testCompletedPlaybackTransportStaysUnknownAndCannotReplay() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let browser = WatchTestBrowserTransport(commandStatus: .completed)
+    let controller = WatchMediaPhoneController(
+      inventory: WatchTestInventory(node: node), browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: browser,
+          uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let observed = await controller.handle(WatchMediaRequest.make(.read))
+    guard let page = observed.observation else { return XCTFail("Missing observation") }
+    let play = WatchMediaRequest.make(.play, target: page.target, epoch: page.epoch,
+                                      revision: page.revision)
+
+    let result = await controller.handle(play)
+    XCTAssertEqual(result.state, .unknown,
+                   "A completed transport response does not prove observed playback")
+    XCTAssertNil(result.observation)
+    await eventually { await browser.playCount == 1 }
+
+    let duplicate = await controller.handle(play)
+    XCTAssertEqual(duplicate.state, .blocked, "The same request ID must remain consumed")
+    let newRequestWithOldObservation = WatchMediaRequest.make(
+      .play, target: page.target, epoch: page.epoch, revision: page.revision)
+    let stale = await controller.handle(newRequestWithOldObservation)
+    XCTAssertEqual(stale.state, .stale,
+                   "A new request cannot reuse the consumed playback observation")
+    let count = await browser.playCount
+    XCTAssertEqual(count, 1)
+  }
+
+  @MainActor
   func testTargetAndGrantChangeBlockBeforeBrowserDispatch() async {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
                                 capabilities: ["browser.read", "browser.control"])
@@ -162,12 +196,47 @@ final class WatchMediaPhoneTests: XCTestCase {
     XCTAssertEqual(expiredReplay.state, .blocked)
   }
 
-  private func credential() -> NativeEnrollmentCredential {
+  @MainActor
+  func testCredentialExpiringDuringInventoryBlocksMutationBeforeBrowserDispatch() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let inventory = WatchTestInventory(node: node)
+    let browser = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(inventory: inventory, browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: browser,
+          uncertainty: WatchTestUncertainty())
+      })
+    let clock = WatchTestClock(value: WatchMediaWire.now())
+    XCTAssertTrue(controller.enable(
+      credential: credential(expiry: clock.value + 5_000), node: node))
+    let observed = await controller.handle(WatchMediaRequest.make(.read, now: clock.value),
+                                           now: { clock.value })
+    guard let page = observed.observation else { return XCTFail("Missing observation") }
+
+    await inventory.holdNextRequest()
+    let request = WatchMediaRequest.make(.play, target: page.target, epoch: page.epoch,
+                                         revision: page.revision, now: clock.value)
+    let pending = Task { await controller.handle(request, now: { clock.value }) }
+    await eventually { await inventory.hasHeldRequest() }
+    clock.value += 5_001
+    await inventory.releaseHeldRequest()
+
+    let reply = await pending.value
+    XCTAssertEqual(reply.state, .blocked)
+    let playCount = await browser.playCount
+    XCTAssertEqual(playCount, 0,
+                   "expired phone authority must not reach the browser mutation transport")
+  }
+
+  private func credential(
+    expiry: Int64 = Int64(Date().timeIntervalSince1970 * 1_000) + 60_000
+  ) -> NativeEnrollmentCredential {
     NativeEnrollmentCredential(origin: URL(string: "https://example.test")!,
       certificateSha256: String(repeating: "a", count: 64),
       client: NativeClient(id: "phone", role: "phone", label: "iPhone",
         grants: [NativeGrant(target: "mac", capabilities: ["browser.read", "browser.control"])],
-        createdAt: 1, expiresAt: Int64(Date().timeIntervalSince1970 * 1_000) + 60_000),
+        createdAt: 1, expiresAt: expiry),
       token: String(repeating: "b", count: 64))
   }
 
@@ -182,20 +251,41 @@ final class WatchMediaPhoneTests: XCTestCase {
 
 @MainActor
 private final class WatchTestClock {
-  var value: Int64 = 1_000_000
+  var value: Int64
+  init(value: Int64 = 1_000_000) { self.value = value }
 }
 
 private actor WatchTestInventory: PhoneControlTransporting {
   private var node: PhoneControlNode
+  private var holdNext = false
+  private var held: CheckedContinuation<[PhoneControlNode], Never>?
   init(node: PhoneControlNode) { self.node = node }
   func replace(_ value: PhoneControlNode) { node = value }
-  func nodes(for credential: NativeEnrollmentCredential) async throws -> [PhoneControlNode] { [node] }
+  func holdNextRequest() { holdNext = true }
+  func hasHeldRequest() -> Bool { held != nil }
+  func releaseHeldRequest() {
+    held?.resume(returning: [node])
+    held = nil
+  }
+  func nodes(for credential: NativeEnrollmentCredential) async throws -> [PhoneControlNode] {
+    if holdNext {
+      holdNext = false
+      return await withCheckedContinuation { held = $0 }
+    }
+    return [node]
+  }
   func open(_ app: PhoneControlApp, on nodeID: String,
             credential: NativeEnrollmentCredential) async throws -> PhoneCommandOutcome { .unknown }
 }
 
 private actor WatchTestBrowserTransport: BrowserPhoneControlTransporting {
   private(set) var playCount = 0
+  private let commandStatus: BrowserPhoneCommandStatus
+
+  init(commandStatus: BrowserPhoneCommandStatus = .unknown) {
+    self.commandStatus = commandStatus
+  }
+
   func execute(_ action: BrowserPhoneAction, nodeID: String,
                credential: NativeEnrollmentCredential) async throws -> BrowserPhoneResponse {
     switch action {
@@ -205,7 +295,7 @@ private actor WatchTestBrowserTransport: BrowserPhoneControlTransporting {
       site: BrowserPhoneSite(page: .watch, playback: .paused, currentTimeSeconds: 4)))
     case .playback(.play, _):
       playCount += 1
-      return .command(source: .accessibility, status: .unknown, revision: "rev")
+      return .command(source: .accessibility, status: commandStatus, revision: "rev")
     default: throw PhoneControlFailure.rejected
     }
   }

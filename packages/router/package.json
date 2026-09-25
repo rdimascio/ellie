@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./decision": "./src/decision.ts"
+    "./decision": "./src/decision.ts",
+    "./browser-decision": "./src/browser-decision.ts"
   },
   "dependencies": {
     "@ellie/config": "*",

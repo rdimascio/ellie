@@ -16,6 +16,11 @@ final class VoiceTurnStoreTests: XCTestCase {
         XCTAssertEqual(store.reviewedApp, .safari)
         store.transcript = "Open Calculator"
         XCTAssertNil(store.reviewedApp)
+        store.transcript = "Open Safari"
+        store.cancel()
+        await wait { store.phase == .idle }
+        store.transcript = "Open Safari" // Simulate a stale editor write after Cancel.
+        XCTAssertNil(store.reviewedApp, "cancelled text cannot retain reviewed-command authority")
     }
 
     @MainActor

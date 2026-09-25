@@ -47,6 +47,10 @@ export async function createIOSGoogleLifeFixture({
   let heldReadStarted = 0;
   let heldReadCompleted = 0;
   let heldHandled = 0;
+  let changeCalendarAfterNextList = false;
+  let calendarChanges = 0;
+  let calendarChange;
+  let restoreCalendarAfterNextAgenda = false;
   let chatPlans = 0;
   const event = (sourceKey, title, startAt) => ({
     sourceKey,
@@ -252,14 +256,53 @@ export async function createIOSGoogleLifeFixture({
     nativeLife,
     lifeApplication: {
       async handle(request, response, context) {
-        const held = /^\/api\/connections\/[^/]+\/messages\/held_message$/.test(
-          request.url?.split("?", 1)[0] ?? "",
-        );
+        const path = request.url?.split("?", 1)[0] ?? "";
+        const held = /^\/api\/connections\/[^/]+\/messages\/held_message$/.test(path);
+        const changeCalendar =
+          request.method === "GET" && path === "/api/connections" && changeCalendarAfterNextList;
+        const agenda = request.method === "GET" && /^\/api\/connections\/[^/]+\/agenda$/.test(path);
+        let finishCalendarChange;
+        if (changeCalendar) changeCalendarAfterNextList = false;
+        if (changeCalendar)
+          calendarChange = new Promise((resolve) => {
+            finishCalendarChange = resolve;
+          });
         try {
+          if (agenda && calendarChange) await calendarChange;
+          const restoreCalendar = agenda && restoreCalendarAfterNextAgenda;
+          if (restoreCalendar) restoreCalendarAfterNextAgenda = false;
           const perform = () => server.handleEmbedded(request, response, context);
-          return quietFixture
+          const result = quietFixture
             ? await quietFixture.handle(request, response, perform)
             : await perform();
+          if (changeCalendar) {
+            try {
+              const current = connectorStore.require(actorId, connectionIds.calendar);
+              // Change only the owned fixture connection. Broker selection also schedules
+              // research, which is unrelated to this list/agenda consistency race.
+              connectorStore.selectCalendar(
+                actorId,
+                connectionIds.calendar,
+                current.generation,
+                "primary",
+              );
+              restoreCalendarAfterNextAgenda = true;
+            } finally {
+              finishCalendarChange();
+              calendarChange = undefined;
+            }
+          } else if (restoreCalendar) {
+            const current = connectorStore.require(actorId, connectionIds.calendar);
+            connectorStore.selectCalendar(
+              actorId,
+              connectionIds.calendar,
+              current.generation,
+              "selected@example.test",
+            );
+            await connectors.sync(actorId, connectionIds.calendar);
+            calendarChanges += 1;
+          }
+          return result;
         } finally {
           if (held) heldHandled += 1;
         }
@@ -284,6 +327,10 @@ export async function createIOSGoogleLifeFixture({
       heldReadStarted: () => heldReadStarted,
       heldReadCompleted: () => heldReadCompleted,
       heldHandled: () => heldHandled,
+      armCalendarChangeAfterNextList: () => {
+        changeCalendarAfterNextList = true;
+      },
+      calendarChanges: () => calendarChanges,
       releaseHeld: () => {
         const release = heldRead;
         heldRead = undefined;

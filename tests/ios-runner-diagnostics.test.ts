@@ -25,6 +25,7 @@ type FixtureMode =
   | "interrupt"
   | "retained"
   | "cleanup-failure"
+  | "already-shutdown"
   | "kill-escalation"
   | "split"
   | "build-failure"
@@ -105,6 +106,14 @@ elif [ "$1 $2 $3" = "--sdk iphonesimulator --show-sdk-version" ]; then
   printf '%s\n' '18.5'
 elif [ "$1 $2" = "simctl create" ]; then
   printf '%s\\n' 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'
+elif [ "$1 $2 $3 $4" = "simctl list devices --json" ]; then
+  if [ -f "$ELLIE_RUNNER_TEST_ROOT/simulator.deleted" ]; then
+    printf '%s\\n' '{"devices":{}}'
+  elif [ "$ELLIE_RUNNER_TEST_MODE" = "already-shutdown" ]; then
+    printf '%s\\n' '{"devices":{"runtime":[{"udid":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","state":"Shutdown"}]}}'
+  else
+    printf '%s\\n' '{"devices":{"runtime":[{"udid":"AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE","state":"Booted"}]}}'
+  fi
 elif [ "$1 $2" = "simctl bootstatus" ] && { [ "$ELLIE_RUNNER_TEST_MODE" = "timeout" ] || [ "$ELLIE_RUNNER_TEST_MODE" = "interrupt" ] || [ "$ELLIE_RUNNER_TEST_MODE" = "kill-escalation" ]; }; then
   if [ "$ELLIE_RUNNER_TEST_MODE" = "interrupt" ]; then
     /usr/bin/touch "$ELLIE_RUNNER_TEST_ROOT/interrupt.ready"
@@ -118,6 +127,11 @@ elif [ "$1 $2" = "simctl bootstatus" ] && { [ "$ELLIE_RUNNER_TEST_MODE" = "timeo
   fi
 elif [ "$1 $2" = "simctl shutdown" ] && [ "$ELLIE_RUNNER_TEST_MODE" = "cleanup-failure" ]; then
   exit 8
+elif [ "$1 $2" = "simctl shutdown" ] && [ "$ELLIE_RUNNER_TEST_MODE" = "already-shutdown" ]; then
+  exit 9
+elif [ "$1 $2" = "simctl delete" ]; then
+  /usr/bin/touch "$ELLIE_RUNNER_TEST_ROOT/simulator.deleted"
+  exit 0
 else
   exit 0
 fi
@@ -481,6 +495,13 @@ test("simulator cleanup failure retains derived evidence and fails the run", asy
   assert.match(diagnostic, /outcome=cleanup-uncertain/);
   assert.match(diagnostic, /cleanup=shutdown-failed,delete-complete,derived-retained/);
   assert.equal(retainedDerived, 1);
+});
+
+test("an already shut down owned simulator skips the redundant shutdown command", async () => {
+  const { diagnostic, result, retainedDerived } = await runFixture("already-shutdown");
+  assert.equal(result.status, 0);
+  assert.match(diagnostic, /cleanup=shutdown-already-complete,delete-complete,derived-removed/);
+  assert.equal(retainedDerived, 0);
 });
 
 test("a finite direct child ignoring TERM is killed and reaped within the shortened fixture bound", async () => {

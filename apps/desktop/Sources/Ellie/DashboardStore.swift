@@ -8,14 +8,21 @@ final class DashboardStore: ObservableObject {
     @Published var error: String?
 
     let fileURL: URL
+    private let setFileAttributes: ([FileAttributeKey: Any], String) throws -> Void
     private var recoveryRequired = false
 
     var selectedDashboard: Dashboard? {
         state.dashboards.first { $0.id == selectedID }
     }
 
-    init(fileURL: URL? = nil) {
+    init(
+        fileURL: URL? = nil,
+        setFileAttributes: @escaping ([FileAttributeKey: Any], String) throws -> Void = {
+            try FileManager.default.setAttributes($0, ofItemAtPath: $1)
+        }
+    ) {
         self.fileURL = fileURL ?? Self.defaultFileURL()
+        self.setFileAttributes = setFileAttributes
         if FileManager.default.fileExists(atPath: self.fileURL.path) {
             do {
                 let values = try self.fileURL.resourceValues(forKeys: [
@@ -51,22 +58,24 @@ final class DashboardStore: ObservableObject {
     }
 
     func createDashboard(name: String) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         performMutation { state in
             guard state.dashboards.count < DashboardModel.maximumDashboards else {
                 throw DashboardModelError.tooManyDashboards
             }
-            let dashboard = Dashboard(id: Self.uniqueID(prefix: "dashboard"), name: name, widgets: [])
+            let dashboard = Dashboard(id: Self.uniqueID(prefix: "dashboard"), name: cleanName, widgets: [])
             state.dashboards.append(dashboard)
             selectedID = dashboard.id
         }
     }
 
     func renameDashboard(id: String, name: String) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         performMutation { state in
             guard let index = state.dashboards.firstIndex(where: { $0.id == id }) else {
                 throw DashboardModelError.unknownDashboard
             }
-            state.dashboards[index].name = name
+            state.dashboards[index].name = cleanName
         }
     }
 
@@ -218,12 +227,15 @@ final class DashboardStore: ObservableObject {
             attributes: [.posixPermissions: 0o700]
         )
         if !directoryExisted || fileURL.standardizedFileURL == Self.defaultFileURL().standardizedFileURL {
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try setFileAttributes([.posixPermissions: 0o700], directory.path)
         }
         let stagingURL = directory.appendingPathComponent(".dashboards-\(UUID().uuidString).tmp")
         do {
             try data.write(to: stagingURL, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: stagingURL.path)
+            try setFileAttributes([.posixPermissions: 0o600], stagingURL.path)
+            // The staged file already has its final private metadata. Keep the
+            // replacement as the commit boundary: a later throwing operation
+            // could report failure after the durable state has already changed.
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 _ = try FileManager.default.replaceItemAt(
                     fileURL,
@@ -234,7 +246,6 @@ final class DashboardStore: ObservableObject {
             } else {
                 try FileManager.default.moveItem(at: stagingURL, to: fileURL)
             }
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch {
             try? FileManager.default.removeItem(at: stagingURL)
             throw error

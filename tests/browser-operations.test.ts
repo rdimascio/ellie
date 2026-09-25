@@ -450,3 +450,72 @@ test("explicit browser refresh uses only the dedicated binding request", async (
     ["binding.refresh"],
   );
 });
+
+test("an unknown WebMCP mutation requires a fresh read and is never replayed", async () => {
+  const binding = {
+    bindingId: "binding-unknown",
+    documentId: "document-unknown",
+    origin: "https://video.example",
+    url: "https://video.example/results",
+    expiresAt: Date.now() + 60_000,
+    availability: "webmcp" as const,
+  };
+  let selectDispatches = 0;
+  const executor = new BrowserWebMCPOperations(
+    {
+      async request(request) {
+        if (request.type === "binding.status")
+          return browserWebMCPResultFor(request.id, "ok", binding);
+        if (request.type === "tools.list")
+          return browserWebMCPResultFor(request.id, "ok", {
+            bindingId: binding.bindingId,
+            documentId: binding.documentId,
+            tools: registry.bindings.map((item) => ({
+              handle: `handle-${item.operation}`,
+              name: item.toolName,
+              description: "reviewed fixture",
+              inputSchema: schema,
+              annotations: {
+                readOnlyHint: item.operation === "read",
+                untrustedContentHint: false,
+                consequentialHint: false,
+              },
+            })),
+          });
+        if (request.type === "tool.execute" && request.toolHandle === "handle-read")
+          return browserWebMCPResultFor(request.id, "ok", {
+            items: [{ id: "episode-1", label: "Episode one" }],
+          });
+        if (request.type === "tool.execute" && request.toolHandle === "handle-select") {
+          selectDispatches += 1;
+          return browserWebMCPResultFor(request.id, "unknown");
+        }
+        throw new Error("Unexpected browser request.");
+      },
+    },
+    registry,
+  );
+  const revision = browserBindingRevision(binding);
+  const read = () =>
+    executor.execute(
+      { tool: "browser.read", view: "summary", revision },
+      AbortSignal.timeout(1_000),
+    );
+  const select = () =>
+    executor.execute(
+      { tool: "browser.select", itemId: "episode-1", revision },
+      AbortSignal.timeout(1_000),
+    );
+
+  await read();
+  const unknown = await select();
+  assert.equal(unknown.browser.operation === "command" ? unknown.browser.status : "", "unknown");
+  assert.equal(selectDispatches, 1);
+
+  await assert.rejects(select(), /fresh read/);
+  assert.equal(selectDispatches, 1);
+
+  await read();
+  assert.equal((await select()).browser.operation, "command");
+  assert.equal(selectDispatches, 2);
+});

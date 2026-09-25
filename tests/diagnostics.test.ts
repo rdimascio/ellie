@@ -222,6 +222,7 @@ async function fixture(role: "coordinator" | "node") {
       },
     }),
     inferenceHealth: async () => true,
+    googleSetupStatus: async () => "client-configured",
   };
   return { deps, closed: () => closed };
 }
@@ -253,6 +254,76 @@ test("role diagnostics cover private state, Keychain, certificate, helper, GUI, 
       ),
     );
   }
+});
+
+test("coordinator doctor distinguishes Google registration from consent and read authority", async () => {
+  const f = await fixture("coordinator");
+  const configured = await doctorService("coordinator", f.deps);
+  assert.equal(configured.ok, true, configured.lines.join("\n"));
+  assert.ok(
+    configured.lines.includes(
+      "PASS The selected private Life host config includes a Google desktop OAuth client registration.",
+    ),
+  );
+  assert.ok(
+    configured.lines.includes(
+      "WARN Selection does not prove the running coordinator loaded it, account consent, or current read authority. After any required explicit restart, run life settings to verify connection state, Calendar to read, and Gmail's private read-only connection.",
+    ),
+  );
+
+  const unconfigured = await doctorService("coordinator", {
+    ...f.deps,
+    googleSetupStatus: async () => "client-unconfigured",
+  });
+  assert.equal(unconfigured.ok, true, unconfigured.lines.join("\n"));
+  assert.ok(
+    unconfigured.lines.some(
+      (line) =>
+        line ===
+        "WARN The selected private Life host config has no registered Google desktop OAuth client. Google Calendar and Gmail setup will remain unavailable after the next explicit coordinator restart.",
+    ),
+  );
+
+  const disabled = await doctorService("coordinator", {
+    ...f.deps,
+    googleSetupStatus: async () => "life-disabled",
+  });
+  assert.equal(disabled.ok, true, disabled.lines.join("\n"));
+  assert.ok(
+    disabled.lines.includes(
+      "WARN No private Life host config is selected for the coordinator's next explicit start. Check any currently running Life account state with life settings.",
+    ),
+  );
+});
+
+test("Google setup diagnostics are redacted and never run for a node", async () => {
+  const coordinator = await fixture("coordinator");
+  const secret = "PRIVATE-google-client-id.apps.example/private/config/path";
+  const failed = await doctorService("coordinator", {
+    ...coordinator.deps,
+    googleSetupStatus: async () => {
+      throw new Error(secret);
+    },
+  });
+  assert.equal(failed.ok, false);
+  assert.ok(
+    failed.lines.includes(
+      "FAIL The selected private Life or Google OAuth client configuration is unavailable, invalid, or unsafe.",
+    ),
+  );
+  assert.doesNotMatch(failed.lines.join("\n"), /PRIVATE|apps\.example|private\/config/);
+
+  const node = await fixture("node");
+  let inspected = false;
+  const nodeReport = await doctorService("node", {
+    ...node.deps,
+    googleSetupStatus: async () => {
+      inspected = true;
+      throw new Error("must not run");
+    },
+  });
+  assert.equal(nodeReport.ok, true, nodeReport.lines.join("\n"));
+  assert.equal(inspected, false);
 });
 
 test("attention diagnostic refuses a second Keychain query", async () => {

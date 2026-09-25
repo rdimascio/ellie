@@ -181,6 +181,55 @@ test(
         agenda.json.events.map((event: { title: string }) => event.title),
         ["Selected family visit 👩‍👩‍👧‍👦"],
       );
+      const evidenceBeforeCalendarChange = fixture.control.chatEvidence();
+      fixture.control.armCalendarChangeAfterNextList();
+      const staleListing = await call(port, tls.rootCert, "/api/connections", { cookie });
+      assert.equal(
+        staleListing.json.connections.find(
+          (connection: { id: string }) => connection.id === fixture!.connectionIds.calendar,
+        ).selectedCalendarId,
+        "selected@example.test",
+      );
+      const changedAgenda = await call(
+        port,
+        tls.rootCert,
+        `/api/connections/${fixture.connectionIds.calendar}/agenda?timeZone=America%2FLos_Angeles`,
+        { cookie },
+      );
+      assert.equal(changedAgenda.status, 200);
+      assert.equal(changedAgenda.json.selectedCalendarId, "primary");
+      assert.equal(
+        changedAgenda.json.events.some(
+          (event: { title: string }) => event.title === "Selected family visit 👩‍👩‍👧‍👦",
+        ),
+        false,
+        "the changed-calendar response must not retain the prior calendar's event",
+      );
+      assert.equal(fixture.control.calendarChanges(), 1);
+      const restoredListing = await call(port, tls.rootCert, "/api/connections", { cookie });
+      assert.equal(
+        restoredListing.json.connections.find(
+          (connection: { id: string }) => connection.id === fixture!.connectionIds.calendar,
+        ).selectedCalendarId,
+        "selected@example.test",
+      );
+      const restoredAgenda = await call(
+        port,
+        tls.rootCert,
+        `/api/connections/${fixture.connectionIds.calendar}/agenda?timeZone=America%2FLos_Angeles`,
+        { cookie },
+      );
+      assert.equal(restoredAgenda.status, 200);
+      assert.deepEqual(
+        restoredAgenda.json.events.map((event: { title: string }) => event.title),
+        ["Selected family visit 👩‍👩‍👧‍👦"],
+        "restoring the fixture calendar must also restore its evidence for later tests",
+      );
+      assert.deepEqual(
+        fixture.control.chatEvidence(),
+        evidenceBeforeCalendarChange,
+        "the calendar race fixture must not enqueue unrelated research or mutate Life evidence",
+      );
       const preview = await call(
         port,
         tls.rootCert,
@@ -190,12 +239,27 @@ test(
       assert.equal(preview.status, 200);
       assert.equal(preview.json.items.length, 4);
       assert.deepEqual(fixture.control.bodyReads(), {}, "list and preview must not fetch bodies");
-      const detail = await call(
-        port,
-        tls.rootCert,
-        `/api/connections/${fixture.connectionIds.gmail}/messages/unicode_message`,
-        { cookie },
+      const messagePath = `/api/connections/${fixture.connectionIds.gmail}/messages/unicode_message`;
+      const unauthenticatedDraft = await call(port, tls.rootCert, `${messagePath}/draft`, {
+        body: { to: ["recipient@example.test"], text: "Synthetic draft" },
+      });
+      assert.equal(unauthenticatedDraft.status, 403);
+      const rejectedDraft = await call(port, tls.rootCert, `${messagePath}/draft`, {
+        cookie,
+        body: { to: ["recipient@example.test"], text: "Synthetic draft" },
+      });
+      assert.equal(rejectedDraft.status, 404);
+      const rejectedSend = await call(port, tls.rootCert, `${messagePath}/send`, {
+        cookie,
+        body: { confirmed: true },
+      });
+      assert.equal(rejectedSend.status, 404);
+      assert.deepEqual(
+        fixture.control.bodyReads(),
+        {},
+        "unsupported draft/send requests must not fetch or act on a message",
       );
+      const detail = await call(port, tls.rootCert, messagePath, { cookie });
       assert.equal(detail.status, 200);
       assert.equal(detail.json.text, "Line one\r\nLine two 👩‍👩‍👧‍👦\n");
       const partial = await call(

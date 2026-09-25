@@ -71,7 +71,10 @@ final class SpeechTurnStore: ObservableObject {
     self.transport = transport
   }
 
-  var reviewedApp: PhoneControlApp? { Self.reviewedApp(in: transcript) }
+  var reviewedApp: PhoneControlApp? {
+    guard phase == .reviewing else { return nil }
+    return Self.reviewedApp(in: transcript)
+  }
   var isBusy: Bool { task != nil || phase == .recording || phase == .cancelling }
 
   func checkAvailability() {

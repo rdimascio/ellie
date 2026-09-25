@@ -11,5 +11,8 @@
   "sites": {
     "netflix": "https://www.netflix.com/",
     "youtube": "https://www.youtube.com/"
+  },
+  "siteBrowsers": {
+    "https://www.netflix.com/": "com.apple.Safari"
   }
 }

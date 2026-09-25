@@ -69,6 +69,7 @@ const canonical = (value: unknown): string => {
 
 export class BrowserWebMCPOperations {
   private readonly observed = new Map<string, Set<string>>();
+  private readonly mutationRequiresRead = new Set<string>();
   private currentRevision?: string;
   private readonly bridge: Bridge;
   private readonly registry: ReviewedBrowserRegistry;
@@ -145,10 +146,12 @@ export class BrowserWebMCPOperations {
     const nextRevision = browserBindingRevision(checked);
     if (this.currentRevision !== nextRevision) {
       this.observed.clear();
+      this.mutationRequiresRead.clear();
       this.currentRevision = nextRevision;
     }
     if (availability === "accessibility" || availability === "companion") {
       this.observed.clear();
+      this.mutationRequiresRead.clear();
       this.currentRevision = undefined;
     }
     return checked;
@@ -315,6 +318,8 @@ export class BrowserWebMCPOperations {
       throw new Error("Browser page changed before the requested action.");
     if (action.tool === "browser.scrollRow")
       throw new Error("Observed row scrolling requires the Netflix companion.");
+    if (action.tool !== "browser.read" && this.mutationRequiresRead.has(action.revision))
+      throw new Error("Browser page needs a fresh read before another action.");
     const operation = action.tool.slice("browser.".length) as ReviewedBrowserBinding["operation"];
     const key = action.tool === "browser.read" ? action.view : operation;
     const reviewed = this.reviewed(binding.origin, operation, key);
@@ -332,6 +337,12 @@ export class BrowserWebMCPOperations {
               : action.action
         : undefined;
     const args = reviewed.argumentKey ? { [reviewed.argumentKey]: scalar } : {};
+    if (action.tool !== "browser.read") {
+      // Consume the current observation before dispatch. A completed, unknown, or lost
+      // mutation must never be replayed against the same page without another read.
+      this.observed.delete(action.revision);
+      this.mutationRequiresRead.add(action.revision);
+    }
     const response = await this.call(
       {
         protocol: BROWSER_WEBMCP_PROTOCOL,
@@ -372,6 +383,7 @@ export class BrowserWebMCPOperations {
             : [],
         ),
       );
+      this.mutationRequiresRead.delete(action.revision);
       return checked;
     }
     const confirmed =

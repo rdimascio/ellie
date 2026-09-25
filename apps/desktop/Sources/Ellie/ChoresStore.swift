@@ -7,12 +7,20 @@ final class ChoresStore: ObservableObject {
     @Published var error: String?
 
     let fileURL: URL
+    private let setFileAttributes: ([FileAttributeKey: Any], String) throws -> Void
     private var recoveryRequired = false
 
     var timeZone: TimeZone { TimeZone(identifier: state.householdTimeZone)! }
 
-    init(fileURL: URL? = nil, defaultTimeZone: TimeZone = .current) {
+    init(
+        fileURL: URL? = nil,
+        defaultTimeZone: TimeZone = .current,
+        setFileAttributes: @escaping ([FileAttributeKey: Any], String) throws -> Void = {
+            try FileManager.default.setAttributes($0, ofItemAtPath: $1)
+        }
+    ) {
         self.fileURL = fileURL ?? Self.defaultFileURL()
+        self.setFileAttributes = setFileAttributes
         state = ChoresModel.emptyState(timeZone: defaultTimeZone)
         guard FileManager.default.fileExists(atPath: self.fileURL.path) else { return }
         do {
@@ -92,16 +100,18 @@ final class ChoresStore: ObservableObject {
         let directoryExisted = FileManager.default.fileExists(atPath: directory.path)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         if !directoryExisted || fileURL.standardizedFileURL == Self.defaultFileURL().standardizedFileURL {
-            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+            try setFileAttributes([.posixPermissions: 0o700], directory.path)
         }
         let staging = directory.appendingPathComponent(".chores-\(UUID().uuidString).tmp")
         do {
             try data.write(to: staging, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: staging.path)
+            try setFileAttributes([.posixPermissions: 0o600], staging.path)
+            // The staged file already has its final private metadata. Keep the
+            // replacement as the commit boundary so a later error cannot leave
+            // memory behind a chore edit that already reached durable storage.
             if FileManager.default.fileExists(atPath: fileURL.path) {
                 _ = try FileManager.default.replaceItemAt(fileURL, withItemAt: staging, backupItemName: nil, options: .usingNewMetadataOnly)
             } else { try FileManager.default.moveItem(at: staging, to: fileURL) }
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
         } catch { try? FileManager.default.removeItem(at: staging); throw error }
     }
 

@@ -9,7 +9,11 @@ import { defaults } from "@ellie/config";
 import { CAPABILITIES, VERSION, job, record } from "@ellie/protocol";
 import type { Action } from "@ellie/protocol";
 import type { Client } from "@ellie/transport";
-import { runNode, reconnectDelay } from "../apps/node/src/index.ts";
+import {
+  runNode,
+  reconnectDelay,
+  reconnectAttemptAfterDisconnect,
+} from "../apps/node/src/index.ts";
 import { JobStore } from "../apps/server/src/jobs.ts";
 import { fixture } from "./helpers.ts";
 
@@ -425,6 +429,25 @@ test("reconnect delay is exponentially bounded and jittered", () => {
   );
 });
 
+test("reconnect backoff resets only after successful traffic spans the stability window", () => {
+  assert.equal(
+    reconnectAttemptAfterDisconnect(4, 1_000, 1_000, 30_000),
+    4,
+    "elapsed sleep or network-refusal time must not make a connection stable",
+  );
+  assert.equal(
+    reconnectAttemptAfterDisconnect(4, 1_000, 30_999, 30_000),
+    4,
+    "successful traffic short of the stability window preserves accumulated backoff",
+  );
+  assert.equal(
+    reconnectAttemptAfterDisconnect(4, 1_000, 31_000, 30_000),
+    0,
+    "repeated successful coordinator traffic can reset accumulated backoff",
+  );
+  assert.equal(reconnectAttemptAfterDisconnect(4, 0, 31_000, 30_000), 4);
+});
+
 test("transport uses an absolute deadline and releases an interrupted long poll", async () => {
   const f = await fixture();
   try {
@@ -507,6 +530,79 @@ test("node stop aborts an active long poll and connection events do not spam ret
     },
   });
   assert.deepEqual(events, ["reconnecting", "connected"]);
+});
+
+test("a lost result acknowledgement is retried after reconnect without replaying the action", async () => {
+  const f = await fixture();
+  const stop = new AbortController();
+  let agent: Promise<void> | undefined;
+  let executions = 0;
+  let resultPosts = 0;
+  let registrations = 0;
+  let settleRead!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settleRead = resolve;
+  });
+  try {
+    const node = await f.pair("result-reconnect-node");
+    const client = {
+      call: async (
+        method: "GET" | "POST",
+        path: string,
+        body?: unknown,
+        options?: { signal?: AbortSignal; timeoutMs?: number },
+      ): Promise<unknown> => {
+        if (path === "/v1/result") resultPosts++;
+        if (path.startsWith("/v1/jobs/") && registrations < 2)
+          throw new Error("synthetic interrupted connection");
+        const reply = await node.call(method, path, body, options);
+        if (path === "/v1/register") registrations++;
+        if (path === "/v1/result" && resultPosts === 1)
+          throw new Error("synthetic lost acknowledgement");
+        if (path.startsWith("/v1/jobs/")) settleRead();
+        return reply;
+      },
+    } as Client;
+    let ready!: () => void;
+    const connected = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    agent = runNode({
+      client,
+      preferences: defaults,
+      signal: stop.signal,
+      heartbeatMs: 10,
+      reconnect: { baseMs: 1, maxMs: 1, random: () => 0.5 },
+      executor: {
+        capabilities: async () => [...CAPABILITIES],
+        execute: async () => {
+          executions++;
+          return { ok: true, message: "Done." };
+        },
+      },
+      onEvent: (event) => {
+        if (event === "connected") ready();
+      },
+    });
+    await connected;
+    const command = record(
+      await f.controller.call("POST", "/v1/commands", {
+        nodeId: "result-reconnect-node",
+        text: "open Arc",
+      }),
+    );
+    assert.equal(command.ok, true);
+    await settled;
+    assert.equal(executions, 1);
+    assert.equal(resultPosts, 2);
+    assert.equal(registrations, 2);
+    assert.equal(f.jobStore.list()[0]?.state, "completed");
+    assert.equal(f.jobStore.list()[0]?.outcomeCode, "succeeded");
+  } finally {
+    stop.abort();
+    await f.close();
+    await agent;
+  }
 });
 
 test("desktop job expiry aborts an active executor before a later action", async () => {
