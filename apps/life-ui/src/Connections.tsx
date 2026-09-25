@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   type ConnectionPreview,
@@ -46,13 +46,25 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
   const [calendarChoice, setCalendarChoice] = useState("");
   const [detailError, setDetailError] = useState("");
   const detailSync = connections.find((item) => item.id === detailId)?.lastSyncAt;
-  const clearMessage = () => {
+  const clearMessage = useCallback(() => {
     messageRequest.current++;
     setSelectedMessageId("");
     setMessageDetail(null);
     setMessageLoading(false);
     setMessageError("");
-  };
+  }, []);
+  useEffect(() => {
+    const pageHidden = () => clearMessage();
+    const visibilityChanged = () => {
+      if (document.visibilityState !== "visible") pageHidden();
+    };
+    document.addEventListener("visibilitychange", visibilityChanged);
+    window.addEventListener("pagehide", pageHidden);
+    return () => {
+      document.removeEventListener("visibilitychange", visibilityChanged);
+      window.removeEventListener("pagehide", pageHidden);
+    };
+  }, [clearMessage]);
   const applyConnections = (value: ConnectorConnection[]) => {
     currentConnections.current = value;
     if (

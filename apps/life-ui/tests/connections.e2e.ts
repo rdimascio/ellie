@@ -536,6 +536,35 @@ try {
     .getByText("Private fixture body, fetched only after selection.")
     .waitFor();
   assert.equal(explicitFullReads, 1);
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "hidden",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await expect(
+    gmailArticle.getByText("Private fixture body, fetched only after selection."),
+  ).toHaveCount(0);
+  await expect(
+    gmailArticle.getByRole("button", { name: /Private fixture subject.*sender@example.test/ }),
+  ).toHaveAttribute("aria-pressed", "false");
+  await page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", {
+      configurable: true,
+      value: "visible",
+    });
+    document.dispatchEvent(new Event("visibilitychange"));
+  });
+  await page.evaluate(
+    () => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))),
+  );
+  assert.equal(explicitFullReads, 1, "foregrounding must not refetch or redisplay a Gmail body");
+  assert.equal(
+    await gmailArticle.getByText("Private fixture body, fetched only after selection.").count(),
+    0,
+    "foregrounding requires another explicit message selection",
+  );
   await calendarArticle.getByRole("button", { name: "View imported activity" }).click();
   assert.equal(
     await gmailArticle.getByText("Private fixture body, fetched only after selection.").count(),
