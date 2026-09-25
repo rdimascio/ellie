@@ -241,14 +241,21 @@ final class WeatherStore: ObservableObject {
         refreshTask = nil
         refreshID = nil
         isRefreshing = false
-        state = WeatherState()
-        fetchedInCurrentSession = false
         guard !recoveryRequired else {
             message = "Weather is off, but the unreadable settings file was preserved and may still contain the previous place."
             return false
         }
-        do { try persist(state); message = nil; return true }
-        catch { message = "Weather is off, but its saved place could not be cleared from disk."; return false }
+        let candidate = WeatherState()
+        do {
+            try persist(candidate)
+            state = candidate
+            fetchedInCurrentSession = false
+            message = nil
+            return true
+        } catch {
+            message = "Weather could not be disabled. Its saved place and forecast remain enabled."
+            return false
+        }
     }
 
     func refresh(force: Bool = false) {
