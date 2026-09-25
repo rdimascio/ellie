@@ -316,6 +316,7 @@ final class BrowserPhoneControlStore: ObservableObject {
   @Published private(set) var page: BrowserPhonePage?
   @Published private(set) var credentialChanged = false
   @Published private(set) var selectedRowID: String?
+  @Published private(set) var selectedResultID: String?
   @Published private(set) var hasPendingBrowserCommand = false
   @Published private(set) var pendingBrowserWarningError: String?
   private let credential: NativeEnrollmentCredential
@@ -361,6 +362,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     selectedTargetID = nodeID
     page = nil
     selectedRowID = nil
+    selectedResultID = nil
     hasPendingBrowserCommand = false
     pendingBrowserWarningError = nil
     if task != nil {
@@ -394,10 +396,28 @@ final class BrowserPhoneControlStore: ObservableObject {
         && !query.isEmpty && query.utf16.count <= 200 && query.utf8.count <= 512
         && !query.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
     case .openResult(let index): return index > 0 && index <= page.items.count
+    case .openSelectedResult:
+      return selectedResultID != nil
+        && page.items.contains(where: { $0.id == selectedResultID })
     case .back: return false
     case .scroll, .play, .pause: return true
     case .inspect, .refresh: return false
     }
+  }
+
+  func canSelectObservedResult(_ itemID: String, on node: PhoneControlNode?) -> Bool {
+    guard !credentialChanged, task == nil, let node, node.online,
+      node.capabilities.contains("browser.control"), let page, page.nodeID == node.id,
+      page.items.contains(where: { $0.id == itemID })
+    else { return false }
+    return Self.observedSiteAllows(.openSelectedResult, on: page)
+  }
+
+  @discardableResult
+  func selectObservedResult(_ itemID: String, on node: PhoneControlNode?) -> Bool {
+    guard canSelectObservedResult(itemID, on: node) else { return false }
+    selectedResultID = itemID
+    return true
   }
 
   @discardableResult
@@ -423,6 +443,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     if selectedTargetID != node.id { clearIfTargetChanged(to: node.id) }
     page = nil
     selectedRowID = nil
+    selectedResultID = nil
     phase = .checking
     launch(targetID: node.id, mayDispatch: false) {
       let scope = try browserMutationUncertaintyScope(
@@ -482,6 +503,7 @@ final class BrowserPhoneControlStore: ObservableObject {
       if try uncertainty.pendingToken(for: scope) != nil {
         self.page = nil
         self.selectedRowID = nil
+        self.selectedResultID = nil
         hasPendingBrowserCommand = true
         pendingBrowserWarningError = nil
         phase = .unknown(
@@ -492,6 +514,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     } catch {
       self.page = nil
       self.selectedRowID = nil
+      self.selectedResultID = nil
       phase = .failed(BrowserMutationUncertaintyFailure.unavailable.localizedDescription)
       return false
     }
@@ -521,6 +544,14 @@ final class BrowserPhoneControlStore: ObservableObject {
         return false
       }
       action = .select(page.items[index - 1].id, revision: page.revision)
+    case .openSelectedResult:
+      guard let selectedResultID,
+        page.items.contains(where: { $0.id == selectedResultID })
+      else {
+        phase = .failed("Choose a result from the current page first.")
+        return false
+      }
+      action = .select(selectedResultID, revision: page.revision)
     case .play, .pause: action = .playback(intent, revision: page.revision)
     case .back:
       phase = .failed("Back is not available for reviewed browser control yet.")
@@ -533,6 +564,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     // mutation is admitted; even a slow or lost response must not expose stale controls.
     self.page = nil
     self.selectedRowID = nil
+    self.selectedResultID = nil
     phase = .sending(label)
     launch(targetID: node.id, mayDispatch: true) {
       guard try self.uncertainty.recordIfClear(token: token, for: scope) else {
@@ -575,6 +607,7 @@ final class BrowserPhoneControlStore: ObservableObject {
   }
 
   func cancel() {
+    selectedResultID = nil
     guard task != nil else { return }
     page = nil
     selectedRowID = nil
@@ -587,6 +620,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     cancel()
     page = nil
     selectedRowID = nil
+    selectedResultID = nil
   }
 
   private func invalidateActiveOperation() {
@@ -647,11 +681,13 @@ final class BrowserPhoneControlStore: ObservableObject {
           phase = result.0
           page = result.1
           selectedRowID = nil
+          selectedResultID = nil
         }
       } catch {
         guard expected == generation else { return }
         page = nil
         selectedRowID = nil
+        selectedResultID = nil
         if mayDispatch && dispatched {
           phase = .unknown("The result is unknown. Read the page before trying again.")
         } else if error as? BrowserMutationUncertaintyFailure == .unresolved {
@@ -687,7 +723,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     guard site.page != .login, site.page != .unsupported else { return false }
     if site.provider == .disneyplus {
       switch intent {
-      case .openResult: return site.page == .browse
+      case .openResult, .openSelectedResult: return site.page == .browse
       case .scroll(let direction):
         return site.page == .browse && (direction == .up || direction == .down)
       default: return false
@@ -695,7 +731,7 @@ final class BrowserPhoneControlStore: ObservableObject {
     }
     if site.provider == .youtubeTV {
       switch intent {
-      case .search, .openResult: return false
+      case .search, .openResult, .openSelectedResult: return false
       case .scroll(let direction): return (direction == .up || direction == .down) && site.page == .browse
       default: break
       }
@@ -704,7 +740,7 @@ final class BrowserPhoneControlStore: ObservableObject {
       switch intent {
       case .search:
         return (site.page == .browse || site.page == .results) && site.searchControl != nil
-      case .openResult: return site.page == .browse || site.page == .results
+      case .openResult, .openSelectedResult: return site.page == .browse || site.page == .results
       case .scroll(let direction) where direction == .left || direction == .right:
         return site.page == .browse && site.rows?.isEmpty == false
       default: break
@@ -714,14 +750,15 @@ final class BrowserPhoneControlStore: ObservableObject {
       switch intent {
       case .search:
         return (site.page == .home || site.page == .results) && site.searchControl != nil
-      case .openResult: return site.page == .results
+      case .openResult, .openSelectedResult: return site.page == .results
       default: break
       }
     }
     switch intent {
     case .play: return site.page == .watch && site.playback == .paused
     case .pause: return site.page == .watch && site.playback == .playing
-    case .inspect, .refresh, .search, .scroll, .openResult, .back: return true
+    case .inspect, .refresh, .search, .scroll, .openResult, .openSelectedResult, .back:
+      return true
     }
   }
 }

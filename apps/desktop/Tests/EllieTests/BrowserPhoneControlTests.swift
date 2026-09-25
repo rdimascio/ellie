@@ -381,10 +381,11 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(store.page?.axScrollDirections, [.down])
     XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
     for intent in [BrowserVoiceIntent.scroll(.up), .scroll(.left), .search(query: "video"),
-      .openResult(index: 1), .play, .pause] {
+      .openResult(index: 1), .openSelectedResult, .play, .pause] {
       XCTAssertFalse(store.canPerform(intent, on: node))
       XCTAssertFalse(store.perform(intent, on: node))
     }
+    XCTAssertFalse(store.selectObservedResult("synthetic-item", on: node))
     let before = await transport.actions
     XCTAssertEqual(before.count, 2,
       "Unobserved actions must not reach the transport or create uncertainty")
@@ -906,6 +907,58 @@ final class BrowserPhoneControlTests: XCTestCase {
         default: return false
         }
       }.count, 4)
+  }
+
+  @MainActor
+  func testOpenThatRequiresExplicitObservedChoiceAndConsumesItWithoutReplay() async {
+    let first = BrowserPhoneItem(id: "opaque-1", label: "First observed result", state: nil)
+    let second = BrowserPhoneItem(id: "opaque-2", label: "Second observed result", state: nil)
+    let transport = BrowserPhoneFakeTransport(
+      source: .companion, commandStatus: .unknown, items: [first, second],
+      site: BrowserPhoneSite(
+        provider: .youtube, page: .results, playback: .unavailable,
+        currentTimeSeconds: nil))
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertFalse(store.canPerform(.openSelectedResult, on: node))
+    XCTAssertFalse(store.selectObservedResult("not-observed", on: node))
+    XCTAssertTrue(store.selectObservedResult(second.id, on: node))
+    XCTAssertEqual(store.selectedResultID, second.id)
+    XCTAssertTrue(store.canPerform(.openSelectedResult, on: node))
+
+    XCTAssertTrue(store.perform(.openSelectedResult, on: node))
+    XCTAssertNil(store.page, "Dispatch must consume the observed document immediately")
+    XCTAssertNil(store.selectedResultID, "Dispatch must consume the explicit referent")
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.openSelectedResult, on: node))
+    var actions = await transport.actions
+    XCTAssertEqual(actions, [
+      .refresh, .read(revision: String(repeating: "a", count: 64)),
+      .select(second.id, revision: String(repeating: "a", count: 64)),
+    ])
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertNil(store.selectedResultID, "A fresh read must not reuse the old referent")
+    XCTAssertFalse(store.canPerform(.openSelectedResult, on: node))
+    XCTAssertTrue(store.selectObservedResult(first.id, on: node))
+    store.cancel()
+    XCTAssertNil(store.selectedResultID, "Leaving the reviewed flow clears an idle referent")
+    XCTAssertFalse(store.canPerform(.openSelectedResult, on: node))
+
+    XCTAssertTrue(store.selectObservedResult(first.id, on: node))
+    store.clearIfTargetChanged(to: "other-mac")
+    XCTAssertNil(store.selectedResultID)
+    XCTAssertNil(store.page)
+    actions = await transport.actions
+    XCTAssertEqual(actions.count, 5, "Selection and lifecycle clearing never dispatch")
   }
 
   @MainActor

@@ -14,18 +14,20 @@ struct BrowserVoiceUITestFixtureView: View {
   @StateObject private var browserTransport: BrowserVoiceUITestTransport
   @State private var backgroundCount = 0
   private let youtubeSearch: Bool
+  private let openThat: Bool
 
   init(completeActions: Bool = false, netflixRows: Bool = false, netflixSearch: Bool = false,
-       youtubeSearch: Bool = false) {
+       youtubeSearch: Bool = false, openThat: Bool = false) {
     self.youtubeSearch = youtubeSearch
+    self.openThat = openThat
     let credential = BrowserVoiceUITestFixture.credential
     precondition((try? validateNativeGrants(credential.client.grants)) != nil)
     let browserTransport = BrowserVoiceUITestTransport(
       completeActions: completeActions,
-      source: netflixRows || netflixSearch || youtubeSearch || completeActions
+      source: netflixRows || netflixSearch || youtubeSearch || openThat || completeActions
         ? .companion : .webmcp,
       siteOverride: netflixRows ? BrowserVoiceUITestFixture.netflixRowsSite : nil,
-      netflixSearch: netflixSearch, youtubeSearch: youtubeSearch)
+      netflixSearch: netflixSearch, youtubeSearch: youtubeSearch, openThat: openThat)
     _controls = StateObject(
       wrappedValue: PhoneControlStore(
         credential: credential, transport: BrowserVoiceUITestPhoneTransport()))
@@ -38,6 +40,7 @@ struct BrowserVoiceUITestFixtureView: View {
         credential: credential, recorder: BrowserVoiceUITestRecorder(),
         transport: BrowserVoiceUITestSpeechTransport(
           transcript: netflixRows ? "Scroll right"
+            : openThat ? "Open that"
             : youtubeSearch ? "Search for public" : "Search for public video")))
     _browserTransport = StateObject(wrappedValue: browserTransport)
     _lifeReview = StateObject(wrappedValue: IOSQuietVoiceStore(
@@ -57,7 +60,7 @@ struct BrowserVoiceUITestFixtureView: View {
           .accessibilityIdentifier("browser-fixture-background-count")
         Text("Fixture mutations: \(browserTransport.mutationCount)")
           .accessibilityIdentifier("browser-fixture-mutation-count")
-        if youtubeSearch {
+        if youtubeSearch || openThat {
           Text("Fixture actions: \(browserTransport.actionHistory.joined(separator: ","))")
             .accessibilityIdentifier("browser-fixture-action-history")
           Text("Synthetic audio and selected YouTube page")
@@ -510,6 +513,7 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
   private let siteOverride: BrowserPhoneSite?
   private let netflixSearch: Bool
   private let youtubeSearch: Bool
+  private let openThat: Bool
   private let source: BrowserPhoneSource
   private let axFallback: Bool
 
@@ -517,13 +521,14 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
     failNextRead: Bool = false, completeActions: Bool = false,
     source: BrowserPhoneSource = .webmcp,
     siteOverride: BrowserPhoneSite? = nil, netflixSearch: Bool = false,
-    youtubeSearch: Bool = false, axFallback: Bool = false
+    youtubeSearch: Bool = false, openThat: Bool = false, axFallback: Bool = false
   ) {
     self.failNextRead = failNextRead
     self.completeActions = completeActions
     self.siteOverride = siteOverride
     self.netflixSearch = netflixSearch
     self.youtubeSearch = youtubeSearch
+    self.openThat = openThat
     self.source = source
     self.axFallback = axFallback
   }
@@ -550,6 +555,18 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
           title: "Synthetic selected web area", summary: "Observed AX scroll only",
           items: [BrowserPhoneItem(id: "synthetic-item", label: "Read-only item", state: nil)],
           axScrollDirections: [.down]))
+      }
+      if openThat {
+        actionHistory.append("read.results")
+        return .page(BrowserPhonePage(
+          nodeID: nodeID, source: source, revision: BrowserVoiceUITestFixture.revision,
+          title: "Synthetic observed results", summary: "Two bounded observed results",
+          items: [
+            BrowserPhoneItem(
+              id: "public-video-a", label: "First observed result", state: nil),
+            BrowserPhoneItem(
+              id: "public-video-b", label: "Second observed result", state: nil),
+          ], site: BrowserVoiceUITestFixture.youtubeResultsSite))
       }
       let isA = nodeID == BrowserVoiceUITestFixture.nodeAID
       if youtubeSearch {
@@ -586,9 +603,15 @@ private final class BrowserVoiceUITestTransport: ObservableObject,
       return .command(
         source: source, status: youtubeSearch ? .unknown : .completed,
         revision: BrowserVoiceUITestFixture.revision)
-    case .select:
+    case .select(let itemID, _):
       mutationCount += 1
       if youtubeSearch { actionHistory.append("select") }
+      if openThat { actionHistory.append("select.\(itemID)") }
+      if openThat {
+        return .command(
+          source: source, status: .unknown,
+          revision: BrowserVoiceUITestFixture.revision)
+      }
       if !completeActions && !youtubeSearch {
         do { try await Task.sleep(for: .seconds(30)) }
         catch { throw PhoneControlFailure.cancelled }

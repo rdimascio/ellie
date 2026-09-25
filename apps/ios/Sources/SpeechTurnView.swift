@@ -128,6 +128,35 @@ struct SpeechTurnView: View {
                   .accessibilityIdentifier("speech-netflix-row-review")
               }
             }
+            if case .openSelectedResult = intent, let page = browserStore.page,
+              !page.items.isEmpty
+            {
+              Text("Choose one result from the current page. Choosing does not open it.")
+                .font(.footnote).foregroundStyle(.secondary)
+              ForEach(Array(page.items.enumerated()), id: \.element.id) { index, item in
+                Button {
+                  browserStore.selectObservedResult(item.id, on: controlStore.selectedNode)
+                } label: {
+                  HStack {
+                    Text(item.label)
+                    Spacer()
+                    if browserStore.selectedResultID == item.id { Image(systemName: "checkmark") }
+                  }
+                }
+                .accessibilityIdentifier("speech-browser-result-\(index + 1)")
+                .disabled(
+                  controlsBusy || browserStore.isBusy
+                    || !browserStore.canSelectObservedResult(
+                      item.id, on: controlStore.selectedNode))
+              }
+              if let selectedResultID = browserStore.selectedResultID,
+                let selected = page.items.first(where: { $0.id == selectedResultID })
+              {
+                Text("Run will open \(selected.label) on \(controlStore.selectedNode?.label ?? "the selected Mac").")
+                  .font(.footnote)
+                  .accessibilityIdentifier("speech-browser-selected-result-review")
+              }
+            }
             Button("Run \(intent.displayLabel) on selected Mac") {
               if browserStore.perform(intent, on: controlStore.selectedNode) {
                 speech.discardReview()
@@ -270,7 +299,11 @@ struct SpeechTurnView: View {
     case .sending(let label): Section { ProgressView("Sending \(label)…") }
     case .cancelling: Section { ProgressView("Stopping…") }
     case .outcome(let message): Section("Browser result") { Label(message, systemImage: "checkmark.circle") }
-    case .unknown(let message): Section("Browser result") { Label(message, systemImage: "questionmark.circle") }
+    case .unknown(let message):
+      Section("Browser result") {
+        Label(message, systemImage: "questionmark.circle")
+          .accessibilityIdentifier("browser-status-unknown")
+      }
     case .failed(let message): Section { Label(message, systemImage: "exclamationmark.triangle") }
     case .revoked:
       Section { Label("This iPhone’s coordinator session was revoked.", systemImage: "lock.slash") }
