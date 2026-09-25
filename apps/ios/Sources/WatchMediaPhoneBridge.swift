@@ -79,14 +79,13 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
   }
 
   nonisolated func sessionDidBecomeInactive(_ session: WCSession) {
-    Task { @MainActor in self.disable(); self.updateAvailability(session) }
+    Task { @MainActor in self.updateAvailability(session) }
   }
 
   nonisolated func sessionDidDeactivate(_ session: WCSession) {
     Task { @MainActor in
-      self.disable()
       self.updateAvailability(session)
-      session.activate()
+      if watchMediaSessionNeedsActivation(session.activationState) { session.activate() }
     }
   }
 
@@ -121,9 +120,23 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
   }
 
   private func updateAvailability(_ session: WCSession) {
-    available = session.activationState == .activated && session.isPaired
-      && session.isWatchAppInstalled
+    available = watchMediaSessionIsAvailable(
+      activated: session.activationState == .activated,
+      paired: session.isPaired,
+      watchAppInstalled: session.isWatchAppInstalled)
     if !available { disable() }
     recordPairedFixtureReadiness()
   }
+}
+
+/// Delegate callbacks cross to the main actor asynchronously. Decisions therefore use the
+/// session's current state when they run, rather than unconditionally applying an older event.
+func watchMediaSessionIsAvailable(
+  activated: Bool, paired: Bool, watchAppInstalled: Bool
+) -> Bool {
+  activated && paired && watchAppInstalled
+}
+
+func watchMediaSessionNeedsActivation(_ state: WCSessionActivationState) -> Bool {
+  state != .activated
 }
