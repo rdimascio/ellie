@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 // @ts-expect-error -- the bundle builders are plain scripts without declarations.
+import { finalizeStagedRuntime } from "../scripts/bundle-runtime.mjs";
+// @ts-expect-error -- the bundle builders are plain scripts without declarations.
 import { machOFiles, measureTree, stageRuntime } from "../scripts/bundle-runtime.mjs";
 
 const members = [
@@ -98,6 +100,25 @@ test("an embedded runtime keeps its layout and reports what it copied", async (t
   // the payload layout has to survive the copy exactly.
   assert.deepEqual(await measureTree(join(resources, "runtime")), measured);
   await assert.rejects(stageRuntime(directory, resources));
+});
+
+test("runtime provenance is measured after copied executable bytes are finalized", async (t) => {
+  const root = await scratch(t);
+  const directory = await payload(root);
+  const resources = join(root, "Resources");
+  await mkdir(resources, { mode: 0o755 });
+  const copied = await stageRuntime(directory, resources);
+  const executable = join(resources, "runtime/bin/node");
+  await writeFile(executable, "signed-node-bytes", { mode: 0o755 });
+  const finalized = await finalizeStagedRuntime(resources, copied);
+  assert.deepEqual(finalized, await measureTree(join(resources, "runtime")));
+  assert.notEqual(finalized?.sha256, copied.sha256);
+
+  await writeFile(join(resources, "runtime/unexpected"), "extra", { mode: 0o644 });
+  await assert.rejects(
+    finalizeStagedRuntime(resources, copied),
+    /runtime layout changed while it was finalized/,
+  );
 });
 
 test("a payload holding something other than a file is not embedded", async (t) => {
