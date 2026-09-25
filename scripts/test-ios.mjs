@@ -102,6 +102,15 @@ function groupAbsent(processGroup) {
   }
 }
 
+async function waitForGroupAbsent(processGroup, timeout = 2_000) {
+  const deadline = performance.now() + timeout;
+  while (!groupAbsent(processGroup)) {
+    if (performance.now() >= deadline) return false;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+  }
+  return true;
+}
+
 function execute(
   file,
   args,
@@ -163,7 +172,7 @@ function execute(
     child.once("error", () => {
       failure ??= executionError(`${label} could not start.`, "spawn-failed");
     });
-    child.once("close", (code, signal) => {
+    child.once("close", async (code, signal) => {
       clearTimeout(timer);
       clearTimeout(killTimer);
       clearTimeout(reapTimer);
@@ -175,7 +184,7 @@ function execute(
       if (settled) return;
       settled = true;
       try {
-        if (!groupAbsent(child.pid)) {
+        if (!(await waitForGroupAbsent(child.pid))) {
           cleanupCertain = false;
           failure ??= executionError(
             `${label} left process-group members whose ownership is uncertain.`,
