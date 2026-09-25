@@ -199,6 +199,38 @@ function execute(
   });
 }
 
+async function ownedSimulatorState(id) {
+  const output = await execute("xcrun", ["simctl", "list", "devices", "--json"], {
+    capture: true,
+    timeout: 5_000,
+    allowAfterSignal: true,
+    label: "simulator state inventory",
+  });
+  let value;
+  try {
+    value = JSON.parse(output);
+  } catch {
+    throw executionError("Simulator state inventory is invalid.", "cleanup-uncertain");
+  }
+  if (!value || typeof value !== "object" || !value.devices || typeof value.devices !== "object")
+    throw executionError("Simulator state inventory is invalid.", "cleanup-uncertain");
+  let match,
+    visited = 0;
+  for (const devices of Object.values(value.devices)) {
+    if (!Array.isArray(devices))
+      throw executionError("Simulator state inventory is invalid.", "cleanup-uncertain");
+    for (const device of devices) {
+      if (++visited > 10_000)
+        throw executionError("Simulator state inventory exceeds its bound.", "cleanup-uncertain");
+      if (!device || typeof device !== "object" || device.udid !== id) continue;
+      if (match || typeof device.state !== "string")
+        throw executionError("Owned simulator state is ambiguous.", "cleanup-uncertain");
+      match = device.state;
+    }
+  }
+  return match;
+}
+
 async function cleanup() {
   if (cleaning) return;
   cleaning = true;
@@ -208,31 +240,48 @@ async function cleanup() {
     cleanupOutcomes.push("child-cleanup-uncertain");
   }
   if (simulatorID) {
+    let observedState,
+      stateKnown = false;
     try {
-      await execute("xcrun", ["simctl", "shutdown", simulatorID], {
-        timeout: 15_000,
-        allowAfterSignal: true,
-        label: "simulator shutdown",
-      });
-      cleanupOutcomes.push("shutdown-complete");
+      observedState = await ownedSimulatorState(simulatorID);
+      stateKnown = true;
     } catch {
-      cleanupCertain = false;
-      cleanupOutcomes.push("shutdown-failed");
-      console.warn("The temporary iOS simulator did not shut down cleanly.");
+      // The exact owned ID still permits the existing shutdown/delete cleanup path.
     }
-    try {
-      await execute("xcrun", ["simctl", "delete", simulatorID], {
-        timeout: 15_000,
-        allowAfterSignal: true,
-        label: "simulator deletion",
-      });
-      cleanupOutcomes.push("delete-complete");
-    } catch {
-      cleanupCertain = false;
-      cleanupOutcomes.push("delete-failed");
-      console.warn(
-        "The temporary iOS simulator could not be deleted; remove the uniquely named Ellie iOS Tests simulator manually.",
-      );
+    if (stateKnown && observedState === undefined) {
+      cleanupOutcomes.push("shutdown-already-complete", "delete-already-complete");
+      simulatorID = undefined;
+    } else if (observedState === "Shutdown") {
+      cleanupOutcomes.push("shutdown-already-complete");
+    } else {
+      try {
+        await execute("xcrun", ["simctl", "shutdown", simulatorID], {
+          timeout: 15_000,
+          allowAfterSignal: true,
+          label: "simulator shutdown",
+        });
+        cleanupOutcomes.push("shutdown-complete");
+      } catch {
+        cleanupCertain = false;
+        cleanupOutcomes.push("shutdown-failed");
+        console.warn("The temporary iOS simulator did not shut down cleanly.");
+      }
+    }
+    if (simulatorID) {
+      try {
+        await execute("xcrun", ["simctl", "delete", simulatorID], {
+          timeout: 15_000,
+          allowAfterSignal: true,
+          label: "simulator deletion",
+        });
+        cleanupOutcomes.push("delete-complete");
+      } catch {
+        cleanupCertain = false;
+        cleanupOutcomes.push("delete-failed");
+        console.warn(
+          "The temporary iOS simulator could not be deleted; remove the uniquely named Ellie iOS Tests simulator manually.",
+        );
+      }
     }
   }
   if (unreapedChildren.size) cleanupCertain = false;
