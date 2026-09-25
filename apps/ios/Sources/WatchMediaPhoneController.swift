@@ -96,6 +96,9 @@ final class WatchMediaPhoneController {
       }
       node = selected
     } catch {
+      guard currentActivation == activation, self.targetID == targetID, self.epoch == epoch else {
+        return reply(.stale)
+      }
       if error as? PhoneControlFailure == .revoked { disable(); return reply(.blocked) }
       return reply(.unavailable)
     }
