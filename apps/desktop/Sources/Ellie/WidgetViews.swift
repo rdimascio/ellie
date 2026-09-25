@@ -523,7 +523,9 @@ struct NativeWeather: View {
           Spacer(minLength: 0)
           TimelineView(.periodic(from: .now, by: 60)) { context in
             HStack(spacing: 6) {
-              Text(store.message ?? store.freshness(at: context.date))
+              Text(
+                store.message ?? DesktopWeatherPresentation.status(store: store, at: context.date)
+              )
               Spacer()
               Button {
                 store.refresh(force: true)
@@ -554,5 +556,15 @@ struct NativeWeather: View {
     }
     .frame(maxWidth: .infinity, minHeight: 155, alignment: .leading)
     .task { store.refresh() }
+  }
+}
+
+enum DesktopWeatherPresentation {
+  @MainActor
+  static func status(store: WeatherStore, at date: Date) -> String {
+    let provenance =
+      !store.fetchedInCurrentSession || store.needsRefresh || store.message != nil
+      ? "Cached forecast" : "Current forecast"
+    return "\(provenance) · \(store.freshness(at: date))"
   }
 }
