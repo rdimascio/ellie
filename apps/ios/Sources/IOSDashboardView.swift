@@ -319,9 +319,9 @@ private struct IOSDashboardDetail: View {
                         IOSWidgetCard(widget: widget, choresStore: choresStore, weatherStore: weatherStore,
                             agendaStore: agendaStore, enrollment: enrollment, editing: editing,
                             edit: { editedWidget = widget },
-                            earlier: { select(); store.moveWidget(id: widget.id, offset: -1) },
-                            later: { select(); store.moveWidget(id: widget.id, offset: 1) },
-                            remove: { select(); store.removeWidget(id: widget.id) },
+                            earlier: { if select() { store.moveWidget(id: widget.id, offset: -1) } },
+                            later: { if select() { store.moveWidget(id: widget.id, offset: 1) } },
+                            remove: { if select() { store.removeWidget(id: widget.id) } },
                             isFirst: dashboard.widgets.first?.id == widget.id,
                             isLast: dashboard.widgets.last?.id == widget.id)
                     }
@@ -337,42 +337,54 @@ private struct IOSDashboardDetail: View {
         .ellieScreen()
         .navigationTitle(dashboard?.name ?? "Dashboard")
         .navigationBarTitleDisplayMode(.large)
-        .onAppear(perform: select)
+        .onAppear { _ = select() }
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { adding = true } label: { Label("Add widget", systemImage: "plus") }
+                    .disabled(dashboard == nil)
                 Button(editing ? "Done" : "Edit") { editing.toggle() }.accessibilityIdentifier("edit-dashboard")
+                    .disabled(dashboard == nil)
                 Menu {
                     Button("Rename Dashboard") { name = dashboard?.name ?? ""; renaming = true }
                     Button("Delete Dashboard", role: .destructive) { deleting = true }
                         .disabled(store.state.dashboards.count < 2)
                 } label: { Label("Dashboard options", systemImage: "ellipsis") }
                     .accessibilityIdentifier("dashboard-options")
+                    .disabled(dashboard == nil)
             }
         }
-        .sheet(isPresented: $adding) { IOSWidgetGallery { select(); store.addWidget(kind: $0); adding = false } }
+        .sheet(isPresented: $adding) {
+            IOSWidgetGallery { kind in
+                if select() { store.addWidget(kind: kind) }
+                adding = false
+            }
+        }
         .sheet(item: $editedWidget) { widget in
             IOSWidgetEditor(widget: widget, weatherStore: weatherStore) { title, size, config in
-                select(); store.updateWidget(id: widget.id, title: title, size: size, config: config)
+                guard select() else { return }
+                store.updateWidget(id: widget.id, title: title, size: size, config: config)
                 if store.error == nil { editedWidget = nil }
             }
         }
         .alert("Rename dashboard", isPresented: $renaming) {
             TextField("Name", text: $name).accessibilityIdentifier("rename-dashboard-name")
             Button("Cancel", role: .cancel) {}
-            Button("Save") { select(); store.renameDashboard(id: dashboardID, name: name) }
+            Button("Save") {
+                guard select() else { return }
+                store.renameDashboard(id: dashboardID, name: name)
+            }
                 .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .confirmationDialog("Delete this dashboard?", isPresented: $deleting, titleVisibility: .visible) {
             Button("Delete dashboard", role: .destructive) {
-                select()
+                guard select() else { return }
                 store.deleteDashboard(id: dashboardID)
                 if store.error == nil, !store.state.dashboards.contains(where: { $0.id == dashboardID }) { dismiss() }
             }
         }
     }
 
-    private func select() { store.selectedID = dashboardID }
+    private func select() -> Bool { store.selectDashboard(id: dashboardID) }
 }
 
 struct DashboardExportDocument: FileDocument {
