@@ -28,7 +28,9 @@ jobs:
       - run: bun run test
   native_core:
     runs-on: macos-15
-    timeout-minutes: 35
+    # The development package smoke below has its own 12-minute bound on top of the
+    # previously measured native checks.
+    timeout-minutes: 50
     outputs:
       head: ${{ steps.source.outputs.head }}
     steps:
@@ -56,6 +58,41 @@ jobs:
         run: bun run desktop:test
       - name: Build and verify native dashboard app
         run: bun run desktop:build
+      - name: Build and inspect development app with embedded runtime
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64)
+              node_arch="arm64"
+              node_sha256="6239d4cf92d864487ec8cd3615038f7b67e7f58b77b21cd2f09ea9fbd68065fe"
+              ;;
+            x86_64)
+              node_arch="x64"
+              node_sha256="0ae5a24c24bb7d015cd816c5036b3f90f2945aa872fcf54e58da054753b3a299"
+              ;;
+            *)
+              echo "Unsupported development package architecture: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          node_archive="$RUNNER_TEMP/node-v24.21.0-darwin-$node_arch.tar.xz"
+          curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 \
+            --output "$node_archive" \
+            "https://nodejs.org/download/release/v24.21.0/$(basename "$node_archive")"
+          printf '%s  %s\n' "$node_sha256" "$node_archive" | shasum -a 256 --check
+          service_output="$RUNNER_TEMP/ellie-service-payload"
+          bun_cache="$(bun pm cache)"
+          test -d "$bun_cache"
+          node scripts/build-service-payload.mjs \
+            --node-archive "$node_archive" \
+            --node-sha256 "$node_sha256" \
+            --bun-cache "$bun_cache" \
+            --output "$service_output"
+          runtime="$service_output/EllieServices-0.1.0-dev-${GITHUB_SHA:0:8}-macos-$node_arch/payload"
+          test -d "$runtime"
+          node scripts/package-desktop.mjs --runtime "$runtime"
   native_ios:
     runs-on: macos-15
     # The UI runner permits 30 minutes; ATS follows on its warmed host with bounded cleanup.
