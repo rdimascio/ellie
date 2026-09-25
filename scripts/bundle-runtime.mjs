@@ -1,28 +1,83 @@
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
 import { cp, lstat, open, readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, sep } from "node:path";
 
-/**
- * Walks a staged tree, refusing anything that is not a plain file or directory. A symbolic
- * link inside the bundle would let the runtime reach content the signature does not cover.
- */
-export async function measureTree(root, current = root) {
+function digestField(hash, value) {
+  const bytes = Buffer.from(String(value));
+  const length = Buffer.allocUnsafe(4);
+  length.writeUInt32BE(bytes.length);
+  hash.update(length);
+  hash.update(bytes);
+}
+
+async function measureEntries(root, current, hash) {
   let files = 0;
   let bytes = 0;
   for (const name of (await readdir(current)).sort()) {
     const path = join(current, name);
+    const relativePath = relative(root, path).split(sep).join("/");
     const info = await lstat(path);
     if (info.isDirectory()) {
-      const nested = await measureTree(root, path);
+      hash.update("directory\0");
+      digestField(hash, relativePath);
+      digestField(hash, (info.mode & 0o777).toString(8));
+      const nested = await measureEntries(root, path, hash);
       files += nested.files;
       bytes += nested.bytes;
       continue;
     }
     if (!info.isFile())
       throw new Error(`Runtime contains something that is not a regular file: ${path}`);
+    hash.update("file\0");
+    digestField(hash, relativePath);
+    digestField(hash, (info.mode & 0o777).toString(8));
+    digestField(hash, info.size);
+    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await handle.stat();
+      if (
+        !opened.isFile() ||
+        opened.dev !== info.dev ||
+        opened.ino !== info.ino ||
+        opened.size !== info.size ||
+        opened.mode !== info.mode
+      )
+        throw new Error(`Runtime file changed while it was inspected: ${path}`);
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let position = 0;
+      while (true) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+        if (bytesRead === 0) break;
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+      const after = await handle.stat();
+      if (
+        position !== opened.size ||
+        after.size !== opened.size ||
+        after.mode !== opened.mode ||
+        after.mtimeMs !== opened.mtimeMs ||
+        after.ctimeMs !== opened.ctimeMs
+      )
+        throw new Error(`Runtime file changed while it was inspected: ${path}`);
+    } finally {
+      await handle.close();
+    }
     files += 1;
     bytes += info.size;
   }
   return { files, bytes };
+}
+
+/**
+ * Walks a staged tree, refusing anything that is not a plain file or directory. A symbolic
+ * link inside the bundle would let the runtime reach content the signature does not cover.
+ */
+export async function measureTree(root) {
+  const hash = createHash("sha256");
+  const measured = await measureEntries(root, root, hash);
+  return { ...measured, sha256: hash.digest("hex") };
 }
 
 const RUNTIME_REQUIRED = [
@@ -55,7 +110,11 @@ export async function stageRuntime(source, resourcesDirectory) {
     force: false,
   });
   const staged = await measureTree(destination);
-  if (staged.files !== expected.files || staged.bytes !== expected.bytes)
+  if (
+    staged.files !== expected.files ||
+    staged.bytes !== expected.bytes ||
+    staged.sha256 !== expected.sha256
+  )
     throw new Error("The embedded runtime does not match the payload it came from.");
   return staged;
 }

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -41,8 +41,40 @@ test("a tree measurement counts every regular file and refuses anything else", a
     measured.bytes,
     members.reduce((total, member) => total + member.length + 1, 0),
   );
+  assert.match(measured.sha256, /^[0-9a-f]{64}$/);
   await symlink("/etc/passwd", join(directory, "escape"));
   await assert.rejects(measureTree(directory), /not a regular file/);
+});
+
+test("a tree digest binds equal-sized content, modes, paths and empty directories", async (t) => {
+  const root = await scratch(t);
+  const directory = await payload(root);
+  const original = await measureTree(directory);
+  const registry = join(directory, "browser-operations.json");
+  const registryBytes = await readFile(registry);
+  registryBytes[0] = registryBytes[0]! ^ 1;
+  await writeFile(registry, registryBytes, { mode: 0o644 });
+  const changedContent = await measureTree(directory);
+  assert.deepEqual(
+    { files: changedContent.files, bytes: changedContent.bytes },
+    { files: original.files, bytes: original.bytes },
+  );
+  assert.notEqual(changedContent.sha256, original.sha256);
+
+  await writeFile(registry, `${members[1]}\n`, { mode: 0o644 });
+  await chmod(registry, 0o755);
+  const changedMode = await measureTree(directory);
+  assert.equal(changedMode.bytes, original.bytes);
+  assert.notEqual(changedMode.sha256, original.sha256);
+
+  await chmod(registry, 0o644);
+  await mkdir(join(directory, "empty"), { mode: 0o755 });
+  const changedLayout = await measureTree(directory);
+  assert.deepEqual(
+    { files: changedLayout.files, bytes: changedLayout.bytes },
+    { files: original.files, bytes: original.bytes },
+  );
+  assert.notEqual(changedLayout.sha256, original.sha256);
 });
 
 test("only a complete service payload is embedded in the bundle", async (t) => {
