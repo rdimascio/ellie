@@ -589,6 +589,39 @@ final class BrowserPhoneControlTests: XCTestCase {
   }
 
   @MainActor
+  func testReviewedVoiceCancellationCannotBecomeSuccessAcknowledgement() async throws {
+    let intent = try XCTUnwrap(BrowserVoiceIntentParser.parse("Scroll down"))
+    let transport = BrowserPhoneFakeTransport()
+    let persistence = BrowserPhoneFakeUncertaintyStore()
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport, uncertainty: persistence)
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.perform(intent, on: node))
+    await eventually { await transport.actions.count == 3 }
+
+    store.cancel()
+    await transport.finishCommand()
+    await eventually { if case .unknown = store.phase { true } else { false } }
+
+    guard case .unknown(let acknowledgement) = store.phase else {
+      return XCTFail("A cancelled reviewed command must stay unknown")
+    }
+    XCTAssertFalse(acknowledgement.localizedCaseInsensitiveContains("completed"))
+    XCTAssertFalse(acknowledgement.localizedCaseInsensitiveContains("success"))
+    XCTAssertNil(store.page)
+    let scope = try browserMutationUncertaintyScope(
+      credential: credential(), targetID: node.id)
+    XCTAssertNotNil(persistence.pendingTokenValue(for: scope))
+    let actions = await transport.actions
+    XCTAssertEqual(actions.count, 3, "A late completion must not replay the spoken command")
+  }
+
+  @MainActor
   func testDelayedReadCannotRepublishAfterTargetChange() async {
     let transport = BrowserPhoneFakeTransport(delayRead: true)
     let store = BrowserPhoneControlStore(
