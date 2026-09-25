@@ -395,12 +395,14 @@ struct IOSGoogleAgendaWidget: View {
                 Button("Refresh imported agenda") { store.refresh() }
                     .disabled(store.isRefreshing)
                     .accessibilityIdentifier("ios-agenda-refresh")
-                NavigationLink("Manage calendars in Ellie Life") {
+                NavigationLink("View calendar status in Ellie Life") {
                     LifeWebView(credential: LifeWebCredential(enrollment: credential))
                 }
                 .font(.caption)
-                Text("Calendar choice and Google sync are managed on your Mac. Ellie reads its existing import only when you refresh here.")
+                .accessibilityIdentifier("ios-agenda-life-status")
+                Text("This iPhone can inspect connection status, but Google consent, calendar choice, and provider refresh must be completed on your coordinator Mac. Ellie reads its existing import only when you refresh here.")
                     .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("ios-agenda-setup-guidance")
             } else {
                 Text("Pair this iPhone and grant Ellie Life account access to read your Mac’s imported calendar.")
                     .font(.caption).foregroundStyle(.secondary)
