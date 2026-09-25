@@ -2525,6 +2525,7 @@ test(
       const failAfterBootout = join(root, "fake-launchctl-fail-after-bootout");
       const disableLeavesEnabledUnloads = join(root, "fake-launchctl-disable-leaves-enabled");
       const queryFailed = join(root, "fake-launchctl-query-failed");
+      const failOneQueryAfterEnable = join(root, "fake-launchctl-fail-one-query-after-enable");
       const swapAncestor = join(root, "fake-launchctl-swap-ancestor");
       const swapCount = join(root, "fake-launchctl-swap-count");
       const launchAgents = join(home, "Library/LaunchAgents");
@@ -2542,7 +2543,7 @@ test(
       const shell = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
       await writeFile(
         launchctl,
-        `#!/bin/sh\n{ printf 'CALL\\n'; for arg in "$@"; do printf 'ARG:%s\\n' "$arg"; done; printf 'END\\n'; } >> ${shell(log)}\nif [ "$1" = print ] && [ "$2" = gui/${uid} ] && [ "$#" = 2 ]; then [ -f ${shell(guiUnavailable)} ] && exit 64; exit 0; fi\nif [ "$1" = print-disabled ] && [ "$2" = gui/${uid} ] && [ "$#" = 2 ]; then\n  if [ -f ${shell(unknownDisabled)} ]; then value=mystery; elif [ -f ${shell(disabledValue)} ]; then value=$(/bin/cat ${shell(disabledValue)}); elif [ -f ${shell(enabled)} ]; then value=enabled; else value=disabled; fi\n  if [ -f ${shell(disabledOutput)} ]; then /bin/cat ${shell(disabledOutput)}; exit 0; fi\n  printf '\\ndisabled services = {\\n\\t\\t"${label}" => %s\\n}\\n' "$value"; exit 0\nfi\nif [ "$1" = print ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then\n  [ -f ${shell(queryFailed)} ] && exit 64\n  if [ -f ${shell(swapAncestor)} ]; then count=0; [ -f ${shell(swapCount)} ] && count=$(/bin/cat ${shell(swapCount)}); count=$((count + 1)); printf '%s\\n' "$count" > ${shell(swapCount)}; if [ "$count" = 2 ]; then /bin/mv ${shell(launchAgents)} ${shell(launchAgentsBackup)}; /bin/mkdir -m 700 ${shell(launchAgents)}; /bin/cp ${shell(join(home, `Library/LaunchAgents/${label}.plist`))} 2>/dev/null || /bin/cp ${shell(join(home, `Library/LaunchAgents.acceptance-backup/${label}.plist`))} ${shell(plist)}; fi; fi\n  [ -f ${shell(state)} ] || exit 113\n  if [ -f ${shell(loadedOutput)} ]; then /bin/cat ${shell(loadedOutput)}; exit 0; fi\n  if [ -f ${shell(slow)} ]; then /bin/sleep 3; fi\n  if [ -f ${shell(oversized)} ]; then i=0; while [ "$i" -lt 70000 ]; do printf x; i=$((i + 1)); done; exit 0; fi\n  if [ -f ${shell(malformed)} ]; then printf '${target} = {\\n\\tpath = ${plist}\\n\\tpath = /tmp/duplicate.plist\\n}\\n'; exit 0; fi\n  if [ -f ${shell(nestedSpoof)} ]; then printf '${target} = {\\n\\tpath = ${plist}\\n\\targuments = {\\n\\t\\tpath = /tmp/spoof\\n\\t}\\n}\\n'; exit 0; fi\n  if [ -f ${shell(duplicateBlock)} ]; then printf '${target} = {\\n\\targuments = {\\n\\t}\\n\\targuments = {\\n\\t}\\n}\\n'; exit 0; fi\n  if [ -f ${shell(foreign)} ]; then path=/tmp/unmanaged.plist; else path=${shell(plist)}; fi\n  printf '${target} = {\\n\\tactive count = 1\\n\\tpath = %s\\n\\ttype = LaunchAgent\\n\\tstate = running\\n\\tprogram = ${executable}\\n\\targuments = {\\n\\t\\t${executable}\\n\\t\\t--launch-agent\\n\\t}\\n\\tenvironment = {\\n\\t\\tHOME => /redacted\\n\\t}\\n\\tpid = 123\\n}\\n' "$path"; exit 0\nfi\nif [ "$1" = enable ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then /usr/bin/touch ${shell(enabled)}; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = disable ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then if [ -f ${shell(disableLeavesEnabledUnloads)} ]; then /bin/rm -f ${shell(state)}; else /bin/rm -f ${shell(enabled)}; fi; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = bootstrap ] && [ "$2" = gui/${uid} ] && [ "$3" = ${shell(plist)} ] && [ "$#" = 3 ]; then /usr/bin/touch ${shell(state)}; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = bootout ] && [ "$2" = gui/${uid} ] && [ "$3" = ${shell(plist)} ] && [ "$#" = 3 ]; then /bin/rm -f ${shell(state)}; [ -f ${shell(failAfterBootout)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nexit 64\n`,
+        `#!/bin/sh\n{ printf 'CALL\\n'; for arg in "$@"; do printf 'ARG:%s\\n' "$arg"; done; printf 'END\\n'; } >> ${shell(log)}\nif [ "$1" = print ] && [ "$2" = gui/${uid} ] && [ "$#" = 2 ]; then [ -f ${shell(guiUnavailable)} ] && exit 64; exit 0; fi\nif [ "$1" = print-disabled ] && [ "$2" = gui/${uid} ] && [ "$#" = 2 ]; then\n  if [ -f ${shell(unknownDisabled)} ]; then value=mystery; elif [ -f ${shell(disabledValue)} ]; then value=$(/bin/cat ${shell(disabledValue)}); elif [ -f ${shell(enabled)} ]; then value=enabled; else value=disabled; fi\n  if [ -f ${shell(disabledOutput)} ]; then /bin/cat ${shell(disabledOutput)}; exit 0; fi\n  printf '\\ndisabled services = {\\n\\t\\t"${label}" => %s\\n}\\n' "$value"; exit 0\nfi\nif [ "$1" = print ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then\n  if [ -f ${shell(failOneQueryAfterEnable)} ]; then /bin/rm -f ${shell(failOneQueryAfterEnable)}; exit 64; fi\n  [ -f ${shell(queryFailed)} ] && exit 64\n  if [ -f ${shell(swapAncestor)} ]; then count=0; [ -f ${shell(swapCount)} ] && count=$(/bin/cat ${shell(swapCount)}); count=$((count + 1)); printf '%s\\n' "$count" > ${shell(swapCount)}; if [ "$count" = 2 ]; then /bin/mv ${shell(launchAgents)} ${shell(launchAgentsBackup)}; /bin/mkdir -m 700 ${shell(launchAgents)}; /bin/cp ${shell(join(home, `Library/LaunchAgents/${label}.plist`))} 2>/dev/null || /bin/cp ${shell(join(home, `Library/LaunchAgents.acceptance-backup/${label}.plist`))} ${shell(plist)}; fi; fi\n  [ -f ${shell(state)} ] || exit 113\n  if [ -f ${shell(loadedOutput)} ]; then /bin/cat ${shell(loadedOutput)}; exit 0; fi\n  if [ -f ${shell(slow)} ]; then /bin/sleep 3; fi\n  if [ -f ${shell(oversized)} ]; then i=0; while [ "$i" -lt 70000 ]; do printf x; i=$((i + 1)); done; exit 0; fi\n  if [ -f ${shell(malformed)} ]; then printf '${target} = {\\n\\tpath = ${plist}\\n\\tpath = /tmp/duplicate.plist\\n}\\n'; exit 0; fi\n  if [ -f ${shell(nestedSpoof)} ]; then printf '${target} = {\\n\\tpath = ${plist}\\n\\targuments = {\\n\\t\\tpath = /tmp/spoof\\n\\t}\\n}\\n'; exit 0; fi\n  if [ -f ${shell(duplicateBlock)} ]; then printf '${target} = {\\n\\targuments = {\\n\\t}\\n\\targuments = {\\n\\t}\\n}\\n'; exit 0; fi\n  if [ -f ${shell(foreign)} ]; then path=/tmp/unmanaged.plist; else path=${shell(plist)}; fi\n  printf '${target} = {\\n\\tactive count = 1\\n\\tpath = %s\\n\\ttype = LaunchAgent\\n\\tstate = running\\n\\tprogram = ${executable}\\n\\targuments = {\\n\\t\\t${executable}\\n\\t\\t--launch-agent\\n\\t}\\n\\tenvironment = {\\n\\t\\tHOME => /redacted\\n\\t}\\n\\tpid = 123\\n}\\n' "$path"; exit 0\nfi\nif [ "$1" = enable ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then /usr/bin/touch ${shell(enabled)}; [ -f ${shell(failOneQueryAfterEnable)}.armed ] && /usr/bin/touch ${shell(failOneQueryAfterEnable)}; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = disable ] && [ "$2" = ${target} ] && [ "$#" = 2 ]; then if [ -f ${shell(disableLeavesEnabledUnloads)} ]; then /bin/rm -f ${shell(state)}; else /bin/rm -f ${shell(enabled)}; fi; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = bootstrap ] && [ "$2" = gui/${uid} ] && [ "$3" = ${shell(plist)} ] && [ "$#" = 3 ]; then /usr/bin/touch ${shell(state)}; [ -f ${shell(failAfterMutation)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nif [ "$1" = bootout ] && [ "$2" = gui/${uid} ] && [ "$3" = ${shell(plist)} ] && [ "$#" = 3 ]; then /bin/rm -f ${shell(state)}; [ -f ${shell(failAfterBootout)} ] && /usr/bin/touch ${shell(queryFailed)}; exit 0; fi\nexit 64\n`,
         { mode: 0o700 },
       );
       await chmod(launchctl, 0o700);
@@ -2672,6 +2673,38 @@ test(
         false,
       );
 
+      await writeFile(`${failOneQueryAfterEnable}.armed`, "fail once\n");
+      const rollbackCallCount = (await readFile(log, "utf8")).split("CALL\n").length;
+      const rolledBackEnable = lifecycle("start");
+      assert.notEqual(rolledBackEnable.status, 0);
+      assert.match(rolledBackEnable.stderr, /prior disabled state was restored/);
+      const rollbackTail = (await readFile(log, "utf8")).split("CALL\n").slice(rollbackCallCount);
+      assert.equal(
+        rollbackTail.some((value) => value.includes("ARG:bootstrap\n")),
+        false,
+      );
+      assert.equal(
+        rollbackTail.some((value) => value.includes("ARG:disable\n")),
+        true,
+      );
+      assert.equal(
+        await lstat(enabled)
+          .then(() => true)
+          .catch(() => false),
+        false,
+      );
+      const rolledBackStatus = lifecycle("status");
+      assert.equal(rolledBackStatus.status, 0, rolledBackStatus.stderr);
+      assert.deepEqual(JSON.parse(rolledBackStatus.stdout), {
+        enabled: false,
+        loadedFromSelectedPlist: false,
+        releaseID: id,
+        role: "coordinator",
+        selected: true,
+        state: "stopped",
+      });
+      await rm(`${failOneQueryAfterEnable}.armed`);
+
       await writeFile(failAfterMutation, "fail after enable\n");
       const enableCallCount = (await readFile(log, "utf8")).split("CALL\n").length;
       const enablePartial = lifecycle("start");
@@ -2682,15 +2715,29 @@ test(
         enableTail.some((value) => value.includes("ARG:bootstrap\n")),
         false,
       );
+      assert.equal(
+        enableTail.some((value) => value.includes("ARG:disable\n")),
+        true,
+      );
       await rm(failAfterMutation);
       await rm(queryFailed);
-      await rm(enabled);
+      await rm(enabled, { force: true });
 
       await writeFile(enabled, "enabled\n");
       await writeFile(failAfterMutation, "fail after bootstrap\n");
+      const bootstrapCallCount = (await readFile(log, "utf8")).split("CALL\n").length;
       const bootstrapUnknown = lifecycle("start");
       assert.notEqual(bootstrapUnknown.status, 0);
       assert.match(bootstrapUnknown.stderr, /start request may have taken effect/);
+      const bootstrapTail = (await readFile(log, "utf8")).split("CALL\n").slice(bootstrapCallCount);
+      assert.equal(
+        bootstrapTail.some((value) => value.includes("ARG:disable\n")),
+        false,
+      );
+      assert.equal(
+        bootstrapTail.some((value) => value.includes("ARG:bootout\n")),
+        false,
+      );
       await rm(failAfterMutation);
       await rm(queryFailed);
       await rm(state);
@@ -2723,7 +2770,7 @@ test(
       const callsBeforeSwap = (await readFile(log, "utf8")).split("CALL\n").length;
       const swappedAncestor = lifecycle("start");
       assert.notEqual(swappedAncestor.status, 0);
-      assert.match(swappedAncestor.stderr, /enabled, but start was not confirmed/);
+      assert.match(swappedAncestor.stderr, /prior disabled state was restored/);
       const swapCalls = (await readFile(log, "utf8")).split("CALL\n").slice(callsBeforeSwap);
       assert.equal(
         swapCalls.some((value) => value.includes("ARG:bootstrap\n")),
@@ -2733,7 +2780,7 @@ test(
       await rename(launchAgentsBackup, launchAgents);
       await rm(swapAncestor);
       await rm(swapCount);
-      await rm(enabled);
+      await rm(enabled, { force: true });
 
       await writeFile(state, "loaded\n");
       await writeFile(foreign, "foreign\n");

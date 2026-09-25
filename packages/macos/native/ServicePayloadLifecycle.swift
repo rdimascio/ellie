@@ -2,7 +2,8 @@ import Darwin
 import Foundation
 
 private enum LifecycleFailure: Error {
-  case rejected, recoveryRequired, busy, unavailable, unmanaged, partialEnable, partialDisable
+  case rejected, recoveryRequired, busy, unavailable, unmanaged, enableRolledBack, partialEnable,
+    partialDisable
   case enableUnknown, disableUnknown, startUnknown, stopUnknown
 }
 private struct LaunchResult {
@@ -32,6 +33,9 @@ private func lifecycleFail(_ error: Error) -> Never {
     message = "Ellie could not verify the selected service state; no lifecycle command was sent."
   case .unmanaged:
     message = "The loaded service is not the selected managed service; it was preserved."
+  case .enableRolledBack:
+    message =
+      "The start was not sent; the selected service's prior disabled state was restored."
   case .partialEnable:
     message =
       "The selected service was enabled, but start was not confirmed; run status before retrying."
@@ -351,6 +355,19 @@ private func emitStatus(_ role: String, selected: LifecycleSelectedRole?, value:
   FileHandle.standardOutput.write(data + Data("\n".utf8))
 }
 
+private func restoreDisabledAfterUnstartedEnable(
+  executable: String, uid: uid_t, selected: LifecycleSelectedRole
+) -> Bool {
+  let target = "gui/\(uid)/\(selected.label)"
+  do {
+    let result = try runLaunchctl(executable, ["disable", target], timeout: 20)
+    guard !result.timedOut, result.code == 0 else { return false }
+    return try !observation(executable: executable, uid: uid, selected: selected).enabled
+  } catch {
+    return false
+  }
+}
+
 func runLifecycleCommand(_ input: [String]) throws -> Never {
   var args = input
   let command = args.removeFirst()
@@ -413,7 +430,14 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
                   throw LifecycleFailure.partialEnable
                 }
                 emitStatus(role, selected: selected, value: afterEnable)
-              } catch { throw LifecycleFailure.partialEnable }
+              } catch {
+                if restoreDisabledAfterUnstartedEnable(
+                  executable: executable, uid: getuid(), selected: selected)
+                {
+                  throw LifecycleFailure.enableRolledBack
+                }
+                throw LifecycleFailure.partialEnable
+              }
             } else {
               emitStatus(role, selected: selected, value: initial)
             }
@@ -431,7 +455,14 @@ func runLifecycleCommand(_ input: [String]) throws -> Never {
             }
             try revalidate()
           } catch {
-            if enableConfirmed { throw LifecycleFailure.partialEnable }
+            if enableConfirmed {
+              if restoreDisabledAfterUnstartedEnable(
+                executable: executable, uid: getuid(), selected: selected)
+              {
+                throw LifecycleFailure.enableRolledBack
+              }
+              throw LifecycleFailure.partialEnable
+            }
             throw error
           }
           do {
