@@ -225,6 +225,7 @@ export class DistributedScheduler {
   }
   private check(lease: Lease): void {
     if (lease.cancelled) return;
+    const nodes = this.nodes();
     const now = Date.now();
     if (lease.members.some((m) => m.task.expiresAt <= now))
       return this.cancel(
@@ -232,7 +233,6 @@ export class DistributedScheduler {
         "Distributed inference exceeded its deadline; all members are stopping.",
         "timed_out",
       );
-    const nodes = this.nodes();
     if (
       lease.members.some(
         (m) =>

@@ -340,7 +340,11 @@ final class DashboardSyncStore: ObservableObject {
     remote = nil
   }
   func readServerCopy() {
+    guard task == nil, phase != .privacyBlocked else { return }
     let selected = profile
+    // A previous server copy is not evidence for this explicit read. Remove it
+    // before requesting a fresh revision so a failed read cannot be imported.
+    remote = nil
     launch(
       .loading,
       operation: { try await self.transport.read(selected, credential: self.credential) }
