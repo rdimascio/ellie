@@ -29,6 +29,30 @@ final class SpeechTurnTests: XCTestCase {
   }
 
   @MainActor
+  func testVoiceIdentityMetadataCannotEnterReviewedCommandAuthority() throws {
+    let turn = UUID().uuidString.lowercased()
+    for metadata in [
+      #""speakerId":"recognized-owner""#,
+      #""voiceId":"synthesized-owner""#,
+      #""confidence":1"#,
+      #""authorized":true"#,
+    ] {
+      XCTAssertThrowsError(
+        try SpeechTransport.decodeTranscript(
+          Data("{\"turnId\":\"\(turn)\",\"text\":\"Open Safari\",\(metadata)}".utf8),
+          turn: turn))
+    }
+    for transcript in [
+      "Speaker recognized-owner: Open Safari",
+      "Voice synthesized-owner says play",
+      "[speaker_0] scroll down",
+    ] {
+      XCTAssertNil(SpeechTurnStore.reviewedApp(in: transcript), transcript)
+      XCTAssertNil(BrowserVoiceIntentParser.parse(transcript), transcript)
+    }
+  }
+
+  @MainActor
   func testInitializationAndAvailabilityNeverStartRecordingOrTranscription() async {
     let recorder = SpeechFakeRecorder()
     let transport = SpeechFakeTransport()

@@ -1502,30 +1502,49 @@ test("native browser commands require the exact read or control grant and preser
 test("native speech stays inert until one explicit synthetic browser mutation and unknown is not replayed", async (t) => {
   const browserActions: unknown[] = [];
   const revision = "7".repeat(64);
-  const f = await fixture(undefined, {
-    nodes: async () => [
-      {
-        ...nativeTarget,
-        capabilities: ["browser.read", "browser.control"],
-      },
-    ],
-    openApp: async () => ({ ok: true, message: "unused" }),
-    execute: async (nodeId, action, options) => {
-      assert.equal(nodeId, nativeTarget.id);
-      assert.ok(options?.signal);
-      browserActions.push(action);
-      return {
-        ok: false,
-        message: "Browser action did not confirm completion.",
-        browser: {
-          source: "webmcp",
-          operation: "command",
-          status: "unknown",
-          revision,
-        },
+  const identityTaggedSpeech: SpeechInput = {
+    async *transcribe(audio) {
+      let bytes = 0;
+      for await (const chunk of audio) bytes += chunk.length;
+      assert.ok(bytes > 0);
+      yield {
+        text: "Synthetic transcript",
+        final: true,
+        speakerId: "recognized-owner",
+        voiceId: "synthesized-owner",
+        confidence: 1,
+        authorized: true,
       };
     },
-  });
+  };
+  const f = await fixture(
+    undefined,
+    {
+      nodes: async () => [
+        {
+          ...nativeTarget,
+          capabilities: ["browser.read", "browser.control"],
+        },
+      ],
+      openApp: async () => ({ ok: true, message: "unused" }),
+      execute: async (nodeId, action, options) => {
+        assert.equal(nodeId, nativeTarget.id);
+        assert.ok(options?.signal);
+        browserActions.push(action);
+        return {
+          ok: false,
+          message: "Browser action did not confirm completion.",
+          browser: {
+            source: "webmcp",
+            operation: "command",
+            status: "unknown",
+            revision,
+          },
+        };
+      },
+    },
+    identityTaggedSpeech,
+  );
   t.after(() => f.close());
 
   const invitation = await f.nativeAuth.invite({
