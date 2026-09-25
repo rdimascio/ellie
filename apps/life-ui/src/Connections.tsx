@@ -402,6 +402,10 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                       ? ` · Updated ${new Date(connection.lastSyncAt).toLocaleString()}`
                       : ""}
                   </small>
+                  {connection.provider === "google-calendar" &&
+                    connection.state === "connected" && (
+                      <span role="status">{calendarReadiness(connection)}</span>
+                    )}
                   {connection.error && <span role="alert">{connection.error}</span>}
                 </div>
               </div>
@@ -627,6 +631,16 @@ function stateLabel(state: ConnectorConnection["state"]) {
     error: "Needs attention",
     revoked: "Disconnected",
   }[state];
+}
+
+function calendarReadiness(connection: ConnectorConnection) {
+  const selection =
+    connection.selectedCalendarId === "primary"
+      ? "Primary calendar selected."
+      : connection.selectedCalendarId
+        ? "Non-primary calendar selected. Open imported activity to see or change it."
+        : "No calendar is selected. Open imported activity to choose one.";
+  return `${selection} ${connection.lastSyncAt ? "Latest import is shown above." : "No completed import yet; use Refresh."}`;
 }
 
 function IntegrationMark({ provider }: { provider: string }) {

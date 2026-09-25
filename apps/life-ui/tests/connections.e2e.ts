@@ -388,8 +388,44 @@ try {
       );
     };
   };
+  const connectionsRoute = "**/api/connections";
+  const hideCompletedCalendarImport = async (route: import("@playwright/test").Route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    const response = await route.fetch();
+    const value = await response.json();
+    const calendar = value.connections.find((item: { id: string }) => item.id === connection.id);
+    if (calendar) delete calendar.lastSyncAt;
+    await route.fulfill({
+      status: response.status(),
+      contentType: "application/json",
+      body: JSON.stringify(value),
+    });
+  };
+  await page.route(connectionsRoute, hideCompletedCalendarImport);
+  await page.reload();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await openSettings();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  await page
+    .locator(".connection-list article")
+    .filter({ hasText: "Private fixture calendar" })
+    .getByRole("status")
+    .getByText("Primary calendar selected. No completed import yet; use Refresh.")
+    .waitFor();
+  await page.unroute(connectionsRoute, hideCompletedCalendarImport);
+  await page.reload();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await openSettings();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
   await page.getByText("Private fixture calendar").waitFor();
   await page.getByText(/Google Calendar · Connected/).waitFor();
+  await page
+    .getByRole("status")
+    .getByText("Primary calendar selected. Latest import is shown above.")
+    .waitFor();
   assert.equal(
     await page.getByLabel("Automatically create private preparation plans").isChecked(),
     true,
@@ -674,6 +710,12 @@ try {
     true,
   );
   await calendarArticle.getByLabel("Calendar to read").selectOption("selected@example.test");
+  await calendarArticle
+    .getByRole("status")
+    .getByText(
+      "Non-primary calendar selected. Open imported activity to see or change it. Latest import is shown above.",
+    )
+    .waitFor();
   await calendarArticle.getByText("Selected calendar visit").waitFor();
   assert.equal(
     await calendarArticle.getByText("Doctor appointment").count(),
