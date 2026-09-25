@@ -10,8 +10,19 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
 
   @Published private(set) var enabledTargetID: String?
   @Published private(set) var available = false
-  private var controller = WatchMediaPhoneController()
+  private var controller: WatchMediaPhoneController
   private var activated = false
+
+  override init() {
+    controller = WatchMediaPhoneController()
+    super.init()
+  }
+
+  init(controller: WatchMediaPhoneController) {
+    self.controller = controller
+    super.init()
+    enabledTargetID = controller.enabledTargetID
+  }
 
   func activate() {
     guard WCSession.isSupported() else { return }
@@ -108,7 +119,7 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
       #if DEBUG
       WatchPairedUITestReadiness.noteDecoded(enabledTargetID: self.enabledTargetID)
       #endif
-      let response = await self.controller.handle(request) {
+      let response = await self.handle(request) {
         session.activationState == .activated && session.isReachable
           && session.isPaired && session.isWatchAppInstalled
       }
@@ -119,13 +130,26 @@ final class WatchMediaPhoneBridge: NSObject, ObservableObject, WCSessionDelegate
     }
   }
 
+  func handle(
+    _ request: WatchMediaRequest, reachable: @escaping () -> Bool = { true }
+  ) async -> WatchMediaReply {
+    let response = await controller.handle(request, reachable: reachable)
+    enabledTargetID = controller.enabledTargetID
+    return response
+  }
+
   private func updateAvailability(_ session: WCSession) {
-    available = watchMediaSessionIsAvailable(
+    updateAvailability(
       activated: session.activationState == .activated,
       paired: session.isPaired,
       watchAppInstalled: session.isWatchAppInstalled)
-    if !available { disable() }
     recordPairedFixtureReadiness()
+  }
+
+  func updateAvailability(activated: Bool, paired: Bool, watchAppInstalled: Bool) {
+    available = watchMediaSessionIsAvailable(
+      activated: activated, paired: paired, watchAppInstalled: watchAppInstalled)
+    if !available { disable() }
   }
 }
 
