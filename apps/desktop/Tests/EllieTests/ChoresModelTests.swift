@@ -97,6 +97,38 @@ final class ChoresModelTests: XCTestCase {
     }
 
     @MainActor
+    func testCommittedEditDoesNotDependOnPostCommitPermissionRepair() async throws {
+        let location = temporaryLocation()
+        let day = try ChoreDay("2026-09-13")
+        let initial = ChoresStore(fileURL: location, defaultTimeZone: TimeZone(identifier: "UTC")!)
+        initial.add(title: "Bins", member: "Sam", dueDay: day)
+        XCTAssertNil(initial.error)
+        let id = try XCTUnwrap(initial.state.chores.first?.id)
+
+        var committedPathAttributeAttempts = 0
+        let store = ChoresStore(fileURL: location, defaultTimeZone: TimeZone(identifier: "UTC")!) {
+            attributes, path in
+            if path == location.path {
+                committedPathAttributeAttempts += 1
+                throw CocoaError(.fileWriteNoPermission)
+            }
+            try FileManager.default.setAttributes(attributes, ofItemAtPath: path)
+        }
+
+        store.update(id: id, title: "Recycling", member: "Sam", dueDay: day)
+
+        XCTAssertEqual(committedPathAttributeAttempts, 0,
+            "all throwing permission checks must finish before the durable chore file is replaced")
+        XCTAssertNil(store.error)
+        XCTAssertEqual(store.state.chores.first?.title, "Recycling")
+        XCTAssertEqual(ChoresStore(fileURL: location).state.chores.first?.title, "Recycling")
+        let fileMode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: location.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(fileMode.intValue & 0o777, 0o600,
+            "the committed staging file must already carry its final private mode")
+    }
+
+    @MainActor
     func testCorruptFileIsPreservedAndBlocksWrites() async throws {
         let location = temporaryLocation()
         try FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)
