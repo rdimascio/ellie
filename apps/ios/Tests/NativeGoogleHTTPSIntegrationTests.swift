@@ -74,6 +74,35 @@ final class NativeGoogleHTTPSIntegrationTests: XCTestCase {
     XCTAssertNil(missing.text)
   }
 
+  @MainActor
+  func testPinnedAgendaRejectsCalendarChangedAfterListing() async throws {
+    let phone = try credential("allowed")
+    let suite = "ellie-google-https-\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    defer { defaults.removePersistentDomain(forName: suite) }
+    let store = IOSGoogleAgendaStore(client: IOSPinnedAgendaClient(), defaults: defaults)
+    store.bind(phone)
+    store.refresh()
+    try await eventually { !store.isRefreshing && store.connections.count == 1 }
+    let connection = try XCTUnwrap(store.connections.first)
+    store.select(connection.id)
+    store.refresh()
+    try await eventually { !store.isRefreshing && store.snapshot != nil }
+    let original = try XCTUnwrap(store.snapshot)
+    XCTAssertEqual(original.selectedCalendarId, "selected@example.test")
+    let originalReadAt = store.refreshedAt
+
+    try await control("calendar-change-after-list", credential: phone)
+    store.refresh()
+    try await eventually { !store.isRefreshing }
+    try await control("calendar-changed/1", credential: phone)
+
+    XCTAssertEqual(store.snapshot, original,
+      "a production-route mismatch must retain the last matching session snapshot")
+    XCTAssertEqual(store.refreshedAt, originalReadAt)
+    XCTAssertTrue(store.message?.contains("changed during this read") == true)
+  }
+
   func testLifeAccountGrantIsIndependentOfNativeEnrollment() async throws {
     let denied = try credential("denied")
     do {
