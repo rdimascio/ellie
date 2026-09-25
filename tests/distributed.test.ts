@@ -302,7 +302,9 @@ test("whole-group cancellation before delivery releases reservations without sen
   }
 });
 
-test("a stale cancellation callback cannot release a newer lease on the same Macs", async () => {
+test("a stale cancellation callback cannot release a newer lease on the same Macs", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now++);
   const f = await fixture();
   const g = group();
   const scheduler = new DistributedScheduler({
