@@ -331,8 +331,13 @@ struct IOSGmailInboxView: View {
                 if let notice = store.notice {
                     Text(notice).accessibilityIdentifier("ios-gmail-notice")
                 }
+                NavigationLink("View Gmail status in Ellie Life") {
+                    LifeWebView(credential: LifeWebCredential(enrollment: credential))
+                }
+                .accessibilityIdentifier("ios-gmail-life-status")
             } footer: {
-                Text("Requires an explicit Ellie Life account grant. Account and message previews come from imports on your Mac. Selecting a message makes one fresh read-only Gmail body request; sync and account setup stay on your Mac.")
+                Text("Requires an explicit Ellie Life account grant. This iPhone can inspect connection status, but Google consent and provider refresh must be completed on your coordinator Mac. Account and message previews come from its imports. Selecting a message makes one fresh read-only Gmail body request.")
+                    .accessibilityIdentifier("ios-gmail-setup-guidance")
             }
             if !store.accounts.isEmpty {
                 Section("Gmail account") {

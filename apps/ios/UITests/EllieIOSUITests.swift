@@ -118,6 +118,11 @@ final class EllieIOSUITests: XCTestCase {
         defer { app.terminate() }
         let reads = app.staticTexts["ios-gmail-fixture-reads"]
         XCTAssertEqual(reads.label, "Fixture body reads: 0")
+        XCTAssertTrue(app.buttons["ios-gmail-life-status"].exists)
+        XCTAssertTrue(app.staticTexts["ios-gmail-setup-guidance"].label.contains(
+            "Google consent and provider refresh must be completed on your coordinator Mac"))
+        XCTAssertEqual(reads.label, "Fixture body reads: 0",
+            "Viewing Gmail setup guidance must not read an account or message body")
         app.buttons["ios-gmail-refresh"].tap()
         let account = app.buttons["ios-gmail-account-fixture_gmail"]
         XCTAssertTrue(account.waitForExistence(timeout: 5))
@@ -182,8 +187,13 @@ final class EllieIOSUITests: XCTestCase {
         app.buttons["home-fixture-load-pairing"].tap()
         openDashboard(named: "Home", in: app)
         let refresh = try revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app)
+        let status = try revealWeatherControl(app.buttons["ios-agenda-life-status"], in: app)
+        XCTAssertEqual(status.label, "View calendar status in Ellie Life")
+        XCTAssertTrue(app.staticTexts["ios-agenda-setup-guidance"].label.contains(
+            "Google consent, calendar choice, and provider refresh must be completed on your coordinator Mac"))
         XCTAssertEqual(calls.label, "Fixture agenda requests: 0",
-            "Opening the native calendar widget must not read an account")
+            "Opening the native calendar widget and its setup guidance must not read an account")
+        _ = try revealWeatherControl(refresh, in: app)
         refresh.tap()
         XCTAssertTrue(app.buttons["ios-agenda-account"].waitForExistence(timeout: 5))
         try revealWeatherControl(app.buttons["ios-agenda-account"], in: app).tap()
