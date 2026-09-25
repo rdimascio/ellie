@@ -1852,6 +1852,23 @@ test(
         );
         return { home, services };
       };
+      const prepareSelected = async (name: string) => {
+        const value = await prepareHome(name, true);
+        const selected = run(installer, [
+          "select",
+          id,
+          "--roles",
+          "coordinator",
+          "--test-home-root",
+          value.home,
+        ]);
+        assert.equal(selected.status, 0, selected.stderr);
+        return {
+          ...value,
+          app: join(value.home, "Applications/Ellie Coordinator.app"),
+          plist: join(value.home, "Library/LaunchAgents/org.ellie.assistant.coordinator.plist"),
+        };
+      };
       const preflight = (
         home: string,
         roles: "coordinator" | "node" | "coordinator,node",
@@ -1865,6 +1882,11 @@ test(
           | "unavailable",
         extra: string[] = [],
         releaseID = id,
+        recovery?: {
+          role: "coordinator" | "node";
+          reason: string;
+          details: readonly string[];
+        },
       ) => {
         const result = run(installer, [
           "preflight-select",
@@ -1880,6 +1902,7 @@ test(
         assert.equal(result.status, status === "ready" ? 0 : 1, result.stderr);
         const expected = {
           command: "preflight-select",
+          ...recovery,
           ready: status === "ready",
           releaseID,
           roles: roles.split(","),
@@ -1888,6 +1911,16 @@ test(
         };
         assert.equal(result.stdout, canonicalJSON(expected));
         assert.deepEqual(JSON.parse(result.stdout), expected);
+        if (recovery) {
+          assert.equal(status, "recovery_required");
+          const diagnostic = JSON.stringify(recovery);
+          assert.doesNotMatch(
+            diagnostic,
+            /Applications|LaunchAgents|[a-f0-9]{40,}|preflight-|ellie-stage|ellie-backup/,
+          );
+        } else {
+          assert.notEqual(status, "recovery_required");
+        }
       };
 
       const fresh = await prepareHome("preflight-fresh");
@@ -1922,11 +1955,19 @@ test(
 
       const lockOnly = await prepareHome("preflight-lock-only");
       await writeFile(join(lockOnly.services, "selection.lock"), "", { mode: 0o600 });
-      preflight(lockOnly.home, "coordinator", "recovery_required");
+      preflight(lockOnly.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["selection_layout"],
+      });
 
       const receiptsOnly = await prepareHome("preflight-receipts-only");
       await mkdir(join(receiptsOnly.services, "receipts"), { mode: 0o700 });
-      preflight(receiptsOnly.home, "coordinator", "recovery_required");
+      preflight(receiptsOnly.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["selection_layout"],
+      });
 
       const selected = await prepareHome("preflight-selected", true);
       assert.equal(
@@ -1947,17 +1988,42 @@ test(
       const selectedLock = join(selected.services, "selection.lock");
       const selectedReceipts = join(selected.services, "receipts");
       await rm(selectedLock);
-      preflight(selected.home, "coordinator", "recovery_required");
+      preflight(selected.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["selection_layout"],
+      });
       await writeFile(selectedLock, "", { mode: 0o600 });
       await chmod(selectedReceipts, 0o755);
-      preflight(selected.home, "coordinator", "recovery_required");
+      preflight(selected.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["receipt_layout"],
+      });
       await chmod(selectedReceipts, 0o700);
 
-      for (const target of ["services-mode", "receipts-mode", "lock-mode"]) {
-        preflight(selected.home, "coordinator", "recovery_required", [
-          "--test-preflight-before-final",
-          target,
-        ]);
+      for (const [target, recovery] of [
+        [
+          "services-mode",
+          { role: "coordinator", reason: "topology_mismatch", details: ["services_directory"] },
+        ],
+        [
+          "receipts-mode",
+          { role: "coordinator", reason: "receipt_mismatch", details: ["receipt_layout"] },
+        ],
+        [
+          "lock-mode",
+          { role: "coordinator", reason: "receipt_mismatch", details: ["selection_lock"] },
+        ],
+      ] as const) {
+        preflight(
+          selected.home,
+          "coordinator",
+          "recovery_required",
+          ["--test-preflight-before-final", target],
+          id,
+          recovery,
+        );
         await chmod(
           target === "services-mode"
             ? selected.services
@@ -1980,9 +2046,61 @@ test(
       await chmod(receipt, 0o600);
       await writeFile(receipt, "malformed\n");
       const receiptBefore = await exactTree(selected.home);
-      preflight(selected.home, "coordinator", "recovery_required");
+      preflight(selected.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "receipt_mismatch",
+        details: ["encoding_or_value"],
+      });
       assert.deepEqual(await exactTree(selected.home), receiptBefore);
       await writeFile(receipt, receiptBytes);
+
+      const modeMismatch = await prepareSelected("preflight-application-mode");
+      await chmod(modeMismatch.app, 0o700);
+      const modeMismatchBefore = await exactTree(modeMismatch.home);
+      preflight(modeMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "application_mismatch",
+        details: ["mode"],
+      });
+      assert.deepEqual(await exactTree(modeMismatch.home), modeMismatchBefore);
+
+      const contentMismatch = await prepareSelected("preflight-application-content");
+      const executable = join(contentMismatch.app, "Contents/MacOS/EllieService");
+      const executableBytes = await readFile(executable);
+      await chmod(executable, 0o644);
+      executableBytes[0] = executableBytes[0]! ^ 1;
+      await writeFile(executable, executableBytes);
+      await chmod(executable, 0o555);
+      const contentMismatchBefore = await exactTree(contentMismatch.home);
+      preflight(contentMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "application_mismatch",
+        details: ["content", "signature"],
+      });
+      assert.deepEqual(await exactTree(contentMismatch.home), contentMismatchBefore);
+
+      const topologyMismatch = await prepareSelected("preflight-topology");
+      await rename(
+        join(topologyMismatch.home, "Applications"),
+        join(topologyMismatch.home, "Applications-preserved"),
+      );
+      const topologyMismatchBefore = await exactTree(topologyMismatch.home);
+      preflight(topologyMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "topology_mismatch",
+        details: ["selected_role_assets"],
+      });
+      assert.deepEqual(await exactTree(topologyMismatch.home), topologyMismatchBefore);
+
+      const plistMismatch = await prepareSelected("preflight-plist");
+      await writeFile(plistMismatch.plist, "changed\n", { mode: 0o600 });
+      const plistMismatchBefore = await exactTree(plistMismatch.home);
+      preflight(plistMismatch.home, "coordinator", "recovery_required", [], id, {
+        role: "coordinator",
+        reason: "plist_mismatch",
+        details: ["content"],
+      });
+      assert.deepEqual(await exactTree(plistMismatch.home), plistMismatchBefore);
 
       const collision = await prepareHome("preflight-collision", true);
       await mkdir(join(collision.home, "Applications/Ellie Coordinator.app"), { mode: 0o700 });
@@ -1991,24 +2109,32 @@ test(
       assert.deepEqual(await exactTree(collision.home), collisionBefore);
 
       const pending = await prepareHome("preflight-pending");
-      for (const relativeName of [
-        "selection-journal.json",
-        "migration-switch-journal.json",
-        "legacy-restore-journal.json",
-        "migrations/migration-preparation.json",
-      ]) {
+      for (const [relativeName, detail] of [
+        ["selection-journal.json", "selection"],
+        ["migration-switch-journal.json", "migration"],
+        ["legacy-restore-journal.json", "migration"],
+        ["migrations/migration-preparation.json", "migration"],
+      ] as const) {
         const path = join(pending.services, relativeName);
         await mkdir(dirname(path), { recursive: true, mode: 0o700 });
         await writeFile(path, "malformed\n", { mode: 0o600 });
         const before = await exactTree(pending.home);
-        preflight(pending.home, "coordinator", "recovery_required");
+        preflight(pending.home, "coordinator", "recovery_required", [], id, {
+          role: "coordinator",
+          reason: "journal_pending",
+          details: [detail],
+        });
         assert.deepEqual(await exactTree(pending.home), before);
         await rm(path);
       }
       await writeFile(join(pending.services, "selection-journal.json"), "malformed\n", {
         mode: 0o600,
       });
-      preflight(pending.home, "coordinator", "recovery_required", [], `${id}-missing`);
+      preflight(pending.home, "coordinator", "recovery_required", [], `${id}-missing`, {
+        role: "coordinator",
+        reason: "journal_pending",
+        details: ["selection"],
+      });
       await rm(join(pending.services, "selection-journal.json"));
 
       const contention = await prepareHome("preflight-contention");
