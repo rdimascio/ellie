@@ -11,6 +11,7 @@ enum BrowserVoiceIntent: Equatable, Sendable {
     case search(query: String)
     case scroll(BrowserScrollDirection)
     case openResult(index: Int)
+    case openSelectedResult
     case play
     case pause
     case back
@@ -22,6 +23,7 @@ enum BrowserVoiceIntent: Equatable, Sendable {
         case .search(let query): "Search for: \(query)"
         case .scroll(let direction): "Scroll \(direction.rawValue)"
         case .openResult(let index): "Open result \(index)"
+        case .openSelectedResult: "Open selected result"
         case .play: "Play"
         case .pause: "Pause"
         case .back: "Back"
@@ -76,6 +78,7 @@ enum BrowserVoiceIntentParser {
         }
 
         switch command {
+        case "open that": return .openSelectedResult
         case "play": return .play
         case "pause": return .pause
         case "back", "go back": return .back
