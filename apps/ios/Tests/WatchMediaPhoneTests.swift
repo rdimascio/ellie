@@ -180,6 +180,66 @@ final class WatchMediaPhoneTests: XCTestCase {
   }
 
   @MainActor
+  func testCurrentRevocationSynchronizesBridgeDisableWithoutDispatchOrReplay() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let inventory = WatchRevokedInventory()
+    let browser = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(
+      inventory: inventory, browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: browser,
+          uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let bridge = WatchMediaPhoneBridge(controller: controller)
+    XCTAssertEqual(bridge.enabledTargetID, node.id)
+
+    let request = WatchMediaRequest.make(.read)
+    let revoked = await bridge.handle(request)
+    XCTAssertEqual(revoked.state, .blocked)
+    XCTAssertNil(controller.enabledTargetID)
+    XCTAssertNil(bridge.enabledTargetID,
+                 "a current revocation must clear the bridge's published target")
+    let dispatchesAfterRevocation = await browser.dispatchCount
+    XCTAssertEqual(dispatchesAfterRevocation, 0)
+
+    let replay = await bridge.handle(request)
+    XCTAssertEqual(replay.state, .blocked)
+    let inventoryRequests = await inventory.requestCount
+    XCTAssertEqual(inventoryRequests, 1,
+                   "a consumed request must not re-enter inventory after revocation")
+    let finalDispatches = await browser.dispatchCount
+    XCTAssertEqual(finalDispatches, 0,
+                   "revocation and replay must not reach the browser transport")
+  }
+
+  @MainActor
+  func testAvailabilityDisablesOnlyCurrentLifecycleLossAndPreservesReactivatedTarget() {
+    let node = PhoneControlNode(id: "mac-b", label: "Studio B", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let controller = WatchMediaPhoneController(
+      inventory: WatchTestInventory(node: node),
+      browserTransport: WatchTestBrowserTransport())
+    XCTAssertTrue(controller.enable(credential: credential(target: node.id), node: node))
+    let bridge = WatchMediaPhoneBridge(controller: controller)
+
+    // An inactive/deactivated delegate callback reaches MainActor later. The bridge must use the
+    // current session snapshot, so an already-reactivated replacement keeps its selected target.
+    bridge.updateAvailability(activated: true, paired: true, watchAppInstalled: true)
+
+    XCTAssertTrue(bridge.available)
+    XCTAssertEqual(bridge.enabledTargetID, node.id)
+    XCTAssertEqual(controller.enabledTargetID, node.id)
+
+    bridge.updateAvailability(activated: true, paired: false, watchAppInstalled: true)
+    XCTAssertFalse(bridge.available)
+    XCTAssertNil(bridge.enabledTargetID)
+    XCTAssertNil(controller.enabledTargetID,
+                 "a current lifecycle loss must clear both controller and bridge authority")
+  }
+
+  @MainActor
   func testReplayCacheRetainsLiveIDsAndPrunesOnlyExpiredRequests() async {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
                                 capabilities: ["browser.read", "browser.control"])
@@ -242,12 +302,13 @@ final class WatchMediaPhoneTests: XCTestCase {
   }
 
   private func credential(
-    expiry: Int64 = Int64(Date().timeIntervalSince1970 * 1_000) + 60_000
+    expiry: Int64 = Int64(Date().timeIntervalSince1970 * 1_000) + 60_000,
+    target: String = "mac"
   ) -> NativeEnrollmentCredential {
     NativeEnrollmentCredential(origin: URL(string: "https://example.test")!,
       certificateSha256: String(repeating: "a", count: 64),
       client: NativeClient(id: "phone", role: "phone", label: "iPhone",
-        grants: [NativeGrant(target: "mac", capabilities: ["browser.read", "browser.control"])],
+        grants: [NativeGrant(target: target, capabilities: ["browser.read", "browser.control"])],
         createdAt: 1, expiresAt: expiry),
       token: String(repeating: "b", count: 64))
   }
@@ -290,8 +351,21 @@ private actor WatchTestInventory: PhoneControlTransporting {
             credential: NativeEnrollmentCredential) async throws -> PhoneCommandOutcome { .unknown }
 }
 
+private actor WatchRevokedInventory: PhoneControlTransporting {
+  private(set) var requestCount = 0
+
+  func nodes(for credential: NativeEnrollmentCredential) async throws -> [PhoneControlNode] {
+    requestCount += 1
+    throw PhoneControlFailure.revoked
+  }
+
+  func open(_ app: PhoneControlApp, on nodeID: String,
+            credential: NativeEnrollmentCredential) async throws -> PhoneCommandOutcome { .unknown }
+}
+
 private actor WatchTestBrowserTransport: BrowserPhoneControlTransporting {
   private(set) var playCount = 0
+  private(set) var dispatchCount = 0
   private let commandStatus: BrowserPhoneCommandStatus
 
   init(commandStatus: BrowserPhoneCommandStatus = .unknown) {
@@ -300,6 +374,7 @@ private actor WatchTestBrowserTransport: BrowserPhoneControlTransporting {
 
   func execute(_ action: BrowserPhoneAction, nodeID: String,
                credential: NativeEnrollmentCredential) async throws -> BrowserPhoneResponse {
+    dispatchCount += 1
     switch action {
     case .refresh: return .status(source: .accessibility, connected: true, revision: "rev")
     case .read: return .page(BrowserPhonePage(nodeID: nodeID, source: .accessibility,
