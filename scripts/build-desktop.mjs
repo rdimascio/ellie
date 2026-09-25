@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { machOFiles, stageRuntime } from "./bundle-runtime.mjs";
+import { finalizeStagedRuntime, machOFiles, stageRuntime } from "./bundle-runtime.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagePath = join(repositoryRoot, "apps/desktop");
@@ -175,14 +175,7 @@ async function main() {
     await cp(join(binaryPath, "Ellie"), join(macOSDirectory, "Ellie"));
     await chmod(join(macOSDirectory, "Ellie"), 0o755);
     await createIcon(workDirectory, resourcesDirectory);
-    const runtime = options.runtime
-      ? await stageRuntime(options.runtime, resourcesDirectory)
-      : null;
-    await writeFile(
-      join(resourcesDirectory, "build-provenance.json"),
-      `${JSON.stringify({ bundleId: options.bundleId, runtime, sourceModified, sourceRevision, version: "0.1.0" }, null, 2)}\n`,
-      { mode: 0o644 },
-    );
+    let runtime = options.runtime ? await stageRuntime(options.runtime, resourcesDirectory) : null;
     await writeFile(
       join(contents, "Info.plist"),
       `<?xml version="1.0" encoding="UTF-8"?>
@@ -215,6 +208,12 @@ async function main() {
     // so its executables are signed one at a time before the bundle seals them.
     for (const executable of runtime ? await machOFiles(join(resourcesDirectory, "runtime")) : [])
       run("/usr/bin/codesign", ["--force", "--sign", "-", executable]);
+    runtime = await finalizeStagedRuntime(resourcesDirectory, runtime);
+    await writeFile(
+      join(resourcesDirectory, "build-provenance.json"),
+      `${JSON.stringify({ bundleId: options.bundleId, runtime, sourceModified, sourceRevision, version: "0.1.0" }, null, 2)}\n`,
+      { mode: 0o644 },
+    );
     run("/usr/bin/codesign", ["--force", "--deep", "--sign", "-", stagedBundle]);
     run("/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", stagedBundle]);
     await assertMissing(options.output);

@@ -404,7 +404,9 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                       ? ` · Updated ${new Date(connection.lastSyncAt).toLocaleString()}`
                       : ""}
                   </small>
-                  {connection.error && <span role="alert">{connection.error}</span>}
+                  {connection.error && (
+                    <span role="alert">{connectionIssueMessage(connection.error)}</span>
+                  )}
                   {connection.state === "connecting" && pending?.connectionId !== connection.id && (
                     <span role="status">
                       Google sign-in is still pending. Finish it in the browser, or stop setup and
@@ -652,6 +654,12 @@ function stateLabel(state: ConnectorConnection["state"]) {
     error: "Needs attention",
     revoked: "Disconnected",
   }[state];
+}
+
+function connectionIssueMessage(error: string) {
+  if (error === "revoked")
+    return "Account access expired or was revoked. Disconnect, then connect again to review access.";
+  return error;
 }
 
 function IntegrationMark({ provider }: { provider: string }) {

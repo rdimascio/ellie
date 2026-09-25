@@ -119,6 +119,18 @@ export async function stageRuntime(source, resourcesDirectory) {
   return staged;
 }
 
+/**
+ * Records the runtime after its copied native files receive their final signatures. Signing
+ * intentionally changes executable bytes, so provenance captured before that step is stale.
+ */
+export async function finalizeStagedRuntime(resourcesDirectory, staged) {
+  if (!staged) return null;
+  const measured = await measureTree(join(resourcesDirectory, "runtime"));
+  if (measured.files !== staged.files)
+    throw new Error("The embedded runtime layout changed while it was finalized.");
+  return measured;
+}
+
 // Mach-O and universal-binary magics, read as a big-endian word.
 const MACH_O = new Set([
   0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca,

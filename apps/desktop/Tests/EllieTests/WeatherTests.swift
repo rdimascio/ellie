@@ -172,6 +172,38 @@ final class WeatherTests: XCTestCase {
     }
 
     @MainActor
+    func testCommittedConfigurationDoesNotDependOnPostCommitPermissionRepair() async throws {
+        let url = temporaryURL()
+        let transport = FixtureTransport(json: "{}", status: 503)
+        let initial = WeatherStore(fileURL: url, client: OpenMeteoClient(transport: transport))
+        XCTAssertTrue(initial.configure(name: "London", latitudeText: "51.5072", longitudeText: "-0.1276"))
+        await eventually { !initial.isRefreshing }
+        var committedPathAttributeAttempts = 0
+        let store = WeatherStore(
+            fileURL: url,
+            client: OpenMeteoClient(transport: transport),
+            setFileAttributes: { attributes, path in
+                if path == url.path {
+                    committedPathAttributeAttempts += 1
+                    throw CocoaError(.fileWriteNoPermission)
+                }
+                try FileManager.default.setAttributes(attributes, ofItemAtPath: path)
+            })
+
+        XCTAssertTrue(store.configure(name: "Paris", latitudeText: "48.8566", longitudeText: "2.3522"))
+        await eventually { !store.isRefreshing }
+
+        XCTAssertEqual(committedPathAttributeAttempts, 0,
+            "all throwing permission checks must finish before the durable file is replaced")
+        XCTAssertEqual(store.state.place?.name, "Paris")
+        XCTAssertEqual(WeatherStore(fileURL: url).state.place?.name, "Paris")
+        let mode = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)
+        XCTAssertEqual(mode.intValue & 0o777, 0o600,
+            "the committed staging file must already carry its final private mode")
+    }
+
+    @MainActor
     func testCorruptCacheIsPreservedAndBlocksOverwrite() async throws {
         let url = temporaryURL()
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
