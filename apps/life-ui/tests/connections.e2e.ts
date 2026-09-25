@@ -456,6 +456,28 @@ try {
     1,
     "a delayed pre-start list must not clear the current setup",
   );
+  await page.reload();
+  await page.getByRole("heading", { name: "Home", exact: true }).waitFor();
+  await openSettings();
+  await page.getByRole("heading", { name: "Settings", exact: true }).waitFor();
+  const pendingGmailArticle = page.locator(".connection-list article").filter({ hasText: "Gmail" });
+  await pendingGmailArticle
+    .getByRole("status")
+    .getByText(
+      "Google sign-in is still pending. Finish it in the browser, or stop setup and start again if the link expired or closed.",
+    )
+    .waitFor();
+  assert.equal(
+    await page.getByRole("button", { name: "Stop setup" }).count(),
+    1,
+    "a restored pending setup keeps one explicit cancellation action",
+  );
+  assert.equal(
+    await pendingGmailArticle.getByRole("button", { name: "View imported activity" }).count(),
+    0,
+    "pending consent must not offer imported activity",
+  );
+  await expect(pendingGmailArticle.getByRole("button", { name: "Refresh" })).toBeDisabled();
   const cancelRoute = "**/api/connections/*/revoke";
   await page.route(cancelRoute, (route) =>
     route.fulfill({

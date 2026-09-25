@@ -172,6 +172,8 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
     try {
       await operation();
       await load();
+      if (key.startsWith("cancel:"))
+        setNotice("Google connection setup did not finish. You can start again.");
       if (detailId && !key.startsWith("revoke:") && !key.startsWith("cancel:"))
         await openDetails(detailId);
       else if (key.startsWith("revoke:") || key.startsWith("cancel:")) {
@@ -403,13 +405,23 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                       : ""}
                   </small>
                   {connection.error && <span role="alert">{connection.error}</span>}
+                  {connection.state === "connecting" && pending?.connectionId !== connection.id && (
+                    <span role="status">
+                      Google sign-in is still pending. Finish it in the browser, or stop setup and
+                      start again if the link expired or closed.
+                    </span>
+                  )}
                 </div>
               </div>
               <label>
                 Mode
                 <select
                   value={connection.mode}
-                  disabled={busy !== "" || connection.state === "revoked"}
+                  disabled={
+                    busy !== "" ||
+                    connection.state === "connecting" ||
+                    connection.state === "revoked"
+                  }
                   onChange={(event) =>
                     void run(`mode:${connection.id}`, () =>
                       api.connections.mode(connection.id, event.target.value as ConnectorMode),
@@ -421,7 +433,7 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                 </select>
               </label>
               <div className="connection-actions">
-                {connection.state !== "revoked" && (
+                {connection.state !== "connecting" && connection.state !== "revoked" && (
                   <button
                     type="button"
                     disabled={busy !== ""}
@@ -441,7 +453,11 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                   </button>
                 )}
                 <button
-                  disabled={busy !== "" || connection.state === "revoked"}
+                  disabled={
+                    busy !== "" ||
+                    connection.state === "connecting" ||
+                    connection.state === "revoked"
+                  }
                   onClick={() =>
                     void run(`refresh:${connection.id}`, () =>
                       api.connections.refresh(connection.id),
@@ -450,15 +466,24 @@ export function Connections({ standalone = false }: { standalone?: boolean }) {
                 >
                   {busy === `refresh:${connection.id}` ? "Refreshing…" : "Refresh"}
                 </button>
-                <button
-                  className="danger"
-                  disabled={busy !== ""}
-                  onClick={() =>
-                    void run(`revoke:${connection.id}`, () => api.connections.revoke(connection.id))
-                  }
-                >
-                  Disconnect
-                </button>
+                {pending?.connectionId !== connection.id && (
+                  <button
+                    className="danger"
+                    disabled={busy !== ""}
+                    onClick={() =>
+                      void run(
+                        `${connection.state === "connecting" ? "cancel" : "revoke"}:${connection.id}`,
+                        () => api.connections.revoke(connection.id),
+                      )
+                    }
+                  >
+                    {busy === `cancel:${connection.id}`
+                      ? "Stopping…"
+                      : connection.state === "connecting"
+                        ? "Stop setup"
+                        : "Disconnect"}
+                  </button>
+                )}
               </div>
               {detailId === connection.id && (
                 <div className="connection-status">
