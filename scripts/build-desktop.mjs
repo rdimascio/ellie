@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { finalizeStagedRuntime, machOFiles, stageRuntime } from "./bundle-runtime.mjs";
+import { embeddedCode, finalizeStagedRuntime, stageRuntime } from "./bundle-runtime.mjs";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagePath = join(repositoryRoot, "apps/desktop");
@@ -204,10 +204,14 @@ async function main() {
     );
 
     run("/usr/bin/plutil", ["-lint", join(contents, "Info.plist")]);
-    // Inside out: an embedded runtime is sealed as resources, not walked as nested code,
-    // so its executables are signed one at a time before the bundle seals them.
-    for (const executable of runtime ? await machOFiles(join(resourcesDirectory, "runtime")) : [])
-      run("/usr/bin/codesign", ["--force", "--sign", "-", executable]);
+    // The runtime lives under Contents/Resources. Verify its code explicitly before the outer
+    // app seals those bytes as resources. Preserve the payload's existing identities and refuse
+    // any loose executable or nested bundle whose own signature does not verify.
+    if (runtime) {
+      const code = await embeddedCode(join(resourcesDirectory, "runtime"));
+      for (const path of [...code.bundles, ...code.executables])
+        run("/usr/bin/codesign", ["--verify", "--strict", path]);
+    }
     runtime = await finalizeStagedRuntime(resourcesDirectory, runtime);
     await writeFile(
       join(resourcesDirectory, "build-provenance.json"),

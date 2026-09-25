@@ -5,9 +5,9 @@ import { join } from "node:path";
 import test from "node:test";
 
 // @ts-expect-error -- the bundle builders are plain scripts without declarations.
-import { finalizeStagedRuntime } from "../scripts/bundle-runtime.mjs";
+import { embeddedCode, finalizeStagedRuntime } from "../scripts/bundle-runtime.mjs";
 // @ts-expect-error -- the bundle builders are plain scripts without declarations.
-import { machOFiles, measureTree, stageRuntime } from "../scripts/bundle-runtime.mjs";
+import { measureTree, stageRuntime } from "../scripts/bundle-runtime.mjs";
 
 const members = [
   "bin/node",
@@ -133,20 +133,25 @@ test("a payload holding something other than a file is not embedded", async (t) 
   await assert.rejects(lstat(join(resources, "runtime")), /ENOENT/);
 });
 
-test("executables inside an embedded runtime are found wherever they sit", async (t) => {
+test("embedded code is split into nested bundles and loose executables", async (t) => {
   const root = await scratch(t);
   const directory = await payload(root);
-  // `codesign --deep` walks nested code locations, not Resources, so the bundle builder has
-  // to find these itself or they ship unsigned and carry no Team ID.
+  // The runtime is under Resources, so the bundle builder verifies its code explicitly while
+  // preserving each signature supplied by the payload.
   for (const executable of ["bin/node", "helpers/ellie-browser-runtime-broker"])
     await writeFile(join(directory, executable), Buffer.from([0xcf, 0xfa, 0xed, 0xfe]));
-  const found = await machOFiles(directory);
-  assert.deepEqual(
-    found.map((path: string) => path.slice(directory.length + 1)),
-    ["bin/node", "helpers/ellie-browser-runtime-broker"],
-  );
-  // The reviewed registry and the staged sources are data and must not be signed.
-  assert.ok(!found.some((path: string) => path.endsWith(".json") || path.endsWith(".ts")));
+  const launcher = join(directory, "launchers/Ellie Coordinator.app/Contents/MacOS");
+  await mkdir(launcher, { recursive: true, mode: 0o755 });
+  await writeFile(join(launcher, "EllieService"), Buffer.from([0xcf, 0xfa, 0xed, 0xfe]));
+
+  const code = await embeddedCode(directory);
+  const relative = (path: string) => path.slice(directory.length + 1);
+  assert.deepEqual(code.bundles.map(relative), ["launchers/Ellie Coordinator.app"]);
+  assert.deepEqual(code.executables.map(relative), [
+    "bin/node",
+    "helpers/ellie-browser-runtime-broker",
+  ]);
+  assert.ok(!code.executables.some((path: string) => /\.(json|ts)$/.test(path)));
 });
 
 test("64-bit universal binaries inside an embedded runtime are found for signing", async (t) => {
@@ -158,7 +163,7 @@ test("64-bit universal binaries inside an embedded runtime are found for signing
   ] as const;
   for (const [path, magic] of binaries) await writeFile(join(directory, path), Buffer.from(magic));
 
-  const found = await machOFiles(directory);
+  const { executables: found } = await embeddedCode(directory);
   assert.deepEqual(
     found.map((path: string) => path.slice(directory.length + 1)),
     binaries.map(([path]) => path),

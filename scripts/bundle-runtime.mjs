@@ -135,20 +135,27 @@ export async function finalizeStagedRuntime(resourcesDirectory, staged) {
 const MACH_O = new Set([
   0xfeedface, 0xcefaedfe, 0xfeedfacf, 0xcffaedfe, 0xcafebabe, 0xbebafeca, 0xcafebabf, 0xbfbafeca,
 ]);
+const BUNDLE = /\.(app|framework|xpc|bundle)$/;
 
 /**
- * Lists the executables inside a staged tree. `codesign --deep` walks only the nested code
- * locations macOS recognizes, so a binary under `Contents/Resources` is sealed as a resource
- * and never signed. Unsigned helpers have no Team ID, which is the identity the Keychain
- * access group and every future notarization depend on, so each one is signed on its own.
+ * Splits code under the staged Resources runtime into nested bundles and loose executables.
+ * A bundle is one signed unit, so the walk stops at its boundary rather than treating the
+ * executable covered by its seal as independent code.
  */
-export async function machOFiles(root, current = root) {
-  const found = [];
+export async function embeddedCode(root, current = root) {
+  const bundles = [];
+  const executables = [];
   for (const name of (await readdir(current)).sort()) {
     const path = join(current, name);
     const info = await lstat(path);
     if (info.isDirectory()) {
-      found.push(...(await machOFiles(root, path)));
+      if (BUNDLE.test(name)) {
+        bundles.push(path);
+        continue;
+      }
+      const nested = await embeddedCode(root, path);
+      bundles.push(...nested.bundles);
+      executables.push(...nested.executables);
       continue;
     }
     if (!info.isFile() || info.size < 4) continue;
@@ -156,10 +163,10 @@ export async function machOFiles(root, current = root) {
     try {
       const head = Buffer.alloc(4);
       const { bytesRead } = await handle.read(head, 0, 4, 0);
-      if (bytesRead === 4 && MACH_O.has(head.readUInt32BE(0))) found.push(path);
+      if (bytesRead === 4 && MACH_O.has(head.readUInt32BE(0))) executables.push(path);
     } finally {
       await handle.close();
     }
   }
-  return found;
+  return { bundles, executables };
 }
