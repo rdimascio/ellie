@@ -2,6 +2,11 @@ import Foundation
 import XCTest
 @testable import Ellie
 
+private struct HouseholdChoresReadinessTimeout: LocalizedError {
+  let stage: String
+  var errorDescription: String? { "Timed out waiting for \(stage)." }
+}
+
 @MainActor
 final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
   private func credential(_ role: String) throws -> NativeEnrollmentCredential {
@@ -32,7 +37,7 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
       if condition() { return }
       try await Task.sleep(for: .milliseconds(10))
     }
-    XCTFail("Timed out waiting for \(description)")
+    throw HouseholdChoresReadinessTimeout(stage: description)
   }
 
   func testTwoEnrolledClientsUsePinnedProductionChoresWithNoWriteReplay() async throws {
@@ -47,6 +52,7 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
     let a = try credential("a"), b = try credential("b")
     let first = HouseholdChoresSyncStore(credential: a, persistence: pending("first"))
     let stale = HouseholdChoresSyncStore(credential: b, persistence: pending("stale"))
+    defer { first.leaveView(); stale.leaveView() }
     first.checkAccess(); stale.checkAccess()
     try await waitFor("both grants") { first.canWrite && stale.canWrite }
     first.readServerCopy(); stale.readServerCopy()
@@ -59,6 +65,7 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
     first.savePrepared()
     try await waitFor("first conditional write") { first.remote?.revision == 1 && !first.isBusy }
     let fresh = HouseholdChoresSyncStore(credential: b, persistence: pending("fresh"))
+    defer { fresh.leaveView() }
     fresh.checkAccess()
     try await waitFor("second client grant") { fresh.canRead }
     fresh.readServerCopy()
@@ -74,6 +81,7 @@ final class HouseholdChoresHTTPSIntegrationTests: XCTestCase {
     try await waitFor("dropped response") { first.phase == .unknown }
     // Reconstruct the store from the same private marker; no app-process restart is simulated.
     let restored = HouseholdChoresSyncStore(credential: a, persistence: pending("first"))
+    defer { restored.leaveView() }
     XCTAssertEqual(restored.phase, .unknown)
     restored.savePrepared() // Recovery cannot replay a possibly committed PUT.
     restored.checkAccess()
