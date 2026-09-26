@@ -311,23 +311,37 @@ final class BrowserPhoneControlTests: XCTestCase {
     }
   }
 
-  func testDisneyPlusCompanionObservationExcludesPlaybackAndSearchControls() throws {
+  func testDisneyPlusCompanionObservationAddsOnlyBoundedVerticalDirections() throws {
     let revision = String(repeating: "e", count: 64)
-    func read(_ site: String) -> Data {
+    func read(_ site: String, source: String = "companion") -> Data {
       Data(
-        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
     }
     guard case .page(let page) = try decodeBrowserPhoneResponse(
       read(#"{"provider":"disneyplus","page":"browse","playback":"unavailable"}"#), nodeID: "mac")
     else { return XCTFail("Expected selected Disney+ title page") }
     XCTAssertEqual(page.site?.provider, .disneyplus)
     XCTAssertEqual(page.site?.page, .browse)
+    XCTAssertNil(page.site?.verticalScrollDirections,
+      "An older response stays readable but grants no direction")
+    let observed = #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":["up","down"]}"#
+    guard case .page(let scrolling) = try decodeBrowserPhoneResponse(read(observed), nodeID: "mac")
+    else { return XCTFail("Expected observed Disney+ scroll directions") }
+    XCTAssertEqual(scrolling.site?.verticalScrollDirections, [.up, .down])
+    for source in ["accessibility", "webmcp"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(observed, source: source), nodeID: "mac"))
+    }
     for invalid in [
       #"{"provider":"disneyplus","page":"watch","playback":"paused"}"#,
       #"{"provider":"disneyplus","page":"results","playback":"unavailable"}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"playing"}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[]}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
+      #"{"provider":"disneyplus","page":"login","playback":"unavailable","verticalScrollDirections":[]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":["down","down"]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":["left"]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":["up","down","up"]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":"down"}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
@@ -382,7 +396,13 @@ final class BrowserPhoneControlTests: XCTestCase {
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil), .search(query: "title"), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
-        currentTimeSeconds: nil), .scroll(.down), true),
+        currentTimeSeconds: nil, verticalScrollDirections: [.down]), .scroll(.down), true),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, verticalScrollDirections: [.down]), .scroll(.up), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, verticalScrollDirections: []), .scroll(.down), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.down), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil), .scroll(.left), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
@@ -442,7 +462,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
       capabilities: ["browser.read", "browser.control"])
     let site = BrowserPhoneSite(provider: .disneyplus, page: .browse,
-      playback: .unavailable, currentTimeSeconds: nil)
+      playback: .unavailable, currentTimeSeconds: nil, verticalScrollDirections: [.down])
     let transport = BrowserPhoneFakeTransport(source: .companion,
       commandStatus: .unknown, site: site)
     let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
@@ -450,6 +470,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertTrue(store.refresh(on: node))
     await eventually { store.phase == .ready }
     XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
+    XCTAssertFalse(store.canPerform(.scroll(.up), on: node))
     XCTAssertFalse(store.canPerform(.scroll(.right), on: node))
     XCTAssertFalse(store.canPerform(.play, on: node))
     XCTAssertTrue(store.perform(.scroll(.down), on: node))

@@ -18,11 +18,11 @@ const binding: BrowserBinding = {
   availability: "companion",
 };
 const revision = browserBindingRevision(binding);
-const result = (site: Record<string, unknown>) => ({
+const result = (site: Record<string, unknown>, source = "companion") => ({
   ok: true,
   message: "Observed.",
   browser: {
-    source: "companion",
+    source,
     operation: "read",
     status: "completed",
     revision,
@@ -37,12 +37,51 @@ test("Disney+ site wire accepts only browse/login/unsupported with unavailable p
     ).browser.operation,
     "read",
   );
+  const observed = {
+    provider: "disneyplus",
+    page: "browse",
+    playback: "unavailable",
+    verticalScrollDirections: ["up", "down"],
+  };
+  assert.equal(browserWebMCPOperationResult(result(observed)).browser.operation, "read");
+  for (const source of ["webmcp", "accessibility"])
+    assert.throws(() => browserWebMCPOperationResult(result(observed, source)));
   for (const invalid of [
     { provider: "disneyplus", page: "watch", playback: "paused" },
     { provider: "disneyplus", page: "browse", playback: "playing" },
     { provider: "disneyplus", page: "browse", playback: "unavailable", rows: [] },
     { provider: "disneyplus", page: "results", playback: "unavailable" },
     { provider: "disneyplus", page: "browse", playback: "unavailable", currentTimeSeconds: 1 },
+    {
+      provider: "disneyplus",
+      page: "login",
+      playback: "unavailable",
+      verticalScrollDirections: [],
+    },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["down", "down"],
+    },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["left"],
+    },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["up", "down", "up"],
+    },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: "down",
+    },
   ])
     assert.throws(() => browserWebMCPOperationResult(result(invalid)));
 });
@@ -133,11 +172,18 @@ test("Disney+ one vertical scroll consumes its read without fallback or replay",
   const commands: string[] = [];
   let currentBinding = binding;
   let page: "browse" | "login" = "browse";
+  let directions: ("up" | "down")[] | undefined = ["down"];
+  let lastSnapshotId: string | undefined;
+  let dispatchedSnapshotId: string | undefined;
   let wrongAdapter = 0;
   const companion = new BrowserCompanionOperations({
     async request(request) {
       if (request.type !== "media.execute") throw new Error("wrong request");
       commands.push(request.command.type);
+      if (request.command.type === "scrollViewport")
+        dispatchedSnapshotId = request.command.snapshotId;
+      const snapshotId = randomUUID();
+      if (request.command.type === "inspect") lastSnapshotId = snapshotId;
       return browserWebMCPResultFor(request.id, "ok", {
         bindingId: currentBinding.bindingId,
         documentId: currentBinding.documentId,
@@ -145,10 +191,17 @@ test("Disney+ one vertical scroll consumes its read without fallback or replay",
         value:
           request.command.type === "inspect"
             ? {
-                snapshotId: randomUUID(),
+                snapshotId,
                 candidates: [],
                 playback: { available: false },
-                site: { provider: "disneyplus", page, playback: "unavailable" },
+                site: {
+                  provider: "disneyplus",
+                  page,
+                  playback: "unavailable",
+                  ...(page === "browse" && directions
+                    ? { verticalScrollDirections: directions }
+                    : {}),
+                },
               }
             : { outcome: "scrolled" },
       });
@@ -179,6 +232,7 @@ test("Disney+ one vertical scroll consumes its read without fallback or replay",
   assert.equal(moved.browser.operation, "command");
   assert.equal(moved.browser.status, "unknown");
   assert.deepEqual(commands, ["inspect", "scrollViewport"]);
+  assert.equal(dispatchedSnapshotId, lastSnapshotId);
   await assert.rejects(
     () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
     /Read the Disney\+ page/,
@@ -198,15 +252,24 @@ test("Disney+ one vertical scroll consumes its read without fallback or replay",
   const cancelled = new AbortController();
   cancelled.abort();
   await assert.rejects(
-    () => selector.execute({ tool: "browser.scroll", direction: "up", revision }, cancelled.signal),
+    () =>
+      selector.execute({ tool: "browser.scroll", direction: "down", revision }, cancelled.signal),
     /cancelled/,
   );
   assert.deepEqual(commands, ["inspect", "scrollViewport", "inspect", "inspect"]);
+
+  directions = undefined;
+  await read();
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+    /not observed/,
+  );
+  assert.deepEqual(commands, ["inspect", "scrollViewport", "inspect", "inspect", "inspect"]);
 
   currentBinding = { ...binding, documentId: "replacement-document" };
   await assert.rejects(
     () => selector.execute({ tool: "browser.scroll", direction: "up", revision }, signal),
     /changed before/,
   );
-  assert.deepEqual(commands, ["inspect", "scrollViewport", "inspect", "inspect"]);
+  assert.deepEqual(commands, ["inspect", "scrollViewport", "inspect", "inspect", "inspect"]);
 });
