@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { loadGoogleClient } from "../apps/life/src/google-client.ts";
@@ -41,7 +41,11 @@ test("Google client loader rejects repository, permissions, links, size, and unk
   const root = await mkdtemp(join(tmpdir(), "ellie-google-client-bounds-"));
   const config = join(root, "client.json"),
     link = join(root, "link.json"),
+    repositoryAncestor = join(root, "repository"),
+    coreStateAncestor = join(root, "core-state"),
+    fakeHome = join(root, "home"),
     huge = join(root, "huge.json");
+  const previousHome = process.env.HOME;
   try {
     await writeFile(config, JSON.stringify({ clientId: "fixture.apps.googleusercontent.com" }), {
       mode: 0o600,
@@ -63,7 +67,25 @@ test("Google client loader rejects repository, permissions, links, size, and unk
       () => loadGoogleClient(join(process.cwd(), "package.json")),
       /outside the repository/,
     );
+    await symlink(process.cwd(), repositoryAncestor, "dir");
+    assert.throws(
+      () => loadGoogleClient(join(repositoryAncestor, "package.json")),
+      /outside the repository/,
+    );
+    await mkdir(join(fakeHome, ".ellie"), { recursive: true, mode: 0o700 });
+    process.env.HOME = fakeHome;
+    assert.throws(
+      () => loadGoogleClient(join(homedir(), ".ellie", "synthetic-google-client.json")),
+      /outside ~\/\.ellie/,
+    );
+    await symlink(join(homedir(), ".ellie"), coreStateAncestor, "dir");
+    assert.throws(
+      () => loadGoogleClient(join(coreStateAncestor, "synthetic-google-client.json")),
+      /outside ~\/\.ellie/,
+    );
   } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
     await rm(root, { recursive: true, force: true });
   }
 });
