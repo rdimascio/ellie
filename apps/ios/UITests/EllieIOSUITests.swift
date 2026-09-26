@@ -119,8 +119,11 @@ final class EllieIOSUITests: XCTestCase {
         let reads = app.staticTexts["ios-gmail-fixture-reads"]
         XCTAssertEqual(reads.label, "Fixture body reads: 0")
         XCTAssertTrue(app.buttons["ios-gmail-life-status"].exists)
-        XCTAssertTrue(app.staticTexts["ios-gmail-setup-guidance"].label.contains(
-            "Google consent and provider refresh must be completed on your coordinator Mac"))
+        let guidance = app.staticTexts["ios-gmail-setup-guidance"].label
+        XCTAssertTrue(guidance.contains(
+            "verify a Google Desktop OAuth client on your coordinator Mac"))
+        XCTAssertTrue(guidance.contains("connect and refresh Gmail in Ellie Life on that Mac"))
+        XCTAssertTrue(guidance.contains("it does not start consent"))
         XCTAssertEqual(reads.label, "Fixture body reads: 0",
             "Viewing Gmail setup guidance must not read an account or message body")
         app.buttons["ios-gmail-refresh"].tap()
@@ -189,8 +192,12 @@ final class EllieIOSUITests: XCTestCase {
         let refresh = try revealWeatherControl(app.buttons["ios-agenda-refresh"], in: app)
         let status = try revealWeatherControl(app.buttons["ios-agenda-life-status"], in: app)
         XCTAssertEqual(status.label, "View calendar status in Ellie Life")
-        XCTAssertTrue(app.staticTexts["ios-agenda-setup-guidance"].label.contains(
-            "Google consent, calendar choice, and provider refresh must be completed on your coordinator Mac"))
+        let guidance = app.staticTexts["ios-agenda-setup-guidance"].label
+        XCTAssertTrue(guidance.contains(
+            "verify a Google Desktop OAuth client on your coordinator Mac"))
+        XCTAssertTrue(guidance.contains(
+            "connect Calendar, choose a calendar, and refresh the provider in Ellie Life on that Mac"))
+        XCTAssertTrue(guidance.contains("it does not start consent"))
         XCTAssertEqual(calls.label, "Fixture agenda requests: 0",
             "Opening the native calendar widget and its setup guidance must not read an account")
         _ = try revealWeatherControl(refresh, in: app)

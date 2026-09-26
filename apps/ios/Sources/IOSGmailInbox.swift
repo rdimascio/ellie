@@ -336,7 +336,7 @@ struct IOSGmailInboxView: View {
                 }
                 .accessibilityIdentifier("ios-gmail-life-status")
             } footer: {
-                Text("Requires an explicit Ellie Life account grant. This iPhone can inspect connection status, but Google consent and provider refresh must be completed on your coordinator Mac. Account and message previews come from its imports. Selecting a message makes one fresh read-only Gmail body request.")
+                Text("Before starting consent, verify a Google Desktop OAuth client on your coordinator Mac. Then connect and refresh Gmail in Ellie Life on that Mac. This iPhone only inspects status and imported previews after an explicit Life account grant; it does not start consent. Selecting a message makes one fresh read-only Gmail body request.")
                     .accessibilityIdentifier("ios-gmail-setup-guidance")
             }
             if !store.accounts.isEmpty {
