@@ -180,6 +180,42 @@ final class WatchMediaPhoneTests: XCTestCase {
   }
 
   @MainActor
+  func testReadDoesNotAdvertiseAPlaybackControlThatIsNoLongerAvailable() async {
+    let enabledNode = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let inventory = WatchTestInventory(node: enabledNode)
+    let browser = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(
+      inventory: inventory, browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(
+          credential: credential, transport: browser, uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: enabledNode))
+
+    await inventory.replace(PhoneControlNode(
+      id: enabledNode.id, label: enabledNode.label, online: true,
+      capabilities: ["browser.read"]))
+    let read = await controller.handle(WatchMediaRequest.make(.read))
+
+    XCTAssertEqual(read.state, .observed)
+    XCTAssertEqual(read.observation?.title, "Observed film")
+    XCTAssertEqual(read.observation?.playback, "unavailable",
+                   "A read-only target must not advertise a reviewed playback action")
+    guard let page = read.observation else { return XCTFail("Missing observation") }
+    let play = WatchMediaRequest.make(
+      .play, target: page.target, epoch: page.epoch, revision: page.revision)
+    let blocked = await controller.handle(play)
+    XCTAssertEqual(blocked.state, .blocked)
+    let replay = await controller.handle(play)
+    XCTAssertEqual(replay.state, .blocked,
+                   "A blocked request ID must not gain authority when replayed")
+    let dispatchCount = await browser.playCount
+    XCTAssertEqual(dispatchCount, 0)
+  }
+
+  @MainActor
   func testCurrentRevocationSynchronizesBridgeDisableWithoutDispatchOrReplay() async {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
                                 capabilities: ["browser.read", "browser.control"])
