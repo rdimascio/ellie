@@ -73,6 +73,32 @@ test("acceptance environment setup removes owned state only after confirmed clea
   assert.equal(removeCalls, 1);
 });
 
+test("acceptance environment setup cleanup deadlines remain finite and retain state", async () => {
+  const setup = new Error("synthetic environment setup failure");
+  const started = Date.now();
+  await assert.rejects(
+    settleFailedAcceptanceEnvironmentSetup(setup, {
+      ownedRoot: "/owned/timeout-state",
+      closeBridge: () => new Promise(() => {}),
+      closeServer: async () => {
+        throw new Error("server close failed");
+      },
+      removeOwnedRoot: async () => {
+        assert.fail("uncertain state must not be removed");
+      },
+      cleanupDeadlineMs: 5,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AcceptanceEnvironmentSetupCleanupError);
+      assert.equal(error.cause, setup);
+      assert.match(error.cleanupFailures[0] ?? "", /^bridge: Error: bridge cleanup timed out$/);
+      assert.match(error.cleanupFailures[1] ?? "", /^server:/);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 250, "setup cleanup deadline must remain finite");
+});
+
 test("native journey setup preserves ownership uncertainty when its close also fails", async () => {
   const setup = new Error("synthetic setup failure");
   let closeCalls = 0;
