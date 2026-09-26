@@ -1,6 +1,6 @@
 import { access, lstat, readFile, writeFile } from "node:fs/promises";
 import { createReadStream } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { Writable } from "node:stream";
@@ -221,6 +221,26 @@ async function main(): Promise<void> {
     if (args.length !== 2) throw new Error("Use: bun run ellie life settings");
     const { openLifeOwnerSettings } = await import("./life-owner-settings.ts");
     await withController(async (client) => console.log(await openLifeOwnerSettings(client)));
+    return;
+  }
+  if (args[0] === "life" && args[1] === "google-client") {
+    const usage =
+      "Use: bun run ellie life google-client check /absolute/private/google-client.json";
+    if (args.length !== 4 || args[2] !== "check" || !isAbsolute(args[3]!)) throw new Error(usage);
+    let client: { clientSecret?: string };
+    try {
+      const { loadGoogleClient } = await import("../../life/src/google-client.ts");
+      client = loadGoogleClient(args[3]!);
+    } catch {
+      throw new Error(
+        "Google OAuth client file is unavailable, invalid, or unsafe. Keep the downloaded desktop client outside the Ellie checkout and ~/.ellie as an owned 0600 regular file.",
+      );
+    }
+    console.log("Google OAuth client preflight passed. No account or consent request was opened.");
+    console.log(`Client secret: ${client.clientSecret ? "present" : "absent"}.`);
+    console.log(
+      'Next, reference this file as "googleOAuthClientFile" in the private Life host config. Calendar and Gmail remain separate read-only consent requests.',
+    );
     return;
   }
   if (args[0] === "life") {
@@ -910,7 +930,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  server init [--lan]   Generate private config and Keychain identity\n  server configure --lan | --local  Change the listening address, preserving identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  browser pursue --max-steps N --allow-page-content "goal" [--node ID]  Bounded AX click loop\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  agent [--set-role R]  Run this Mac's configured role, or record it\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up direct Jev in shadow mode\n  routing gateway --allow-cloud   Set up Jev through AI Gateway in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  life google-client check PATH  Validate a private Google OAuth client without consent\n  server init [--lan]   Generate private config and Keychain identity\n  server configure --lan | --local  Change the listening address, preserving identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  browser pursue --max-steps N --allow-page-content "goal" [--node ID]  Bounded AX click loop\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  agent [--set-role R]  Run this Mac's configured role, or record it\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up direct Jev in shadow mode\n  routing gateway --allow-cloud   Set up Jev through AI Gateway in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
   console.log(
     "  transcribe --audio WAV --model PATH --executable PATH\n" +
