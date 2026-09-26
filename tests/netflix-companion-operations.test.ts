@@ -6,6 +6,7 @@ import {
   browserWebMCPRequest,
   browserWebMCPOperationResult,
   browserWebMCPResultFor,
+  type BrowserCompanionCommand,
   type BrowserWebMCPRequest,
 } from "@ellie/protocol";
 import { BrowserCompanionOperations } from "../apps/node/src/browser-companion-operations.ts";
@@ -125,12 +126,6 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
       page: "browse",
       playback: "unavailable",
       verticalScrollDirections: "down",
-    },
-    {
-      provider: "netflix",
-      page: "browse",
-      playback: "unavailable",
-      verticalScrollDirections: ["down"],
     },
     {
       provider: "youtube_tv",
@@ -259,6 +254,103 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
   ]);
   assert.equal(webmcp, 0);
   assert.equal(ax, 0);
+});
+
+test("Netflix vertical scrolling requires one observed direction and consumes the snapshot", async () => {
+  const siteResult = (source: string, site: Record<string, unknown>) => ({
+    ok: true,
+    message: "Observed.",
+    browser: {
+      source,
+      operation: "read",
+      status: "completed",
+      revision: "b".repeat(64),
+      view: { items: [], site },
+    },
+  });
+  const observedSite = {
+    provider: "netflix",
+    page: "browse",
+    playback: "unavailable",
+    verticalScrollDirections: ["down"],
+  };
+  assert.equal(
+    browserWebMCPOperationResult(siteResult("companion", observedSite)).browser.operation,
+    "read",
+  );
+  for (const source of ["accessibility", "webmcp"])
+    assert.throws(() => browserWebMCPOperationResult(siteResult(source, observedSite)));
+  for (const invalid of [
+    { ...observedSite, page: "watch", playback: "paused" },
+    { ...observedSite, verticalScrollDirections: ["down", "down"] },
+    { ...observedSite, verticalScrollDirections: ["left"] },
+    { ...observedSite, verticalScrollDirections: "down" },
+  ])
+    assert.throws(() => browserWebMCPOperationResult(siteResult("companion", invalid)));
+  const current = binding("vertical");
+  const revision = browserBindingRevision(current);
+  const snapshotId = randomUUID();
+  let directions: ("up" | "down")[] | undefined;
+  const commands: BrowserCompanionCommand[] = [];
+  const companion = new BrowserCompanionOperations({
+    async request(request) {
+      if (request.type !== "media.execute") throw new Error("unexpected request");
+      commands.push(request.command);
+      return request.command.type === "inspect"
+        ? browserWebMCPResultFor(request.id, "ok", {
+            bindingId: current.bindingId,
+            documentId: current.documentId,
+            url: current.url,
+            value: {
+              snapshotId,
+              candidates: [],
+              playback: { available: false },
+              site: {
+                provider: "netflix",
+                page: "browse",
+                playback: "unavailable",
+                ...(directions ? { verticalScrollDirections: directions } : {}),
+              },
+            },
+          })
+        : browserWebMCPResultFor(request.id, "unknown");
+    },
+  });
+  const signal = new AbortController().signal;
+  const read = () =>
+    companion.execute({ tool: "browser.read", view: "summary", revision }, current, signal);
+  await read();
+  await assert.rejects(
+    () =>
+      companion.execute({ tool: "browser.scroll", direction: "down", revision }, current, signal),
+    /not observed/,
+  );
+  assert.deepEqual(
+    commands.map(({ type }) => type),
+    ["inspect"],
+    "a legacy response without directions completes its read but grants no scroll",
+  );
+  directions = ["down"];
+  await read();
+  const result = browserWebMCPOperationResult(
+    await companion.execute(
+      { tool: "browser.scroll", direction: "down", revision },
+      current,
+      signal,
+    ),
+  );
+  assert.equal(result.browser.operation, "command");
+  assert.equal(result.browser.status, "unknown");
+  const command = commands.at(-1);
+  assert.equal(command?.type, "scrollViewport");
+  if (command?.type !== "scrollViewport") throw new Error("wrong command");
+  assert.equal(command.snapshotId, snapshotId, "the effect carries the exact read snapshot");
+  await assert.rejects(
+    () =>
+      companion.execute({ tool: "browser.scroll", direction: "down", revision }, current, signal),
+    /Read the Netflix page/,
+  );
+  assert.equal(commands.length, 3, "an unknown effect is never replayed");
 });
 
 test("companion wire admits only fixed commands and rejects arbitrary input", () => {
@@ -800,7 +892,12 @@ test("a confirmed pre-effect companion rejection is failed or cancelled, never a
                 snapshotId: randomUUID(),
                 candidates: [],
                 playback: { available: false },
-                site: { provider: "netflix", page: "browse", playback: "unavailable" },
+                site: {
+                  provider: "netflix",
+                  page: "browse",
+                  playback: "unavailable",
+                  verticalScrollDirections: ["down"],
+                },
               },
             })
           : browserWebMCPResultFor(request.id, bridgeStatus);

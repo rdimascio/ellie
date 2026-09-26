@@ -745,6 +745,10 @@ final class BrowserPhoneControlStore: ObservableObject {
       case .openResult, .openSelectedResult: return site.page == .browse || site.page == .results
       case .scroll(let direction) where direction == .left || direction == .right:
         return site.page == .browse && site.rows?.isEmpty == false
+      case .scroll(let direction):
+        return page.source == .companion
+          && (site.page == .browse || site.page == .results)
+          && site.verticalScrollDirections?.contains(direction) == true
       default: break
       }
     }
