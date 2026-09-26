@@ -44,7 +44,7 @@ struct PhoneControlView: View {
             .disabled(isBusy)
           }
           Button("Refresh Macs", systemImage: "arrow.clockwise") { store.refresh() }
-            .disabled(isBusy)
+            .disabled(isBusy || store.requiresUnknownOutcomeReview)
         }
 
         Section("Application") {
@@ -145,6 +145,10 @@ struct PhoneControlView: View {
           Label(
             "The outcome is unknown. Check \(nodeLabel(nodeID)) before trying again.",
             systemImage: "questionmark.circle")
+          Button("I checked the Mac") { store.acknowledgeUnknownOutcome() }
+            .accessibilityIdentifier("phone-command-unknown-reviewed")
+          Text("This only enables a separate new command. Nothing is sent automatically.")
+            .font(.footnote).foregroundStyle(.secondary)
         }
       }
     case .failed(let message): Section { Label(message, systemImage: "exclamationmark.triangle") }
