@@ -5,6 +5,7 @@ struct DashboardSyncView: View {
   @ObservedObject var dashboards: DashboardStore
   @StateObject private var sync: DashboardSyncStore
   @State private var replacing = false
+  @State private var importPresentation = DashboardSyncImportPresentation()
 
   init(
     credential: NativeEnrollmentCredential, dashboards: DashboardStore,
@@ -80,12 +81,25 @@ struct DashboardSyncView: View {
       "Replace local dashboards?", isPresented: $replacing, titleVisibility: .visible
     ) {
       Button("Replace Local Dashboards", role: .destructive) {
-        guard let remote = sync.remote, let data = try? DashboardModel.encode(remote.value) else { return }
-        dashboards.importData(data)
+        guard let remote = sync.remote else { return }
+        importPresentation.replace(with: remote.value, dashboards: dashboards)
       }
       Button("Cancel", role: .cancel) {}
     } message: {
       Text("This replaces the dashboard file on this iPhone after validating and saving it atomically.")
+    }
+    .alert(
+      "Couldn’t replace local dashboards",
+      isPresented: Binding(
+        get: { importPresentation.isPresentingError },
+        set: { _ in }
+      )
+    ) {
+      Button("OK", role: .cancel) {
+        importPresentation.dismissError(dashboards: dashboards)
+      }
+    } message: {
+      Text(importPresentation.error ?? "")
     }
     .onChange(of: scenePhase) { _, phase in if phase == .background { sync.enterBackground() } }
     .onDisappear { sync.leaveView() }
