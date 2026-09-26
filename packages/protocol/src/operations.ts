@@ -526,8 +526,11 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
             typeof observed.horizontalScrollAvailable !== "boolean")) ||
         (hasVerticalScroll &&
           (browser.source !== "companion" ||
-            observed.provider !== "youtube_tv" ||
-            observed.page !== "browse" ||
+            !(
+              (observed.provider === "youtube_tv" && observed.page === "browse") ||
+              (observed.provider === "netflix" &&
+                (observed.page === "browse" || observed.page === "results"))
+            ) ||
             !Array.isArray(observed.verticalScrollDirections) ||
             observed.verticalScrollDirections.length > 2 ||
             observed.verticalScrollDirections.some(

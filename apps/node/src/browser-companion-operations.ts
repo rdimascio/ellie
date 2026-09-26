@@ -248,6 +248,7 @@ export class BrowserCompanionOperations {
     const youtubeTV = binding.origin === "https://tv.youtube.com";
     const disneyplus = binding.origin === "https://www.disneyplus.com";
     const youtube = binding.origin === "https://www.youtube.com";
+    const netflix = binding.origin === "https://www.netflix.com";
     if (youtube && action.tool !== "browser.search" && action.tool !== "browser.select")
       throw new Error("YouTube observed controls support only search and title selection.");
     if (
@@ -277,6 +278,14 @@ export class BrowserCompanionOperations {
         !observed.site.verticalScrollDirections?.includes(action.direction))
     )
       throw new Error("YouTube TV scroll direction is not observed; read the page again.");
+    if (
+      netflix &&
+      action.tool === "browser.scroll" &&
+      (action.direction === "up" || action.direction === "down") &&
+      ((observed.site.page !== "browse" && observed.site.page !== "results") ||
+        !observed.site.verticalScrollDirections?.includes(action.direction))
+    )
+      throw new Error("Netflix scroll direction is not observed; read the page again.");
     let command: BrowserCompanionCommand;
     if (action.tool === "browser.search") {
       if (
@@ -312,7 +321,7 @@ export class BrowserCompanionOperations {
           type: "scrollViewport",
           actionId: randomUUID(),
           direction: action.direction,
-          ...(youtubeTV ? { snapshotId: observed.snapshotId } : {}),
+          ...(youtubeTV || netflix ? { snapshotId: observed.snapshotId } : {}),
         };
       else
         throw new Error(

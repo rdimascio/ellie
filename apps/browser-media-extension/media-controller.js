@@ -269,14 +269,62 @@
         }
       : undefined;
   };
+  const viewportScroll = () => {
+    const root = document.scrollingElement;
+    if (!root || innerWidth < 1 || innerHeight < 1) return { state: "scroll_unavailable" };
+    const rootOverflow = getComputedStyle(root).overflowY;
+    const bodyOverflow = document.body && getComputedStyle(document.body).overflowY;
+    if ([rootOverflow, bodyOverflow].some((value) => value === "hidden" || value === "clip"))
+      return { state: "scroll_unavailable" };
+    const hit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    if (!hit) return { state: "scroll_unavailable" };
+    for (let node = hit; node && node !== root; node = node.parentElement) {
+      if (node.hasAttribute("inert") || node.getAttribute("aria-disabled") === "true")
+        return { state: "scroll_unavailable" };
+      const style = getComputedStyle(node);
+      if (
+        node !== document.body &&
+        ["auto", "scroll"].includes(style.overflowY) &&
+        node.scrollHeight > node.clientHeight + 2
+      )
+        return { state: "scroll_ambiguous" };
+      const bounds = node.getBoundingClientRect();
+      if (
+        style.position === "fixed" &&
+        bounds.width >= innerWidth / 2 &&
+        bounds.height >= innerHeight / 2
+      )
+        return { state: "scroll_unavailable" };
+    }
+    const top = root.scrollTop;
+    const height = root.scrollHeight;
+    const viewport = root.clientHeight;
+    const maximum = height - viewport;
+    if (
+      ![top, height, viewport].every(Number.isFinite) ||
+      viewport <= 0 ||
+      height <= viewport + 2 ||
+      top < -1 ||
+      top > maximum + 1
+    )
+      return { state: "scroll_unavailable" };
+    const directions = [...(top > 1 ? ["up"] : []), ...(top < maximum - 1 ? ["down"] : [])];
+    return { state: "available", root, top, height, viewport, directions };
+  };
   const schema = (c) => {
     if (!c || !uuid(c.actionId)) return false;
     if (c.type === "inspect" || c.type === "observe" || c.type === "play" || c.type === "pause")
       return exact(c, ["type", "actionId"]);
     if (c.type === "cancel")
       return exact(c, ["type", "actionId", "targetActionId"]) && uuid(c.targetActionId);
-    if (c.type === "scrollViewport")
-      return exact(c, ["type", "actionId", "direction"]) && ["up", "down"].includes(c.direction);
+    if (c.type === "scrollViewport") {
+      const hasSnapshot = Object.hasOwn(c, "snapshotId");
+      return (
+        exact(c, ["type", "actionId", "direction", ...(hasSnapshot ? ["snapshotId"] : [])]) &&
+        ["up", "down"].includes(c.direction) &&
+        (!hasSnapshot || uuid(c.snapshotId))
+      );
+    }
     if (c.type === "seek")
       return (
         exact(c, ["type", "actionId", "offsetSeconds"]) &&
@@ -451,6 +499,8 @@
         throw new Error("unsupported_page");
       if (command.type === "scrollRow" && site.page !== "browse")
         throw new Error("unsupported_page");
+      if (command.type === "scrollViewport" && site.page !== "browse" && site.page !== "results")
+        throw new Error("unsupported_page");
       if (
         (command.type === "play" || command.type === "pause") &&
         (site.page !== "watch" ||
@@ -513,7 +563,12 @@
         const rowCandidateId = uniqueRow
           ? entries.find((entry) => scrollableRowFor(entry.anchor) === uniqueRow)?.id
           : undefined;
+        const scroll =
+          netflixOrigins.has(location.origin) && (site.page === "browse" || site.page === "results")
+            ? viewportScroll()
+            : undefined;
         snapshots.set(snapshotId, {
+          id: snapshotId,
           session,
           url: location.href,
           created: Date.now(),
@@ -521,6 +576,7 @@
           rowCandidateId,
           rows,
           searchControl,
+          scroll,
         });
         const allVideos = [...document.querySelectorAll("video")];
         const videos = allVideos.length <= 16 ? allVideos.filter(visible) : [];
@@ -554,6 +610,7 @@
                   ...(searchControl
                     ? { searchControl: { id: searchControl.id, label: searchControl.label } }
                     : {}),
+                  verticalScrollDirections: scroll?.directions || [],
                 }
               : youtubeOrigins.has(location.origin) &&
                   (site.page === "home" || site.page === "results") &&
@@ -564,6 +621,41 @@
         };
       }
       if (command.type === "scrollViewport") {
+        if (netflixOrigins.has(location.origin)) {
+          const snapshot = snapshots.get(command.snapshotId);
+          if (snapshot) snapshots.delete(command.snapshotId);
+          if (
+            !snapshot ||
+            snapshot.session !== session ||
+            snapshot.url !== location.href ||
+            Date.now() - snapshot.created >= 30_000
+          )
+            throw new Error("stale_snapshot");
+          const current = viewportScroll();
+          if (snapshot.scroll?.state !== "available" || current.state !== "available")
+            throw new Error(
+              current.state === "scroll_ambiguous" ? "scroll_ambiguous" : "scroll_unavailable",
+            );
+          if (
+            command.snapshotId !== snapshot.id ||
+            current.root !== snapshot.scroll.root ||
+            current.top !== snapshot.scroll.top ||
+            current.height !== snapshot.scroll.height ||
+            current.viewport !== snapshot.scroll.viewport ||
+            !snapshot.scroll.directions.includes(command.direction) ||
+            !current.directions.includes(command.direction)
+          )
+            throw new Error("stale_snapshot");
+          active(command, expectedUrl, deadline);
+          current.root.scrollBy({
+            top: (command.direction === "down" ? 1 : -1) * Math.max(1, current.viewport - 80),
+            behavior: "instant",
+          });
+          await wait(80);
+          active(command, expectedUrl, deadline);
+          if (current.root.scrollTop === current.top) throw new Error("scroll_unavailable");
+          return { outcome: "scrolled" };
+        }
         active(command, expectedUrl, deadline);
         const before = scrollY;
         scrollBy({
