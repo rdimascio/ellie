@@ -235,13 +235,15 @@ final class BrowserPhoneControlTests: XCTestCase {
     await eventually { store.phase == .ready }
     XCTAssertFalse(store.canPerform(.scroll(.up), on: node))
     XCTAssertFalse(store.perform(.scroll(.up), on: node))
-    XCTAssertEqual(await transport.actions.count, 2, "An unobserved direction has zero dispatch")
+    let actionsBeforeScroll = await transport.actions
+    XCTAssertEqual(actionsBeforeScroll.count, 2, "An unobserved direction has zero dispatch")
     XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
     XCTAssertTrue(store.perform(.scroll(.down), on: node))
     XCTAssertNil(store.page, "The observed direction is consumed before transport dispatch")
     await eventually { if case .unknown = store.phase { true } else { false } }
     XCTAssertFalse(store.perform(.scroll(.down), on: node))
-    XCTAssertEqual(await transport.actions, [
+    let actionsAfterUnknown = await transport.actions
+    XCTAssertEqual(actionsAfterUnknown, [
       .refresh, .read(revision: String(repeating: "a", count: 64)),
       .scroll(.down, revision: String(repeating: "a", count: 64)),
     ])
