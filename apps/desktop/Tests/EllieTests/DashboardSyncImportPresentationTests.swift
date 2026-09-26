@@ -77,4 +77,29 @@ final class DashboardSyncImportPresentationTests: XCTestCase {
     XCTAssertNil(dashboards.error)
     XCTAssertFalse(presentation.isPresentingError)
   }
+
+  func testDismissalDoesNotClearANewerStoreError() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(
+        "EllieDashboardImportNewerError-\(UUID().uuidString)",
+        isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let file = directory.appendingPathComponent("dashboards.json")
+    let dashboards = DashboardStore(fileURL: file) { _, path in
+      if path.contains(".dashboards-") { throw CocoaError(.fileWriteNoPermission) }
+    }
+    var presentation = DashboardSyncImportPresentation()
+    let remote = DashboardState(dashboards: [
+      Dashboard(id: "remote", name: "Remote replacement", widgets: [])
+    ])
+    presentation.replace(with: remote, dashboards: dashboards)
+    XCTAssertTrue(presentation.isPresentingError)
+
+    dashboards.error = "A newer dashboard error"
+    presentation.dismissError(dashboards: dashboards)
+
+    XCTAssertFalse(presentation.isPresentingError)
+    XCTAssertEqual(dashboards.error, "A newer dashboard error")
+  }
 }

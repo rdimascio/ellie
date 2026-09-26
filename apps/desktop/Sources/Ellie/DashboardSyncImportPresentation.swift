@@ -14,8 +14,8 @@ struct DashboardSyncImportPresentation: Equatable {
 
   @MainActor
   mutating func dismissError(dashboards: DashboardStore) {
-    guard error != nil else { return }
-    error = nil
-    dashboards.error = nil
+    guard let presentedError = error else { return }
+    if dashboards.error == presentedError { dashboards.error = nil }
+    self.error = nil
   }
 }
