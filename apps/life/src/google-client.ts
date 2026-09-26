@@ -1,9 +1,18 @@
-import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
-import { relative, resolve, sep } from "node:path";
+import {
+  constants,
+  closeSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const MAX_CONFIG_BYTES = 64 * 1024;
-const REPOSITORY_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
+const REPOSITORY_ROOT = realpathSync(resolve(fileURLToPath(new URL("../../..", import.meta.url))));
 const MINIMAL_KEYS = new Set(["clientId", "clientSecret"]);
 const INSTALLED_KEYS = new Set([
   "auth_provider_x509_cert_url",
@@ -33,14 +42,34 @@ function bounded(value: unknown, name: string, limit: number): string | undefine
   return value;
 }
 
+function isWithin(root: string, candidate: string): boolean {
+  const fromRoot = relative(root, candidate);
+  return fromRoot === "" || (fromRoot !== ".." && !fromRoot.startsWith(`..${sep}`));
+}
+
+function canonicalCoreStateRoot(): string {
+  const root = resolve(homedir(), ".ellie");
+  try {
+    return realpathSync(root);
+  } catch {
+    return join(realpathSync(homedir()), ".ellie");
+  }
+}
+
 /** Reads only a private host configuration. OAuth endpoints remain fixed in the OAuth helper. */
 export function loadGoogleClient(path: string): GoogleClientConfig {
   if (!path || path.includes("\0")) throw new Error("Google OAuth client path is invalid.");
   const absolute = resolve(path);
-  const fromRepository = relative(REPOSITORY_ROOT, absolute);
-  if (fromRepository === "" || (fromRepository !== ".." && !fromRepository.startsWith(`..${sep}`)))
+  const coreStateRoot = resolve(homedir(), ".ellie");
+  if (isWithin(coreStateRoot, absolute))
+    throw new Error("Google OAuth client configuration must be stored outside ~/.ellie.");
+  const canonical = join(realpathSync(dirname(absolute)), basename(absolute));
+  if (isWithin(REPOSITORY_ROOT, canonical))
     throw new Error("Google OAuth client configuration must be stored outside the repository.");
-  if (lstatSync(absolute).isSymbolicLink())
+  if (isWithin(canonicalCoreStateRoot(), canonical))
+    throw new Error("Google OAuth client configuration must be stored outside ~/.ellie.");
+  const pathStat = lstatSync(absolute);
+  if (pathStat.isSymbolicLink())
     throw new Error("Google OAuth client configuration may not use symlinks.");
 
   const descriptor = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -49,6 +78,8 @@ export function loadGoogleClient(path: string): GoogleClientConfig {
     const stat = fstatSync(descriptor);
     if (
       !stat.isFile() ||
+      stat.dev !== pathStat.dev ||
+      stat.ino !== pathStat.ino ||
       stat.nlink !== 1 ||
       (stat.mode & 0o777) !== 0o600 ||
       (process.getuid && stat.uid !== process.getuid()) ||
