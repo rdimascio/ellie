@@ -131,18 +131,24 @@ document.querySelector("#search-submit").onclick = async () => {
   titles.replaceChildren();
   await run(command, tab.windowId);
 };
-document.querySelector("#up").onclick = () =>
-  run({
+const scrollViewport = async (direction) => {
+  const observedSnapshot = snapshot;
+  if (observedProvider === "netflix") {
+    snapshot = undefined;
+    searchControl = undefined;
+    observedSearch.hidden = true;
+    titles.replaceChildren();
+  }
+  await run({
     type: "scrollViewport",
-    direction: "up",
-    ...(observedProvider === "youtube_tv" && snapshot ? { snapshotId: snapshot } : {}),
+    direction,
+    ...(["netflix", "youtube_tv"].includes(observedProvider) && observedSnapshot
+      ? { snapshotId: observedSnapshot }
+      : {}),
   });
-document.querySelector("#down").onclick = () =>
-  run({
-    type: "scrollViewport",
-    direction: "down",
-    ...(observedProvider === "youtube_tv" && snapshot ? { snapshotId: snapshot } : {}),
-  });
+};
+document.querySelector("#up").onclick = () => scrollViewport("up");
+document.querySelector("#down").onclick = () => scrollViewport("down");
 document.querySelector("#play").onclick = () => run({ type: "play" });
 document.querySelector("#pause").onclick = () => run({ type: "pause" });
 document.querySelector("#back").onclick = () => run({ type: "seek", offsetSeconds: -10 });

@@ -2677,6 +2677,137 @@ test(
 );
 
 test(
+  "Netflix viewport scroll stays bound to one observed snapshot and exact geometry",
+  { timeout: 30_000 },
+  async () => {
+    const owned = await fixture({ companionOnly: true, stableNativePort: true });
+    let context: BrowserContext | undefined;
+    let server: ReturnType<typeof createServer> | undefined;
+    try {
+      const launched = await launch(owned.extension, owned.root);
+      ({ context, server } = launched);
+      const port = new URL(launched.page.url()).port;
+      await launched.page.goto(`http://127.0.0.1:${port}/browse`);
+      await launched.page.setContent(
+        "<!doctype html><style>html,body{margin:0}body{min-height:2400px}main{height:2400px}</style><main>Observed catalogue</main>",
+      );
+      await launched.page.bringToFront();
+      const tab = await launched.worker.evaluate(
+        async (url) =>
+          (await globalThis["chrome"].tabs.query({})).find((item: any) => item.url === url),
+        launched.page.url(),
+      );
+      assert.ok(tab?.id);
+      await launched.worker.evaluate((tabId) => globalThis.__ellieTestWebMCP.bind(tabId), tab.id);
+      let binding = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.status",
+        }),
+      );
+      const native = (request: Record<string, unknown>) =>
+        launched.worker.evaluate(async (value) => {
+          try {
+            return await globalThis.__ellieTestWebMCP.request(value);
+          } catch (error) {
+            return { error: error instanceof Error ? error.message : "failed" };
+          }
+        }, request);
+      const inspect = () =>
+        native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        });
+      const scroll = (snapshotId: string) =>
+        native({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "scrollViewport",
+            actionId: crypto.randomUUID(),
+            snapshotId,
+            direction: "down",
+          },
+        });
+      const first = await inspect();
+      assert.deepEqual(first.value.site.verticalScrollDirections, ["down"]);
+      const replacement = await inspect();
+      assert.notEqual(replacement.value.snapshotId, first.value.snapshotId);
+      const beforeReplacement = await launched.page.evaluate(() => scrollY);
+      const staleReplacement = await scroll(first.value.snapshotId);
+      assert.equal(staleReplacement.error, "unknown");
+      assert.equal(await launched.page.evaluate(() => scrollY), beforeReplacement);
+
+      binding = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.refresh",
+        }),
+      );
+      const beforeGeometry = await inspect();
+      await launched.page.evaluate(() => {
+        document.body.style.minHeight = "2800px";
+        document.querySelector("main").style.height = "2800px";
+      });
+      const geometryTop = await launched.page.evaluate(() => scrollY);
+      const staleGeometry = await scroll(beforeGeometry.value.snapshotId);
+      assert.equal(staleGeometry.error, "unknown");
+      assert.equal(await launched.page.evaluate(() => scrollY), geometryTop);
+
+      binding = await launched.worker.evaluate(() =>
+        globalThis.__ellieTestWebMCP.request({
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "binding.refresh",
+        }),
+      );
+      await launched.page.evaluate(() => {
+        const overlay = document.createElement("div");
+        overlay.id = "fixed-overlay";
+        overlay.style.cssText =
+          "position:fixed;inset:0;background:white;z-index:10;width:100vw;height:100vh";
+        document.body.append(overlay);
+      });
+      assert.deepEqual((await inspect()).value.site.verticalScrollDirections, []);
+      await launched.page.evaluate(() => document.querySelector("#fixed-overlay").remove());
+      await launched.page.evaluate(() => {
+        const nested = document.createElement("div");
+        nested.id = "nested-scroll";
+        nested.style.cssText =
+          "position:fixed;left:calc(50% - 100px);top:calc(50% - 100px);width:200px;height:200px;overflow-y:auto;z-index:10";
+        nested.innerHTML = '<div style="height:600px;background:white">Nested</div>';
+        document.body.append(nested);
+      });
+      assert.deepEqual((await inspect()).value.site.verticalScrollDirections, []);
+      await launched.page.evaluate(() => document.querySelector("#nested-scroll").remove());
+      const current = await inspect();
+      assert.deepEqual(current.value.site.verticalScrollDirections, ["down"]);
+      const before = await launched.page.evaluate(() => scrollY);
+      const dispatched = await scroll(current.value.snapshotId);
+      assert.equal(dispatched.value.outcome, "scrolled");
+      const after = await launched.page.evaluate(() => scrollY);
+      assert.ok(after > before);
+      const replay = await scroll(current.value.snapshotId);
+      assert.equal(replay.error, "unbound");
+      assert.equal(await launched.page.evaluate(() => scrollY), after);
+    } finally {
+      await context?.close();
+      if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
+      await rm(owned.root, { recursive: true, force: true });
+    }
+  },
+);
+
+test(
   "native Netflix companion binds one observed synthetic document and consumes mutations",
   { timeout: 30_000 },
   async () => {

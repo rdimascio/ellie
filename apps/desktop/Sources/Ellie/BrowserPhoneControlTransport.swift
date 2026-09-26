@@ -357,7 +357,8 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
   } else { row = nil }
   let verticalScrollDirections: [BrowserScrollDirection]?
   if let rawDirections = value["verticalScrollDirections"] {
-    guard provider == .youtubeTV, page == .browse,
+    guard (provider == .youtubeTV && page == .browse)
+      || (provider == .netflix && (page == .browse || page == .results)),
       let raw = rawDirections as? [String], raw.count <= 2,
       raw.allSatisfy({ $0 == "up" || $0 == "down" }), Set(raw).count == raw.count
     else { throw PhoneControlFailure.invalidResponse }
