@@ -29,7 +29,8 @@ struct SpeechTurnView: View {
   }
 
   var body: some View {
-    Form {
+    let displayedReview = speech.activeReviewBinding
+    return Form {
       Section("Voice command") {
         Text(
           "Record up to 30 seconds. Audio is sent only to your paired coordinator for transcription. Review the text before choosing an action."
@@ -72,7 +73,9 @@ struct SpeechTurnView: View {
           Text("\(speech.transcript.utf16.count) of 2,000 characters")
             .font(.caption).foregroundStyle(.secondary)
           Button("Send reviewed message to Life") {
-            lifeReview.sendReviewed(speech.transcript, conversationID: lifeConversationID)
+            guard let displayedReview, speech.matchesActiveReview(displayedReview) else { return }
+            lifeReview.sendReviewed(
+              displayedReview.transcript, conversationID: lifeConversationID)
           }
           .accessibilityIdentifier("speech-life-send")
           .disabled(!lifeReview.canSend || controlsBusy || browserStore.isBusy)
@@ -80,6 +83,7 @@ struct SpeechTurnView: View {
             .font(.footnote).foregroundStyle(.secondary)
           if let app = speech.reviewedApp {
             Button("Use reviewed \(app.label) command") {
+              guard let displayedReview, speech.matchesActiveReview(displayedReview) else { return }
               controlStore.selectedApp = app
               speech.discardReview()
               dismiss()
@@ -158,6 +162,7 @@ struct SpeechTurnView: View {
               }
             }
             Button("Run \(intent.displayLabel) on selected Mac") {
+              guard let displayedReview, speech.matchesActiveReview(displayedReview) else { return }
               if browserStore.perform(intent, on: controlStore.selectedNode) {
                 speech.discardReview()
               }

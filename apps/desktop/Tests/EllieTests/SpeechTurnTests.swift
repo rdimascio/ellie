@@ -103,6 +103,48 @@ final class SpeechTurnTests: XCTestCase {
   }
 
   @MainActor
+  func testRenderedReviewMustStillMatchTextAndTurnAtActionAdmission() async throws {
+    let store = SpeechTurnStore(
+      credential: credential(), recorder: SpeechFakeRecorder(),
+      transport: SpeechFakeTransport(text: "Open Safari"))
+    store.checkAvailability()
+    await eventually { store.phase == .ready }
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { store.phase == .reviewing }
+
+    let renderedReview = try XCTUnwrap(store.activeReviewBinding)
+    XCTAssertTrue(store.matchesActiveReview(renderedReview))
+
+    store.transcript = "Open Messages"
+    XCTAssertFalse(
+      store.matchesActiveReview(renderedReview),
+      "An action rendered for older review text must fail closed")
+    let editedReview = try XCTUnwrap(store.activeReviewBinding)
+    XCTAssertTrue(store.matchesActiveReview(editedReview))
+
+    store.discardReview()
+    XCTAssertFalse(store.matchesActiveReview(editedReview))
+    store.transcript = editedReview.transcript // Model a stale editor write after review removal.
+    XCTAssertFalse(
+      store.matchesActiveReview(editedReview),
+      "Text alone cannot restore reviewed-command authority")
+
+    store.record()
+    await eventually { store.phase == .recording }
+    store.stop()
+    await eventually { store.phase == .reviewing }
+    let newReview = try XCTUnwrap(store.activeReviewBinding)
+    XCTAssertEqual(newReview.transcript, renderedReview.transcript)
+    XCTAssertNotEqual(newReview, renderedReview)
+    XCTAssertFalse(
+      store.matchesActiveReview(renderedReview),
+      "An identical transcript from a newer voice turn has distinct review authority")
+    XCTAssertTrue(store.matchesActiveReview(newReview))
+  }
+
+  @MainActor
   func testRevokedAvailabilityNeverRequestsRecording() async {
     let recorder = SpeechFakeRecorder()
     let transport = SpeechFakeTransport(availabilityFailure: .revoked)
