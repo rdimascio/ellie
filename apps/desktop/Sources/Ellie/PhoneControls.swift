@@ -78,18 +78,25 @@ final class PhoneControlStore: ObservableObject {
     nodes.first { $0.id == selectedNodeID }
   }
 
+  var requiresUnknownOutcomeReview: Bool {
+    if case .outcome(.unknown, _, _) = phase { return true }
+    return false
+  }
+
   var canSend: Bool {
-    !credentialChanged && task == nil && selectedNode?.canOpenApps == true
+    !credentialChanged && task == nil && !requiresUnknownOutcomeReview
+      && selectedNode?.canOpenApps == true
   }
 
   func refresh() {
-    guard !credentialChanged, task == nil else { return }
+    guard !credentialChanged, task == nil, !requiresUnknownOutcomeReview else { return }
     phase = .loading
     launchInventory()
   }
 
   func send() {
-    guard !credentialChanged, task == nil, let node = selectedNode, node.canOpenApps else {
+    guard !credentialChanged, task == nil, !requiresUnknownOutcomeReview,
+      let node = selectedNode, node.canOpenApps else {
       return
     }
     let nodeID = node.id
@@ -108,6 +115,11 @@ final class PhoneControlStore: ObservableObject {
     generation += 1
     task?.cancel()
     phase = .cancelling
+  }
+
+  func acknowledgeUnknownOutcome() {
+    guard !credentialChanged, requiresUnknownOutcomeReview else { return }
+    phase = .ready
   }
 
   func credentialDidChange() {
