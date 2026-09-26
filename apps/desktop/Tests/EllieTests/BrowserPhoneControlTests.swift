@@ -167,6 +167,16 @@ final class BrowserPhoneControlTests: XCTestCase {
     else { return XCTFail("Expected Netflix search results") }
     XCTAssertEqual(withSearch.site?.page, .results)
     XCTAssertEqual(withSearch.site?.searchControl?.label, "Search")
+    guard case .page(let withScroll) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"netflix","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}"#),
+      nodeID: "mac")
+    else { return XCTFail("Expected observed Netflix scroll direction") }
+    XCTAssertEqual(withScroll.site?.verticalScrollDirections, [.down])
+    for source in ["accessibility", "webmcp"] {
+      let invalidSource = Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":{"provider":"netflix","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}}}}}"#.utf8)
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(invalidSource, nodeID: "mac"))
+    }
     let missingSite = Data(
       #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]}}}}"#.utf8)
     XCTAssertThrowsError(try decodeBrowserPhoneResponse(missingSite, nodeID: "mac"))
@@ -183,6 +193,9 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"netflix","page":"watch","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000003","label":"Search"}}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","searchControl":{"id":"input[type=search]","label":"Search"}}"#,
       #"{"provider":"netflix","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row"},{"id":"10000000-0000-4000-8000-000000000001","label":"Other"}]}"#,
+      #"{"provider":"netflix","page":"watch","playback":"paused","verticalScrollDirections":["down"]}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","verticalScrollDirections":["down","down"]}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","verticalScrollDirections":["left"]}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
@@ -216,7 +229,6 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["left"]}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["up","down","up"]}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":"down"}"#,
-      #"{"provider":"netflix","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
@@ -244,6 +256,31 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertFalse(store.perform(.scroll(.down), on: node))
     let actionsAfterUnknown = await transport.actions
     XCTAssertEqual(actionsAfterUnknown, [
+      .refresh, .read(revision: String(repeating: "a", count: 64)),
+      .scroll(.down, revision: String(repeating: "a", count: 64)),
+    ])
+  }
+
+  @MainActor
+  func testNetflixObservedDirectionIsConsumedBeforeUnknownAndNeverReplayed() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let site = BrowserPhoneSite(provider: .netflix, page: .browse,
+      playback: .unavailable, currentTimeSeconds: nil, verticalScrollDirections: [.down])
+    let transport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertFalse(store.canPerform(.scroll(.up), on: node))
+    XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    XCTAssertNil(store.page, "The observed direction is consumed before transport dispatch")
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.scroll(.down), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [
       .refresh, .read(revision: String(repeating: "a", count: 64)),
       .scroll(.down, revision: String(repeating: "a", count: 64)),
     ])
@@ -312,6 +349,12 @@ final class BrowserPhoneControlTests: XCTestCase {
         currentTimeSeconds: nil, searchControl: BrowserPhoneSearchControl(
           id: "10000000-0000-4000-8000-000000000003", label: "Search")),
         .search(query: "title"), true),
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, verticalScrollDirections: [.down]), .scroll(.down), true),
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, verticalScrollDirections: [.down]), .scroll(.up), false),
+      (BrowserPhoneSite(provider: .netflix, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.down), false),
       (BrowserPhoneSite(provider: .netflix, page: .results, playback: .unavailable,
         currentTimeSeconds: nil, searchControl: BrowserPhoneSearchControl(
           id: "10000000-0000-4000-8000-000000000004", label: "Search")),
