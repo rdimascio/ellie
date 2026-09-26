@@ -79,6 +79,43 @@ final class PhoneControlStoreTests: XCTestCase {
     XCTAssertEqual(commandCount, 0)
   }
 
+  @MainActor
+  func testOfflineMacStaysVisibleWithOwnerManagedCleanupAndCannotDispatch() async {
+    let offline = PhoneControlNode(
+      id: "mac-a", label: "Living Room Mac mini", online: false,
+      capabilities: ["app.open"])
+    let availability = phoneControlNodeAvailability(offline)
+    XCTAssertEqual(availability.title, "Living Room Mac mini is offline")
+    XCTAssertEqual(availability.systemImage, "wifi.slash")
+    XCTAssertEqual(
+      availability.guidance,
+      "Ellie keeps this Mac listed while the coordinator still grants access. "
+        + "Reconnect it, then tap Refresh Macs. To remove this iPhone’s access, the coordinator "
+        + "owner must use Manage iPhone Pairing and then pair again with the intended Macs. "
+        + "Nothing is removed automatically.")
+
+    let transport = PhoneControlFakeTransport(nodes: [offline])
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    XCTAssertEqual(store.nodes, [offline], "Refresh must not discard a granted offline identity")
+    store.selectedNodeID = offline.id
+    XCTAssertEqual(store.selectedNode, offline)
+    XCTAssertFalse(store.canSend)
+    store.send()
+    let commandCount = await transport.commandCalls.count
+    XCTAssertEqual(commandCount, 0)
+
+    let online = PhoneControlNode(
+      id: "mac-a", label: "Living Room Mac mini", online: true,
+      capabilities: ["app.open"])
+    XCTAssertEqual(
+      phoneControlNodeAvailability(online),
+      PhoneControlNodeAvailability(
+        title: "Living Room Mac mini is online", systemImage: "checkmark.circle.fill",
+        guidance: nil))
+  }
+
   func testCommandResponseOnlyTrustsCanonicalPredispatchErrors() throws {
     XCTAssertEqual(
       try decodePhoneCommandResponse(status: 200, data: Data(#"{"outcome":"completed"}"#.utf8)),
