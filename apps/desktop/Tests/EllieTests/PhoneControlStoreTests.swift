@@ -196,6 +196,40 @@ final class PhoneControlStoreTests: XCTestCase {
   }
 
   @MainActor
+  func testUnknownOutcomeBlocksRefreshAndReplayUntilExplicitReview() async {
+    let transport = PhoneControlFakeTransport(nodes: [node("mac-a")], suspendCommand: true)
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = "mac-a"
+    store.selectedApp = .messages
+    store.send()
+    await eventually { await transport.commandCalls.count == 1 }
+    await transport.finishCommand(.unknown)
+    await eventually {
+      store.phase == .outcome(.unknown, nodeID: "mac-a", app: .messages)
+    }
+
+    XCTAssertTrue(store.requiresUnknownOutcomeReview)
+    XCTAssertFalse(store.canSend)
+    store.send()
+    store.refresh()
+    let callsWhileUnknown = await transport.commandCalls.count
+    let readsWhileUnknown = await transport.nodeCalls
+    XCTAssertEqual(callsWhileUnknown, 1, "An unknown command cannot be replayed")
+    XCTAssertEqual(readsWhileUnknown, 1, "Refresh cannot erase an unresolved outcome")
+
+    store.acknowledgeUnknownOutcome()
+    XCTAssertEqual(store.phase, .ready)
+    XCTAssertFalse(store.requiresUnknownOutcomeReview)
+    XCTAssertTrue(store.canSend)
+    let callsAfterReview = await transport.commandCalls.count
+    let readsAfterReview = await transport.nodeCalls
+    XCTAssertEqual(callsAfterReview, 1, "Acknowledging never dispatches a command")
+    XCTAssertEqual(readsAfterReview, 1, "Acknowledging never refreshes automatically")
+  }
+
+  @MainActor
   func testCredentialChangePermanentlyBlocksOldStoreAndPreservesUnknownCommand() async {
     let transport = PhoneControlFakeTransport(nodes: [node("mac-a")], suspendCommand: true)
     let store = PhoneControlStore(credential: credential(), transport: transport)
