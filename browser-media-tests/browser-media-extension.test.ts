@@ -858,6 +858,11 @@ test("popup submits only the search control from its fresh observed page", async
   await elements.get("down").onclick();
   assert.equal(sent.at(-1).command.type, "scrollViewport");
   assert.equal(sent.at(-1).command.snapshotId, "observed-snapshot");
+  inspectProvider = "disneyplus";
+  await elements.get("inspect").onclick();
+  await elements.get("down").onclick();
+  assert.equal(sent.at(-1).command.type, "scrollViewport");
+  assert.equal(sent.at(-1).command.snapshotId, "observed-snapshot");
 });
 
 test("YouTube popup search accepts only exact results on its selected active tab", async () => {
@@ -1785,14 +1790,21 @@ test(
           documentId: bound.documentId,
           command: { type: "inspect", actionId: crypto.randomUUID() },
         });
-      assert.equal((await inspect(binding)).value.site.page, "browse");
+      const observed = await inspect(binding);
+      assert.equal(observed.value.site.page, "browse");
+      assert.deepEqual(observed.value.site.verticalScrollDirections, ["down"]);
       const scroll = {
         protocol: "ellie.browser-webmcp.v1",
         id: crypto.randomUUID(),
         type: "media.execute",
         bindingId: binding.bindingId,
         documentId: binding.documentId,
-        command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+        command: {
+          type: "scrollViewport",
+          actionId: crypto.randomUUID(),
+          direction: "down",
+          snapshotId: observed.value.snapshotId,
+        },
       };
       const effect = await request(scroll);
       assert.equal(effect.value.outcome, "scrolled");
@@ -1972,14 +1984,17 @@ test(
           type: "binding.status",
         }),
       );
-      await launched.worker.evaluate((value) => globalThis.__ellieTestWebMCP.request(value), {
-        protocol: "ellie.browser-webmcp.v1",
-        id: crypto.randomUUID(),
-        type: "media.execute",
-        bindingId: binding.bindingId,
-        documentId: binding.documentId,
-        command: { type: "inspect", actionId: crypto.randomUUID() },
-      });
+      const observed = await launched.worker.evaluate(
+        (value) => globalThis.__ellieTestWebMCP.request(value),
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: { type: "inspect", actionId: crypto.randomUUID() },
+        },
+      );
       await launched.worker.evaluate(() => globalThis.__ellieTestWebMCP.arm());
       const pending = launched.worker.evaluate(
         async (value) => {
@@ -1996,7 +2011,12 @@ test(
           type: "media.execute",
           bindingId: binding.bindingId,
           documentId: binding.documentId,
-          command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+          command: {
+            type: "scrollViewport",
+            actionId: crypto.randomUUID(),
+            direction: "down",
+            snapshotId: observed.value.snapshotId,
+          },
         },
       );
       try {

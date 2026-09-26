@@ -725,7 +725,8 @@ final class BrowserPhoneControlStore: ObservableObject {
       switch intent {
       case .openResult, .openSelectedResult: return site.page == .browse
       case .scroll(let direction):
-        return site.page == .browse && (direction == .up || direction == .down)
+        return page.source == .companion && site.page == .browse
+          && site.verticalScrollDirections?.contains(direction) == true
       default: return false
       }
     }
