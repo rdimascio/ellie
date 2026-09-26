@@ -102,9 +102,11 @@ export async function settleFailedAcceptanceEnvironmentSetup(
   },
 ): Promise<never> {
   const deadline = options.cleanupDeadlineMs ?? 5_000;
+  const bounded = (work: () => Promise<void>, message: string) =>
+    within(Promise.resolve().then(work), deadline, message);
   const attempts = await Promise.allSettled([
-    within(options.closeBridge(), deadline, "bridge cleanup timed out"),
-    within(options.closeServer(), deadline, "server cleanup timed out"),
+    bounded(options.closeBridge, "bridge cleanup timed out"),
+    bounded(options.closeServer, "server cleanup timed out"),
   ]);
   const cleanupFailures = attempts.flatMap((result, index) =>
     result.status === "rejected"

@@ -18,7 +18,7 @@ test("acceptance environment setup preserves first failure and every uncertain o
   await assert.rejects(
     settleFailedAcceptanceEnvironmentSetup(setup, {
       ownedRoot: "/owned/retained-state",
-      closeBridge: async () => {
+      closeBridge: () => {
         throw new Error("bridge close failed");
       },
       closeServer: async () => {
