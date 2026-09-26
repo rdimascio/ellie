@@ -383,6 +383,29 @@ test("local provider rejects completions cut short at the token limit", async ()
   await assert.rejects(provider.evaluate(request()), /Invalid decision response/);
 });
 
+test("local provider rejects a missing or substituted model identity without fallback", async () => {
+  for (const model of [undefined, "different-local-model"]) {
+    let calls = 0;
+    const provider = new LocalDecisionProvider({
+      endpoint: "http://127.0.0.1:1234",
+      model: "reviewed-local-model",
+      fetch: async () => {
+        calls++;
+        return json({
+          ...(model === undefined ? {} : { model }),
+          choices: [{ message: { content: JSON.stringify({ answers }) } }],
+        });
+      },
+    });
+    await assert.rejects(provider.evaluate(request()), (error: Error) => {
+      assert.equal(error.message, "Invalid decision response");
+      assert.doesNotMatch(error.message, /different-local-model|reviewed-local-model/);
+      return true;
+    });
+    assert.equal(calls, 1, "a rejected model identity must not trigger a retry or fallback");
+  }
+});
+
 test("provider constructor bounds model length and rejects a key with a newline", () => {
   assert.throws(
     () => new TypeSafeDecisionProvider({ apiKey: "secret\nheader" }),
