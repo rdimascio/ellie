@@ -208,6 +208,23 @@ final class DashboardModelTests: XCTestCase {
     }
 
     @MainActor
+    func testDesktopSelectionKeepsTheLastValidDashboardWhenListProposesNoSelection() throws {
+        let location = temporaryLocation()
+        let store = DashboardStore(fileURL: location)
+        store.createDashboard(name: "Evening")
+        let eveningID = try XCTUnwrap(store.selectedID)
+        let durableBeforeSelection = try Data(contentsOf: location)
+
+        XCTAssertFalse(store.selectDashboard(id: nil))
+
+        XCTAssertEqual(store.selectedID, eveningID)
+        XCTAssertEqual(store.selectedDashboard?.name, "Evening")
+        XCTAssertNil(store.error)
+        XCTAssertEqual(try Data(contentsOf: location), durableBeforeSelection)
+        XCTAssertEqual(DashboardStore(fileURL: location).state, store.state)
+    }
+
+    @MainActor
     func testCorruptSavedFileIsPreservedAndReported() async throws {
         let location = temporaryLocation()
         try FileManager.default.createDirectory(at: location.deletingLastPathComponent(), withIntermediateDirectories: true)

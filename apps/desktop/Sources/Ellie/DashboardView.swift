@@ -52,7 +52,7 @@ struct DashboardView: View {
   var body: some View {
     NavigationSplitView {
       VStack(spacing: 0) {
-        List(selection: $store.selectedID) {
+        List(selection: dashboardSelection) {
           Section("Dashboards") {
             ForEach(store.state.dashboards) { dashboard in
               Label(
@@ -63,12 +63,12 @@ struct DashboardView: View {
               .tag(dashboard.id)
               .contextMenu {
                 Button("Rename…") {
-                  store.selectedID = dashboard.id
+                  guard store.selectDashboard(id: dashboard.id) else { return }
                   name = dashboard.name
                   renaming = true
                 }
                 Button("Delete…", role: .destructive) {
-                  store.selectedID = dashboard.id
+                  guard store.selectDashboard(id: dashboard.id) else { return }
                   deleting = true
                 }
                 .disabled(store.state.dashboards.count < 2)
@@ -240,6 +240,13 @@ struct DashboardView: View {
     } message: {
       Text(store.error ?? "")
     }
+  }
+
+  private var dashboardSelection: Binding<String?> {
+    Binding(
+      get: { store.selectedID },
+      set: { _ = store.selectDashboard(id: $0) }
+    )
   }
 
   private func widgetRows(_ dashboard: Dashboard, columns: Int) -> some View {

@@ -4,7 +4,7 @@ import Foundation
 @MainActor
 final class DashboardStore: ObservableObject {
     @Published private(set) var state: DashboardState
-    @Published var selectedID: String?
+    @Published private(set) var selectedID: String?
     @Published var error: String?
 
     let fileURL: URL
@@ -23,6 +23,18 @@ final class DashboardStore: ObservableObject {
         }
         selectedID = id
         return true
+    }
+
+    @discardableResult
+    func selectDashboard(id: String?) -> Bool {
+        guard let id else {
+            // SwiftUI can transiently propose an empty List selection while rows
+            // still exist. Keep the last valid dashboard selected in that case.
+            guard state.dashboards.isEmpty else { return false }
+            selectedID = nil
+            return true
+        }
+        return selectDashboard(id: id)
     }
 
     init(
