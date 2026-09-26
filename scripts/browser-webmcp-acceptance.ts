@@ -69,6 +69,11 @@ export async function settleFailedNativeJourneySetup(
   }
   throw error;
 }
+
+export function settleAcceptanceOutcome(failure: unknown, cleanupError: string | undefined): void {
+  if (failure) throw failure;
+  if (cleanupError) throw new Error(cleanupError);
+}
 const sourceExtension = resolve("apps/browser-media-extension");
 const agentBrowserPath = resolve("node_modules/.bin/agent-browser");
 const hostname = "ellie-browser-acceptance.local";
@@ -196,6 +201,11 @@ async function prepareExtension(root: string, origin: string) {
     "const reviewedWebMCPBindings = Object.freeze({});",
     `const reviewedWebMCPBindings = Object.freeze(${reviewed});`,
   );
+  const acceptanceLauncher =
+    '<!doctype html><meta charset="utf-8"><title>Acceptance popup launcher</title>\n';
+  await writeFile(join(extension, "acceptance-launcher.html"), acceptanceLauncher, {
+    mode: 0o600,
+  });
   const manifestPath = join(extension, "manifest.json");
   const productionManifest = await readFile(manifestPath);
   const manifest = JSON.parse(productionManifest.toString("utf8"));
@@ -216,7 +226,9 @@ async function prepareExtension(root: string, origin: string) {
       "background.js reviewedWebMCPBindings contains only the five acceptance tools",
       "all reviewed acceptance tools require the Chrome 152 JSON-string argument dialect",
       `manifest.json host_permissions contains only ${origin}/*`,
+      "acceptance-launcher.html opens the genuine action popup without adding a popup.html tab",
     ],
+    acceptanceLauncherSha256: sha256(acceptanceLauncher),
     productionManifestSha256: sha256(productionManifest),
   };
 }
@@ -849,6 +861,11 @@ async function main() {
   if (composedSetting !== undefined && composedSetting !== "1")
     throw new Error("Invalid composed iOS acceptance setting.");
   const composed = composedSetting === "1";
+  const bindOnlySetting = process.env.ELLIE_BROWSER_ACCEPTANCE_BIND_ONLY;
+  if (bindOnlySetting !== undefined && bindOnlySetting !== "1")
+    throw new Error("Invalid bind-only acceptance setting.");
+  const bindOnly = bindOnlySetting === "1";
+  if (bindOnly && composed) throw new Error("Bind-only acceptance cannot launch composed iOS.");
   const sourceStatus = await gitValue(["status", "--short"]);
   if (sourceStatus && process.env.ELLIE_BROWSER_ACCEPTANCE_ALLOW_DIRTY !== "1")
     throw new Error(
@@ -1102,50 +1119,84 @@ async function main() {
     assert.match(directTools, /ellie_acceptance_read/);
     assert.match(directTools, /ellie_acceptance_scroll/);
 
-    await agent(["tab", "new", `chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/popup.html`]);
+    await agent([
+      "tab",
+      "new",
+      `chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/acceptance-launcher.html`,
+    ]);
     const extensionIdentity = await agentJson<{ result: unknown }>([
       "eval",
       "({id:chrome.runtime.id,url:location.href})",
     ]);
     assert.deepEqual(extensionIdentity.result, {
       id: ELLIE_BROWSER_EXTENSION_ID,
-      url: `chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/popup.html`,
+      url: `chrome-extension://${ELLIE_BROWSER_EXTENSION_ID}/acceptance-launcher.html`,
     });
-    const bindExpression = composed
-      ? `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});const selected=await chrome.tabs.get(tab.id);const ownerWindow=await chrome.windows.get(selected.windowId);const reply=await chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}});return {reply,anchor:{tabId:selected.id,windowId:selected.windowId,url:selected.url},precondition:{tabActive:selected.active===true,tabComplete:selected.status==='complete',windowFocused:ownerWindow.focused===true}}})()`
-      : `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});return chrome.runtime.sendMessage({protocol:'ellie.media.v1',tabId:tab.id,command:{type:'bindWebMCP',actionId:crypto.randomUUID()}})})()`;
-    const bound = await agentJson<{ result: unknown }>(["eval", bindExpression]);
-    const composedBinding = composed
-      ? (bound.result as {
-          reply?: { ok?: unknown; error?: unknown; value?: { availability?: unknown } };
-          anchor?: { tabId?: unknown; windowId?: unknown; url?: unknown };
-          precondition?: {
-            tabActive?: unknown;
-            tabComplete?: unknown;
-            windowFocused?: unknown;
-          };
-        })
-      : undefined;
-    const bindingReply = composed
-      ? composedBinding?.reply
-      : (bound.result as { ok?: unknown; value?: { availability?: unknown } });
-    const bindError =
-      typeof composedBinding?.reply?.error === "string" &&
-      /^[a-z_]{1,64}$/.test(composedBinding.reply.error)
-        ? composedBinding.reply.error
-        : "unavailable";
-    assert.equal(
-      bindingReply?.ok,
-      true,
-      composed
-        ? `Owned bind rejected: ${bindError}; active=${composedBinding?.precondition?.tabActive === true}; complete=${composedBinding?.precondition?.tabComplete === true}; focused=${composedBinding?.precondition?.windowFocused === true}`
-        : undefined,
-    );
-    assert.equal(bindingReply?.value?.availability, "webmcp");
+    const opened = await agentJson<{ result: unknown }>([
+      "eval",
+      `(async()=>{const tabs=await chrome.tabs.query({});const tab=tabs.find(value=>value.url===${JSON.stringify(`${origin}/`)});if(!tab?.id)throw new Error('fixture_tab_missing');await chrome.tabs.update(tab.id,{active:true});const selected=await chrome.tabs.get(tab.id);const ownerWindow=await chrome.windows.get(selected.windowId);await chrome.action.openPopup({windowId:selected.windowId});const deadline=Date.now()+5000;let popup;while(Date.now()<deadline){[popup]=chrome.extension.getViews({type:'popup',windowId:selected.windowId});if(popup)break;await new Promise(resolve=>setTimeout(resolve,25))}if(!popup)throw new Error('genuine_popup_missing');const contexts=await chrome.runtime.getContexts({documentUrls:[chrome.runtime.getURL('popup.html')]});const genuine=contexts.length===1&&contexts[0].contextType==='POPUP'&&contexts[0].tabId===-1&&contexts[0].windowId===-1;if(!genuine)throw new Error('genuine_popup_context_missing');const button=popup.document.querySelector('#bind-webmcp');if(!button)throw new Error('bind_control_missing');button.click();let status='';while(Date.now()<deadline){status=popup.document.querySelector('#status')?.textContent??'';if(status!=='Working…'&&status!=='Ready')break;await new Promise(resolve=>setTimeout(resolve,25))}if(status!=='Page selected.')throw new Error('popup_bind_failed:'+status);popup.close();return {anchor:{tabId:selected.id,windowId:selected.windowId,url:selected.url},precondition:{tabActive:selected.active===true,tabComplete:selected.status==='complete',windowFocused:ownerWindow.focused===true},popup:{genuine,status}}})()`,
+    ]);
+    const popupBinding = opened.result as {
+      anchor?: { tabId?: unknown; windowId?: unknown; url?: unknown };
+      precondition?: { tabActive?: unknown; tabComplete?: unknown; windowFocused?: unknown };
+    };
+    assert.equal(popupBinding.precondition?.tabActive, true);
+    assert.equal(popupBinding.precondition?.tabComplete, true);
+    assert.equal(popupBinding.precondition?.windowFocused, true);
     await waitUntil(() => bridge.connected(), "The real browser did not open the native host.");
+    const bindingStatus = await bridge.request(
+      {
+        protocol: "ellie.browser-webmcp.v1",
+        id: randomUUID(),
+        type: "binding.status",
+      },
+      AbortSignal.timeout(2_000),
+    );
+    assert.equal(bindingStatus.status, "ok", "The genuine popup did not bind the owned page.");
+    assert.equal(record(bindingStatus.value).availability, "webmcp");
 
-    if (composed) {
-      const anchor = composedBinding?.anchor;
+    if (bindOnly) {
+      const anchor = popupBinding.anchor;
+      assert.ok(anchor);
+      assert.ok(Number.isInteger(anchor.tabId) && Number(anchor.tabId) > 0);
+      assert.ok(Number.isInteger(anchor.windowId) && Number(anchor.windowId) > 0);
+      assert.equal(anchor?.url, `${origin}/`);
+      report = {
+        version: 1,
+        status: "pass",
+        mode: "synthetic-genuine-popup-bind-only",
+        startedFromCleanSource: sourceStatus.length === 0,
+        source: {
+          commit: await gitValue(["rev-parse", "HEAD"]),
+          tree: await gitValue(["rev-parse", "HEAD^{tree}"]),
+          runnerSha256: sha256(await readFile(runnerPath)),
+        },
+        browser: {
+          executableSha256: sha256(await readFile(browserExecutable)),
+          userAgent: browserUserAgent,
+          profile: "owned temporary profile",
+        },
+        binding: {
+          origin,
+          url: anchor.url,
+          availability: record(bindingStatus.value).availability,
+          popup: "Chrome action POPUP context",
+        },
+        nativeHost,
+        extension: {
+          id: ELLIE_BROWSER_EXTENSION_ID,
+          acceptanceLauncherSha256: extension.acceptanceLauncherSha256,
+          productionFiles: extension.productionFiles,
+          fixtureFiles: extension.files,
+          fixtureDifferences: extension.fixtureDifferences,
+        },
+        replayAttempted: false,
+        accessibilityFallbackAttempted: false,
+        commands,
+        artifacts: ["before.snapshot.txt", "before.png"],
+      };
+    } else if (composed) {
+      const anchor = popupBinding.anchor;
       assert.ok(Number.isInteger(anchor?.tabId) && Number(anchor?.tabId) > 0);
       assert.ok(Number.isInteger(anchor?.windowId) && Number(anchor?.windowId) > 0);
       assert.equal(anchor?.url, `${origin}/`);
@@ -1649,7 +1700,7 @@ async function main() {
       mode: 0o600,
     });
   }
-  if (failure || cleanupError) throw failure ?? new Error(cleanupError);
+  settleAcceptanceOutcome(failure, cleanupError);
   console.log(JSON.stringify({ status: "pass", reportDirectory }));
 }
 
