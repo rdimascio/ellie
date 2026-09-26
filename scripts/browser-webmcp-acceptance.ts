@@ -69,6 +69,11 @@ export async function settleFailedNativeJourneySetup(
   }
   throw error;
 }
+
+export function settleAcceptanceOutcome(failure: unknown, cleanupError: string | undefined): void {
+  if (failure) throw failure;
+  if (cleanupError) throw new Error(cleanupError);
+}
 const sourceExtension = resolve("apps/browser-media-extension");
 const agentBrowserPath = resolve("node_modules/.bin/agent-browser");
 const hostname = "ellie-browser-acceptance.local";
@@ -1190,10 +1195,7 @@ async function main() {
         commands,
         artifacts: ["before.snapshot.txt", "before.png"],
       };
-      return;
-    }
-
-    if (composed) {
+    } else if (composed) {
       const anchor = popupBinding.anchor;
       assert.ok(Number.isInteger(anchor?.tabId) && Number(anchor?.tabId) > 0);
       assert.ok(Number.isInteger(anchor?.windowId) && Number(anchor?.windowId) > 0);
@@ -1698,7 +1700,7 @@ async function main() {
       mode: 0o600,
     });
   }
-  if (failure || cleanupError) throw failure ?? new Error(cleanupError);
+  settleAcceptanceOutcome(failure, cleanupError);
   console.log(JSON.stringify({ status: "pass", reportDirectory }));
 }
 
