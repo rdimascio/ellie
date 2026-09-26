@@ -58,6 +58,17 @@ struct BrowserPhoneSite: Equatable, Sendable {
     self.searchControl = searchControl
   }
 }
+
+func browserRowsCompatibleWithReviewedScroll(
+  _ direction: BrowserScrollDirection, site: BrowserPhoneSite
+) -> [BrowserPhoneRow] {
+  guard (direction == .left || direction == .right), site.page == .browse,
+    site.provider == .netflix || site.provider == .disneyplus
+  else { return [] }
+  let rows = site.rows ?? []
+  if site.provider == .netflix { return rows }
+  return rows.filter { $0.directions?.contains(direction) == true }
+}
 struct BrowserPhonePage: Equatable, Sendable {
   let nodeID: String
   let source: BrowserPhoneSource

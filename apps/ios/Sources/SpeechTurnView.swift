@@ -110,27 +110,36 @@ struct SpeechTurnView: View {
               direction == .left || direction == .right,
               let site = browserStore.page?.site,
               site.provider == .netflix || site.provider == .disneyplus,
-              site.page == .browse, let rows = site.rows, !rows.isEmpty
+              site.page == .browse, site.rows?.isEmpty == false
             {
-              Text("Choose a row on \(controlStore.selectedNode?.label ?? "the selected Mac") before running this command.")
-                .font(.footnote).foregroundStyle(.secondary)
-              ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                Button {
-                  browserStore.selectObservedRow(row.id, on: controlStore.selectedNode)
-                } label: {
-                  HStack {
-                    Text(row.label)
-                    Spacer()
-                    if browserStore.selectedRowID == row.id { Image(systemName: "checkmark") }
+              let compatibleRows = browserRowsCompatibleWithReviewedScroll(direction, site: site)
+              if compatibleRows.isEmpty {
+                Text("No observed row can move \(direction.rawValue) from this read. Read the page again after its rows change.")
+                  .font(.footnote).foregroundStyle(.secondary)
+                  .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-unavailable")
+              } else {
+                Text("Choose a row on \(controlStore.selectedNode?.label ?? "the selected Mac") before running this command.")
+                  .font(.footnote).foregroundStyle(.secondary)
+                ForEach(Array(compatibleRows.enumerated()), id: \.element.id) { index, row in
+                  Button {
+                    browserStore.selectObservedRow(row.id, on: controlStore.selectedNode)
+                  } label: {
+                    HStack {
+                      Text(row.label)
+                      Spacer()
+                      if browserStore.selectedRowID == row.id { Image(systemName: "checkmark") }
+                    }
                   }
+                  .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-\(index + 1)")
+                  .disabled(controlsBusy || browserStore.isBusy)
                 }
-                .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-\(index + 1)")
-                .disabled(controlsBusy || browserStore.isBusy)
-              }
-              if let chosen = rows.first(where: { $0.id == browserStore.selectedRowID }) {
-                Text("Run will scroll \(chosen.label) on \(controlStore.selectedNode?.label ?? "the selected Mac").")
-                  .font(.footnote)
-                  .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-review")
+                if let chosen = compatibleRows.first(where: {
+                  $0.id == browserStore.selectedRowID
+                }) {
+                  Text("Run will scroll \(chosen.label) \(direction.rawValue) on \(controlStore.selectedNode?.label ?? "the selected Mac").")
+                    .font(.footnote)
+                    .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-review")
+                }
               }
             }
             if case .openSelectedResult = intent, let page = browserStore.page,

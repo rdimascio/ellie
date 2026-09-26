@@ -356,6 +356,27 @@ final class BrowserPhoneControlTests: XCTestCase {
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
   }
 
+  func testReviewedHorizontalRowsFilterDisneyDirectionAndPreserveNetflixBehavior() {
+    let right = BrowserPhoneRow(
+      id: "10000000-0000-4000-8000-000000000001", label: "Right", directions: [.right])
+    let left = BrowserPhoneRow(
+      id: "10000000-0000-4000-8000-000000000002", label: "Left", directions: [.left])
+    let legacy = BrowserPhoneRow(
+      id: "10000000-0000-4000-8000-000000000003", label: "Legacy")
+    let disney = BrowserPhoneSite(provider: .disneyplus, page: .browse,
+      playback: .unavailable, currentTimeSeconds: nil, rows: [right, left, legacy])
+    XCTAssertEqual(browserRowsCompatibleWithReviewedScroll(.right, site: disney), [right])
+    XCTAssertEqual(browserRowsCompatibleWithReviewedScroll(.left, site: disney), [left])
+    XCTAssertTrue(browserRowsCompatibleWithReviewedScroll(.down, site: disney).isEmpty)
+
+    let netflix = BrowserPhoneSite(provider: .netflix, page: .browse,
+      playback: .unavailable, currentTimeSeconds: nil, rows: [right, left, legacy])
+    XCTAssertEqual(
+      browserRowsCompatibleWithReviewedScroll(.right, site: netflix), [right, left, legacy])
+    XCTAssertEqual(
+      browserRowsCompatibleWithReviewedScroll(.left, site: netflix), [right, left, legacy])
+  }
+
   @MainActor
   func testNetflixObservedControlsFailClosedBeforeDispatch() async {
     let node = PhoneControlNode(
