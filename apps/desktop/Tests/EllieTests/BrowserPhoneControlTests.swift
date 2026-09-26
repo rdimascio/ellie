@@ -375,6 +375,16 @@ final class BrowserPhoneControlTests: XCTestCase {
       browserRowsCompatibleWithReviewedScroll(.right, site: netflix), [right, left, legacy])
     XCTAssertEqual(
       browserRowsCompatibleWithReviewedScroll(.left, site: netflix), [right, left, legacy])
+    XCTAssertEqual(
+      browserReviewedRowRunCopy(
+        provider: .netflix, row: legacy, direction: .right, nodeLabel: "Studio"),
+      "Run will scroll Legacy on Studio.")
+    XCTAssertEqual(
+      browserReviewedRowRunCopy(
+        provider: .disneyplus, row: right, direction: .right, nodeLabel: "Studio"),
+      "Run will scroll Right right on Studio.")
+    XCTAssertNil(browserReviewedRowRunCopy(
+      provider: .disneyplus, row: right, direction: .left, nodeLabel: "Studio"))
   }
 
   @MainActor

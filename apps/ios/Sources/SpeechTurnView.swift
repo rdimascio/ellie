@@ -135,8 +135,11 @@ struct SpeechTurnView: View {
                 }
                 if let chosen = compatibleRows.first(where: {
                   $0.id == browserStore.selectedRowID
-                }) {
-                  Text("Run will scroll \(chosen.label) \(direction.rawValue) on \(controlStore.selectedNode?.label ?? "the selected Mac").")
+                }), let reviewCopy = browserReviewedRowRunCopy(
+                  provider: site.provider, row: chosen, direction: direction,
+                  nodeLabel: controlStore.selectedNode?.label ?? "the selected Mac")
+                {
+                  Text(reviewCopy)
                     .font(.footnote)
                     .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-review")
                 }

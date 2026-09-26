@@ -69,6 +69,16 @@ func browserRowsCompatibleWithReviewedScroll(
   if site.provider == .netflix { return rows }
   return rows.filter { $0.directions?.contains(direction) == true }
 }
+
+func browserReviewedRowRunCopy(
+  provider: BrowserPhoneProvider, row: BrowserPhoneRow, direction: BrowserScrollDirection,
+  nodeLabel: String
+) -> String? {
+  guard direction == .left || direction == .right else { return nil }
+  if provider == .netflix { return "Run will scroll \(row.label) on \(nodeLabel)." }
+  guard provider == .disneyplus, row.directions?.contains(direction) == true else { return nil }
+  return "Run will scroll \(row.label) \(direction.rawValue) on \(nodeLabel)."
+}
 struct BrowserPhonePage: Equatable, Sendable {
   let nodeID: String
   let source: BrowserPhoneSource
