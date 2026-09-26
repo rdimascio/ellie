@@ -262,6 +262,13 @@ export class BrowserCompanionOperations {
         "Disney+ exposes only observed title links and vertical browsing on this page.",
       );
     if (
+      disneyplus &&
+      action.tool === "browser.scroll" &&
+      ((action.direction !== "up" && action.direction !== "down") ||
+        !observed.site.verticalScrollDirections?.includes(action.direction))
+    )
+      throw new Error("Disney+ scroll direction is not observed; read the page again.");
+    if (
       youtubeTV &&
       (action.tool === "browser.search" ||
         action.tool === "browser.select" ||
@@ -321,7 +328,7 @@ export class BrowserCompanionOperations {
           type: "scrollViewport",
           actionId: randomUUID(),
           direction: action.direction,
-          ...(youtubeTV || netflix ? { snapshotId: observed.snapshotId } : {}),
+          ...(youtubeTV || netflix || disneyplus ? { snapshotId: observed.snapshotId } : {}),
         };
       else
         throw new Error(

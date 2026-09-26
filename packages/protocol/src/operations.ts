@@ -529,7 +529,8 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
             !(
               (observed.provider === "youtube_tv" && observed.page === "browse") ||
               (observed.provider === "netflix" &&
-                (observed.page === "browse" || observed.page === "results"))
+                (observed.page === "browse" || observed.page === "results")) ||
+              (observed.provider === "disneyplus" && observed.page === "browse")
             ) ||
             !Array.isArray(observed.verticalScrollDirections) ||
             observed.verticalScrollDirections.length > 2 ||
