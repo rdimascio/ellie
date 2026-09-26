@@ -388,8 +388,14 @@ final class BrowserPhoneControlStore: ObservableObject {
     }
     guard Self.observedSiteAllows(intent, on: page) else { return false }
     if case .scroll(let direction) = intent,
-      (direction == .left || direction == .right), page.site?.provider == .netflix,
-      page.site?.rows?.contains(where: { $0.id == selectedRowID }) != true { return false }
+      (direction == .left || direction == .right),
+      page.site?.provider == .netflix || page.site?.provider == .disneyplus
+    {
+      guard let row = page.site?.rows?.first(where: { $0.id == selectedRowID }) else { return false }
+      if page.site?.provider == .disneyplus && row.directions?.contains(direction) != true {
+        return false
+      }
+    }
     switch intent {
     case .search(let query):
       return query == query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -424,7 +430,8 @@ final class BrowserPhoneControlStore: ObservableObject {
   func selectObservedRow(_ rowID: String, on node: PhoneControlNode?) -> Bool {
     guard !credentialChanged, task == nil, let node, node.online,
       node.capabilities.contains("browser.control"), let page, page.nodeID == node.id,
-      page.site?.provider == .netflix, page.site?.page == .browse,
+      (page.site?.provider == .netflix || page.site?.provider == .disneyplus),
+      page.source == .companion, page.site?.page == .browse,
       page.site?.rows?.contains(where: { $0.id == rowID }) == true
     else { return false }
     selectedRowID = rowID
@@ -521,10 +528,14 @@ final class BrowserPhoneControlStore: ObservableObject {
     let action: BrowserPhoneAction
     switch intent {
     case .scroll(let direction):
-      if page.site?.provider == .netflix && (direction == .left || direction == .right) {
+      if (page.site?.provider == .netflix || page.site?.provider == .disneyplus)
+        && (direction == .left || direction == .right)
+      {
         guard let rowID = selectedRowID,
-          page.site?.rows?.contains(where: { $0.id == rowID }) == true else {
-          phase = .failed("Choose a row from the current Netflix page first.")
+          let row = page.site?.rows?.first(where: { $0.id == rowID }),
+          page.site?.provider != .disneyplus || row.directions?.contains(direction) == true
+        else {
+          phase = .failed("Choose an observed row and direction from the current page first.")
           return false
         }
         action = .scrollRow(rowID, direction, revision: page.revision)
@@ -725,6 +736,9 @@ final class BrowserPhoneControlStore: ObservableObject {
       switch intent {
       case .openResult, .openSelectedResult: return site.page == .browse
       case .scroll(let direction):
+        if direction == .left || direction == .right {
+          return page.source == .companion && site.page == .browse && site.rows?.isEmpty == false
+        }
         return page.source == .companion && site.page == .browse
           && site.verticalScrollDirections?.contains(direction) == true
       default: return false

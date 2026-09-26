@@ -19,6 +19,13 @@ enum BrowserPhonePlayback: String, Equatable, Sendable {
 struct BrowserPhoneRow: Equatable, Identifiable, Sendable {
   let id: String
   let label: String
+  let directions: [BrowserScrollDirection]?
+
+  init(id: String, label: String, directions: [BrowserScrollDirection]? = nil) {
+    self.id = id
+    self.label = label
+    self.directions = directions
+  }
 }
 struct BrowserPhoneSearchControl: Equatable, Sendable {
   let id: String
@@ -318,6 +325,9 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     if site?.verticalScrollDirections != nil && source != .companion {
       throw PhoneControlFailure.invalidResponse
     }
+    if site?.rows != nil && source != .companion {
+      throw PhoneControlFailure.invalidResponse
+    }
     return .page(
       BrowserPhonePage(
         nodeID: nodeID, source: source, revision: revision, title: title, summary: summary,
@@ -367,16 +377,25 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
   } else { verticalScrollDirections = nil }
   let rows: [BrowserPhoneRow]?
   if let rawRows = value["rows"] {
-    guard provider == .netflix, page == .browse,
+    guard (provider == .netflix || provider == .disneyplus), page == .browse,
       let entries = rawRows as? [[String: Any]], entries.count <= 8
     else { throw PhoneControlFailure.invalidResponse }
     var seen = Set<String>()
     rows = try entries.map { entry in
-      guard Set(entry.keys) == Set(["id", "label"]),
+      let hasDirections = entry["directions"] != nil
+      guard Set(entry.keys) == Set(["id", "label"] + (hasDirections ? ["directions"] : [])),
         let id = entry["id"] as? String, validBrowserRowID(id), seen.insert(id).inserted,
         let label = entry["label"] as? String, validBrowserText(label, maximum: 100)
       else { throw PhoneControlFailure.invalidResponse }
-      return BrowserPhoneRow(id: id, label: label)
+      var directions: [BrowserScrollDirection]?
+      if hasDirections {
+        guard let raw = entry["directions"] as? [String], raw.count <= 2,
+          Set(raw).count == raw.count,
+          raw.allSatisfy({ $0 == "left" || $0 == "right" })
+        else { throw PhoneControlFailure.invalidResponse }
+        directions = raw.compactMap(BrowserScrollDirection.init(rawValue:))
+      }
+      return BrowserPhoneRow(id: id, label: label, directions: directions)
     }
   } else { rows = nil }
   let searchControl: BrowserPhoneSearchControl?

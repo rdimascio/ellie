@@ -311,7 +311,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     }
   }
 
-  func testDisneyPlusCompanionObservationAddsOnlyBoundedVerticalDirections() throws {
+  func testDisneyPlusCompanionObservationAddsOnlyBoundedObservedDirections() throws {
     let revision = String(repeating: "e", count: 64)
     func read(_ site: String, source: String = "companion") -> Data {
       Data(
@@ -324,6 +324,16 @@ final class BrowserPhoneControlTests: XCTestCase {
     XCTAssertEqual(page.site?.page, .browse)
     XCTAssertNil(page.site?.verticalScrollDirections,
       "An older response stays readable but grants no direction")
+    XCTAssertNil(page.site?.rows)
+    let rowID = "10000000-0000-4000-8000-000000000001"
+    let rowSite = #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Recommended","directions":["right"]}]}"#
+    guard case .page(let rowPage) = try decodeBrowserPhoneResponse(read(rowSite), nodeID: "mac")
+    else { return XCTFail("Expected observed Disney+ row") }
+    XCTAssertEqual(rowPage.site?.rows,
+      [BrowserPhoneRow(id: rowID, label: "Recommended", directions: [.right])])
+    for source in ["accessibility", "webmcp"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(rowSite, source: source), nodeID: "mac"))
+    }
     let observed = #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":["up","down"]}"#
     guard case .page(let scrolling) = try decodeBrowserPhoneResponse(read(observed), nodeID: "mac")
     else { return XCTFail("Expected observed Disney+ scroll directions") }
@@ -335,7 +345,8 @@ final class BrowserPhoneControlTests: XCTestCase {
       #"{"provider":"disneyplus","page":"watch","playback":"paused"}"#,
       #"{"provider":"disneyplus","page":"results","playback":"unavailable"}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"playing"}"#,
-      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row","directions":["right","right"]}]}"#,
+      #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row","directions":["up"]}]}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
       #"{"provider":"disneyplus","page":"login","playback":"unavailable","verticalScrollDirections":[]}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"unavailable","verticalScrollDirections":["down","down"]}"#,
@@ -405,6 +416,9 @@ final class BrowserPhoneControlTests: XCTestCase {
         currentTimeSeconds: nil), .scroll(.down), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil), .scroll(.left), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, rows: [BrowserPhoneRow(
+          id: "10000000-0000-4000-8000-000000000001", label: "Row")]), .scroll(.right), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
         currentTimeSeconds: nil), .openResult(index: 1), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
@@ -480,6 +494,34 @@ final class BrowserPhoneControlTests: XCTestCase {
     let actions = await transport.actions
     XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
       .scroll(.down, revision: String(repeating: "a", count: 64))])
+  }
+
+  @MainActor
+  func testDisneyPlusHorizontalRowRequiresObservedDirectionAndConsumesRead() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let rowID = "10000000-0000-4000-8000-000000000001"
+    let site = BrowserPhoneSite(provider: .disneyplus, page: .browse,
+      playback: .unavailable, currentTimeSeconds: nil,
+      rows: [BrowserPhoneRow(id: rowID, label: "Recommended", directions: [.right])])
+    let transport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertFalse(store.canPerform(.scroll(.right), on: node))
+    XCTAssertTrue(store.selectObservedRow(rowID, on: node))
+    XCTAssertFalse(store.canPerform(.scroll(.left), on: node))
+    XCTAssertTrue(store.canPerform(.scroll(.right), on: node))
+    XCTAssertTrue(store.perform(.scroll(.right), on: node))
+    XCTAssertNil(store.page)
+    XCTAssertNil(store.selectedRowID)
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.scroll(.right), on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
+      .scrollRow(rowID, .right, revision: String(repeating: "a", count: 64))])
   }
 
   @MainActor

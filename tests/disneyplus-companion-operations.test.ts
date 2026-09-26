@@ -33,7 +33,11 @@ const result = (site: Record<string, unknown>, source = "companion") => ({
 test("Disney+ site wire accepts only browse/login/unsupported with unavailable playback", () => {
   assert.equal(
     browserWebMCPOperationResult(
-      result({ provider: "disneyplus", page: "browse", playback: "unavailable" }),
+      result({
+        provider: "disneyplus",
+        page: "browse",
+        playback: "unavailable",
+      }),
     ).browser.operation,
     "read",
   );
@@ -44,14 +48,47 @@ test("Disney+ site wire accepts only browse/login/unsupported with unavailable p
     verticalScrollDirections: ["up", "down"],
   };
   assert.equal(browserWebMCPOperationResult(result(observed)).browser.operation, "read");
+  const legacyRows = {
+    provider: "disneyplus",
+    page: "browse",
+    playback: "unavailable",
+    rows: [],
+  };
+  assert.deepEqual(browserWebMCPOperationResult(result(legacyRows)).browser.operation, "read");
+  const rowId = randomUUID();
+  const rows = {
+    provider: "disneyplus",
+    page: "browse",
+    playback: "unavailable",
+    rows: [{ id: rowId, label: "Recommended", directions: ["right"] }],
+  };
+  assert.equal(browserWebMCPOperationResult(result(rows)).browser.operation, "read");
+  for (const source of ["webmcp", "accessibility"])
+    assert.throws(() => browserWebMCPOperationResult(result(rows, source)));
   for (const source of ["webmcp", "accessibility"])
     assert.throws(() => browserWebMCPOperationResult(result(observed, source)));
   for (const invalid of [
     { provider: "disneyplus", page: "watch", playback: "paused" },
     { provider: "disneyplus", page: "browse", playback: "playing" },
-    { provider: "disneyplus", page: "browse", playback: "unavailable", rows: [] },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      rows: [{ id: rowId, label: "Row", directions: ["right", "right"] }],
+    },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      rows: [{ id: rowId, label: "Row", directions: ["up"] }],
+    },
     { provider: "disneyplus", page: "results", playback: "unavailable" },
-    { provider: "disneyplus", page: "browse", playback: "unavailable", currentTimeSeconds: 1 },
+    {
+      provider: "disneyplus",
+      page: "browse",
+      playback: "unavailable",
+      currentTimeSeconds: 1,
+    },
     {
       provider: "disneyplus",
       page: "login",
@@ -84,6 +121,58 @@ test("Disney+ site wire accepts only browse/login/unsupported with unavailable p
     },
   ])
     assert.throws(() => browserWebMCPOperationResult(result(invalid)));
+});
+
+test("Disney+ one observed horizontal row direction carries the snapshot and never replays", async () => {
+  const rowId = randomUUID();
+  const commands: Array<Record<string, unknown>> = [];
+  const companion = new BrowserCompanionOperations({
+    async request(request) {
+      if (request.type !== "media.execute") throw new Error("wrong request");
+      commands.push(request.command as unknown as Record<string, unknown>);
+      return browserWebMCPResultFor(request.id, "ok", {
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        url: binding.url,
+        value:
+          request.command.type === "inspect"
+            ? {
+                snapshotId: "10000000-0000-4000-8000-000000000001",
+                candidates: [],
+                playback: { available: false },
+                site: {
+                  provider: "disneyplus",
+                  page: "browse",
+                  playback: "unavailable",
+                  rows: [{ id: rowId, label: "Recommended", directions: ["right"] }],
+                },
+              }
+            : { outcome: "scrolled" },
+      });
+    },
+  });
+  const signal = new AbortController().signal;
+  await companion.execute({ tool: "browser.read", view: "summary", revision }, binding, signal);
+  const moved = await companion.execute(
+    { tool: "browser.scrollRow", rowId, direction: "right", revision },
+    binding,
+    signal,
+  );
+  assert.equal(moved.browser.operation, "command");
+  assert.equal(moved.browser.status, "unknown");
+  assert.deepEqual(
+    commands.map((command) => command.type),
+    ["inspect", "scrollSelectedRow"],
+  );
+  assert.equal(commands[1]?.snapshotId, "10000000-0000-4000-8000-000000000001");
+  await assert.rejects(
+    companion.execute(
+      { tool: "browser.scrollRow", rowId, direction: "right", revision },
+      binding,
+      signal,
+    ),
+    /Read the Disney\+ page/,
+  );
 });
 
 test("Disney+ production selector permits one observed title choice, never search/play/replay", async () => {

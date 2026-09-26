@@ -108,7 +108,8 @@ struct SpeechTurnView: View {
             }
             if case .scroll(let direction) = intent,
               direction == .left || direction == .right,
-              let site = browserStore.page?.site, site.provider == .netflix,
+              let site = browserStore.page?.site,
+              site.provider == .netflix || site.provider == .disneyplus,
               site.page == .browse, let rows = site.rows, !rows.isEmpty
             {
               Text("Choose a row on \(controlStore.selectedNode?.label ?? "the selected Mac") before running this command.")
@@ -123,13 +124,13 @@ struct SpeechTurnView: View {
                     if browserStore.selectedRowID == row.id { Image(systemName: "checkmark") }
                   }
                 }
-                .accessibilityIdentifier("speech-netflix-row-\(index + 1)")
+                .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-\(index + 1)")
                 .disabled(controlsBusy || browserStore.isBusy)
               }
               if let chosen = rows.first(where: { $0.id == browserStore.selectedRowID }) {
                 Text("Run will scroll \(chosen.label) on \(controlStore.selectedNode?.label ?? "the selected Mac").")
                   .font(.footnote)
-                  .accessibilityIdentifier("speech-netflix-row-review")
+                  .accessibilityIdentifier("speech-\(site.provider.rawValue)-row-review")
               }
             }
             if case .openSelectedResult = intent, let page = browserStore.page,

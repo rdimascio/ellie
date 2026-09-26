@@ -110,7 +110,11 @@ export const OPERATION_REGISTRY = {
         type: "object",
         additionalProperties: true,
         required: ["tool", "app", "url"],
-        properties: { tool: { const: "url.open" }, app: IDENTIFIER, url: HTTPS_URL },
+        properties: {
+          tool: { const: "url.open" },
+          app: IDENTIFIER,
+          url: HTTPS_URL,
+        },
       },
       output: RESULT,
     },
@@ -141,7 +145,11 @@ export const OPERATION_REGISTRY = {
         type: "object",
         additionalProperties: true,
         required: ["tool", "app", "anchor"],
-        properties: { tool: { const: "window.adjacent" }, app: IDENTIFIER, anchor: IDENTIFIER },
+        properties: {
+          tool: { const: "window.adjacent" },
+          app: IDENTIFIER,
+          anchor: IDENTIFIER,
+        },
       },
       output: RESULT,
     },
@@ -322,7 +330,7 @@ export type BrowserView = {
     currentTimeSeconds?: number;
     horizontalScrollAvailable?: boolean;
     verticalScrollDirections?: ("up" | "down")[];
-    rows?: { id: string; label: string }[];
+    rows?: { id: string; label: string; directions?: ("left" | "right")[] }[];
     searchControl?: { id: string; label: string };
   };
 };
@@ -540,14 +548,16 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
             new Set(observed.verticalScrollDirections).size !==
               observed.verticalScrollDirections.length)) ||
         (hasRows &&
-          (observed.provider !== "netflix" ||
+          (browser.source !== "companion" ||
+            (observed.provider !== "netflix" && observed.provider !== "disneyplus") ||
             observed.page !== "browse" ||
             !Array.isArray(observed.rows) ||
             observed.rows.length > 8 ||
             observed.rows.some((raw) => {
               const row = raw as Record<string, unknown>;
               try {
-                exactObject(row, ["id", "label"]);
+                const hasDirections = Object.hasOwn(row, "directions");
+                exactObject(row, ["id", "label", ...(hasDirections ? ["directions"] : [])]);
                 browserIdentifier(row.id);
                 if (
                   !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
@@ -556,6 +566,16 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
                 )
                   return true;
                 boundedText(row.label, 100);
+                if (
+                  hasDirections &&
+                  (!Array.isArray(row.directions) ||
+                    row.directions.length > 2 ||
+                    row.directions.some(
+                      (direction) => direction !== "left" && direction !== "right",
+                    ) ||
+                    new Set(row.directions).size !== row.directions.length)
+                )
+                  return true;
                 return false;
               } catch {
                 return true;
