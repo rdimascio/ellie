@@ -55,6 +55,22 @@ export class NativeJourneySetupCleanupError extends Error {
   override name = "NativeJourneySetupCleanupError";
 }
 
+export class AcceptanceEnvironmentSetupCleanupError extends Error {
+  override name = "AcceptanceEnvironmentSetupCleanupError";
+
+  constructor(
+    message: string,
+    options: ErrorOptions & { cleanupFailures: readonly string[]; retainedRoot: string },
+  ) {
+    super(message, options);
+    this.cleanupFailures = options.cleanupFailures;
+    this.retainedRoot = options.retainedRoot;
+  }
+
+  readonly cleanupFailures: readonly string[];
+  readonly retainedRoot: string;
+}
+
 /** Preserve both the setup failure and uncertain ownership when setup cleanup fails. */
 export async function settleFailedNativeJourneySetup(
   error: unknown,
@@ -73,6 +89,74 @@ export async function settleFailedNativeJourneySetup(
 export function settleAcceptanceOutcome(failure: unknown, cleanupError: string | undefined): void {
   if (failure) throw failure;
   if (cleanupError) throw new Error(cleanupError);
+}
+
+export async function settleFailedAcceptanceEnvironmentSetup(
+  error: unknown,
+  options: {
+    ownedRoot: string;
+    closeBridge: () => Promise<void>;
+    closeServer: () => Promise<void>;
+    removeOwnedRoot: () => Promise<void>;
+    cleanupDeadlineMs?: number;
+  },
+): Promise<never> {
+  const deadline = options.cleanupDeadlineMs ?? 5_000;
+  const bounded = (work: () => Promise<void>, message: string) =>
+    within(Promise.resolve().then(work), deadline, message);
+  const attempts = await Promise.allSettled([
+    bounded(options.closeBridge, "bridge cleanup timed out"),
+    bounded(options.closeServer, "server cleanup timed out"),
+  ]);
+  const cleanupFailures = attempts.flatMap((result, index) =>
+    result.status === "rejected"
+      ? [`${index === 0 ? "bridge" : "server"}: ${String(result.reason)}`]
+      : [],
+  );
+  if (cleanupFailures.length > 0) {
+    throw new AcceptanceEnvironmentSetupCleanupError(
+      "Owned acceptance environment setup cleanup is uncertain.",
+      { cause: error, cleanupFailures, retainedRoot: options.ownedRoot },
+    );
+  }
+  try {
+    await options.removeOwnedRoot();
+  } catch (cleanup) {
+    throw new AcceptanceEnvironmentSetupCleanupError(
+      "Owned acceptance environment setup cleanup is uncertain.",
+      {
+        cause: error,
+        cleanupFailures: [`owned-root: ${String(cleanup)}`],
+        retainedRoot: options.ownedRoot,
+      },
+    );
+  }
+  throw error;
+}
+
+export function acceptanceEnvironmentSetupFailureReport(error: unknown): Record<string, unknown> {
+  const uncertain = error instanceof AcceptanceEnvironmentSetupCleanupError;
+  const firstFailure = uncertain ? error.cause : error;
+  return {
+    version: 1,
+    status: "fail",
+    phase: "acceptance-environment-setup",
+    error: String(firstFailure instanceof Error ? firstFailure.message : firstFailure).slice(
+      0,
+      4_096,
+    ),
+    cleanup: {
+      certain: !uncertain,
+      ...(uncertain
+        ? {
+            retainedRoot: error.retainedRoot,
+            failures: error.cleanupFailures.map((value) => value.slice(0, 1_024)),
+          }
+        : {}),
+    },
+    replayAttempted: false,
+    accessibilityFallbackAttempted: false,
+  };
 }
 const sourceExtension = resolve("apps/browser-media-extension");
 const agentBrowserPath = resolve("node_modules/.bin/agent-browser");
@@ -799,6 +883,7 @@ async function prepareAcceptanceEnvironment(
   ownedRoot: string,
   home: string,
   release: string,
+  reportDirectory: string,
   composed = false,
 ) {
   let server: ReturnType<typeof createServer> | undefined;
@@ -849,10 +934,21 @@ async function prepareAcceptanceEnvironment(
     await writeFile(configPath, "{}\n", { mode: 0o600 });
     return { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki };
   } catch (error) {
-    await bridge?.close().catch(() => {});
-    if (server) await closeFixtureServer(server).catch(() => {});
-    await rm(ownedRoot, { recursive: true, force: true });
-    throw error;
+    try {
+      return await settleFailedAcceptanceEnvironmentSetup(error, {
+        ownedRoot,
+        closeBridge: () => bridge?.close() ?? Promise.resolve(),
+        closeServer: () => (server ? closeFixtureServer(server) : Promise.resolve()),
+        removeOwnedRoot: () => rm(ownedRoot, { recursive: true, force: true }),
+      });
+    } catch (settled) {
+      await writeFile(
+        join(reportDirectory, "report.json"),
+        `${JSON.stringify(acceptanceEnvironmentSetupFailureReport(settled), null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      throw settled;
+    }
   }
 }
 
@@ -901,7 +997,7 @@ async function main() {
     mode: 0o700,
   });
   const { bridge, configPath, extension, nativeHost, origin, profile, registry, server, spki } =
-    await prepareAcceptanceEnvironment(ownedRoot, home, release, composed);
+    await prepareAcceptanceEnvironment(ownedRoot, home, release, reportDirectory, composed);
   const bridgeEvents: Array<{ type: string; status: string; value?: unknown }> = [];
   const bridgeTrace: Array<Record<string, string | number | boolean>> = [];
   type OwnedWindowState = {

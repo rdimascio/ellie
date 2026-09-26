@@ -4,10 +4,100 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  acceptanceEnvironmentSetupFailureReport,
+  AcceptanceEnvironmentSetupCleanupError,
   NativeJourneySetupCleanupError,
+  settleFailedAcceptanceEnvironmentSetup,
   settleAcceptanceOutcome,
   settleFailedNativeJourneySetup,
 } from "../scripts/browser-webmcp-acceptance.ts";
+
+test("acceptance environment setup preserves first failure and every uncertain owner", async () => {
+  const setup = new Error("synthetic environment setup failure");
+  let removeCalls = 0;
+  await assert.rejects(
+    settleFailedAcceptanceEnvironmentSetup(setup, {
+      ownedRoot: "/owned/retained-state",
+      closeBridge: () => {
+        throw new Error("bridge close failed");
+      },
+      closeServer: async () => {
+        throw new Error("server close failed");
+      },
+      removeOwnedRoot: async () => {
+        removeCalls++;
+      },
+      cleanupDeadlineMs: 50,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AcceptanceEnvironmentSetupCleanupError);
+      assert.equal(error.cause, setup);
+      assert.equal(error.retainedRoot, "/owned/retained-state");
+      assert.equal(error.cleanupFailures.length, 2);
+      assert.match(error.cleanupFailures[0] ?? "", /^bridge:/);
+      assert.match(error.cleanupFailures[1] ?? "", /^server:/);
+      assert.deepEqual(acceptanceEnvironmentSetupFailureReport(error), {
+        version: 1,
+        status: "fail",
+        phase: "acceptance-environment-setup",
+        error: "synthetic environment setup failure",
+        cleanup: {
+          certain: false,
+          retainedRoot: "/owned/retained-state",
+          failures: error.cleanupFailures,
+        },
+        replayAttempted: false,
+        accessibilityFallbackAttempted: false,
+      });
+      return true;
+    },
+  );
+  assert.equal(removeCalls, 0, "uncertain state must remain available for inspection");
+});
+
+test("acceptance environment setup removes owned state only after confirmed cleanup", async () => {
+  const setup = new Error("synthetic environment setup failure");
+  let removeCalls = 0;
+  await assert.rejects(
+    settleFailedAcceptanceEnvironmentSetup(setup, {
+      ownedRoot: "/owned/confirmed-state",
+      closeBridge: async () => {},
+      closeServer: async () => {},
+      removeOwnedRoot: async () => {
+        removeCalls++;
+      },
+      cleanupDeadlineMs: 50,
+    }),
+    (error) => error === setup,
+  );
+  assert.equal(removeCalls, 1);
+});
+
+test("acceptance environment setup cleanup deadlines remain finite and retain state", async () => {
+  const setup = new Error("synthetic environment setup failure");
+  const started = Date.now();
+  await assert.rejects(
+    settleFailedAcceptanceEnvironmentSetup(setup, {
+      ownedRoot: "/owned/timeout-state",
+      closeBridge: () => new Promise(() => {}),
+      closeServer: async () => {
+        throw new Error("server close failed");
+      },
+      removeOwnedRoot: async () => {
+        assert.fail("uncertain state must not be removed");
+      },
+      cleanupDeadlineMs: 5,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof AcceptanceEnvironmentSetupCleanupError);
+      assert.equal(error.cause, setup);
+      assert.match(error.cleanupFailures[0] ?? "", /^bridge: Error: bridge cleanup timed out$/);
+      assert.match(error.cleanupFailures[1] ?? "", /^server:/);
+      return true;
+    },
+  );
+  assert.ok(Date.now() - started < 250, "setup cleanup deadline must remain finite");
+});
 
 test("native journey setup preserves ownership uncertainty when its close also fails", async () => {
   const setup = new Error("synthetic setup failure");
