@@ -270,6 +270,13 @@ export class BrowserCompanionOperations {
           action.direction !== "down"))
     )
       throw new Error("YouTube TV selection, search, and row controls are not observed.");
+    if (
+      youtubeTV &&
+      action.tool === "browser.scroll" &&
+      ((action.direction !== "up" && action.direction !== "down") ||
+        !observed.site.verticalScrollDirections?.includes(action.direction))
+    )
+      throw new Error("YouTube TV scroll direction is not observed; read the page again.");
     let command: BrowserCompanionCommand;
     if (action.tool === "browser.search") {
       if (
@@ -301,7 +308,12 @@ export class BrowserCompanionOperations {
         (action.direction === "up" || action.direction === "down") &&
         (!youtubeTV || observed.site.page === "browse")
       )
-        command = { type: "scrollViewport", actionId: randomUUID(), direction: action.direction };
+        command = {
+          type: "scrollViewport",
+          actionId: randomUUID(),
+          direction: action.direction,
+          ...(youtubeTV ? { snapshotId: observed.snapshotId } : {}),
+        };
       else
         throw new Error(
           youtubeTV

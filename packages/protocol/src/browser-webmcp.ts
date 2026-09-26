@@ -44,7 +44,7 @@ export const BROWSER_WEBMCP_STATUSES = [
 export type BrowserWebMCPStatus = (typeof BROWSER_WEBMCP_STATUSES)[number];
 export type BrowserCompanionCommand =
   | { type: "inspect"; actionId: string }
-  | { type: "scrollViewport"; actionId: string; direction: "up" | "down" }
+  | { type: "scrollViewport"; actionId: string; direction: "up" | "down"; snapshotId?: string }
   | {
       type: "scrollRow";
       actionId: string;
@@ -144,9 +144,13 @@ function companionCommand(value: unknown): BrowserCompanionCommand {
     return { type: body.type, actionId };
   }
   if (body.type === "scrollViewport") {
-    exactKeys(body, ["type", "actionId", "direction"]);
+    const hasSnapshot = Object.hasOwn(body, "snapshotId");
+    exactKeys(body, ["type", "actionId", "direction", ...(hasSnapshot ? ["snapshotId"] : [])]);
     if (body.direction !== "up" && body.direction !== "down") throw new Error("Invalid message.");
-    return { type: "scrollViewport", actionId, direction: body.direction };
+    if (!hasSnapshot) return { type: "scrollViewport", actionId, direction: body.direction };
+    const snapshotId = identifier(body.snapshotId);
+    if (!uuidPattern.test(snapshotId)) throw new Error("Invalid message.");
+    return { type: "scrollViewport", actionId, direction: body.direction, snapshotId };
   }
   if (body.type === "open" || body.type === "scrollRow") {
     exactKeys(

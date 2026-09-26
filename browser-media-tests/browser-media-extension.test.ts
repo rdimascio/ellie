@@ -763,6 +763,7 @@ test("popup submits only the search control from its fresh observed page", async
   const popup = await readFile(join(source, "popup.js"), "utf8");
   const sent: any[] = [];
   let popupFocused = true;
+  let inspectProvider = "youtube";
   const elements = new Map<string, any>();
   for (const id of [
     "status",
@@ -804,6 +805,7 @@ test("popup submits only the search control from its fresh observed page", async
                 snapshotId: "observed-snapshot",
                 searchControl: { id: "observed-search", label: "Search" },
                 candidates: [],
+                site: { provider: inspectProvider },
               },
             };
           return { ok: false, error: "navigation_not_observed" };
@@ -850,6 +852,12 @@ test("popup submits only the search control from its fresh observed page", async
   await elements.get("search-submit").onclick();
   assert.equal(sent.length, 3, "an unfocused popup cannot spend the new observation");
   assert.equal(elements.get("observed-search").hidden, true);
+  popupFocused = true;
+  inspectProvider = "youtube_tv";
+  await elements.get("inspect").onclick();
+  await elements.get("down").onclick();
+  assert.equal(sent.at(-1).command.type, "scrollViewport");
+  assert.equal(sent.at(-1).command.snapshotId, "observed-snapshot");
 });
 
 test("YouTube popup search accepts only exact results on its selected active tab", async () => {
@@ -2150,7 +2158,43 @@ test(
       });
       observed = await inspect();
       assert.equal(observed.value.site.page, "browse");
+      assert.deepEqual(observed.value.site.verticalScrollDirections, ["down"]);
       assert.deepEqual(observed.value.candidates, []);
+      const firstSnapshot = observed.value.snapshotId;
+      const replacement = await inspect();
+      assert.notEqual(replacement.value.snapshotId, firstSnapshot);
+      const positionBeforeReplacedSnapshot = await launched.page.evaluate(() => scrollY);
+      const replacedSnapshot = await launched.worker.evaluate(
+        async (body) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(body);
+            return "accepted";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "scrollViewport",
+            actionId: crypto.randomUUID(),
+            direction: "down",
+            snapshotId: firstSnapshot,
+          },
+        },
+      );
+      assert.equal(replacedSnapshot, "unknown");
+      assert.equal(await launched.page.evaluate(() => scrollY), positionBeforeReplacedSnapshot);
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
       const stale = await launched.worker.evaluate(
         async (body) => {
           try {
@@ -2166,7 +2210,12 @@ test(
           type: "media.execute",
           bindingId: binding.bindingId,
           documentId: `${binding.documentId}-stale`,
-          command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+          command: {
+            type: "scrollViewport",
+            actionId: crypto.randomUUID(),
+            direction: "down",
+            snapshotId: observed.value.snapshotId,
+          },
         },
       );
       assert.equal(stale, "page_changed");
@@ -2177,12 +2226,149 @@ test(
         type: "media.execute",
         bindingId: binding.bindingId,
         documentId: binding.documentId,
-        command: { type: "scrollViewport", actionId: crypto.randomUUID(), direction: "down" },
+        command: {
+          type: "scrollViewport",
+          actionId: crypto.randomUUID(),
+          direction: "down",
+          snapshotId: observed.value.snapshotId,
+        },
       });
       assert.equal(scrolled.value.outcome, "scrolled");
       assert.ok((await launched.page.evaluate(() => scrollY)) > 0);
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
+      assert.deepEqual(observed.value.site.verticalScrollDirections, ["up", "down"]);
+      const staleTop = await launched.page.evaluate(() => scrollY);
+      await launched.page.evaluate(() => scrollTo(0, document.documentElement.scrollHeight));
+      const staleGeometry = await launched.worker.evaluate(
+        async (body) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(body);
+            return "accepted";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "scrollViewport",
+            actionId: crypto.randomUUID(),
+            direction: "up",
+            snapshotId: observed.value.snapshotId,
+          },
+        },
+      );
+      assert.equal(staleGeometry, "unknown");
+      assert.ok((await launched.page.evaluate(() => scrollY)) > staleTop);
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
+      assert.deepEqual(observed.value.site.verticalScrollDirections, ["up"]);
+      const bottomBefore = await launched.page.evaluate(() => scrollY);
+      const bottomDenied = await launched.worker.evaluate(
+        async (body) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(body);
+            return "accepted";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "scrollViewport",
+            actionId: crypto.randomUUID(),
+            direction: "down",
+            snapshotId: observed.value.snapshotId,
+          },
+        },
+      );
+      assert.equal(bottomDenied, "unknown");
+      assert.equal(await launched.page.evaluate(() => scrollY), bottomBefore);
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
+      const upward = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "media.execute",
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        command: {
+          type: "scrollViewport",
+          actionId: crypto.randomUUID(),
+          direction: "up",
+          snapshotId: observed.value.snapshotId,
+        },
+      });
+      assert.equal(upward.value.outcome, "scrolled");
+      assert.ok((await launched.page.evaluate(() => scrollY)) < bottomBefore);
+      await launched.page.setContent("<main>Synthetic guide</main>");
+      await launched.page.bringToFront();
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
+      assert.deepEqual(
+        observed.value.site.verticalScrollDirections,
+        [],
+        "an unscrollable page exposes no direction",
+      );
+      await launched.page.setContent(
+        "<main style='height:100vh;overflow-y:auto'><div style='height:2200px'>Nested guide</div></main>",
+      );
+      await launched.page.bringToFront();
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
+      assert.deepEqual(
+        observed.value.site.verticalScrollDirections,
+        [],
+        "a competing nested scroller exposes no viewport direction",
+      );
+      await launched.page.setContent(
+        "<main style='min-height:2500px'>Guide</main><div style='position:fixed;inset:0'>Overlay</div>",
+      );
+      await launched.page.bringToFront();
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
+      assert.deepEqual(
+        observed.value.site.verticalScrollDirections,
+        [],
+        "a covering fixed surface exposes no viewport direction",
+      );
       await launched.page.evaluate(() => {
         const main = document.querySelector("main")!;
+        document.querySelector("body > div")?.remove();
         main.innerHTML =
           "<button aria-label='Play'>Play</button><video muted playsinline width='320' height='180'></video>";
         const canvas = document.createElement("canvas");

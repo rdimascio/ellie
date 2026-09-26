@@ -197,12 +197,54 @@ final class BrowserPhoneControlTests: XCTestCase {
     else { return XCTFail("Expected selected YouTube TV player") }
     XCTAssertEqual(page.site?.provider, .youtubeTV)
     XCTAssertEqual(page.site?.page, .watch)
+    guard case .page(let browse) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}"#),
+      nodeID: "mac")
+    else { return XCTFail("Expected observed YouTube TV browse directions") }
+    XCTAssertEqual(browse.site?.verticalScrollDirections, [.down])
+    for source in ["accessibility", "webmcp"] {
+      let invalidSource = Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}}}}}"#.utf8)
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(invalidSource, nodeID: "mac"))
+    }
     for invalid in [
       #"{"provider":"youtube_tv","page":"results","playback":"unavailable"}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"playing"}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","rows":[]}"#,
+      #"{"provider":"youtube_tv","page":"watch","playback":"paused","verticalScrollDirections":["down"]}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["down","down"]}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["left"]}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["up","down","up"]}"#,
+      #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":"down"}"#,
+      #"{"provider":"netflix","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}"#,
       #"{"provider":"youtube_tv","page":"browse","playback":"unavailable","searchControl":{"id":"10000000-0000-4000-8000-000000000001","label":"Search"}}"#,
     ] { XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(invalid), nodeID: "mac")) }
+  }
+
+  @MainActor
+  func testYouTubeTVObservedDirectionIsConsumedBeforeUnknownAndNeverReplayed() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let site = BrowserPhoneSite(provider: .youtubeTV, page: .browse,
+      playback: .unavailable, currentTimeSeconds: nil, verticalScrollDirections: [.down])
+    let transport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertFalse(store.canPerform(.scroll(.up), on: node))
+    XCTAssertFalse(store.perform(.scroll(.up), on: node))
+    XCTAssertEqual(await transport.actions.count, 2, "An unobserved direction has zero dispatch")
+    XCTAssertTrue(store.canPerform(.scroll(.down), on: node))
+    XCTAssertTrue(store.perform(.scroll(.down), on: node))
+    XCTAssertNil(store.page, "The observed direction is consumed before transport dispatch")
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.scroll(.down), on: node))
+    XCTAssertEqual(await transport.actions, [
+      .refresh, .read(revision: String(repeating: "a", count: 64)),
+      .scroll(.down, revision: String(repeating: "a", count: 64)),
+    ])
   }
 
   func testYouTubeCompanionSearchControlDecodesOnlyOnObservedHomeOrResults() throws {
@@ -281,7 +323,13 @@ final class BrowserPhoneControlTests: XCTestCase {
       (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
         currentTimeSeconds: nil), .scroll(.right), false),
       (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
-        currentTimeSeconds: nil), .scroll(.down), true),
+        currentTimeSeconds: nil, verticalScrollDirections: [.down]), .scroll(.down), true),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, verticalScrollDirections: [.down]), .scroll(.up), false),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil, verticalScrollDirections: []), .scroll(.down), false),
+      (BrowserPhoneSite(provider: .youtubeTV, page: .browse, playback: .unavailable,
+        currentTimeSeconds: nil), .scroll(.down), false),
       (BrowserPhoneSite(provider: .youtubeTV, page: .watch, playback: .paused,
         currentTimeSeconds: 1), .play, true),
       (BrowserPhoneSite(provider: .disneyplus, page: .browse, playback: .unavailable,
