@@ -321,6 +321,7 @@ export type BrowserView = {
     playback: "playing" | "paused" | "unavailable" | "ambiguous";
     currentTimeSeconds?: number;
     horizontalScrollAvailable?: boolean;
+    verticalScrollDirections?: ("up" | "down")[];
     rows?: { id: string; label: string }[];
     searchControl?: { id: string; label: string };
   };
@@ -493,6 +494,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         throw new Error("Invalid browser operation result.");
       const hasTime = Object.hasOwn(observed, "currentTimeSeconds");
       const hasRow = Object.hasOwn(observed, "horizontalScrollAvailable");
+      const hasVerticalScroll = Object.hasOwn(observed, "verticalScrollDirections");
       const hasRows = Object.hasOwn(observed, "rows");
       const hasSearchControl = Object.hasOwn(observed, "searchControl");
       exactObject(observed, [
@@ -501,6 +503,7 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
         "playback",
         ...(hasTime ? ["currentTimeSeconds"] : []),
         ...(hasRow ? ["horizontalScrollAvailable"] : []),
+        ...(hasVerticalScroll ? ["verticalScrollDirections"] : []),
         ...(hasRows ? ["rows"] : []),
         ...(hasSearchControl ? ["searchControl"] : []),
       ]);
@@ -521,6 +524,17 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
           (observed.provider !== "netflix" ||
             observed.page !== "browse" ||
             typeof observed.horizontalScrollAvailable !== "boolean")) ||
+        (hasVerticalScroll &&
+          (browser.source !== "companion" ||
+            observed.provider !== "youtube_tv" ||
+            observed.page !== "browse" ||
+            !Array.isArray(observed.verticalScrollDirections) ||
+            observed.verticalScrollDirections.length > 2 ||
+            observed.verticalScrollDirections.some(
+              (direction) => direction !== "up" && direction !== "down",
+            ) ||
+            new Set(observed.verticalScrollDirections).size !==
+              observed.verticalScrollDirections.length)) ||
         (hasRows &&
           (observed.provider !== "netflix" ||
             observed.page !== "browse" ||

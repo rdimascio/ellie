@@ -30,13 +30,15 @@ struct BrowserPhoneSite: Equatable, Sendable {
   let playback: BrowserPhonePlayback
   let currentTimeSeconds: Double?
   let horizontalScrollAvailable: Bool?
+  let verticalScrollDirections: [BrowserScrollDirection]?
   let rows: [BrowserPhoneRow]?
   let searchControl: BrowserPhoneSearchControl?
 
   init(
     provider: BrowserPhoneProvider = .youtube, page: BrowserPhoneYouTubePage,
     playback: BrowserPhonePlayback, currentTimeSeconds: Double?,
-    horizontalScrollAvailable: Bool? = nil, rows: [BrowserPhoneRow]? = nil,
+    horizontalScrollAvailable: Bool? = nil,
+    verticalScrollDirections: [BrowserScrollDirection]? = nil, rows: [BrowserPhoneRow]? = nil,
     searchControl: BrowserPhoneSearchControl? = nil
   ) {
     self.provider = provider
@@ -44,6 +46,7 @@ struct BrowserPhoneSite: Equatable, Sendable {
     self.playback = playback
     self.currentTimeSeconds = currentTimeSeconds
     self.horizontalScrollAvailable = horizontalScrollAvailable
+    self.verticalScrollDirections = verticalScrollDirections
     self.rows = rows
     self.searchControl = searchControl
   }
@@ -312,6 +315,9 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     if site?.provider == .youtube && site?.searchControl != nil && source != .companion {
       throw PhoneControlFailure.invalidResponse
     }
+    if site?.verticalScrollDirections != nil && source != .companion {
+      throw PhoneControlFailure.invalidResponse
+    }
     return .page(
       BrowserPhonePage(
         nodeID: nodeID, source: source, revision: revision, title: title, summary: summary,
@@ -328,7 +334,7 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
 }
 
 private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPhoneSite {
-  guard Set(value.keys).isSubset(of: ["provider", "page", "playback", "currentTimeSeconds", "horizontalScrollAvailable", "rows", "searchControl"]),
+  guard Set(value.keys).isSubset(of: ["provider", "page", "playback", "currentTimeSeconds", "horizontalScrollAvailable", "verticalScrollDirections", "rows", "searchControl"]),
     Set(["provider", "page", "playback"]).isSubset(of: Set(value.keys)),
     let providerValue = value["provider"] as? String,
     let provider = BrowserPhoneProvider(rawValue: providerValue),
@@ -349,6 +355,14 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
     else { throw PhoneControlFailure.invalidResponse }
     row = number.boolValue
   } else { row = nil }
+  let verticalScrollDirections: [BrowserScrollDirection]?
+  if let rawDirections = value["verticalScrollDirections"] {
+    guard provider == .youtubeTV, page == .browse,
+      let raw = rawDirections as? [String], raw.count <= 2,
+      raw.allSatisfy({ $0 == "up" || $0 == "down" }), Set(raw).count == raw.count
+    else { throw PhoneControlFailure.invalidResponse }
+    verticalScrollDirections = raw.compactMap(BrowserScrollDirection.init(rawValue:))
+  } else { verticalScrollDirections = nil }
   let rows: [BrowserPhoneRow]?
   if let rawRows = value["rows"] {
     guard provider == .netflix, page == .browse,
@@ -385,7 +399,8 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
   }
   return BrowserPhoneSite(
     provider: provider, page: page, playback: playback,
-    currentTimeSeconds: time, horizontalScrollAvailable: row, rows: rows,
+    currentTimeSeconds: time, horizontalScrollAvailable: row,
+    verticalScrollDirections: verticalScrollDirections, rows: rows,
     searchControl: searchControl)
 }
 

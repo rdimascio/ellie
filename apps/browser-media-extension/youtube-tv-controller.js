@@ -87,6 +87,51 @@
     if (controls.length !== 1) return { state: controls.length ? "ambiguous" : "unavailable" };
     return { state, video, control: controls[0] };
   };
+  const viewportScroll = () => {
+    const root = document.scrollingElement;
+    if (!root || innerWidth < 1 || innerHeight < 1) return { state: "scroll_unavailable" };
+    const rootOverflow = getComputedStyle(root).overflowY;
+    const bodyOverflow = document.body && getComputedStyle(document.body).overflowY;
+    if ([rootOverflow, bodyOverflow].some((value) => value === "hidden" || value === "clip"))
+      return { state: "scroll_unavailable" };
+    const hit = document.elementFromPoint(innerWidth / 2, innerHeight / 2);
+    if (!hit) return { state: "scroll_unavailable" };
+    for (let node = hit; node && node !== root; node = node.parentElement) {
+      if (node.hasAttribute("inert") || node.getAttribute("aria-disabled") === "true")
+        return { state: "scroll_unavailable" };
+      const style = getComputedStyle(node);
+      if (
+        node !== document.body &&
+        ["auto", "scroll"].includes(style.overflowY) &&
+        node.scrollHeight > node.clientHeight + 2
+      )
+        return { state: "scroll_ambiguous" };
+      const bounds = node.getBoundingClientRect();
+      if (
+        style.position === "fixed" &&
+        bounds.width >= innerWidth / 2 &&
+        bounds.height >= innerHeight / 2
+      )
+        return { state: "scroll_unavailable" };
+    }
+    const top = root.scrollTop;
+    const height = root.scrollHeight;
+    const viewport = root.clientHeight;
+    const maximum = height - viewport;
+    if (
+      ![top, height, viewport].every(Number.isFinite) ||
+      viewport <= 0 ||
+      height <= viewport + 2 ||
+      top < -1 ||
+      top > maximum + 1
+    )
+      return { state: "scroll_unavailable" };
+    const directions = [
+      ...(top > 1 ? ["up"] : []),
+      ...(top < height - viewport - 1 ? ["down"] : []),
+    ];
+    return { state: "available", root, top, height, viewport, directions };
+  };
   const observe = () => {
     const observedPage = page();
     if (observedPage !== "browse")
@@ -106,12 +151,15 @@
         player: observedPlayer,
       };
     }
+    const scroll = viewportScroll();
     return {
       site: {
         provider: "youtube_tv",
         page: "browse",
         playback: "unavailable",
+        verticalScrollDirections: scroll.directions || [],
       },
+      scroll,
     };
   };
   const current = (expectedUrl, deadline) => {
@@ -126,8 +174,9 @@
         (["inspect", "play", "pause"].includes(command.type) &&
           exact(command, ["type", "actionId"])) ||
         (command.type === "scrollViewport" &&
-          exact(command, ["type", "actionId", "direction"]) &&
-          ["up", "down"].includes(command.direction))
+          exact(command, ["type", "actionId", "direction", "snapshotId"]) &&
+          ["up", "down"].includes(command.direction) &&
+          uuid(command.snapshotId))
       )
     )
       throw new Error("unsupported_command");
@@ -137,6 +186,7 @@
     if (command.type === "inspect") {
       const observation = observe();
       snapshot = {
+        id: crypto.randomUUID(),
         session,
         url: expectedUrl,
         created: Date.now(),
@@ -144,9 +194,10 @@
         playback: observation.site.playback,
         video: observation.player?.video,
         control: observation.player?.control,
+        scroll: observation.scroll,
       };
       return {
-        snapshotId: crypto.randomUUID(),
+        snapshotId: snapshot.id,
         candidates: [],
         playback: {
           available: Boolean(observation.player),
@@ -168,13 +219,30 @@
     if (command.type === "scrollViewport") {
       if (prior.page !== "browse" || observation.site.page !== "browse")
         throw new Error("scroll_unavailable");
-      const before = scrollY;
+      const currentScroll = observation.scroll;
+      if (prior.scroll?.state !== "available" || currentScroll.state !== "available")
+        throw new Error(
+          currentScroll.state === "scroll_ambiguous" ? "scroll_ambiguous" : "scroll_unavailable",
+        );
+      if (
+        command.snapshotId !== prior.id ||
+        currentScroll.root !== prior.scroll.root ||
+        currentScroll.top !== prior.scroll.top ||
+        currentScroll.height !== prior.scroll.height ||
+        currentScroll.viewport !== prior.scroll.viewport ||
+        !prior.scroll.directions.includes(command.direction) ||
+        !currentScroll.directions.includes(command.direction)
+      )
+        throw new Error("stale_snapshot");
       current(expectedUrl, deadline);
-      scrollBy({
-        top: (command.direction === "down" ? 1 : -1) * Math.max(1, innerHeight - 80),
+      currentScroll.root.scrollBy({
+        top: (command.direction === "down" ? 1 : -1) * Math.max(1, currentScroll.viewport - 80),
         behavior: "instant",
       });
-      return { outcome: scrollY === before ? "scroll_unverified" : "scrolled" };
+      return {
+        outcome:
+          currentScroll.root.scrollTop === currentScroll.top ? "scroll_unverified" : "scrolled",
+      };
     }
     if (
       prior.page !== "watch" ||

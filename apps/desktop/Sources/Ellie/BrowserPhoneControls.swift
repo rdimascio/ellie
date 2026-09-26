@@ -732,7 +732,9 @@ final class BrowserPhoneControlStore: ObservableObject {
     if site.provider == .youtubeTV {
       switch intent {
       case .search, .openResult, .openSelectedResult: return false
-      case .scroll(let direction): return (direction == .up || direction == .down) && site.page == .browse
+      case .scroll(let direction):
+        return page.source == .companion && site.page == .browse
+          && site.verticalScrollDirections?.contains(direction) == true
       default: break
       }
     }

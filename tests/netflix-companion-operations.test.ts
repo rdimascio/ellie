@@ -42,10 +42,96 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
     ).browser.operation,
     "read",
   );
+  assert.deepEqual(
+    browserWebMCPOperationResult(
+      siteResult({
+        provider: "youtube_tv",
+        page: "browse",
+        playback: "unavailable",
+        verticalScrollDirections: ["down"],
+      }),
+    ).browser,
+    {
+      source: "companion",
+      operation: "read",
+      status: "completed",
+      revision: "a".repeat(64),
+      view: {
+        items: [],
+        site: {
+          provider: "youtube_tv",
+          page: "browse",
+          playback: "unavailable",
+          verticalScrollDirections: ["down"],
+        },
+      },
+    },
+  );
+  for (const source of ["accessibility", "webmcp"]) {
+    assert.throws(() =>
+      browserWebMCPOperationResult({
+        ...siteResult({
+          provider: "youtube_tv",
+          page: "browse",
+          playback: "unavailable",
+          verticalScrollDirections: ["down"],
+        }),
+        browser: {
+          ...siteResult({}).browser,
+          source,
+          view: {
+            items: [],
+            site: {
+              provider: "youtube_tv",
+              page: "browse",
+              playback: "unavailable",
+              verticalScrollDirections: ["down"],
+            },
+          },
+        },
+      }),
+    );
+  }
   for (const invalid of [
     { provider: "youtube_tv", page: "results", playback: "unavailable" },
     { provider: "youtube_tv", page: "browse", playback: "playing" },
     { provider: "youtube_tv", page: "browse", playback: "unavailable", rows: [] },
+    {
+      provider: "youtube_tv",
+      page: "watch",
+      playback: "paused",
+      verticalScrollDirections: ["down"],
+    },
+    {
+      provider: "youtube_tv",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["down", "down"],
+    },
+    {
+      provider: "youtube_tv",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["left"],
+    },
+    {
+      provider: "youtube_tv",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["up", "down", "up"],
+    },
+    {
+      provider: "youtube_tv",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: "down",
+    },
+    {
+      provider: "netflix",
+      page: "browse",
+      playback: "unavailable",
+      verticalScrollDirections: ["down"],
+    },
     {
       provider: "youtube_tv",
       page: "browse",
@@ -61,12 +147,21 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
   const revision = browserBindingRevision(current);
   const commands: string[] = [];
   let page: "browse" | "watch" | "login" = "browse";
+  let scrollDirections: ("down" | "up")[] | undefined;
+  let lastSnapshot: string | undefined;
   let webmcp = 0;
   let ax = 0;
   const companion = new BrowserCompanionOperations({
     async request(request) {
       if (request.type !== "media.execute") throw new Error("wrong request");
       commands.push(request.command.type);
+      if (request.command.type === "scrollViewport")
+        assert.equal(
+          request.command.snapshotId,
+          lastSnapshot,
+          "scroll binds the exact read snapshot",
+        );
+      if (request.command.type === "inspect") lastSnapshot = randomUUID();
       return browserWebMCPResultFor(request.id, "ok", {
         bindingId: current.bindingId,
         documentId: current.documentId,
@@ -74,13 +169,16 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
         value:
           request.command.type === "inspect"
             ? {
-                snapshotId: randomUUID(),
+                snapshotId: lastSnapshot,
                 candidates: [],
                 playback: { available: page === "watch", paused: page === "watch" },
                 site: {
                   provider: "youtube_tv",
                   page,
                   playback: page === "watch" ? "paused" : "unavailable",
+                  ...(page === "browse" && scrollDirections
+                    ? { verticalScrollDirections: scrollDirections }
+                    : {}),
                 },
               }
             : { outcome: "dispatched_unverified" },
@@ -113,6 +211,18 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
   ])
     await assert.rejects(() => selector.execute(action as never, signal), /not observed/);
   assert.deepEqual(commands, ["inspect"]);
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
+    /not observed/,
+  );
+  assert.deepEqual(commands, ["inspect"], "a legacy read grants no vertical scroll");
+  scrollDirections = ["down"];
+  await read();
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.scroll", direction: "up", revision }, signal),
+    /not observed/,
+  );
+  assert.deepEqual(commands, ["inspect", "inspect"], "an unobserved direction has zero dispatch");
   const scroll = browserWebMCPOperationResult(
     await selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
   );
@@ -139,7 +249,14 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
     () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
     /needs attention/,
   );
-  assert.deepEqual(commands, ["inspect", "scrollViewport", "inspect", "play", "inspect"]);
+  assert.deepEqual(commands, [
+    "inspect",
+    "inspect",
+    "scrollViewport",
+    "inspect",
+    "play",
+    "inspect",
+  ]);
   assert.equal(webmcp, 0);
   assert.equal(ax, 0);
 });
@@ -189,6 +306,36 @@ test("companion wire admits only fixed commands and rejects arbitrary input", ()
       },
     }).type,
     "media.execute",
+  );
+  const viewportSnapshot = randomUUID();
+  const viewportAction = randomUUID();
+  const viewportCommand = browserWebMCPRequest({
+    ...base,
+    command: {
+      type: "scrollViewport",
+      actionId: viewportAction,
+      direction: "down",
+      snapshotId: viewportSnapshot,
+    },
+  });
+  assert.equal(viewportCommand.type, "media.execute");
+  if (viewportCommand.type !== "media.execute") throw new Error("Expected media command.");
+  assert.deepEqual(viewportCommand.command, {
+    type: "scrollViewport",
+    actionId: viewportAction,
+    direction: "down",
+    snapshotId: viewportSnapshot,
+  });
+  assert.throws(() =>
+    browserWebMCPRequest({
+      ...base,
+      command: {
+        type: "scrollViewport",
+        actionId: randomUUID(),
+        direction: "down",
+        snapshotId: "not-a-snapshot",
+      },
+    }),
   );
   const observedSearch = {
     type: "searchObserved",
