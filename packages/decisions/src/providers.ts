@@ -144,6 +144,7 @@ export class LocalDecisionProvider implements DecisionProvider {
         this.fetchImpl,
       ),
     );
+    if (wire.model !== this.model) throw new Error("Invalid decision response");
     const choices = wire.choices;
     if (!Array.isArray(choices) || choices.length < 1) throw new Error("Invalid decision response");
     const first = object(choices[0]);
@@ -160,7 +161,7 @@ export class LocalDecisionProvider implements DecisionProvider {
       request.questions,
       normalize(
         {
-          model: wire.model ?? this.model,
+          model: wire.model,
           answers: payload.answers,
           usage: wire.usage,
         },
