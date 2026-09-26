@@ -15,6 +15,26 @@ struct PhoneControlNode: Equatable, Identifiable, Sendable {
   var canOpenApps: Bool { online && capabilities.contains("app.open") }
 }
 
+struct PhoneControlNodeAvailability: Equatable, Sendable {
+  let title: String
+  let systemImage: String
+  let guidance: String?
+}
+
+func phoneControlNodeAvailability(_ node: PhoneControlNode) -> PhoneControlNodeAvailability {
+  if node.online {
+    return PhoneControlNodeAvailability(
+      title: "\(node.label) is online", systemImage: "checkmark.circle.fill", guidance: nil)
+  }
+  return PhoneControlNodeAvailability(
+    title: "\(node.label) is offline",
+    systemImage: "wifi.slash",
+    guidance: "Ellie keeps this Mac listed while the coordinator still grants access. "
+      + "Reconnect it, then tap Refresh Macs. To remove this iPhone’s access, the coordinator "
+      + "owner must use Manage iPhone Pairing and then pair again with the intended Macs. "
+      + "Nothing is removed automatically.")
+}
+
 enum PhoneCommandOutcome: Equatable, Sendable {
   case completed, failed, unknown
 }

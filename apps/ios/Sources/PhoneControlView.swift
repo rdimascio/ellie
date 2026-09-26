@@ -47,6 +47,10 @@ struct PhoneControlView: View {
             .disabled(isBusy)
         }
 
+        if let node = store.selectedNode {
+          selectedMacStatus(node)
+        }
+
         Section("Application") {
           Picker("Application", selection: $store.selectedApp) {
             ForEach(PhoneControlApp.allCases) { app in Text(app.label).tag(app) }
@@ -167,6 +171,19 @@ struct PhoneControlView: View {
     return credential.client.grants.contains {
       $0.target == node.id && $0.capabilities.contains("browser.read")
         && $0.capabilities.contains("browser.control")
+    }
+  }
+
+  private func selectedMacStatus(_ node: PhoneControlNode) -> some View {
+    let availability = phoneControlNodeAvailability(node)
+    return Section("Selected Mac") {
+      Label(availability.title, systemImage: availability.systemImage)
+        .accessibilityIdentifier("phone-selected-mac-availability")
+      if let guidance = availability.guidance {
+        Text(guidance)
+          .font(.footnote).foregroundStyle(.secondary)
+          .accessibilityIdentifier("phone-selected-mac-offline-guidance")
+      }
     }
   }
 
