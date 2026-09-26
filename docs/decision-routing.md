@@ -51,7 +51,7 @@ An already installed, operator-managed local model can provide the same decision
 bun run ellie routing local MODEL_ID --endpoint http://127.0.0.1:1234
 ```
 
-Replace `MODEL_ID` and the port with those of the installed runner. Only literal `127.0.0.1` or `[::1]` HTTP(S) origins are accepted. The adapter calls `/v1/chat/completions` with JSON output instructions, temperature zero, and a bounded output budget. It validates the returned distributions and choices. The runner must support JSON object responses; generated or self-reported probabilities are an evaluation baseline, not evidence of calibration. The runner's own networking and privacy behavior remain operator-controlled.
+Replace `MODEL_ID` and the port with those of the installed runner. Only literal `127.0.0.1` or `[::1]` HTTP(S) origins are accepted. The adapter calls `/v1/chat/completions` with JSON output instructions, temperature zero, and a bounded output budget. It requires the response to identify the exact configured model and validates the returned distributions and choices. A missing or substituted model identity fails without retrying or switching providers. The runner must support JSON object responses; generated or self-reported probabilities are an evaluation baseline, not evidence of calibration. The runner's own networking and privacy behavior remain operator-controlled.
 
 This adapter runs on the coordinator, separately from Ellie's independent compute-worker probe. It does not install a model or silently switch providers.
 
