@@ -400,7 +400,7 @@ struct IOSGoogleAgendaWidget: View {
                 }
                 .font(.caption)
                 .accessibilityIdentifier("ios-agenda-life-status")
-                Text("This iPhone can inspect connection status, but Google consent, calendar choice, and provider refresh must be completed on your coordinator Mac. Ellie reads its existing import only when you refresh here.")
+                Text("Before starting consent, verify a Google Desktop OAuth client on your coordinator Mac. Then connect Calendar, choose a calendar, and refresh the provider in Ellie Life on that Mac. This iPhone only reads the existing import when you refresh here; it does not start consent.")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("ios-agenda-setup-guidance")
             } else {
