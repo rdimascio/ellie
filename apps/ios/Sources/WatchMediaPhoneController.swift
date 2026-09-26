@@ -119,8 +119,8 @@ final class WatchMediaPhoneController {
       else { return reply(.unavailable) }
       let playback: String
       switch page.site?.playback {
-      case .playing: playback = "playing"
-      case .paused: playback = "paused"
+      case .playing where browser.canPerform(.pause, on: node): playback = "playing"
+      case .paused where browser.canPerform(.play, on: node): playback = "paused"
       default: playback = "unavailable"
       }
       let title = page.title.flatMap {
