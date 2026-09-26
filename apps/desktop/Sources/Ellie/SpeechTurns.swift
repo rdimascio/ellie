@@ -7,6 +7,11 @@ struct SpeechAudioArtifact: Equatable, Sendable {
   let url: URL
 }
 
+struct SpeechReviewBinding: Equatable, Sendable {
+  fileprivate let id: UUID
+  let transcript: String
+}
+
 protocol SpeechRecording: Sendable {
   func start() async throws
   func stop() async throws -> SpeechAudioArtifact
@@ -49,7 +54,9 @@ final class SpeechTurnStore: ObservableObject {
     case cleanupRequired
   }
 
-  @Published private(set) var phase: Phase = .idle
+  @Published private(set) var phase: Phase = .idle {
+    didSet { if phase != .reviewing { reviewID = nil } }
+  }
   @Published var transcript = ""
 
   private let credential: NativeEnrollmentCredential
@@ -59,6 +66,7 @@ final class SpeechTurnStore: ObservableObject {
   private var limitTask: Task<Void, Never>?
   private var generation = 0
   private var activeTurnID: UUID?
+  private var reviewID: UUID?
   private var credentialInvalidated = false
   private var cancelledTurnCleanupFailed = false
 
@@ -74,6 +82,13 @@ final class SpeechTurnStore: ObservableObject {
   var reviewedApp: PhoneControlApp? {
     guard phase == .reviewing else { return nil }
     return Self.reviewedApp(in: transcript)
+  }
+  var activeReviewBinding: SpeechReviewBinding? {
+    guard phase == .reviewing, let reviewID else { return nil }
+    return SpeechReviewBinding(id: reviewID, transcript: transcript)
+  }
+  func matchesActiveReview(_ binding: SpeechReviewBinding) -> Bool {
+    activeReviewBinding == binding
   }
   var isBusy: Bool { task != nil || phase == .recording || phase == .cancelling }
 
@@ -140,6 +155,7 @@ final class SpeechTurnStore: ObservableObject {
       catch { throw SpeechTurnFailure.cleanupFailed }
       guard !Task.isCancelled else { throw CancellationError() }
       self.transcript = text
+      self.reviewID = UUID()
       self.activeTurnID = nil
       return .reviewing
     }
