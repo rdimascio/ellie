@@ -133,7 +133,7 @@ document.querySelector("#search-submit").onclick = async () => {
 };
 const scrollViewport = async (direction) => {
   const observedSnapshot = snapshot;
-  if (observedProvider === "netflix") {
+  if (["netflix", "disneyplus"].includes(observedProvider)) {
     snapshot = undefined;
     searchControl = undefined;
     observedSearch.hidden = true;
@@ -142,7 +142,7 @@ const scrollViewport = async (direction) => {
   await run({
     type: "scrollViewport",
     direction,
-    ...(["netflix", "youtube_tv"].includes(observedProvider) && observedSnapshot
+    ...(["netflix", "youtube_tv", "disneyplus"].includes(observedProvider) && observedSnapshot
       ? { snapshotId: observedSnapshot }
       : {}),
   });

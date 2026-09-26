@@ -158,9 +158,17 @@
     const top = root.scrollTop;
     const height = root.scrollHeight;
     const viewport = root.clientHeight;
-    if (![top, height, viewport].every(Number.isFinite) || height <= viewport + 2)
+    const maximum = height - viewport;
+    if (
+      ![top, height, viewport].every(Number.isFinite) ||
+      viewport <= 0 ||
+      height <= viewport + 2 ||
+      top < -1 ||
+      top > maximum + 1
+    )
       return { state: "scroll_unavailable" };
-    return { state: "available", root, top, height, viewport };
+    const directions = [...(top > 1 ? ["up"] : []), ...(top < maximum - 1 ? ["down"] : [])];
+    return { state: "available", root, top, height, viewport, directions };
   };
   const valid = (command) => {
     if (!command || !actionId(command.actionId)) return false;
@@ -178,8 +186,9 @@
       );
     if (command.type === "scrollViewport")
       return (
-        exact(command, ["type", "actionId", "direction"]) &&
-        ["up", "down"].includes(command.direction)
+        exact(command, ["type", "actionId", "direction", "snapshotId"]) &&
+        ["up", "down"].includes(command.direction) &&
+        actionId(command.snapshotId)
       );
     return false;
   };
@@ -194,25 +203,36 @@
       remember(cancelled, command.targetActionId);
       return { outcome: "cancelled" };
     }
-    active(command, expectedUrl, deadline);
+    try {
+      active(command, expectedUrl, deadline);
+    } catch (error) {
+      if (command.type !== "observe" && command.type !== "inspect") snapshot = undefined;
+      throw error;
+    }
     if (command.type === "observe") return site();
     if (command.type === "inspect") {
       const observation = site();
       const entries = observation.page === "browse" ? observed() : [];
+      const scroll = observation.page === "browse" ? viewportScroll() : undefined;
       const snapshotId = crypto.randomUUID();
       snapshot = {
         session,
         url: location.href,
         created: Date.now(),
         entries: entries.length <= 40 ? entries : [],
-        scroll: observation.page === "browse" ? viewportScroll() : undefined,
+        scroll,
         id: snapshotId,
       };
       return {
         snapshotId,
         candidates: snapshot.entries.map(({ id, title: label }) => ({ id, title: label })),
         playback: { available: false },
-        site: observation,
+        site: {
+          ...observation,
+          ...(observation.page === "browse"
+            ? { verticalScrollDirections: scroll?.directions || [] }
+            : {}),
+        },
       };
     }
     if (mutation) throw new Error("busy");
@@ -221,7 +241,7 @@
       if (page() !== "browse") throw new Error("unsupported_page");
       if (
         !snapshot ||
-        (command.type === "open" && snapshot.id !== command.snapshotId) ||
+        snapshot.id !== command.snapshotId ||
         snapshot.session !== session ||
         snapshot.url !== location.href ||
         Date.now() - snapshot.created >= 30_000
@@ -237,17 +257,14 @@
           current.root !== snapshot.scroll.root ||
           current.top !== snapshot.scroll.top ||
           current.height !== snapshot.scroll.height ||
-          current.viewport !== snapshot.scroll.viewport
+          current.viewport !== snapshot.scroll.viewport ||
+          !snapshot.scroll.directions.includes(command.direction) ||
+          !current.directions.includes(command.direction)
         )
           throw new Error("stale_snapshot");
-        if (
-          (command.direction === "up" && current.top <= 1) ||
-          (command.direction === "down" && current.top >= current.height - current.viewport - 1)
-        )
-          throw new Error("scroll_unavailable");
         active(command, expectedUrl, deadline);
         current.root.scrollBy({
-          top: (command.direction === "down" ? 1 : -1) * Math.max(1, innerHeight - 80),
+          top: (command.direction === "down" ? 1 : -1) * Math.max(1, current.viewport - 80),
           behavior: "instant",
         });
         return {

@@ -71,26 +71,140 @@ test(
     await withPage(async (page) => {
       await makeViewportScrollable(page);
       const first = await dispatch(page, { type: "inspect", actionId: actionId() });
-      const down = { type: "scrollViewport", actionId: actionId(), direction: "down" };
+      assert.deepEqual(first.site.verticalScrollDirections, ["down"]);
+      const down = {
+        type: "scrollViewport",
+        actionId: actionId(),
+        direction: "down",
+        snapshotId: first.snapshotId,
+      };
       assert.deepEqual(await dispatch(page, down), { outcome: "scrolled" });
       const afterDown = await page.evaluate(() => scrollY);
       assert.ok(afterDown > 0);
       await assert.rejects(dispatch(page, down), /duplicate_action/);
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: first.snapshotId,
+        }),
         /stale_snapshot/,
       );
       assert.equal(await page.evaluate(() => scrollY), afterDown);
       const next = await dispatch(page, { type: "inspect", actionId: actionId() });
       assert.notEqual(next.snapshotId, first.snapshotId);
+      assert.deepEqual(next.site.verticalScrollDirections, ["up", "down"]);
       assert.deepEqual(
-        await dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "up" }),
+        await dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "up",
+          snapshotId: next.snapshotId,
+        }),
         { outcome: "scrolled" },
       );
       assert.equal(await page.evaluate(() => scrollY), 0);
+      await page.evaluate(() => scrollTo(0, document.scrollingElement?.scrollHeight || 0));
+      const bottom = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.deepEqual(bottom.site.verticalScrollDirections, ["up"]);
+      await page.evaluate(() => scrollTo(0, 0));
       const ready = await dispatch(page, { type: "inspect", actionId: actionId() });
       assert.equal(ready.candidates[0]?.title, "Observed title");
       assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), []);
+    });
+  },
+);
+
+test(
+  "Disney+ scroll is bound to the exact inspect snapshot and an unverified effect never rearms",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await makeViewportScrollable(page);
+      const first = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const replacement = await dispatch(page, { type: "inspect", actionId: actionId() });
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: first.snapshotId,
+        }),
+        /stale_snapshot/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: replacement.snapshotId,
+        }),
+        /stale_snapshot/,
+      );
+
+      const fresh = await dispatch(page, { type: "inspect", actionId: actionId() });
+      await page.evaluate(() => {
+        const root = document.scrollingElement;
+        if (!root) throw new Error("missing root");
+        globalThis["savedDisneyScrollBy"] = root.scrollBy;
+        root.scrollBy = () => {};
+      });
+      assert.deepEqual(
+        await dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: fresh.snapshotId,
+        }),
+        { outcome: "scroll_unverified" },
+      );
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: fresh.snapshotId,
+        }),
+        /stale_snapshot/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+    });
+  },
+);
+
+test(
+  "Disney+ invalid viewport geometry exposes no scroll direction",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await makeViewportScrollable(page);
+      await page.evaluate(() => {
+        const root = document.scrollingElement;
+        if (!root) throw new Error("missing root");
+        Object.defineProperty(root, "clientHeight", { configurable: true, value: 0 });
+      });
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).site
+          .verticalScrollDirections,
+        [],
+      );
+      await page.evaluate(() => {
+        const root = document.scrollingElement;
+        if (!root) throw new Error("missing root");
+        delete root.clientHeight;
+        Object.defineProperty(root, "scrollTop", {
+          configurable: true,
+          value: root.scrollHeight + 100,
+          writable: true,
+        });
+      });
+      assert.deepEqual(
+        (await dispatch(page, { type: "inspect", actionId: actionId() })).site
+          .verticalScrollDirections,
+        [],
+      );
     });
   },
 );
@@ -102,43 +216,96 @@ test(
     await withPage(async (page) => {
       const missing = await dispatch(page, { type: "inspect", actionId: actionId() });
       assert.ok(missing.snapshotId);
+      assert.deepEqual(missing.site.verticalScrollDirections, []);
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: missing.snapshotId,
+        }),
         /scroll_unavailable/,
       );
       await makeViewportScrollable(page);
-      await dispatch(page, { type: "inspect", actionId: actionId() });
+      let read = await dispatch(page, { type: "inspect", actionId: actionId() });
       await page.evaluate(() => history.pushState({}, "", "/commerce/plans"));
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
         /page_changed/,
       );
       await page.evaluate((url) => history.pushState({}, "", url), current);
       assert.equal(await page.evaluate(() => scrollY), 0);
 
-      await dispatch(page, { type: "inspect", actionId: actionId() });
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
       await page.evaluate(() => scrollTo(0, 30));
       const movedExternally = await page.evaluate(() => scrollY);
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
         /stale_snapshot/,
       );
       assert.equal(await page.evaluate(() => scrollY), movedExternally);
       await page.evaluate(() => scrollTo(0, 0));
 
-      await dispatch(page, { type: "inspect", actionId: actionId() });
-      const cancelled = actionId();
-      await dispatch(page, { type: "cancel", actionId: actionId(), targetActionId: cancelled });
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      await page.evaluate(() => {
+        const extra = document.createElement("div");
+        extra.id = "changed-height";
+        extra.style.height = "300px";
+        document.body.append(extra);
+      });
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: cancelled, direction: "down" }),
-        /cancelled/,
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
+        /stale_snapshot/,
       );
       assert.equal(await page.evaluate(() => scrollY), 0);
 
-      await dispatch(page, { type: "inspect", actionId: actionId() });
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const cancelled = actionId();
+      await dispatch(page, { type: "cancel", actionId: actionId(), targetActionId: cancelled });
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: cancelled,
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
+        /cancelled/,
+      );
+      assert.equal(await page.evaluate(() => scrollY), 0);
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
+        /stale_snapshot/,
+      );
+
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
       await page.locator("main").evaluate((node) => node.setAttribute("role", "dialog"));
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
         /unsupported_page/,
       );
       assert.equal(await page.evaluate(() => scrollY), 0);
@@ -147,9 +314,14 @@ test(
       await page.evaluate(() => {
         document.body.style.overflowY = "hidden";
       });
-      await dispatch(page, { type: "inspect", actionId: actionId() });
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
         /scroll_unavailable/,
       );
       await page.evaluate(() => {
@@ -165,12 +337,36 @@ test(
         competing.innerHTML = '<div style="height:150vh">Competing page region</div>';
         document.body.append(competing);
       });
-      await dispatch(page, { type: "inspect", actionId: actionId() });
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
       await assert.rejects(
-        dispatch(page, { type: "scrollViewport", actionId: actionId(), direction: "down" }),
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
         /scroll_ambiguous/,
       );
       assert.equal(await page.evaluate(() => scrollY), 0);
+      await page.locator("#competing-scroller").evaluate((node) => node.remove());
+      await page.evaluate(() => {
+        const cover = document.createElement("div");
+        cover.id = "fixed-scroll-cover";
+        cover.style.cssText =
+          "position:fixed;inset:0;z-index:20;background:white;pointer-events:auto";
+        document.body.append(cover);
+      });
+      read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.deepEqual(read.site.verticalScrollDirections, []);
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollViewport",
+          actionId: actionId(),
+          direction: "down",
+          snapshotId: read.snapshotId,
+        }),
+        /scroll_unavailable/,
+      );
       assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), []);
     });
   },
@@ -188,7 +384,7 @@ test(
         playback: "unavailable",
       });
       const read = await dispatch(page, { type: "inspect", actionId: actionId() });
-      assert.deepEqual(read.site, observation);
+      assert.deepEqual(read.site, { ...observation, verticalScrollDirections: [] });
       assert.deepEqual(read.playback, { available: false });
       assert.equal(read.candidates.length, 1);
       assert.equal(read.candidates[0].title, "Observed title");
