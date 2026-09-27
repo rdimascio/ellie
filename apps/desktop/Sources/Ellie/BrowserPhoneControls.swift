@@ -762,7 +762,13 @@ final class BrowserPhoneControlStore: ObservableObject {
       case .scroll(let direction):
         return page.source == .companion && site.page == .browse
           && site.verticalScrollDirections?.contains(direction) == true
-      default: break
+      case .play:
+        return page.source == .companion && page.title != nil && site.page == .watch
+          && site.playback == .paused
+      case .pause:
+        return page.source == .companion && page.title != nil && site.page == .watch
+          && site.playback == .playing
+      case .inspect, .refresh, .back: return false
       }
     }
     if site.provider == .netflix {

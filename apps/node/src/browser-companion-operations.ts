@@ -25,6 +25,7 @@ type Observation = {
   url: string;
   revision: string;
   snapshotId: string;
+  title?: string;
   items: Map<string, string>;
   rowCandidateId?: string;
   rows: Map<string, { label: string; directions?: ("left" | "right")[] }>;
@@ -139,6 +140,7 @@ export class BrowserCompanionOperations {
         throw new Error("Browser companion read failed.");
       const raw = response.value as Record<string, unknown>;
       const topSearch = Object.hasOwn(raw, "searchControl");
+      const topTitle = Object.hasOwn(raw, "title");
       const value = exact(
         raw,
         Object.hasOwn(raw, "rowCandidateId")
@@ -149,6 +151,7 @@ export class BrowserCompanionOperations {
               "site",
               "rowCandidateId",
               ...(topSearch ? ["searchControl"] : []),
+              ...(topTitle ? ["title"] : []),
             ]
           : [
               "snapshotId",
@@ -156,6 +159,7 @@ export class BrowserCompanionOperations {
               "playback",
               "site",
               ...(topSearch ? ["searchControl"] : []),
+              ...(topTitle ? ["title"] : []),
             ],
       );
       if (
@@ -192,6 +196,7 @@ export class BrowserCompanionOperations {
           status: "completed",
           revision,
           view: {
+            ...(topTitle ? { title: value.title } : {}),
             items: [...items].map(([id, label]) => ({ id, label })),
             site: value.site,
           },
@@ -221,12 +226,21 @@ export class BrowserCompanionOperations {
         throw new Error("Browser companion observation is invalid.");
       if (binding.origin !== "https://www.youtube.com" && topSearch)
         throw new Error("Browser companion observation is invalid.");
+      if (
+        topTitle &&
+        (binding.origin !== "https://tv.youtube.com" ||
+          checked.browser.view.site.page !== "watch" ||
+          !["playing", "paused"].includes(checked.browser.view.site.playback) ||
+          checked.browser.view.title !== value.title)
+      )
+        throw new Error("Browser companion observation is invalid.");
       this.observed = {
         bindingId: binding.bindingId,
         documentId: binding.documentId,
         url: binding.url,
         revision,
         snapshotId: value.snapshotId,
+        ...(topTitle ? { title: checked.browser.view.title } : {}),
         items,
         ...(value.rowCandidateId === undefined ? {} : { rowCandidateId: value.rowCandidateId }),
         rows: new Map(
@@ -370,10 +384,15 @@ export class BrowserCompanionOperations {
     } else if (action.tool === "browser.playback") {
       if (
         observed.site.page !== "watch" ||
-        observed.site.playback !== (action.action === "play" ? "paused" : "playing")
+        observed.site.playback !== (action.action === "play" ? "paused" : "playing") ||
+        (youtubeTV && !observed.title)
       )
-        throw new Error("Netflix playback state is unavailable.");
-      command = { type: action.action, actionId: randomUUID() };
+        throw new Error(`${youtubeTV ? "YouTube TV" : "Netflix"} playback state is unavailable.`);
+      command = {
+        type: action.action,
+        actionId: randomUUID(),
+        ...(youtubeTV ? { snapshotId: observed.snapshotId } : {}),
+      };
     } else throw new Error("Browser operation is unsupported.");
     // Once admitted, the mutation consumes the observation even if its result is lost.
     this.invalidate();

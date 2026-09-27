@@ -12,6 +12,17 @@
     typeof value === "object" &&
     !Array.isArray(value) &&
     Object.keys(value).sort().join() === [...keys].sort().join();
+  const boundedText = (value, maximum = 200) => {
+    const text = value?.replace(/\s+/g, " ").trim();
+    return text && !/[\p{C}]/u.test(text) && new TextEncoder().encode(text).length <= maximum
+      ? text
+      : undefined;
+  };
+  const geometry = (element) => {
+    const rect = element.getBoundingClientRect();
+    const values = [rect.left, rect.top, rect.width, rect.height];
+    return values.every(Number.isFinite) ? values : undefined;
+  };
   const visible = (element) => {
     const rect = element.getBoundingClientRect();
     if (
@@ -55,18 +66,60 @@
       return "unsupported";
     return document.querySelector("main,[role='main']") ? "browse" : "unsupported";
   };
+  // Playback exists only when the page exposes one explicit title/region/video/control
+  // relationship. This never guesses a provider selector or invokes the video element.
   const player = () => {
+    if (page() !== "browse") return undefined;
+    const headings = [...document.querySelectorAll("h1")]
+      .filter(visible)
+      .map((heading) => ({ heading, title: boundedText(heading.textContent) }))
+      .filter(({ title }) => title);
+    if (headings.length !== 1) return undefined;
+    const headingId = headings[0].heading.id;
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,99}$/.test(headingId)) return undefined;
+    const regions = [...document.querySelectorAll("[role='region'][aria-labelledby]")].filter(
+      (region) => region.getAttribute("aria-labelledby") === headingId && visible(region),
+    );
+    if (regions.length !== 1) return undefined;
+    const region = regions[0];
     const videos = [...document.querySelectorAll("video")];
-    if (videos.length > 16) return { state: "ambiguous" };
+    if (videos.length > 16) return undefined;
     const shown = videos.filter(visible);
-    if (shown.length !== 1) return { state: shown.length ? "ambiguous" : "unavailable" };
+    if (shown.length !== 1) return undefined;
     const video = shown[0];
-    if (video.error || video.readyState < 2) return { state: "unavailable" };
+    const videoId = video.id;
+    const source = video.currentSrc || video.srcObject?.id;
+    const currentTime = video.currentTime;
+    const duration = video.duration;
+    const durationKey = Number.isFinite(duration)
+      ? duration
+      : duration === Infinity
+        ? "live"
+        : undefined;
+    if (
+      !/^[A-Za-z][A-Za-z0-9_-]{0,99}$/.test(videoId) ||
+      !region.contains(video) ||
+      typeof source !== "string" ||
+      source.length < 1 ||
+      new TextEncoder().encode(source).length > 2048 ||
+      video.error ||
+      video.readyState < 2 ||
+      video.loop ||
+      video.autoplay ||
+      !Number.isFinite(currentTime) ||
+      currentTime < 0 ||
+      currentTime > 86_400 ||
+      durationKey === undefined ||
+      (typeof durationKey === "number" && (durationKey <= 0 || durationKey > 86_400))
+    )
+      return undefined;
     const state = video.paused || video.ended ? "paused" : "playing";
     const buttons = [...document.querySelectorAll("button,[role='button']")];
-    if (buttons.length > 256) return { state: "ambiguous" };
+    if (buttons.length > 256) return undefined;
     const controls = buttons.filter(
       (button) =>
+        button.getAttribute("aria-controls") === videoId &&
+        region.contains(button) &&
         visible(button) &&
         !button.matches(":disabled") &&
         !button.closest("[inert]") &&
@@ -80,12 +133,32 @@
           );
           return Boolean(hit && (hit === button || button.contains(hit)));
         })() &&
-        (button.getAttribute("aria-label") || button.getAttribute("title") || "")
-          .trim()
-          .toLowerCase() === (state === "paused" ? "play" : "pause"),
+        boundedText(
+          button.getAttribute("aria-label") || button.getAttribute("title") || button.textContent,
+          100,
+        )?.toLowerCase() === (state === "paused" ? "play" : "pause"),
     );
-    if (controls.length !== 1) return { state: controls.length ? "ambiguous" : "unavailable" };
-    return { state, video, control: controls[0] };
+    if (controls.length !== 1) return undefined;
+    const regionGeometry = geometry(region);
+    const videoGeometry = geometry(video);
+    const controlGeometry = geometry(controls[0]);
+    if (!regionGeometry || !videoGeometry || !controlGeometry) return undefined;
+    return {
+      title: headings[0].title,
+      heading: headings[0].heading,
+      region,
+      video,
+      videoId,
+      source,
+      currentTime,
+      duration: durationKey,
+      state,
+      control: controls[0],
+      action: state === "paused" ? "play" : "pause",
+      regionGeometry,
+      videoGeometry,
+      controlGeometry,
+    };
   };
   const viewportScroll = () => {
     const root = document.scrollingElement;
@@ -137,16 +210,13 @@
     if (observedPage !== "browse")
       return { site: { provider: "youtube_tv", page: observedPage, playback: "unavailable" } };
     const observedPlayer = player();
-    if (observedPlayer.state === "playing" || observedPlayer.state === "paused") {
-      const time = observedPlayer.video.currentTime;
+    if (observedPlayer) {
       return {
         site: {
           provider: "youtube_tv",
           page: "watch",
           playback: observedPlayer.state,
-          ...(Number.isFinite(time) && time >= 0 && time <= 86_400
-            ? { currentTimeSeconds: Math.round(time * 10) / 10 }
-            : {}),
+          currentTimeSeconds: Math.round(observedPlayer.currentTime * 10) / 10,
         },
         player: observedPlayer,
       };
@@ -171,8 +241,10 @@
     if (!uuid(command?.actionId)) throw new Error("invalid_command");
     if (
       !(
-        (["inspect", "play", "pause"].includes(command.type) &&
-          exact(command, ["type", "actionId"])) ||
+        (command.type === "inspect" && exact(command, ["type", "actionId"])) ||
+        (["play", "pause"].includes(command.type) &&
+          exact(command, ["type", "actionId", "snapshotId"]) &&
+          uuid(command.snapshotId)) ||
         (command.type === "scrollViewport" &&
           exact(command, ["type", "actionId", "direction", "snapshotId"]) &&
           ["up", "down"].includes(command.direction) &&
@@ -192,8 +264,7 @@
         created: Date.now(),
         page: observation.site.page,
         playback: observation.site.playback,
-        video: observation.player?.video,
-        control: observation.player?.control,
+        player: observation.player,
         scroll: observation.scroll,
       };
       return {
@@ -203,6 +274,7 @@
           available: Boolean(observation.player),
           paused: observation.site.playback === "paused",
         },
+        ...(observation.player ? { title: observation.player.title } : {}),
         site: observation.site,
       };
     }
@@ -245,18 +317,41 @@
       };
     }
     if (
+      command.snapshotId !== prior.id ||
       prior.page !== "watch" ||
       observation.site.page !== "watch" ||
-      prior.video !== observation.player?.video ||
-      prior.control !== observation.player?.control ||
+      !prior.player ||
+      !observation.player ||
+      command.type !== prior.player.action ||
+      observation.player.action !== prior.player.action ||
+      observation.player.title !== prior.player.title ||
+      observation.player.heading !== prior.player.heading ||
+      observation.player.region !== prior.player.region ||
+      observation.player.video !== prior.player.video ||
+      observation.player.control !== prior.player.control ||
+      observation.player.videoId !== prior.player.videoId ||
+      observation.player.source !== prior.player.source ||
+      (prior.player.state === "paused"
+        ? observation.player.currentTime !== prior.player.currentTime
+        : observation.player.currentTime < prior.player.currentTime ||
+          observation.player.currentTime - prior.player.currentTime > 30) ||
+      observation.player.duration !== prior.player.duration ||
       prior.playback !== observation.site.playback ||
-      prior.playback !== (command.type === "play" ? "paused" : "playing")
+      prior.playback !== (command.type === "play" ? "paused" : "playing") ||
+      observation.player.regionGeometry.some(
+        (value, index) => value !== prior.player.regionGeometry[index],
+      ) ||
+      observation.player.videoGeometry.some(
+        (value, index) => value !== prior.player.videoGeometry[index],
+      ) ||
+      observation.player.controlGeometry.some(
+        (value, index) => value !== prior.player.controlGeometry[index],
+      )
     )
       throw new Error("playback_unavailable");
     current(expectedUrl, deadline);
-    if (command.type === "play") await observation.player.video.play();
-    else observation.player.video.pause();
-    return { outcome: "dispatched_unverified" };
+    prior.player.control.click();
+    return { outcome: "playback_unverified" };
   }
   globalThis.__ellieMediaController = { dispatch };
 })();

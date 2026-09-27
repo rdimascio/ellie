@@ -145,6 +145,22 @@ struct SpeechTurnView: View {
                 }
               }
             }
+            if let page = browserStore.page,
+              let reviewCopy = browserReviewedYouTubeTVPlaybackRunCopy(
+                intent: intent, page: page,
+                nodeLabel: controlStore.selectedNode?.label ?? "the selected Mac")
+            {
+              Text(reviewCopy)
+                .font(.footnote)
+                .accessibilityIdentifier("speech-youtube-tv-playback-review")
+            }
+            if (intent == .play || intent == .pause), let page = browserStore.page,
+              page.site?.provider == .youtubeTV, page.title == nil
+            {
+              Text("This YouTube TV read did not expose a safely identified title and linked player control. No playback command can run until another read does.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .accessibilityIdentifier("speech-youtube-tv-playback-unavailable")
+            }
             if case .openSelectedResult = intent, let page = browserStore.page,
               !page.items.isEmpty
             {

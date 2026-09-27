@@ -201,15 +201,35 @@ final class BrowserPhoneControlTests: XCTestCase {
 
   func testYouTubeTVCompanionObservationKeepsSearchAndRowsClosed() throws {
     let revision = String(repeating: "d", count: 64)
-    func read(_ site: String) -> Data {
-      Data(
-        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"companion","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    func read(_ site: String, title: String? = nil, source: String = "companion") -> Data {
+      let titleField = title.map { #", "title":"\#($0)""# } ?? ""
+      return Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]\#(titleField),"site":\#(site)}}}}"#.utf8)
     }
     guard case .page(let page) = try decodeBrowserPhoneResponse(
       read(#"{"provider":"youtube_tv","page":"watch","playback":"paused"}"#), nodeID: "mac")
     else { return XCTFail("Expected selected YouTube TV player") }
     XCTAssertEqual(page.site?.provider, .youtubeTV)
     XCTAssertEqual(page.site?.page, .watch)
+    XCTAssertNil(page.title, "A legacy read remains compatible but carries no playback authority")
+    guard case .page(let titled) = try decodeBrowserPhoneResponse(
+      read(#"{"provider":"youtube_tv","page":"watch","playback":"paused"}"#,
+        title: "Observed program"), nodeID: "mac")
+    else { return XCTFail("Expected titled YouTube TV player") }
+    XCTAssertEqual(titled.title, "Observed program")
+    XCTAssertEqual(
+      browserReviewedYouTubeTVPlaybackRunCopy(intent: .play, page: titled, nodeLabel: "Studio"),
+      "Run will play the observed Observed program control on Studio. Read again to observe the result.")
+    XCTAssertNil(browserReviewedYouTubeTVPlaybackRunCopy(
+      intent: .pause, page: titled, nodeLabel: "Studio"))
+    for source in ["accessibility", "webmcp"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(
+        read(#"{"provider":"youtube_tv","page":"watch","playback":"paused"}"#,
+          title: "Observed program", source: source), nodeID: "mac"))
+    }
+    XCTAssertThrowsError(try decodeBrowserPhoneResponse(
+      read(#"{"provider":"youtube_tv","page":"browse","playback":"unavailable"}"#,
+        title: "Observed program"), nodeID: "mac"))
     guard case .page(let browse) = try decodeBrowserPhoneResponse(
       read(#"{"provider":"youtube_tv","page":"browse","playback":"unavailable","verticalScrollDirections":["down"]}"#),
       nodeID: "mac")
@@ -259,6 +279,39 @@ final class BrowserPhoneControlTests: XCTestCase {
       .refresh, .read(revision: String(repeating: "a", count: 64)),
       .scroll(.down, revision: String(repeating: "a", count: 64)),
     ])
+  }
+
+  @MainActor
+  func testYouTubeTVTitleBoundPlaybackConsumesBeforeUnknownAndLegacyReadCannotDispatch() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let site = BrowserPhoneSite(provider: .youtubeTV, page: .watch,
+      playback: .paused, currentTimeSeconds: 12)
+    let legacyTransport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, title: nil, site: site)
+    let legacy = BrowserPhoneControlStore(credential: credential(), transport: legacyTransport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(legacy.refresh(on: node))
+    await eventually { legacy.phase == .ready }
+    XCTAssertFalse(legacy.canPerform(.play, on: node))
+    XCTAssertFalse(legacy.perform(.play, on: node))
+    let legacyActions = await legacyTransport.actions
+    XCTAssertEqual(legacyActions.count, 2)
+
+    let transport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, title: "Observed program", site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.canPerform(.play, on: node))
+    XCTAssertTrue(store.perform(.play, on: node))
+    XCTAssertNil(store.page, "The titled observation is consumed before dispatch")
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.play, on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
+      .playback(.play, revision: String(repeating: "a", count: 64))])
   }
 
   @MainActor
@@ -1728,6 +1781,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
   private let statusSource: BrowserPhoneSource?
   private let commandStatus: BrowserPhoneCommandStatus?
   private let items: [BrowserPhoneItem]
+  private let title: String?
   private let site: BrowserPhoneSite?
   private let axScrollDirections: [BrowserScrollDirection]?
   private var commandContinuation: CheckedContinuation<Void, Never>?
@@ -1738,6 +1792,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     readFailure: PhoneControlFailure? = nil, commandError: Bool = false,
     source: BrowserPhoneSource = .webmcp, commandStatus: BrowserPhoneCommandStatus? = nil,
     items: [BrowserPhoneItem] = [BrowserPhoneItem(id: "opaque-1", label: "First", state: nil)],
+    title: String? = "Page",
     site: BrowserPhoneSite? = nil, statusSource: BrowserPhoneSource? = nil,
     axScrollDirections: [BrowserScrollDirection]? = nil
   ) {
@@ -1749,6 +1804,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
     self.statusSource = statusSource
     self.commandStatus = commandStatus
     self.items = items
+    self.title = title
     self.site = site
     self.axScrollDirections = axScrollDirections
   }
@@ -1766,7 +1822,7 @@ private actor BrowserPhoneFakeTransport: BrowserPhoneControlTransporting {
       if let readFailure { throw readFailure }
       return .page(
         BrowserPhonePage(
-          nodeID: nodeID, source: source, revision: revision, title: "Page", summary: nil,
+          nodeID: nodeID, source: source, revision: revision, title: title, summary: nil,
           items: items, site: site, axScrollDirections: axScrollDirections))
     default:
       if commandError { throw PhoneControlFailure.unavailable }

@@ -104,6 +104,17 @@ struct BrowserPhonePage: Equatable, Sendable {
     self.axScrollDirections = axScrollDirections
   }
 }
+
+func browserReviewedYouTubeTVPlaybackRunCopy(
+  intent: BrowserVoiceIntent, page: BrowserPhonePage, nodeLabel: String
+) -> String? {
+  guard page.source == .companion, page.site?.provider == .youtubeTV,
+    page.site?.page == .watch, let title = page.title,
+    (intent == .play && page.site?.playback == .paused)
+      || (intent == .pause && page.site?.playback == .playing)
+  else { return nil }
+  return "Run will \(intent.displayLabel.lowercased()) the observed \(title) control on \(nodeLabel). Read again to observe the result."
+}
 enum BrowserPhoneResponse: Equatable, Sendable {
   case status(source: BrowserPhoneSource, connected: Bool, revision: String?)
   case page(BrowserPhonePage)
@@ -341,6 +352,14 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
       throw PhoneControlFailure.invalidResponse
     }
     if site?.provider == .youtube && site?.searchControl != nil && source != .companion {
+      throw PhoneControlFailure.invalidResponse
+    }
+    if site?.provider == .youtubeTV
+      && (source != .companion
+        || (title != nil
+          && (site?.page != .watch
+            || (site?.playback != .playing && site?.playback != .paused))))
+    {
       throw PhoneControlFailure.invalidResponse
     }
     if site?.verticalScrollDirections != nil && source != .companion {

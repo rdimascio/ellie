@@ -67,7 +67,7 @@ export type BrowserCompanionCommand =
       query: string;
     }
   | { type: "open"; actionId: string; snapshotId: string; candidateId: string }
-  | { type: "play" | "pause"; actionId: string };
+  | { type: "play" | "pause"; actionId: string; snapshotId?: string };
 export type BrowserWebMCPRequest =
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.status" }
   | { protocol: typeof BROWSER_WEBMCP_PROTOCOL; id: string; type: "binding.refresh" }
@@ -139,9 +139,17 @@ function companionCommand(value: unknown): BrowserCompanionCommand {
   const body = record(value);
   const actionId = identifier(body.actionId);
   if (!uuidPattern.test(actionId)) throw new Error("Invalid message.");
-  if (body.type === "inspect" || body.type === "play" || body.type === "pause") {
+  if (body.type === "inspect") {
     exactKeys(body, ["type", "actionId"]);
     return { type: body.type, actionId };
+  }
+  if (body.type === "play" || body.type === "pause") {
+    const hasSnapshot = Object.hasOwn(body, "snapshotId");
+    exactKeys(body, ["type", "actionId", ...(hasSnapshot ? ["snapshotId"] : [])]);
+    if (!hasSnapshot) return { type: body.type, actionId };
+    const snapshotId = identifier(body.snapshotId);
+    if (!uuidPattern.test(snapshotId)) throw new Error("Invalid message.");
+    return { type: body.type, actionId, snapshotId };
   }
   if (body.type === "scrollViewport") {
     const hasSnapshot = Object.hasOwn(body, "snapshotId");

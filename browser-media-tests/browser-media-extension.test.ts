@@ -2389,18 +2389,27 @@ test(
       await launched.page.evaluate(() => {
         const main = document.querySelector("main")!;
         document.querySelector("body > div")?.remove();
-        main.innerHTML =
-          "<button aria-label='Play'>Play</button><video muted playsinline width='320' height='180'></video>";
+        main.innerHTML = `<section id="observed-player" role="region" aria-labelledby="program-title">
+          <h1 id="program-title">Observed synthetic program</h1>
+          <video id="program-video" muted playsinline width="320" height="180"></video>
+          <button aria-controls="program-video" aria-label="Play">Play</button>
+        </section>`;
+        const video = document.querySelector("video") as HTMLVideoElement;
+        const button = document.querySelector("button")!;
+        globalThis["youtubeTVClicks"] = 0;
         const canvas = document.createElement("canvas");
         canvas.width = 32;
         canvas.height = 32;
         const ctx = canvas.getContext("2d")!;
         ctx.fillStyle = "red";
         ctx.fillRect(0, 0, 32, 32);
-        const video = document.querySelector("video")!;
         video.srcObject = canvas.captureStream(5);
-        ctx.fillStyle = "blue";
-        ctx.fillRect(0, 0, 32, 32);
+        button.addEventListener("click", async () => {
+          globalThis["youtubeTVClicks"] += 1;
+          if (video.paused) await video.play();
+          else video.pause();
+          button.setAttribute("aria-label", video.paused ? "Play" : "Pause");
+        });
       });
       await launched.page.waitForFunction(
         () => (document.querySelector("video") as HTMLVideoElement)?.readyState >= 2,
@@ -2416,6 +2425,40 @@ test(
       observed = await inspect();
       assert.equal(observed.value.site.page, "watch");
       assert.equal(observed.value.site.playback, "paused");
+      assert.equal(observed.value.title, "Observed synthetic program");
+      const firstPlayerSnapshot = observed.value.snapshotId;
+      const replacementPlayer = await inspect();
+      assert.notEqual(replacementPlayer.value.snapshotId, firstPlayerSnapshot);
+      const replacedPlayer = await launched.worker.evaluate(
+        async (body) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(body);
+            return "accepted";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "play",
+            actionId: crypto.randomUUID(),
+            snapshotId: firstPlayerSnapshot,
+          },
+        },
+      );
+      assert.notEqual(replacedPlayer, "accepted");
+      assert.equal(await launched.page.evaluate(() => globalThis["youtubeTVClicks"]), 0);
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
       await launched.page
         .locator("button")
         .evaluate((button) => button.setAttribute("aria-label", "Pause"));
@@ -2434,7 +2477,11 @@ test(
           type: "media.execute",
           bindingId: binding.bindingId,
           documentId: binding.documentId,
-          command: { type: "play", actionId: crypto.randomUUID() },
+          command: {
+            type: "play",
+            actionId: crypto.randomUUID(),
+            snapshotId: observed.value.snapshotId,
+          },
         },
       );
       assert.notEqual(changedControl, "accepted");
@@ -2488,7 +2535,11 @@ test(
             type: "media.execute",
             bindingId: binding.bindingId,
             documentId: binding.documentId,
-            command: { type: "play", actionId: crypto.randomUUID() },
+            command: {
+              type: "play",
+              actionId: crypto.randomUUID(),
+              snapshotId: observed.value.snapshotId,
+            },
           },
         );
         assert.notEqual(denied, "accepted", `${condition} must not dispatch player action`);
@@ -2511,19 +2562,62 @@ test(
       });
       observed = await inspect();
       assert.equal(observed.value.site.playback, "paused");
+      const beforeGeometryChange = await launched.page.evaluate(
+        () => globalThis["youtubeTVClicks"],
+      );
+      await launched.page.locator("button").evaluate((button) => {
+        (button as HTMLElement).style.width = "180px";
+      });
+      const changedGeometry = await launched.worker.evaluate(
+        async (body) => {
+          try {
+            await globalThis.__ellieTestWebMCP.request(body);
+            return "accepted";
+          } catch (error) {
+            return error instanceof Error ? error.message : "failed";
+          }
+        },
+        {
+          protocol: "ellie.browser-webmcp.v1",
+          id: crypto.randomUUID(),
+          type: "media.execute",
+          bindingId: binding.bindingId,
+          documentId: binding.documentId,
+          command: {
+            type: "play",
+            actionId: crypto.randomUUID(),
+            snapshotId: observed.value.snapshotId,
+          },
+        },
+      );
+      assert.notEqual(changedGeometry, "accepted");
+      assert.equal(
+        await launched.page.evaluate(() => globalThis["youtubeTVClicks"]),
+        beforeGeometryChange,
+      );
+      await launched.page.locator("button").evaluate((button) => {
+        (button as HTMLElement).style.width = "";
+      });
+      binding = await request({
+        protocol: "ellie.browser-webmcp.v1",
+        id: crypto.randomUUID(),
+        type: "binding.refresh",
+      });
+      observed = await inspect();
       const play = await request({
         protocol: "ellie.browser-webmcp.v1",
         id: crypto.randomUUID(),
         type: "media.execute",
         bindingId: binding.bindingId,
         documentId: binding.documentId,
-        command: { type: "play", actionId: crypto.randomUUID() },
+        command: {
+          type: "play",
+          actionId: crypto.randomUUID(),
+          snapshotId: observed.value.snapshotId,
+        },
       });
-      assert.equal(play.value.outcome, "dispatched_unverified");
-      assert.equal(
-        await launched.page.locator("video").evaluate((video: HTMLVideoElement) => video.paused),
-        false,
-      );
+      assert.equal(play.value.outcome, "playback_unverified");
+      assert.equal(await launched.page.evaluate(() => globalThis["youtubeTVClicks"]), 1);
       const replay = await launched.worker.evaluate(
         async (body) => {
           try {
@@ -2539,10 +2633,15 @@ test(
           type: "media.execute",
           bindingId: binding.bindingId,
           documentId: binding.documentId,
-          command: { type: "pause", actionId: crypto.randomUUID() },
+          command: {
+            type: "pause",
+            actionId: crypto.randomUUID(),
+            snapshotId: observed.value.snapshotId,
+          },
         },
       );
       assert.notEqual(replay, "accepted", "an old binding cannot authorize another player action");
+      assert.equal(await launched.page.evaluate(() => globalThis["youtubeTVClicks"]), 1);
     } finally {
       await context?.close();
       if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
