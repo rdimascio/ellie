@@ -27,7 +27,7 @@ type Observation = {
   snapshotId: string;
   items: Map<string, string>;
   rowCandidateId?: string;
-  rows: Map<string, string>;
+  rows: Map<string, { label: string; directions?: ("left" | "right")[] }>;
   searchControl?: { id: string; label: string };
   site: NonNullable<BrowserView["site"]>;
 };
@@ -191,7 +191,10 @@ export class BrowserCompanionOperations {
           operation: "read",
           status: "completed",
           revision,
-          view: { items: [...items].map(([id, label]) => ({ id, label })), site: value.site },
+          view: {
+            items: [...items].map(([id, label]) => ({ id, label })),
+            site: value.site,
+          },
         },
       });
       if (
@@ -226,7 +229,15 @@ export class BrowserCompanionOperations {
         snapshotId: value.snapshotId,
         items,
         ...(value.rowCandidateId === undefined ? {} : { rowCandidateId: value.rowCandidateId }),
-        rows: new Map(checked.browser.view.site.rows?.map((row) => [row.id, row.label]) || []),
+        rows: new Map(
+          checked.browser.view.site.rows?.map((row) => [
+            row.id,
+            {
+              label: row.label,
+              ...(row.directions ? { directions: row.directions } : {}),
+            },
+          ]) || [],
+        ),
         ...(checked.browser.view.site.searchControl
           ? { searchControl: checked.browser.view.site.searchControl }
           : {}),
@@ -255,6 +266,7 @@ export class BrowserCompanionOperations {
       disneyplus &&
       (observed.site.page !== "browse" ||
         (action.tool !== "browser.select" &&
+          action.tool !== "browser.scrollRow" &&
           (action.tool !== "browser.scroll" ||
             (action.direction !== "up" && action.direction !== "down"))))
     )
@@ -310,8 +322,13 @@ export class BrowserCompanionOperations {
         query: action.query,
       };
     } else if (action.tool === "browser.scrollRow") {
-      if (observed.site.page !== "browse" || !observed.rows.has(action.rowId))
-        throw new Error("Netflix row choice is stale; read and choose a row again.");
+      const row = observed.rows.get(action.rowId);
+      if (
+        observed.site.page !== "browse" ||
+        !row ||
+        (disneyplus && !row.directions?.includes(action.direction))
+      )
+        throw new Error("Observed row choice is stale; read and choose a row again.");
       command = {
         type: "scrollSelectedRow",
         actionId: randomUUID(),

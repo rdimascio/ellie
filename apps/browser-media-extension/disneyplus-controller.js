@@ -36,7 +36,11 @@
       return "unsupported";
     return "browse";
   };
-  const site = () => ({ provider: "disneyplus", page: page(), playback: "unavailable" });
+  const site = () => ({
+    provider: "disneyplus",
+    page: page(),
+    playback: "unavailable",
+  });
   const visible = (element) => {
     const rect = element.getBoundingClientRect();
     if (
@@ -122,11 +126,91 @@
       if (!visible(anchor) || !eligible(anchor)) continue;
       const label = title(anchor);
       if (!label) continue;
-      const entry = { id: crypto.randomUUID(), title: label, anchor, href: anchor.href };
+      const entry = {
+        id: crypto.randomUUID(),
+        title: label,
+        anchor,
+        href: anchor.href,
+      };
       entries.push(entry);
       counts.set(entry.href, (counts.get(entry.href) || 0) + 1);
     }
     return entries.filter((entry) => counts.get(entry.href) === 1);
+  };
+  const rowLabel = (row, index) => {
+    for (const value of [row.getAttribute("aria-label"), row.getAttribute("title")]) {
+      const label = value?.replace(/\s+/g, " ").trim();
+      if (label && !/[\p{C}]/u.test(label) && new TextEncoder().encode(label).length <= 100)
+        return label;
+    }
+    return `Row ${index + 1}`;
+  };
+  const rowGeometry = (row) => {
+    const style = getComputedStyle(row);
+    const left = row.scrollLeft;
+    const width = row.scrollWidth;
+    const viewport = row.clientWidth;
+    const maximum = width - viewport;
+    if (
+      ![left, width, viewport].every(Number.isFinite) ||
+      style.direction !== "ltr" ||
+      !["auto", "scroll"].includes(style.overflowX) ||
+      viewport <= 0 ||
+      width <= viewport + 2 ||
+      left < -1 ||
+      left > maximum + 1
+    )
+      return null;
+    const bounds = row.getBoundingClientRect();
+    if (bounds.width <= 2 || bounds.height <= 2 || bounds.bottom <= 0 || bounds.top >= innerHeight)
+      return null;
+    for (let node = row; node; node = node.parentElement) {
+      if (
+        node.hasAttribute("inert") ||
+        node.hasAttribute("disabled") ||
+        node.getAttribute("aria-disabled")?.trim().toLowerCase() === "true" ||
+        node.getAttribute("aria-hidden")?.trim().toLowerCase() === "true"
+      )
+        return null;
+      const current = getComputedStyle(node);
+      const rect = node.getBoundingClientRect();
+      if (
+        current.position === "fixed" &&
+        node !== row &&
+        rect.width >= innerWidth / 2 &&
+        rect.height >= innerHeight / 2
+      )
+        return null;
+    }
+    return {
+      row,
+      left,
+      width,
+      viewport,
+      directions: [...(left > 1 ? ["left"] : []), ...(left < maximum - 1 ? ["right"] : [])],
+    };
+  };
+  const observedRows = (entries) => {
+    const candidates = new Map();
+    for (const entry of entries) {
+      let row = entry.anchor.parentElement;
+      while (row && row !== document.body && !rowGeometry(row)) row = row.parentElement;
+      if (!row || row === document.body) continue;
+      const list = candidates.get(row) || [];
+      list.push(entry);
+      candidates.set(row, list);
+    }
+    if (candidates.size > 8) throw new Error("ambiguous_rows");
+    return [...candidates].map(([row, members], index) => ({
+      id: crypto.randomUUID(),
+      label: rowLabel(row, index),
+      ...rowGeometry(row),
+      members: members.map(({ href, anchor, title }) => ({
+        href,
+        anchor,
+        title,
+      })),
+    }));
   };
   const viewportScroll = () => {
     const root = document.scrollingElement;
@@ -190,6 +274,13 @@
         ["up", "down"].includes(command.direction) &&
         actionId(command.snapshotId)
       );
+    if (command.type === "scrollSelectedRow")
+      return (
+        exact(command, ["type", "actionId", "snapshotId", "rowId", "direction"]) &&
+        actionId(command.snapshotId) &&
+        actionId(command.rowId) &&
+        ["left", "right"].includes(command.direction)
+      );
     return false;
   };
 
@@ -213,6 +304,7 @@
     if (command.type === "inspect") {
       const observation = site();
       const entries = observation.page === "browse" ? observed() : [];
+      const rows = observation.page === "browse" ? observedRows(entries) : [];
       const scroll = observation.page === "browse" ? viewportScroll() : undefined;
       const snapshotId = crypto.randomUUID();
       snapshot = {
@@ -220,17 +312,28 @@
         url: location.href,
         created: Date.now(),
         entries: entries.length <= 40 ? entries : [],
+        rows,
         scroll,
         id: snapshotId,
       };
       return {
         snapshotId,
-        candidates: snapshot.entries.map(({ id, title: label }) => ({ id, title: label })),
+        candidates: snapshot.entries.map(({ id, title: label }) => ({
+          id,
+          title: label,
+        })),
         playback: { available: false },
         site: {
           ...observation,
           ...(observation.page === "browse"
-            ? { verticalScrollDirections: scroll?.directions || [] }
+            ? {
+                verticalScrollDirections: scroll?.directions || [],
+                rows: rows.map(({ id, label, directions }) => ({
+                  id,
+                  label,
+                  directions,
+                })),
+              }
             : {}),
         },
       };
@@ -269,6 +372,37 @@
         });
         return {
           outcome: current.root.scrollTop === current.top ? "scroll_unverified" : "scrolled",
+        };
+      }
+      if (command.type === "scrollSelectedRow") {
+        const row = snapshot.rows.find((candidate) => candidate.id === command.rowId);
+        if (!row || !row.directions.includes(command.direction)) throw new Error("stale_row");
+        const entries = observed();
+        const currentRows = observedRows(entries);
+        const current = currentRows.find((candidate) => candidate.row === row.row);
+        if (
+          !current ||
+          current.label !== row.label ||
+          current.left !== row.left ||
+          current.width !== row.width ||
+          current.viewport !== row.viewport ||
+          !current.directions.includes(command.direction) ||
+          current.members.length !== row.members.length ||
+          current.members.some(
+            (member, index) =>
+              member.anchor !== row.members[index].anchor ||
+              member.href !== row.members[index].href ||
+              member.title !== row.members[index].title,
+          )
+        )
+          throw new Error("stale_row");
+        active(command, expectedUrl, deadline);
+        current.row.scrollBy({
+          left: (command.direction === "right" ? 1 : -1) * Math.max(1, current.viewport - 80),
+          behavior: "instant",
+        });
+        return {
+          outcome: current.row.scrollLeft === current.left ? "scroll_unverified" : "scrolled",
         };
       }
       const entry = snapshot.entries.find((candidate) => candidate.id === command.candidateId);

@@ -65,12 +65,121 @@ async function makeViewportScrollable(page: Page) {
 }
 
 test(
+  "Disney+ horizontal entity row is snapshot and geometry bound and consumed once",
+  { timeout: 15_000 },
+  async () => {
+    await withPage(async (page) => {
+      await page.evaluate(() => {
+        const title = document.querySelector("#title");
+        const row = document.createElement("section");
+        row.id = "entity-row";
+        row.setAttribute("aria-label", "Recommended");
+        row.style.cssText = "display:flex;overflow-x:auto;width:320px;height:140px";
+        title?.parentElement?.insertBefore(row, title);
+        if (title) row.append(title);
+        const spacer = document.createElement("div");
+        spacer.style.cssText = "flex:0 0 1000px;height:80px";
+        row.append(spacer);
+      });
+      const first = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
+      assert.equal(first.site.rows.length, 1);
+      assert.equal(first.site.rows[0].label, "Recommended");
+      assert.deepEqual(first.site.rows[0].directions, ["right"]);
+      await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollSelectedRow",
+          actionId: actionId(),
+          snapshotId: first.snapshotId,
+          rowId: first.site.rows[0].id,
+          direction: "right",
+        }),
+        /stale_snapshot/,
+      );
+      assert.equal(await page.locator("#entity-row").evaluate((node) => node.scrollLeft), 0);
+      const fresh = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
+      assert.deepEqual(
+        await dispatch(page, {
+          type: "scrollSelectedRow",
+          actionId: actionId(),
+          snapshotId: fresh.snapshotId,
+          rowId: fresh.site.rows[0].id,
+          direction: "right",
+        }),
+        { outcome: "scrolled" },
+      );
+      const moved = await page.locator("#entity-row").evaluate((node) => node.scrollLeft);
+      assert.ok(moved > 0);
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollSelectedRow",
+          actionId: actionId(),
+          snapshotId: fresh.snapshotId,
+          rowId: fresh.site.rows[0].id,
+          direction: "right",
+        }),
+        /stale_snapshot/,
+      );
+      assert.equal(await page.locator("#entity-row").evaluate((node) => node.scrollLeft), moved);
+      await page.locator("#entity-row").evaluate((node) => {
+        node.scrollLeft = 0;
+      });
+      const geometryRead = await dispatch(page, { type: "inspect", actionId: actionId() });
+      await page.locator("#entity-row").evaluate((node) => {
+        node.style.width = "300px";
+      });
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollSelectedRow",
+          actionId: actionId(),
+          snapshotId: geometryRead.snapshotId,
+          rowId: geometryRead.site.rows[0].id,
+          direction: "right",
+        }),
+        /stale_row/,
+      );
+      assert.equal(await page.locator("#entity-row").evaluate((node) => node.scrollLeft), 0);
+      const cancelRead = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const cancelledAction = actionId();
+      await dispatch(page, {
+        type: "cancel",
+        actionId: actionId(),
+        targetActionId: cancelledAction,
+      });
+      await assert.rejects(
+        dispatch(page, {
+          type: "scrollSelectedRow",
+          actionId: cancelledAction,
+          snapshotId: cancelRead.snapshotId,
+          rowId: cancelRead.site.rows[0].id,
+          direction: "right",
+        }),
+        /cancelled/,
+      );
+      assert.equal(await page.locator("#entity-row").evaluate((node) => node.scrollLeft), 0);
+    });
+  },
+);
+
+test(
   "Disney+ one observed viewport scroll needs a fresh read and never replays",
   { timeout: 15_000 },
   async () => {
     await withPage(async (page) => {
       await makeViewportScrollable(page);
-      const first = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const first = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       assert.deepEqual(first.site.verticalScrollDirections, ["down"]);
       const down = {
         type: "scrollViewport",
@@ -92,7 +201,10 @@ test(
         /stale_snapshot/,
       );
       assert.equal(await page.evaluate(() => scrollY), afterDown);
-      const next = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const next = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       assert.notEqual(next.snapshotId, first.snapshotId);
       assert.deepEqual(next.site.verticalScrollDirections, ["up", "down"]);
       assert.deepEqual(
@@ -106,10 +218,16 @@ test(
       );
       assert.equal(await page.evaluate(() => scrollY), 0);
       await page.evaluate(() => scrollTo(0, document.scrollingElement?.scrollHeight || 0));
-      const bottom = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const bottom = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       assert.deepEqual(bottom.site.verticalScrollDirections, ["up"]);
       await page.evaluate(() => scrollTo(0, 0));
-      const ready = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const ready = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       assert.equal(ready.candidates[0]?.title, "Observed title");
       assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), []);
     });
@@ -122,8 +240,14 @@ test(
   async () => {
     await withPage(async (page) => {
       await makeViewportScrollable(page);
-      const first = await dispatch(page, { type: "inspect", actionId: actionId() });
-      const replacement = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const first = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
+      const replacement = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       await assert.rejects(
         dispatch(page, {
           type: "scrollViewport",
@@ -144,7 +268,10 @@ test(
         /stale_snapshot/,
       );
 
-      const fresh = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const fresh = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       await page.evaluate(() => {
         const root = document.scrollingElement;
         if (!root) throw new Error("missing root");
@@ -183,7 +310,10 @@ test(
       await page.evaluate(() => {
         const root = document.scrollingElement;
         if (!root) throw new Error("missing root");
-        Object.defineProperty(root, "clientHeight", { configurable: true, value: 0 });
+        Object.defineProperty(root, "clientHeight", {
+          configurable: true,
+          value: 0,
+        });
       });
       assert.deepEqual(
         (await dispatch(page, { type: "inspect", actionId: actionId() })).site
@@ -214,7 +344,10 @@ test(
   { timeout: 20_000 },
   async () => {
     await withPage(async (page) => {
-      const missing = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const missing = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       assert.ok(missing.snapshotId);
       assert.deepEqual(missing.site.verticalScrollDirections, []);
       await assert.rejects(
@@ -227,7 +360,10 @@ test(
         /scroll_unavailable/,
       );
       await makeViewportScrollable(page);
-      let read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      let read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       await page.evaluate(() => history.pushState({}, "", "/commerce/plans"));
       await assert.rejects(
         dispatch(page, {
@@ -276,7 +412,11 @@ test(
 
       read = await dispatch(page, { type: "inspect", actionId: actionId() });
       const cancelled = actionId();
-      await dispatch(page, { type: "cancel", actionId: actionId(), targetActionId: cancelled });
+      await dispatch(page, {
+        type: "cancel",
+        actionId: actionId(),
+        targetActionId: cancelled,
+      });
       await assert.rejects(
         dispatch(page, {
           type: "scrollViewport",
@@ -377,14 +517,24 @@ test(
   { timeout: 15_000 },
   async () => {
     await withPage(async (page) => {
-      const observation = await dispatch(page, { type: "observe", actionId: actionId() });
+      const observation = await dispatch(page, {
+        type: "observe",
+        actionId: actionId(),
+      });
       assert.deepEqual(observation, {
         provider: "disneyplus",
         page: "browse",
         playback: "unavailable",
       });
-      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
-      assert.deepEqual(read.site, { ...observation, verticalScrollDirections: [] });
+      const read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
+      assert.deepEqual(read.site, {
+        ...observation,
+        verticalScrollDirections: [],
+        rows: [],
+      });
       assert.deepEqual(read.playback, { available: false });
       assert.equal(read.candidates.length, 1);
       assert.equal(read.candidates[0].title, "Observed title");
@@ -406,14 +556,19 @@ test(
   { timeout: 15_000 },
   async () => {
     await withPage(async (page) => {
-      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       const open = {
         type: "open",
         actionId: actionId(),
         snapshotId: read.snapshotId,
         candidateId: read.candidates[0].id,
       };
-      assert.deepEqual(await dispatch(page, open), { outcome: "navigation_observed" });
+      assert.deepEqual(await dispatch(page, open), {
+        outcome: "navigation_observed",
+      });
       assert.deepEqual(await page.evaluate(() => globalThis["clicks"]), ["title"]);
       await assert.rejects(dispatch(page, open, next), /duplicate_action/);
       await assert.rejects(
@@ -430,7 +585,10 @@ test(
   { timeout: 15_000 },
   async () => {
     await withPage(async (page) => {
-      let read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      let read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       await page.locator("#title").evaluate((node) => node.setAttribute("aria-label", "Changed"));
       await assert.rejects(
         dispatch(page, {
@@ -559,7 +717,10 @@ test(
         [],
       );
       await page.locator("main").evaluate((node) => node.removeAttribute("inert"));
-      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       assert.equal(read.candidates.length, 1);
       await page.locator("main").evaluate((node) => node.setAttribute("aria-disabled", "true"));
       await assert.rejects(
@@ -584,7 +745,10 @@ test(
       await page.evaluate(() => {
         globalThis["noNavigate"] = true;
       });
-      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       const open = {
         type: "open",
         actionId: actionId(),
@@ -606,7 +770,10 @@ test(
       await page.evaluate(() => {
         globalThis["wrongNavigate"] = true;
       });
-      const read = await dispatch(page, { type: "inspect", actionId: actionId() });
+      const read = await dispatch(page, {
+        type: "inspect",
+        actionId: actionId(),
+      });
       const open = {
         type: "open",
         actionId: actionId(),

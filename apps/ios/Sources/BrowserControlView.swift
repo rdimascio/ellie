@@ -45,7 +45,8 @@ struct BrowserControlView: View {
               Text("No unambiguous YouTube search field was observed in the selected browser document. Search is unavailable on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
-            if site.provider == .netflix && site.page == .browse && site.rows?.isEmpty != false {
+            if (site.provider == .netflix || site.provider == .disneyplus)
+              && site.page == .browse && site.rows?.isEmpty != false {
               Text("No safely identified horizontal rows are available on this page.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
@@ -54,13 +55,14 @@ struct BrowserControlView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .disneyplus {
-              Text("On an observed Disney+ title page, Up and Down move the page when one viewport scroller is available; read again before selecting a visible title. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
+              Text("On an observed Disney+ title page, page and entity-row movement use only directions from the latest read. Read again after one movement. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
           }
-          if site.provider == .netflix && site.page == .browse, let rows = site.rows,
+          if (site.provider == .netflix || site.provider == .disneyplus)
+            && site.page == .browse, let rows = site.rows,
             !rows.isEmpty {
-            Section("Netflix rows") {
+            Section(site.provider == .netflix ? "Netflix rows" : "Disney+ rows") {
               Text("Choose a row, then use Left or Right. Read again after scrolling.")
                 .font(.footnote).foregroundStyle(.secondary)
               ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
@@ -73,7 +75,7 @@ struct BrowserControlView: View {
                     if browser.selectedRowID == row.id { Image(systemName: "checkmark") }
                   }
                 }
-                .accessibilityIdentifier("browser-netflix-row-\(index + 1)")
+                .accessibilityIdentifier("browser-\(site.provider.rawValue)-row-\(index + 1)")
                 .disabled(browser.isBusy || controls.selectedNode?.capabilities.contains("browser.control") != true)
               }
             }
