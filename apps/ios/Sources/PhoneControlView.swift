@@ -43,7 +43,9 @@ struct PhoneControlView: View {
             .accessibilityIdentifier("phone-target-picker")
             .disabled(isBusy)
           }
-          Button("Refresh Macs", systemImage: "arrow.clockwise") { store.refresh() }
+          Button("Refresh Macs", systemImage: "arrow.clockwise") {
+            browser.refreshTargets(using: store)
+          }
             .disabled(isBusy || store.requiresUnknownOutcomeReview)
         }
 
@@ -118,9 +120,11 @@ struct PhoneControlView: View {
       browser.cancel()
     }
     .onChange(of: scenePhase) { _, phase in
-      if phase != .active {
-        store.cancel()
-        browser.cancel()
+      if phase == .active {
+        store.reconnectAfterBackground()
+      } else {
+        store.background()
+        browser.background()
       }
     }
     .onChange(of: credential) { _, _ in
