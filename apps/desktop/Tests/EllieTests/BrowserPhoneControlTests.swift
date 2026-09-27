@@ -315,7 +315,7 @@ final class BrowserPhoneControlTests: XCTestCase {
     let revision = String(repeating: "e", count: 64)
     func read(_ site: String, source: String = "companion", title: String? = nil) -> Data {
       let titleField = title.map { ",\"title\":\"\($0)\"" } ?? ""
-      Data(
+      return Data(
         #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]\#(titleField),"site":\#(site)}}}}"#.utf8)
     }
     guard case .page(let page) = try decodeBrowserPhoneResponse(
