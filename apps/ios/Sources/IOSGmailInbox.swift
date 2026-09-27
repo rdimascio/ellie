@@ -225,8 +225,7 @@ final class IOSGmailInboxStore: ObservableObject {
                 try Task.checkCancellation()
                 guard let self, self.generation == ticket else { return }
                 self.accounts = result.filter { $0.state == "connected" }
-                self.notice = self.accounts.isEmpty
-                    ? "Connect and import Gmail in Ellie Life on your Mac, then refresh here."
+                self.notice = self.accounts.isEmpty ? Self.setupNotice(result)
                     : "Choose a connected Gmail account to read its imported preview."
             } catch is CancellationError { }
             catch { self?.fail(error, ticket: ticket) }
@@ -292,6 +291,25 @@ final class IOSGmailInboxStore: ObservableObject {
     private func finish(ticket: Int) {
         guard generation == ticket else { return }
         busy = false; operation = nil
+    }
+    private static func setupNotice(_ accounts: [IOSGmailAccount]) -> String {
+        let states = Set(accounts.map(\.state))
+        if states == ["connecting"] {
+            return "Gmail authorization is still pending on your Mac. Finish or cancel it in Ellie Life, then refresh here."
+        }
+        if states == ["paused"] {
+            return "Gmail is paused on your Mac. Resume it in Ellie Life, then refresh here."
+        }
+        if states == ["error"] {
+            return "Gmail needs attention on your Mac. Open Ellie Life to reconnect or review its status, then refresh here."
+        }
+        if states == ["revoked"] {
+            return "Gmail access was removed. Reconnect it in Ellie Life on your Mac, then refresh here."
+        }
+        if !states.isEmpty {
+            return "No Gmail account is ready. Review pending, paused, or failed Gmail connections in Ellie Life on your Mac, then refresh here."
+        }
+        return "Connect and import Gmail in Ellie Life on your Mac, then refresh here."
     }
     private func fail(_ error: Error, ticket: Int) {
         guard generation == ticket else { return }
