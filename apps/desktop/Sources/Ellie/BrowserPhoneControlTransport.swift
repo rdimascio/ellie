@@ -79,6 +79,17 @@ func browserReviewedRowRunCopy(
   guard provider == .disneyplus, row.directions?.contains(direction) == true else { return nil }
   return "Run will scroll \(row.label) \(direction.rawValue) on \(nodeLabel)."
 }
+
+func browserReviewedPlaybackRunCopy(
+  intent: BrowserVoiceIntent, page: BrowserPhonePage, nodeLabel: String
+) -> String? {
+  guard page.source == .companion, page.site?.provider == .disneyplus,
+    page.site?.page == .watch, let title = page.title,
+    (intent == .play && page.site?.playback == .paused)
+      || (intent == .pause && page.site?.playback == .playing)
+  else { return nil }
+  return "Run will \(intent.displayLabel.lowercased()) the observed \(title) control on \(nodeLabel). Read again to observe the result."
+}
 struct BrowserPhonePage: Equatable, Sendable {
   let nodeID: String
   let source: BrowserPhoneSource
@@ -362,6 +373,11 @@ func decodeBrowserPhoneResponse(_ data: Data, nodeID: String) throws -> BrowserP
     {
       throw PhoneControlFailure.invalidResponse
     }
+    if site?.provider == .disneyplus && site?.page == .watch
+      && (source != .companion || title == nil)
+    {
+      throw PhoneControlFailure.invalidResponse
+    }
     if site?.verticalScrollDirections != nil && source != .companion {
       throw PhoneControlFailure.invalidResponse
     }
@@ -393,10 +409,11 @@ private func decodeBrowserPhoneSite(_ value: [String: Any]) throws -> BrowserPho
     let playbackValue = value["playback"] as? String,
     let playback = BrowserPhonePlayback(rawValue: playbackValue),
     page == .watch || playback == .unavailable,
+    provider != .disneyplus || page != .watch || playback == .playing || playback == .paused,
     (provider == .youtube && [.home, .results, .watch, .login, .unsupported].contains(page))
       || (provider == .netflix && [.browse, .results, .watch, .login, .unsupported].contains(page))
       || (provider == .youtubeTV && [.browse, .watch, .login, .unsupported].contains(page))
-      || (provider == .disneyplus && [.browse, .login, .unsupported].contains(page))
+      || (provider == .disneyplus && [.browse, .watch, .login, .unsupported].contains(page))
   else { throw PhoneControlFailure.invalidResponse }
   let row: Bool?
   if let rawRow = value["horizontalScrollAvailable"] {

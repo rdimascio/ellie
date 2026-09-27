@@ -747,6 +747,8 @@ final class BrowserPhoneControlStore: ObservableObject {
     if site.provider == .disneyplus {
       switch intent {
       case .openResult, .openSelectedResult: return site.page == .browse
+      case .play: return page.source == .companion && site.page == .watch && site.playback == .paused
+      case .pause: return page.source == .companion && site.page == .watch && site.playback == .playing
       case .scroll(let direction):
         if direction == .left || direction == .right {
           return page.source == .companion && site.page == .browse && site.rows?.isEmpty == false

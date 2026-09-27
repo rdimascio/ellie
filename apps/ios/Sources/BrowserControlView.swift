@@ -35,7 +35,8 @@ struct BrowserControlView: View {
                   .font(.caption).foregroundStyle(.secondary)
               }
               Text(
-                site.provider == .youtubeTV && page.title != nil
+                (site.provider == .youtubeTV && page.title != nil)
+                  || site.provider == .disneyplus
                   ? "The observed title and player control belong only to this read."
                   : "Visible media state does not confirm which video is playing."
               )
@@ -59,7 +60,9 @@ struct BrowserControlView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .disneyplus {
-              Text("On an observed Disney+ title page, page and entity-row movement use only directions from the latest read. Read again after one movement. Search, playback, profiles, and subscription controls are unavailable. Selection does not confirm playback.")
+              Text(site.page == .watch
+                ? "Play or Pause clicks the one observed control for this title once. Read again to observe the result. Search, profiles, and subscription controls remain unavailable."
+                : "On an observed Disney+ title page, page and entity-row movement use only directions from the latest read. Read again after one movement. Search, profiles, subscription controls, and unobserved playback are unavailable. Selection does not confirm playback.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
           }
@@ -204,6 +207,7 @@ struct BrowserControlView: View {
     if site.provider == .disneyplus {
       switch site.page {
       case .browse: return "Observed Disney+ title page"
+      case .watch: return "Observed Disney+ title player"
       case .login: return "Observed Disney+ sign-in page"
       default: return "Observed Disney+ page is unsupported"
       }
