@@ -138,6 +138,35 @@ final class WatchMediaPhoneTests: XCTestCase {
   }
 
   @MainActor
+  func testUnreachablePlaybackPacketIsConsumedBeforeConnectivityReturns() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let browser = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(
+      inventory: WatchTestInventory(node: node), browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: browser,
+          uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let read = WatchMediaRequest.make(.read)
+    let offlineRead = await controller.handle(read, reachable: { false })
+    XCTAssertEqual(offlineRead.state, .blocked)
+    let observed = await controller.handle(read, reachable: { true })
+    guard let page = observed.observation else { return XCTFail("Missing observation") }
+    let play = WatchMediaRequest.make(.play, target: page.target, epoch: page.epoch,
+                                      revision: page.revision)
+
+    let offline = await controller.handle(play, reachable: { false })
+    XCTAssertEqual(offline.state, .blocked)
+    let redelivered = await controller.handle(play, reachable: { true })
+    XCTAssertEqual(redelivered.state, .blocked,
+                   "connectivity recovery must not replay the same Watch mutation packet")
+    let dispatchCount = await browser.playCount
+    XCTAssertEqual(dispatchCount, 0)
+  }
+
+  @MainActor
   func testTargetAndGrantChangeBlockBeforeBrowserDispatch() async {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
                                 capabilities: ["browser.read", "browser.control"])
@@ -302,6 +331,52 @@ final class WatchMediaPhoneTests: XCTestCase {
     }
     let expiredReplay = await controller.handle(first, now: { clock.value })
     XCTAssertEqual(expiredReplay.state, .blocked)
+  }
+
+  @MainActor
+  func testSaturatedReplayCacheConsumesMutationWhileReadsRemainRetryable() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let browser = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(
+      inventory: WatchTestInventory(node: node), browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: browser,
+          uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let clock = WatchTestClock()
+    var latest = await controller.handle(
+      WatchMediaRequest.make(.read, now: clock.value), now: { clock.value })
+    XCTAssertEqual(latest.state, .observed)
+    for _ in 0..<127 {
+      clock.value += 80
+      latest = await controller.handle(
+        WatchMediaRequest.make(.read, now: clock.value), now: { clock.value })
+      XCTAssertEqual(latest.state, .observed)
+    }
+    guard let page = latest.observation else { return XCTFail("Missing observation") }
+    let retryableRead = WatchMediaRequest.make(.read, now: clock.value)
+    let saturatedRead = await controller.handle(retryableRead, now: { clock.value })
+    XCTAssertEqual(saturatedRead.state, .blocked,
+      "the 128 live entries must saturate the bounded replay cache")
+    let play = WatchMediaRequest.make(
+      .play, target: page.target, epoch: page.epoch, revision: page.revision,
+      now: clock.value)
+    let saturatedPlay = await controller.handle(play, now: { clock.value })
+    XCTAssertEqual(saturatedPlay.state, .blocked)
+
+    // Two staggered read entries expire while the blocked mutation packet is still live.
+    clock.value += 9_921
+    XCTAssertLessThan(clock.value, play.expiresAt)
+    let redeliveredPlay = await controller.handle(play, now: { clock.value })
+    XCTAssertEqual(redeliveredPlay.state, .blocked,
+                   "free ledger slots must not rearm a mutation rejected at saturation")
+    let retriedRead = await controller.handle(retryableRead, now: { clock.value })
+    XCTAssertEqual(retriedRead.state, .observed,
+      "a read rejected only by capacity remains retryable during its lifetime")
+    let dispatchCount = await browser.playCount
+    XCTAssertEqual(dispatchCount, 0)
   }
 
   @MainActor
