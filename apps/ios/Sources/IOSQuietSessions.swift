@@ -520,17 +520,35 @@ private struct IOSQuietAllSessions: View {
                 Text(notice).accessibilityIdentifier("quiet-all-notice")
             }
             ForEach(store.all) { session in
-                NavigationLink(session.title) {
+                NavigationLink {
                     IOSQuietSessionDetail(store: store, credential: credential,
                         uiTestVoiceStore: uiTestVoiceStore, id: session.id)
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(session.title)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(ElliePalette.foreground)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(session.pending ? "Reply in progress" :
+                            "Updated \(session.updatedAt.formatted(.relative(presentation: .named)))")
+                            .font(.caption)
+                            .foregroundStyle(ElliePalette.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                    .padding(.vertical, 8)
                 }
-                    .accessibilityIdentifier("quiet-all-session-\(session.id)")
+                .listRowBackground(Color.clear)
+                .listRowSeparatorTint(ElliePalette.border)
+                .accessibilityIdentifier("quiet-all-session-\(session.id)")
             }
             if store.hasMore {
                 Button("Load more") { store.loadMore() }.disabled(store.busy)
                     .accessibilityIdentifier("quiet-load-more")
             }
         }
+        .listStyle(.plain)
+        .accessibilityIdentifier("quiet-all-list")
         .navigationTitle("All sessions")
         .ellieScreen()
         .toolbar { Button("Refresh") { store.loadAll() }.disabled(store.busy) }
