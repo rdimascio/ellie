@@ -18,7 +18,7 @@ const binding: BrowserBinding = {
   availability: "companion",
 };
 const revision = browserBindingRevision(binding);
-const result = (site: Record<string, unknown>, source = "companion") => ({
+const result = (site: Record<string, unknown>, source = "companion", title?: string) => ({
   ok: true,
   message: "Observed.",
   browser: {
@@ -26,11 +26,11 @@ const result = (site: Record<string, unknown>, source = "companion") => ({
     operation: "read",
     status: "completed",
     revision,
-    view: { items: [], site },
+    view: { ...(title ? { title } : {}), items: [], site },
   },
 });
 
-test("Disney+ site wire accepts only browse/login/unsupported with unavailable playback", () => {
+test("Disney+ site wire admits companion-only observed playback and legacy browsing", () => {
   assert.equal(
     browserWebMCPOperationResult(
       result({
@@ -63,12 +63,25 @@ test("Disney+ site wire accepts only browse/login/unsupported with unavailable p
     rows: [{ id: rowId, label: "Recommended", directions: ["right"] }],
   };
   assert.equal(browserWebMCPOperationResult(result(rows)).browser.operation, "read");
+  const watch = {
+    provider: "disneyplus",
+    page: "watch",
+    playback: "paused",
+    currentTimeSeconds: 12.5,
+  };
+  assert.equal(
+    browserWebMCPOperationResult(result(watch, "companion", "Moon Mission")).browser.operation,
+    "read",
+  );
+  for (const source of ["webmcp", "accessibility"])
+    assert.throws(() => browserWebMCPOperationResult(result(watch, source, "Moon Mission")));
+  assert.throws(() => browserWebMCPOperationResult(result(watch)));
   for (const source of ["webmcp", "accessibility"])
     assert.throws(() => browserWebMCPOperationResult(result(rows, source)));
   for (const source of ["webmcp", "accessibility"])
     assert.throws(() => browserWebMCPOperationResult(result(observed, source)));
   for (const invalid of [
-    { provider: "disneyplus", page: "watch", playback: "paused" },
+    { provider: "disneyplus", page: "watch", playback: "unavailable" },
     { provider: "disneyplus", page: "browse", playback: "playing" },
     {
       provider: "disneyplus",
@@ -175,7 +188,7 @@ test("Disney+ one observed horizontal row direction carries the snapshot and nev
   );
 });
 
-test("Disney+ production selector permits one observed title choice, never search/play/replay", async () => {
+test("Disney+ production selector permits one observed title choice, never search or replay", async () => {
   const candidate = randomUUID();
   const commands: string[] = [];
   let page: "browse" | "login" = "browse";
@@ -224,7 +237,6 @@ test("Disney+ production selector permits one observed title choice, never searc
   for (const forbidden of [
     { tool: "browser.search", query: "movie", revision },
     { tool: "browser.scroll", direction: "left", revision },
-    { tool: "browser.playback", action: "play", revision },
   ])
     await assert.rejects(() => selector.execute(forbidden as never, signal), /Disney\+/);
   assert.deepEqual(commands, ["inspect"]);
@@ -255,6 +267,87 @@ test("Disney+ production selector permits one observed title choice, never searc
   );
   assert.deepEqual(commands, ["inspect", "open", "inspect"]);
   assert.equal(wrongAdapter, 0);
+});
+
+test("Disney+ observed player title admits one snapshot-bound playback dispatch", async () => {
+  const commands: Array<Record<string, unknown>> = [];
+  let readCount = 0;
+  const companion = new BrowserCompanionOperations({
+    async request(request) {
+      if (request.type !== "media.execute") throw new Error("wrong request");
+      commands.push(request.command as unknown as Record<string, unknown>);
+      readCount += request.command.type === "inspect" ? 1 : 0;
+      return browserWebMCPResultFor(request.id, "ok", {
+        bindingId: binding.bindingId,
+        documentId: binding.documentId,
+        url: binding.url,
+        value:
+          request.command.type === "inspect"
+            ? {
+                snapshotId: `10000000-0000-4000-8000-00000000000${readCount}`,
+                candidates: [],
+                playback: { available: true, paused: true, currentTime: 12.5, seekable: false },
+                title: "Moon Mission",
+                site: {
+                  provider: "disneyplus",
+                  page: "watch",
+                  playback: "paused",
+                  currentTimeSeconds: 12.5,
+                },
+              }
+            : { outcome: "playback_unverified" },
+      });
+    },
+  });
+  const selector = new BrowserOperationSelector(
+    async () => binding,
+    {
+      execute: async () => {
+        throw new Error("wrong WebMCP adapter");
+      },
+    },
+    {
+      execute: async () => {
+        throw new Error("wrong Accessibility adapter");
+      },
+    } as never,
+    companion,
+  );
+  const signal = new AbortController().signal;
+  const read = browserWebMCPOperationResult(
+    await selector.execute({ tool: "browser.read", view: "summary", revision }, signal),
+  );
+  assert.equal(read.browser.operation, "read");
+  assert.equal(read.browser.view.title, "Moon Mission");
+  const played = browserWebMCPOperationResult(
+    await selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
+  );
+  assert.equal(played.browser.operation, "command");
+  assert.equal(played.browser.status, "unknown");
+  assert.deepEqual(
+    commands.map((command) => command.type),
+    ["inspect", "play"],
+  );
+  assert.equal(commands[1]?.snapshotId, "10000000-0000-4000-8000-000000000001");
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
+    /Read the Disney\+ page/,
+  );
+  assert.equal(commands.length, 2);
+
+  await selector.execute({ tool: "browser.read", view: "summary", revision }, signal);
+  const cancelled = new AbortController();
+  cancelled.abort();
+  await assert.rejects(
+    () =>
+      selector.execute({ tool: "browser.playback", action: "play", revision }, cancelled.signal),
+    /cancelled/,
+  );
+  assert.equal(
+    commands.length,
+    3,
+    "pre-dispatch cancellation consumes the read without a mutation",
+  );
 });
 
 test("Disney+ one vertical scroll consumes its read without fallback or replay", async () => {

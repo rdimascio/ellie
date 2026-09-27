@@ -139,6 +139,7 @@ export class BrowserCompanionOperations {
         throw new Error("Browser companion read failed.");
       const raw = response.value as Record<string, unknown>;
       const topSearch = Object.hasOwn(raw, "searchControl");
+      const topTitle = Object.hasOwn(raw, "title");
       const value = exact(
         raw,
         Object.hasOwn(raw, "rowCandidateId")
@@ -148,6 +149,7 @@ export class BrowserCompanionOperations {
               "playback",
               "site",
               "rowCandidateId",
+              ...(topTitle ? ["title"] : []),
               ...(topSearch ? ["searchControl"] : []),
             ]
           : [
@@ -155,6 +157,7 @@ export class BrowserCompanionOperations {
               "candidates",
               "playback",
               "site",
+              ...(topTitle ? ["title"] : []),
               ...(topSearch ? ["searchControl"] : []),
             ],
       );
@@ -192,6 +195,7 @@ export class BrowserCompanionOperations {
           status: "completed",
           revision,
           view: {
+            ...(topTitle ? { title: value.title } : {}),
             items: [...items].map(([id, label]) => ({ id, label })),
             site: value.site,
           },
@@ -220,6 +224,12 @@ export class BrowserCompanionOperations {
       )
         throw new Error("Browser companion observation is invalid.");
       if (binding.origin !== "https://www.youtube.com" && topSearch)
+        throw new Error("Browser companion observation is invalid.");
+      if (
+        checked.browser.view.site.provider === "disneyplus" &&
+        checked.browser.view.site.page === "watch" &&
+        (!topTitle || !checked.browser.view.title)
+      )
         throw new Error("Browser companion observation is invalid.");
       this.observed = {
         bindingId: binding.bindingId,
@@ -264,15 +274,16 @@ export class BrowserCompanionOperations {
       throw new Error("YouTube observed controls support only search and title selection.");
     if (
       disneyplus &&
-      (observed.site.page !== "browse" ||
-        (action.tool !== "browser.select" &&
-          action.tool !== "browser.scrollRow" &&
-          (action.tool !== "browser.scroll" ||
-            (action.direction !== "up" && action.direction !== "down"))))
+      !(
+        (observed.site.page === "browse" &&
+          (action.tool === "browser.select" ||
+            action.tool === "browser.scrollRow" ||
+            (action.tool === "browser.scroll" &&
+              (action.direction === "up" || action.direction === "down")))) ||
+        (observed.site.page === "watch" && action.tool === "browser.playback")
+      )
     )
-      throw new Error(
-        "Disney+ exposes only observed title links and vertical browsing on this page.",
-      );
+      throw new Error("Disney+ exposes only controls from the latest observed title page.");
     if (
       disneyplus &&
       action.tool === "browser.scroll" &&
@@ -372,8 +383,16 @@ export class BrowserCompanionOperations {
         observed.site.page !== "watch" ||
         observed.site.playback !== (action.action === "play" ? "paused" : "playing")
       )
-        throw new Error("Netflix playback state is unavailable.");
-      command = { type: action.action, actionId: randomUUID() };
+        throw new Error(
+          disneyplus
+            ? "Disney+ observed playback state is unavailable; read the title again."
+            : "Netflix playback state is unavailable.",
+        );
+      command = {
+        type: action.action,
+        actionId: randomUUID(),
+        ...(disneyplus ? { snapshotId: observed.snapshotId } : {}),
+      };
     } else throw new Error("Browser operation is unsupported.");
     // Once admitted, the mutation consumes the observation even if its result is lost.
     this.invalidate();

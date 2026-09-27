@@ -524,10 +524,14 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
               ? ["browse", "results", "watch", "login", "unsupported"]
               : observed.provider === "youtube_tv"
                 ? ["browse", "watch", "login", "unsupported"]
-                : ["browse", "login", "unsupported"]
+                : ["browse", "watch", "login", "unsupported"]
         ).includes(observed.page as string) ||
         !["playing", "paused", "unavailable", "ambiguous"].includes(observed.playback as string) ||
         (observed.page !== "watch" && observed.playback !== "unavailable") ||
+        (observed.provider === "disneyplus" &&
+          observed.page === "watch" &&
+          observed.playback !== "playing" &&
+          observed.playback !== "paused") ||
         (hasRow &&
           (observed.provider !== "netflix" ||
             observed.page !== "browse" ||
@@ -621,6 +625,12 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
       site = observed as BrowserView["site"];
     }
     if (site?.provider === "youtube" && site.searchControl && browser.source !== "companion")
+      throw new Error("Invalid browser operation result.");
+    if (
+      site?.provider === "disneyplus" &&
+      site.page === "watch" &&
+      (browser.source !== "companion" || typeof view.title !== "string")
+    )
       throw new Error("Invalid browser operation result.");
     if (
       browser.source === "companion" &&
