@@ -100,6 +100,73 @@ final class DashboardSyncTests: XCTestCase {
     XCTAssertEqual(transport.calls, ["read"])
   }
 
+  func testMatchedUnknownSaveCannotBeRebasedOrSentAgain() async {
+    let transport = SyncTransport()
+    let persistence = SyncPersistence()
+    transport.grants = [grant(.shared, .write)]
+    transport.document = HouseholdDashboardDocument(
+      profile: .shared, revision: 3, value: DashboardModel.initialState)
+    let store = DashboardSyncStore(
+      credential: credential(), transport: transport, persistence: persistence)
+    store.checkAccess()
+    await settle(store)
+    store.prepare(DashboardModel.initialState)
+    transport.saveFailure = .unknownOutcome
+    store.savePrepared()
+    await settle(store)
+    XCTAssertEqual(store.phase, .unknown)
+    XCTAssertEqual(transport.calls.filter { $0 == "save" }.count, 1)
+
+    store.checkSaveResult()
+    await settle(store)
+    XCTAssertEqual(store.phase, .matchedCurrentCopy(3))
+    XCTAssertFalse(store.canUseCurrentRevisionForDraft)
+    let pendingBeforeRebase = persistence.saved
+
+    store.useCurrentRevisionForDraft()
+    store.savePrepared()
+
+    XCTAssertEqual(store.phase, .matchedCurrentCopy(3))
+    XCTAssertEqual(persistence.saved, pendingBeforeRebase)
+    XCTAssertEqual(transport.calls.filter { $0 == "save" }.count, 1)
+  }
+
+  func testObservedConflictCanBeRebasedForOneExplicitNewSave() async {
+    let transport = SyncTransport()
+    let persistence = SyncPersistence()
+    persistence.saved = PendingDashboardDraft(
+      origin: credential().origin, certificateSha256: credential().certificateSha256,
+      clientId: "client-a", profile: .shared, baseRevision: 2,
+      value: DashboardModel.initialState)
+    transport.grants = [grant(.shared, .write)]
+    transport.document = HouseholdDashboardDocument(
+      profile: .shared, revision: 4, value: DashboardState(dashboards: []))
+    let store = DashboardSyncStore(
+      credential: credential(), transport: transport, persistence: persistence)
+    store.checkAccess()
+    await settle(store)
+    store.checkSaveResult()
+    await settle(store)
+    XCTAssertEqual(store.phase, .conflict(4))
+    XCTAssertTrue(store.canUseCurrentRevisionForDraft)
+
+    store.useCurrentRevisionForDraft()
+
+    XCTAssertEqual(store.phase, .prepared)
+    XCTAssertEqual(store.draft?.baseRevision, 4)
+    XCTAssertEqual(persistence.saved?.baseRevision, 4)
+    transport.document = HouseholdDashboardDocument(
+      profile: .shared, revision: 5, value: DashboardModel.initialState)
+    transport.saveResult = .saved(transport.document)
+    store.savePrepared()
+    await settle(store)
+
+    XCTAssertEqual(store.phase, .ready)
+    XCTAssertEqual(store.remote?.revision, 5)
+    XCTAssertNil(store.draft)
+    XCTAssertEqual(transport.calls.filter { $0 == "save" }.count, 1)
+  }
+
   func testForbiddenClearsSyncDataAndFailedCleanupBlocks() async {
     let transport = SyncTransport()
     let persistence = SyncPersistence()

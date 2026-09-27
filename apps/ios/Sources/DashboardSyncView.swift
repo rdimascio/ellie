@@ -64,9 +64,8 @@ struct DashboardSyncView: View {
           LabeledContent("Dashboards", value: "\(draft.value.dashboards.count)")
           Button("Save Prepared Copy") { sync.savePrepared() }.disabled(!sync.canSave)
           Button("Check Save Result") { sync.checkSaveResult() }.disabled(isBusy)
-          if sync.remote?.profile == draft.profile {
+          if sync.canUseCurrentRevisionForDraft {
             Button("Use Current Revision for Prepared Copy") { sync.useCurrentRevisionForDraft() }
-              .disabled(isBusy)
           }
           Button("Discard Prepared Copy", role: .destructive) { sync.discardDraft() }
             .disabled(isBusy)
