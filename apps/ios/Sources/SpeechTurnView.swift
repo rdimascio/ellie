@@ -174,6 +174,14 @@ struct SpeechTurnView: View {
                   .accessibilityIdentifier("speech-browser-selected-result-review")
               }
             }
+            if let page = browserStore.page,
+              let reviewCopy = browserReviewedPlaybackRunCopy(
+                intent: intent, page: page,
+                nodeLabel: controlStore.selectedNode?.label ?? "the selected Mac") {
+              Text(reviewCopy)
+                .font(.footnote)
+                .accessibilityIdentifier("speech-disneyplus-playback-review")
+            }
             Button("Run \(intent.displayLabel) on selected Mac") {
               guard let displayedReview, speech.matchesActiveReview(displayedReview) else { return }
               if browserStore.perform(intent, on: controlStore.selectedNode) {
