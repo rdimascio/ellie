@@ -181,6 +181,29 @@ final class PhoneControlStoreTests: XCTestCase {
   }
 
   @MainActor
+  func testUnavailableRefreshClearsStaleReadyStateAndPreservesTargetChoice() async {
+    let transport = PhoneControlFakeTransport(nodes: [node("mac-a")])
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = "mac-a"
+    XCTAssertTrue(store.canSend)
+
+    await transport.setNodesFailure(.unavailable)
+    store.refresh()
+    XCTAssertTrue(store.nodes.isEmpty)
+    XCTAssertEqual(store.selectedNodeID, "mac-a")
+    XCTAssertFalse(store.canSend)
+    await eventually { if case .failed = store.phase { true } else { false } }
+    XCTAssertTrue(store.nodes.isEmpty)
+    XCTAssertEqual(store.selectedNodeID, "mac-a")
+    XCTAssertFalse(store.canSend)
+    store.send()
+    let commandCalls = await transport.commandCalls
+    XCTAssertTrue(commandCalls.isEmpty, "a failed reconnect cannot dispatch from stale readiness")
+  }
+
+  @MainActor
   func testRevocationClearsInventoryAndBlocksCommands() async {
     let transport = PhoneControlFakeTransport(nodes: [node("mac-a")])
     let store = PhoneControlStore(credential: credential(), transport: transport)
@@ -209,6 +232,59 @@ final class PhoneControlStoreTests: XCTestCase {
     await eventually { store.phase == .idle }
     XCTAssertTrue(store.nodes.isEmpty)
     XCTAssertEqual(store.phase, .idle)
+  }
+
+  @MainActor
+  func testForegroundReconnectRejectsLateInventoryAndPreservesSelectedTarget() async {
+    let initial = node("mac-a")
+    let fresh = PhoneControlNode(
+      id: "mac-a", label: "mac-a", online: false, capabilities: ["app.open"])
+    let transport = PhoneControlReconnectTransport(
+      initial: [initial], stale: [node("stale-mac")], fresh: [fresh])
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = initial.id
+
+    store.refresh()
+    await eventually { await transport.nodeCalls == 2 }
+    store.background()
+    XCTAssertTrue(store.nodes.isEmpty, "backgrounding must clear stale online readiness")
+    XCTAssertEqual(store.selectedNodeID, initial.id, "the target choice survives reconnect")
+    XCTAssertFalse(store.canSend)
+    store.reconnectAfterBackground()
+    await transport.finishStaleInventory()
+
+    await eventually { await transport.nodeCalls == 3 && store.phase == .ready }
+    XCTAssertEqual(store.nodes, [fresh], "the cancelled inventory cannot publish after reconnect")
+    XCTAssertEqual(store.selectedNodeID, initial.id)
+    XCTAssertFalse(store.canSend, "the fresh offline result controls availability")
+    let commandCalls = await transport.commandCalls
+    XCTAssertEqual(commandCalls, 0, "reconnect never replays a command")
+  }
+
+  @MainActor
+  func testForegroundNeverReconnectsOrReplaysWhileBackgroundedCommandIsUnknown() async {
+    let transport = PhoneControlFakeTransport(nodes: [node("mac-a")], suspendCommand: true)
+    let store = PhoneControlStore(credential: credential(), transport: transport)
+    store.refresh()
+    await eventually { store.phase == .ready }
+    store.selectedNodeID = "mac-a"
+    store.send()
+    await eventually { await transport.commandCalls.count == 1 }
+
+    store.background()
+    store.reconnectAfterBackground()
+    await transport.finishCommand(.completed)
+
+    await eventually { store.phase == .outcome(.unknown, nodeID: "mac-a", app: .safari) }
+    XCTAssertTrue(store.nodes.isEmpty)
+    XCTAssertEqual(store.selectedNodeID, "mac-a")
+    XCTAssertTrue(store.requiresUnknownOutcomeReview)
+    let nodeCalls = await transport.nodeCalls
+    let commandCalls = await transport.commandCalls.count
+    XCTAssertEqual(nodeCalls, 1, "unknown review blocks the foreground inventory request")
+    XCTAssertEqual(commandCalls, 1, "foregrounding never replays the cancelled command")
   }
 
   @MainActor
@@ -343,6 +419,44 @@ final class PhoneControlStoreTests: XCTestCase {
       try? await Task.sleep(for: .milliseconds(10))
     }
     XCTFail("Timed out")
+  }
+}
+
+private actor PhoneControlReconnectTransport: PhoneControlTransporting {
+  private let initial: [PhoneControlNode]
+  private let stale: [PhoneControlNode]
+  private let fresh: [PhoneControlNode]
+  private var staleContinuation: CheckedContinuation<Void, Never>?
+  private(set) var nodeCalls = 0
+  private(set) var commandCalls = 0
+
+  init(initial: [PhoneControlNode], stale: [PhoneControlNode], fresh: [PhoneControlNode]) {
+    self.initial = initial
+    self.stale = stale
+    self.fresh = fresh
+  }
+
+  func nodes(for credential: NativeEnrollmentCredential) async throws -> [PhoneControlNode] {
+    nodeCalls += 1
+    switch nodeCalls {
+    case 1: return initial
+    case 2:
+      await withCheckedContinuation { staleContinuation = $0 }
+      return stale
+    default: return fresh
+    }
+  }
+
+  func open(
+    _ app: PhoneControlApp, on nodeID: String, credential: NativeEnrollmentCredential
+  ) async throws -> PhoneCommandOutcome {
+    commandCalls += 1
+    return .completed
+  }
+
+  func finishStaleInventory() {
+    staleContinuation?.resume()
+    staleContinuation = nil
   }
 }
 

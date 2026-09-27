@@ -548,6 +548,33 @@ final class BrowserPhoneControlTests: XCTestCase {
   }
 
   @MainActor
+  func testBackgroundClearsObservedBrowserPageWithoutDispatchOrAutomaticRead() async {
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let transport = BrowserPhoneFakeTransport(
+      source: .companion,
+      site: BrowserPhoneSite(
+        provider: .netflix, page: .watch, playback: .paused, currentTimeSeconds: 10))
+    let store = BrowserPhoneControlStore(
+      credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.canPerform(.play, on: node))
+
+    store.background()
+
+    XCTAssertNil(store.page)
+    XCTAssertFalse(store.canPerform(.play, on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(
+      actions,
+      [.refresh, .read(revision: String(repeating: "a", count: 64))],
+      "backgrounding clears observation without reading or replaying an action")
+  }
+
+  @MainActor
   func testObservedYouTubeStateBlocksUnavailableControlsBeforeDispatch() async {
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,

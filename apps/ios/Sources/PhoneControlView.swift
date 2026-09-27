@@ -118,9 +118,11 @@ struct PhoneControlView: View {
       browser.cancel()
     }
     .onChange(of: scenePhase) { _, phase in
-      if phase != .active {
-        store.cancel()
-        browser.cancel()
+      if phase == .active {
+        store.reconnectAfterBackground()
+      } else {
+        store.background()
+        browser.background()
       }
     }
     .onChange(of: credential) { _, _ in

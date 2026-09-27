@@ -85,6 +85,8 @@ final class PhoneControlStore: ObservableObject {
   private var task: Task<Void, Never>?
   private var activeCommand: (nodeID: String, app: PhoneControlApp)?
   private var generation = 0
+  private var foregroundReconnectRequested = false
+  private var appIsActive = true
 
   init(
     credential: NativeEnrollmentCredential,
@@ -110,6 +112,7 @@ final class PhoneControlStore: ObservableObject {
 
   func refresh() {
     guard !credentialChanged, task == nil, !requiresUnknownOutcomeReview else { return }
+    nodes = []
     phase = .loading
     launchInventory()
   }
@@ -137,6 +140,24 @@ final class PhoneControlStore: ObservableObject {
     phase = .cancelling
   }
 
+  func background() {
+    appIsActive = false
+    foregroundReconnectRequested = false
+    nodes = []
+    if task != nil {
+      cancel()
+    } else if !credentialChanged && !requiresUnknownOutcomeReview && phase != .revoked {
+      phase = .idle
+    }
+  }
+
+  func reconnectAfterBackground() {
+    appIsActive = true
+    guard !credentialChanged, !requiresUnknownOutcomeReview, phase != .revoked else { return }
+    foregroundReconnectRequested = true
+    startForegroundReconnectIfPossible()
+  }
+
   func acknowledgeUnknownOutcome() {
     guard !credentialChanged, requiresUnknownOutcomeReview else { return }
     phase = .ready
@@ -157,6 +178,7 @@ final class PhoneControlStore: ObservableObject {
       defer {
         task = nil
         if expected != generation, phase == .cancelling { phase = .idle }
+        startForegroundReconnectIfPossible()
       }
       do {
         try Task.checkCancellation()
@@ -197,6 +219,7 @@ final class PhoneControlStore: ObservableObject {
             } ?? .idle
         }
         activeCommand = nil
+        startForegroundReconnectIfPossible()
       }
       do {
         try Task.checkCancellation()
@@ -221,5 +244,13 @@ final class PhoneControlStore: ObservableObject {
         }
       }
     }
+  }
+
+  private func startForegroundReconnectIfPossible() {
+    guard foregroundReconnectRequested, appIsActive, task == nil else { return }
+    foregroundReconnectRequested = false
+    guard !credentialChanged, !requiresUnknownOutcomeReview, phase != .revoked else { return }
+    phase = .loading
+    launchInventory()
   }
 }
