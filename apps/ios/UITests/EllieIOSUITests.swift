@@ -111,6 +111,52 @@ final class EllieIOSUITests: XCTestCase {
         XCTAssertFalse(app.buttons["quiet-session-photo_session"].exists)
     }
 
+    func testQuietAllSessionsKeepsContextAndNavigationAtNarrowAccessibilitySizes() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        defer { app.terminate() }
+        for accessibility in [false, true] {
+            app.launchArguments = ["--ellie-ui-quiet-session-fixture",
+                "--ellie-ui-quiet-list-appearance"]
+            if accessibility { app.launchArguments.append("--ellie-ui-quiet-list-accessibility") }
+            app.launch()
+
+            let seeAll = app.buttons["quiet-see-all"]
+            XCTAssertTrue(seeAll.waitForExistence(timeout: 5))
+            for _ in 0..<8 where !seeAll.isHittable { app.swipeUp() }
+            XCTAssertTrue(seeAll.isHittable)
+            seeAll.tap()
+            let list = app.descendants(matching: .any).matching(
+                identifier: "quiet-all-list").firstMatch
+            XCTAssertTrue(list.waitForExistence(timeout: 5))
+            XCTAssertEqual(list.frame.width, 320, accuracy: 1)
+            XCTAssertEqual(app.textFields.count, 0)
+            XCTAssertEqual(app.textViews.count, 0)
+
+            for id in ["trip_session", "photo_session", "gift_session"] {
+                let row = app.buttons["quiet-all-session-\(id)"]
+                for _ in 0..<8 where !row.isHittable { list.swipeUp() }
+                XCTAssertTrue(row.isHittable, id)
+                XCTAssertGreaterThanOrEqual(row.frame.height, 44)
+                XCTAssertGreaterThanOrEqual(row.frame.minX, list.frame.minX)
+                XCTAssertLessThanOrEqual(row.frame.maxX, list.frame.maxX)
+                XCTAssertTrue(row.label.contains(id == "photo_session" ? "Reply in progress" : "Updated"))
+                if id == "trip_session" {
+                    XCTAssertTrue(row.label.contains(
+                        "Plan a quiet family trip along the coast for the long weekend"))
+                }
+                let attachment = XCTAttachment(screenshot: app.screenshot())
+                attachment.name = "quiet-all-320-\(accessibility ? "accessibility5" : "regular")-\(id)"
+                attachment.lifetime = .keepAlways
+                add(attachment)
+            }
+            app.buttons["quiet-all-session-gift_session"].tap()
+            XCTAssertTrue(app.descendants(matching: .any).matching(
+                identifier: "quiet-turn-turn_gift_session").firstMatch.waitForExistence(timeout: 5))
+            app.terminate()
+        }
+    }
+
     func testGmailRequiresExplicitBodyReadAndCancelsLateOrRevokedResults() {
         let app = XCUIApplication()
         app.launchArguments = ["--ellie-ui-gmail-read-fixture"]
