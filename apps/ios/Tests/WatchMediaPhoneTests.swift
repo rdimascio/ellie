@@ -138,6 +138,35 @@ final class WatchMediaPhoneTests: XCTestCase {
   }
 
   @MainActor
+  func testUnreachablePlaybackPacketIsConsumedBeforeConnectivityReturns() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+                                capabilities: ["browser.read", "browser.control"])
+    let browser = WatchTestBrowserTransport()
+    let controller = WatchMediaPhoneController(
+      inventory: WatchTestInventory(node: node), browserTransport: browser,
+      makeBrowser: { credential in
+        BrowserPhoneControlStore(credential: credential, transport: browser,
+          uncertainty: WatchTestUncertainty())
+      })
+    XCTAssertTrue(controller.enable(credential: credential(), node: node))
+    let read = WatchMediaRequest.make(.read)
+    let offlineRead = await controller.handle(read, reachable: { false })
+    XCTAssertEqual(offlineRead.state, .blocked)
+    let observed = await controller.handle(read, reachable: { true })
+    guard let page = observed.observation else { return XCTFail("Missing observation") }
+    let play = WatchMediaRequest.make(.play, target: page.target, epoch: page.epoch,
+                                      revision: page.revision)
+
+    let offline = await controller.handle(play, reachable: { false })
+    XCTAssertEqual(offline.state, .blocked)
+    let redelivered = await controller.handle(play, reachable: { true })
+    XCTAssertEqual(redelivered.state, .blocked,
+                   "connectivity recovery must not replay the same Watch mutation packet")
+    let dispatchCount = await browser.playCount
+    XCTAssertEqual(dispatchCount, 0)
+  }
+
+  @MainActor
   func testTargetAndGrantChangeBlockBeforeBrowserDispatch() async {
     let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
                                 capabilities: ["browser.read", "browser.control"])

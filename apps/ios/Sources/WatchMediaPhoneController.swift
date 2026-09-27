@@ -72,12 +72,17 @@ final class WatchMediaPhoneController {
     // Expired packets cannot run, so their IDs need no longer occupy the bounded replay cache.
     // Never evict a still-live accepted ID merely to make room for another request.
     seenRequests = seenRequests.filter { $0.value > receivedAt }
-    guard request.expiresAt > receivedAt, reachable(), !requestInFlight,
-      seenRequests.count < 128, seenRequests[request.id] == nil,
+    guard request.expiresAt > receivedAt,
+      seenRequests.count < 128, seenRequests[request.id] == nil
+    else { return reply(.blocked) }
+    // A live playback packet is one-shot even when a transient phone/session condition blocks it.
+    // Otherwise transport redelivery after reachability returns could reuse the observed revision.
+    if request.operation != .read { seenRequests[request.id] = request.expiresAt }
+    guard reachable(), !requestInFlight,
       let credential, let targetID, let epoch, let browser,
       credential.client.expiresAt > now()
     else { return reply(.blocked) }
-    seenRequests[request.id] = request.expiresAt
+    if request.operation == .read { seenRequests[request.id] = request.expiresAt }
     let currentActivation = activation
     requestInFlight = true
     defer { requestInFlight = false }
