@@ -11,6 +11,7 @@ final class WatchMediaPhoneController {
   private var epoch: String?
   private var browser: BrowserPhoneControlStore?
   private var seenRequests = [String: Int64]()
+  private var mutationReplayBarrierUntil: Int64 = 0
   private var requestInFlight = false
   private var activation = 0
 
@@ -55,6 +56,7 @@ final class WatchMediaPhoneController {
     epoch = nil
     browser = nil
     seenRequests.removeAll()
+    mutationReplayBarrierUntil = 0
   }
 
   func retainOnly(_ credential: NativeEnrollmentCredential?) {
@@ -72,12 +74,19 @@ final class WatchMediaPhoneController {
     // Expired packets cannot run, so their IDs need no longer occupy the bounded replay cache.
     // Never evict a still-live accepted ID merely to make room for another request.
     seenRequests = seenRequests.filter { $0.value > receivedAt }
-    guard request.expiresAt > receivedAt,
-      seenRequests.count < 128, seenRequests[request.id] == nil
-    else { return reply(.blocked) }
+    if mutationReplayBarrierUntil <= receivedAt { mutationReplayBarrierUntil = 0 }
+    guard request.expiresAt > receivedAt, seenRequests[request.id] == nil else {
+      return reply(.blocked)
+    }
     // A live playback packet is one-shot even when a transient phone/session condition blocks it.
     // Otherwise transport redelivery after reachability returns could reuse the observed revision.
-    if request.operation != .read { seenRequests[request.id] = request.expiresAt }
+    if request.operation != .read {
+      if mutationReplayBarrierUntil > receivedAt || seenRequests.count >= 128 {
+        mutationReplayBarrierUntil = max(mutationReplayBarrierUntil, request.expiresAt)
+        return reply(.blocked)
+      }
+      seenRequests[request.id] = request.expiresAt
+    } else if seenRequests.count >= 128 { return reply(.blocked) }
     guard reachable(), !requestInFlight,
       let credential, let targetID, let epoch, let browser,
       credential.client.expiresAt > now()
