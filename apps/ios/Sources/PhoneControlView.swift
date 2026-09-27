@@ -43,7 +43,9 @@ struct PhoneControlView: View {
             .accessibilityIdentifier("phone-target-picker")
             .disabled(isBusy)
           }
-          Button("Refresh Macs", systemImage: "arrow.clockwise") { store.refresh() }
+          Button("Refresh Macs", systemImage: "arrow.clockwise") {
+            browser.refreshTargets(using: store)
+          }
             .disabled(isBusy || store.requiresUnknownOutcomeReview)
         }
 

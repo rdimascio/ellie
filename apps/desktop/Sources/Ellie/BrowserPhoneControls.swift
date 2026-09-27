@@ -621,6 +621,11 @@ final class BrowserPhoneControlStore: ObservableObject {
     if task != nil { invalidateActiveOperation() }
   }
 
+  func refreshTargets(using controls: PhoneControlStore) {
+    background()
+    controls.refresh()
+  }
+
   func credentialDidChange() {
     guard !credentialChanged else { return }
     credentialChanged = true

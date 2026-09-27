@@ -575,6 +575,40 @@ final class BrowserPhoneControlTests: XCTestCase {
   }
 
   @MainActor
+  func testManualTargetRefreshClearsBrowserReadinessBeforeOneInventoryWithoutReplay() async {
+    let node = PhoneControlNode(
+      id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let browserTransport = BrowserPhoneFakeTransport(
+      source: .companion,
+      site: BrowserPhoneSite(
+        provider: .netflix, page: .watch, playback: .paused, currentTimeSeconds: 10))
+    let browser = BrowserPhoneControlStore(
+      credential: credential(), transport: browserTransport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(browser.refresh(on: node))
+    await eventually { browser.phase == .ready }
+    XCTAssertTrue(browser.canPerform(.play, on: node))
+
+    let phoneTransport = BrowserPhoneTargetRefreshTransport(node: node)
+    let controls = PhoneControlStore(credential: credential(), transport: phoneTransport)
+    browser.refreshTargets(using: controls)
+
+    XCTAssertNil(browser.page, "target refresh removes the old browser observation immediately")
+    XCTAssertFalse(browser.canPerform(.play, on: node))
+    await eventually { controls.phase == .ready }
+    let nodeCalls = await phoneTransport.nodeCalls
+    let commandCalls = await phoneTransport.commandCalls
+    XCTAssertEqual(nodeCalls, 1)
+    XCTAssertEqual(commandCalls, 0)
+    let actions = await browserTransport.actions
+    XCTAssertEqual(
+      actions,
+      [.refresh, .read(revision: String(repeating: "a", count: 64))],
+      "target refresh neither rereads nor replays a browser action")
+  }
+
+  @MainActor
   func testObservedYouTubeStateBlocksUnavailableControlsBeforeDispatch() async {
     let node = PhoneControlNode(
       id: "mac", label: "Studio", online: true,
@@ -1588,6 +1622,26 @@ final class BrowserPhoneControlTests: XCTestCase {
       try? await Task.sleep(for: .milliseconds(10))
     }
     XCTFail("Timed out")
+  }
+}
+
+private actor BrowserPhoneTargetRefreshTransport: PhoneControlTransporting {
+  private let node: PhoneControlNode
+  private(set) var nodeCalls = 0
+  private(set) var commandCalls = 0
+
+  init(node: PhoneControlNode) { self.node = node }
+
+  func nodes(for credential: NativeEnrollmentCredential) async throws -> [PhoneControlNode] {
+    nodeCalls += 1
+    return [node]
+  }
+
+  func open(
+    _ app: PhoneControlApp, on nodeID: String, credential: NativeEnrollmentCredential
+  ) async throws -> PhoneCommandOutcome {
+    commandCalls += 1
+    return .completed
   }
 }
 

@@ -255,7 +255,15 @@ final class PhoneControlStoreTests: XCTestCase {
     store.reconnectAfterBackground()
     await transport.finishStaleInventory()
 
-    await eventually { await transport.nodeCalls == 3 && store.phase == .ready }
+    await eventually { await transport.nodeCalls == 3 }
+    store.reconnectAfterBackground()
+    var nodeCalls = await transport.nodeCalls
+    XCTAssertEqual(nodeCalls, 3, "an active reconnect is not queued again")
+    await transport.finishFreshInventory()
+    await eventually { store.phase == .ready }
+    try? await Task.sleep(for: .milliseconds(50))
+    nodeCalls = await transport.nodeCalls
+    XCTAssertEqual(nodeCalls, 3, "settling reconnect starts no second inventory")
     XCTAssertEqual(store.nodes, [fresh], "the cancelled inventory cannot publish after reconnect")
     XCTAssertEqual(store.selectedNodeID, initial.id)
     XCTAssertFalse(store.canSend, "the fresh offline result controls availability")
@@ -427,6 +435,7 @@ private actor PhoneControlReconnectTransport: PhoneControlTransporting {
   private let stale: [PhoneControlNode]
   private let fresh: [PhoneControlNode]
   private var staleContinuation: CheckedContinuation<Void, Never>?
+  private var freshContinuation: CheckedContinuation<Void, Never>?
   private(set) var nodeCalls = 0
   private(set) var commandCalls = 0
 
@@ -443,6 +452,9 @@ private actor PhoneControlReconnectTransport: PhoneControlTransporting {
     case 2:
       await withCheckedContinuation { staleContinuation = $0 }
       return stale
+    case 3:
+      await withCheckedContinuation { freshContinuation = $0 }
+      return fresh
     default: return fresh
     }
   }
@@ -457,6 +469,11 @@ private actor PhoneControlReconnectTransport: PhoneControlTransporting {
   func finishStaleInventory() {
     staleContinuation?.resume()
     staleContinuation = nil
+  }
+
+  func finishFreshInventory() {
+    freshContinuation?.resume()
+    freshContinuation = nil
   }
 }
 

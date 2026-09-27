@@ -154,6 +154,7 @@ final class PhoneControlStore: ObservableObject {
   func reconnectAfterBackground() {
     appIsActive = true
     guard !credentialChanged, !requiresUnknownOutcomeReview, phase != .revoked else { return }
+    guard task == nil || phase == .cancelling else { return }
     foregroundReconnectRequested = true
     startForegroundReconnectIfPossible()
   }
