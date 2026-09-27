@@ -6,6 +6,7 @@ private actor GmailFixtureClient: IOSGmailClient {
     var calls: [String] = []
     var holdNextDetail = false
     var revokeAccounts = false
+    var accountListing: [IOSGmailAccount]?
     private var held: CheckedContinuation<IOSGmailDetail, Error>?
     let account = IOSGmailAccount(id: "gmail_1", label: "Fixture inbox", state: "connected")
     let message = IOSGmailMessage(id: "message_1", subject: "Fixture subject",
@@ -14,7 +15,7 @@ private actor GmailFixtureClient: IOSGmailClient {
     func accounts(_ credential: NativeEnrollmentCredential) async throws -> [IOSGmailAccount] {
         calls.append("accounts")
         if revokeAccounts { throw IOSGmailFailure.revoked }
-        return [account]
+        return accountListing ?? [account]
     }
     func preview(_ credential: NativeEnrollmentCredential, accountID: String) async throws -> [IOSGmailMessage] {
         calls.append("preview:\(accountID)")
@@ -35,6 +36,7 @@ private actor GmailFixtureClient: IOSGmailClient {
     }
     func setHold() { holdNextDetail = true }
     func setRevoke() { revokeAccounts = true }
+    func setAccounts(_ accounts: [IOSGmailAccount]) { accountListing = accounts }
     func awaitingDetail() -> Bool { held != nil }
     func release() {
         held?.resume(returning: result())
@@ -165,6 +167,34 @@ final class IOSGmailInboxTests: XCTestCase {
         XCTAssertEqual(noBody.status, "unavailable")
         unavailable["messageId"] = "../message_1"
         XCTAssertThrowsError(try IOSGmailWire.detail(json(unavailable), expectedID: "../message_1"))
+    }
+
+    @MainActor
+    func testNonReadyAccountStatesGiveMacRecoveryWithoutBecomingSelectable() async {
+        let client = GmailFixtureClient()
+        let store = IOSGmailInboxStore(client: client)
+        store.bind(credential())
+        let cases = [
+            ("connecting", "authorization is still pending", "Finish or cancel"),
+            ("paused", "is paused", "Resume it"),
+            ("error", "needs attention", "reconnect or review"),
+            ("revoked", "access was removed", "Reconnect it"),
+        ]
+        for (state, status, recovery) in cases {
+            await client.setAccounts([IOSGmailAccount(id: "gmail_1",
+                label: "Private account label", state: state)])
+            store.refresh()
+            await eventually { !store.busy }
+            XCTAssertTrue(store.accounts.isEmpty, "A \(state) account must not become selectable")
+            XCTAssertTrue(store.notice?.contains(status) == true)
+            XCTAssertTrue(store.notice?.contains(recovery) == true)
+            XCTAssertFalse(store.notice?.contains("Private account label") == true,
+                "Setup guidance must not repeat provider account labels")
+            store.selectAccount("gmail_1")
+        }
+        let requests = await client.requests()
+        XCTAssertEqual(requests, ["accounts", "accounts", "accounts", "accounts"],
+            "Status recovery must not read previews or message bodies")
     }
 
     @MainActor
