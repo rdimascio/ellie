@@ -309,6 +309,12 @@ final class DashboardSyncStore: ObservableObject {
     guard task == nil, phase == .prepared, let draft else { return false }
     return grants.contains { $0.clientId == credential.client.id && $0.profile == draft.profile && $0.kind == "dashboards" && $0.access == .write }
   }
+  var canUseCurrentRevisionForDraft: Bool {
+    guard task == nil, let draft, let remote, draft.profile == remote.profile,
+      case .conflict(let conflictRevision) = phase
+    else { return false }
+    return conflictRevision == remote.revision
+  }
 
   func checkAccess() {
     guard !hasOrphanedPending else { return }
@@ -401,7 +407,7 @@ final class DashboardSyncStore: ObservableObject {
     }
   }
   func useCurrentRevisionForDraft() {
-    guard task == nil, let old = draft, let remote, old.profile == remote.profile else { return }
+    guard canUseCurrentRevisionForDraft, let old = draft, let remote else { return }
     do {
       let revised = PendingDashboardDraft(
         origin: old.origin, certificateSha256: old.certificateSha256,
