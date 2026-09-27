@@ -64,6 +64,187 @@ async function makeViewportScrollable(page: Page) {
   });
 }
 
+async function installObservedPlayer(page: Page, paused = true) {
+  await page.evaluate((initiallyPaused) => {
+    document.querySelector("#plan")?.setAttribute("style", "display:none");
+    const section = document.createElement("section");
+    section.id = "observed-player";
+    section.setAttribute("role", "region");
+    section.setAttribute("aria-labelledby", "feature-title");
+    section.innerHTML = `<h1 id="feature-title">Moon Mission</h1><video id="feature-video" style="display:block;width:360px;height:200px"></video><button id="player-control" aria-controls="feature-video"></button>`;
+    document.querySelector("main")?.prepend(section);
+    const video = section.querySelector("video");
+    const control = section.querySelector("button");
+    globalThis["playerPaused"] = initiallyPaused;
+    globalThis["playerClicks"] = 0;
+    Object.defineProperties(video, {
+      currentSrc: { configurable: true, get: () => "blob:https://www.disneyplus.com/feature" },
+      currentTime: { configurable: true, get: () => 12.5 },
+      duration: { configurable: true, get: () => 3600 },
+      readyState: { configurable: true, get: () => 4 },
+      paused: { configurable: true, get: () => globalThis["playerPaused"] },
+      ended: { configurable: true, get: () => false },
+      error: { configurable: true, get: () => null },
+    });
+    const label = () =>
+      control.setAttribute("aria-label", globalThis["playerPaused"] ? "Play" : "Pause");
+    label();
+    control.addEventListener("click", () => {
+      globalThis["playerClicks"] += 1;
+      globalThis["playerPaused"] = !globalThis["playerPaused"];
+      label();
+    });
+  }, paused);
+}
+
+test("Disney+ clicks one exact observed player control and consumes the snapshot", async () => {
+  await withPage(async (page) => {
+    await installObservedPlayer(page);
+    await page.evaluate(() => {
+      const hidden = document.createElement("div");
+      hidden.setAttribute("role", "dialog");
+      hidden.style.display = "none";
+      document.body.append(hidden);
+    });
+    const first = await dispatch(page, { type: "inspect", actionId: actionId() });
+    assert.equal(first.title, "Moon Mission");
+    assert.deepEqual(first.site, {
+      provider: "disneyplus",
+      page: "watch",
+      playback: "paused",
+      currentTimeSeconds: 12.5,
+    });
+    assert.deepEqual(first.playback, {
+      available: true,
+      paused: true,
+      currentTime: 12.5,
+      seekable: false,
+    });
+    const play = {
+      type: "play",
+      actionId: actionId(),
+      snapshotId: first.snapshotId,
+    };
+    assert.deepEqual(await dispatch(page, play), { outcome: "playback_unverified" });
+    assert.equal(await page.evaluate(() => globalThis["playerClicks"]), 1);
+    await assert.rejects(dispatch(page, { ...play, actionId: actionId() }), /stale_snapshot/);
+    assert.equal(await page.evaluate(() => globalThis["playerClicks"]), 1);
+    const second = await dispatch(page, { type: "inspect", actionId: actionId() });
+    assert.equal(second.site.playback, "playing");
+    assert.deepEqual(
+      await dispatch(page, {
+        type: "pause",
+        actionId: actionId(),
+        snapshotId: second.snapshotId,
+      }),
+      { outcome: "playback_unverified" },
+    );
+    assert.equal(await page.evaluate(() => globalThis["playerClicks"]), 2);
+  });
+});
+
+test("Disney+ player is exact-snapshot bound and blocked controls never dispatch", async () => {
+  await withPage(async (page) => {
+    await installObservedPlayer(page);
+    const replaced = await dispatch(page, { type: "inspect", actionId: actionId() });
+    await dispatch(page, { type: "inspect", actionId: actionId() });
+    await assert.rejects(
+      dispatch(page, {
+        type: "play",
+        actionId: actionId(),
+        snapshotId: replaced.snapshotId,
+      }),
+      /stale_snapshot/,
+    );
+    const changed = await dispatch(page, { type: "inspect", actionId: actionId() });
+    await page.locator("#player-control").evaluate((node) => {
+      node.style.width = "180px";
+    });
+    await assert.rejects(
+      dispatch(page, {
+        type: "play",
+        actionId: actionId(),
+        snapshotId: changed.snapshotId,
+      }),
+      /stale_player/,
+    );
+    assert.equal(await page.evaluate(() => globalThis["playerClicks"]), 0);
+
+    const cancelled = await dispatch(page, { type: "inspect", actionId: actionId() });
+    const cancelledID = actionId();
+    await dispatch(page, {
+      type: "cancel",
+      actionId: actionId(),
+      targetActionId: cancelledID,
+    });
+    await assert.rejects(
+      dispatch(page, {
+        type: "play",
+        actionId: cancelledID,
+        snapshotId: cancelled.snapshotId,
+      }),
+      /cancelled/,
+    );
+    assert.equal(await page.evaluate(() => globalThis["playerClicks"]), 0);
+    await page.locator("#player-control").evaluate((node) => {
+      node.style.width = "";
+      node.setAttribute("aria-disabled", "true");
+    });
+    const disabled = await dispatch(page, { type: "inspect", actionId: actionId() });
+    assert.equal(disabled.site.page, "browse");
+    assert.deepEqual(disabled.playback, { available: false });
+    await page.locator("#player-control").evaluate((node) => node.removeAttribute("aria-disabled"));
+    await page
+      .locator("#observed-player")
+      .evaluate((node) => node.setAttribute("aria-labelledby", "different-title"));
+    const unboundTitle = await dispatch(page, { type: "inspect", actionId: actionId() });
+    assert.equal(unboundTitle.site.page, "browse");
+    assert.deepEqual(unboundTitle.playback, { available: false });
+  });
+});
+
+test("Disney+ player rejects ambiguous, commerce, muted autoplay, and visible-modal states", async () => {
+  await withPage(async (page) => {
+    await installObservedPlayer(page);
+    for (const setup of [
+      () =>
+        page.locator("#plan").evaluate((node) => {
+          node.style.display = "inline-block";
+        }),
+      () =>
+        page.locator("#feature-video").evaluate((node) => {
+          node.muted = true;
+        }),
+      () =>
+        page.locator("#feature-video").evaluate((node) => {
+          node.autoplay = true;
+        }),
+      () =>
+        page.evaluate(() => {
+          const video = document.createElement("video");
+          video.style.cssText = "display:block;width:200px;height:100px";
+          document.body.append(video);
+        }),
+      () =>
+        page.evaluate(() => {
+          const dialog = document.createElement("div");
+          dialog.setAttribute("role", "dialog");
+          dialog.textContent = "Continue";
+          dialog.style.cssText = "width:300px;height:100px";
+          document.body.prepend(dialog);
+        }),
+    ]) {
+      await setup();
+      const observed = await dispatch(page, { type: "inspect", actionId: actionId() });
+      assert.notEqual(observed.site.page, "watch");
+      assert.deepEqual(observed.playback, { available: false });
+      await page.reload();
+      await page.addScriptTag({ path: modulePath });
+      await installObservedPlayer(page);
+    }
+  });
+});
+
 test(
   "Disney+ horizontal entity row is snapshot and geometry bound and consumed once",
   { timeout: 15_000 },

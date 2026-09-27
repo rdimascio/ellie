@@ -313,9 +313,10 @@ final class BrowserPhoneControlTests: XCTestCase {
 
   func testDisneyPlusCompanionObservationAddsOnlyBoundedObservedDirections() throws {
     let revision = String(repeating: "e", count: 64)
-    func read(_ site: String, source: String = "companion") -> Data {
-      Data(
-        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[],"site":\#(site)}}}}"#.utf8)
+    func read(_ site: String, source: String = "companion", title: String? = nil) -> Data {
+      let titleField = title.map { ",\"title\":\"\($0)\"" } ?? ""
+      return Data(
+        #"{"outcome":"completed","result":{"ok":true,"message":"Observed.","browser":{"source":"\#(source)","operation":"read","status":"completed","revision":"\#(revision)","view":{"items":[]\#(titleField),"site":\#(site)}}}}"#.utf8)
     }
     guard case .page(let page) = try decodeBrowserPhoneResponse(
       read(#"{"provider":"disneyplus","page":"browse","playback":"unavailable"}"#), nodeID: "mac")
@@ -341,8 +342,24 @@ final class BrowserPhoneControlTests: XCTestCase {
     for source in ["accessibility", "webmcp"] {
       XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(observed, source: source), nodeID: "mac"))
     }
+    let player = #"{"provider":"disneyplus","page":"watch","playback":"paused","currentTimeSeconds":12.5}"#
+    guard case .page(let watch) = try decodeBrowserPhoneResponse(
+      read(player, title: "Moon Mission"), nodeID: "mac")
+    else { return XCTFail("Expected observed Disney+ title player") }
+    XCTAssertEqual(watch.title, "Moon Mission")
+    XCTAssertEqual(watch.site?.page, .watch)
+    XCTAssertEqual(watch.site?.playback, .paused)
+    XCTAssertEqual(
+      browserReviewedPlaybackRunCopy(intent: .play, page: watch, nodeLabel: "Studio"),
+      "Run will play the observed Moon Mission control on Studio. Read again to observe the result.")
+    XCTAssertNil(browserReviewedPlaybackRunCopy(intent: .pause, page: watch, nodeLabel: "Studio"))
+    for source in ["accessibility", "webmcp"] {
+      XCTAssertThrowsError(try decodeBrowserPhoneResponse(
+        read(player, source: source, title: "Moon Mission"), nodeID: "mac"))
+    }
+    XCTAssertThrowsError(try decodeBrowserPhoneResponse(read(player), nodeID: "mac"))
     for invalid in [
-      #"{"provider":"disneyplus","page":"watch","playback":"paused"}"#,
+      #"{"provider":"disneyplus","page":"watch","playback":"unavailable"}"#,
       #"{"provider":"disneyplus","page":"results","playback":"unavailable"}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"playing"}"#,
       #"{"provider":"disneyplus","page":"browse","playback":"unavailable","rows":[{"id":"10000000-0000-4000-8000-000000000001","label":"Row","directions":["right","right"]}]}"#,
@@ -454,6 +471,10 @@ final class BrowserPhoneControlTests: XCTestCase {
         currentTimeSeconds: nil), .openResult(index: 1), false),
       (BrowserPhoneSite(provider: .disneyplus, page: .login, playback: .unavailable,
         currentTimeSeconds: nil), .scroll(.down), false),
+      (BrowserPhoneSite(provider: .disneyplus, page: .watch, playback: .paused,
+        currentTimeSeconds: 12.5), .play, true),
+      (BrowserPhoneSite(provider: .disneyplus, page: .watch, playback: .playing,
+        currentTimeSeconds: 12.5), .pause, true),
     ]
     for (site, intent, allowed) in cases {
       let transport = BrowserPhoneFakeTransport(source: .companion, site: site)
@@ -525,6 +546,29 @@ final class BrowserPhoneControlTests: XCTestCase {
     let actions = await transport.actions
     XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
       .scroll(.down, revision: String(repeating: "a", count: 64))])
+  }
+
+  @MainActor
+  func testDisneyPlusObservedPlaybackConsumesReadBeforeUnknownAndNeverReplays() async {
+    let node = PhoneControlNode(id: "mac", label: "Studio", online: true,
+      capabilities: ["browser.read", "browser.control"])
+    let site = BrowserPhoneSite(provider: .disneyplus, page: .watch,
+      playback: .paused, currentTimeSeconds: 12.5)
+    let transport = BrowserPhoneFakeTransport(source: .companion,
+      commandStatus: .unknown, site: site)
+    let store = BrowserPhoneControlStore(credential: credential(), transport: transport,
+      uncertainty: BrowserPhoneFakeUncertaintyStore())
+    XCTAssertTrue(store.refresh(on: node))
+    await eventually { store.phase == .ready }
+    XCTAssertTrue(store.canPerform(.play, on: node))
+    XCTAssertFalse(store.canPerform(.pause, on: node))
+    XCTAssertTrue(store.perform(.play, on: node))
+    XCTAssertNil(store.page, "The observed title and player are consumed before transport")
+    await eventually { if case .unknown = store.phase { true } else { false } }
+    XCTAssertFalse(store.perform(.play, on: node))
+    let actions = await transport.actions
+    XCTAssertEqual(actions, [.refresh, .read(revision: String(repeating: "a", count: 64)),
+      .playback(.play, revision: String(repeating: "a", count: 64))])
   }
 
   @MainActor

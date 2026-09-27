@@ -26,21 +26,14 @@
     if (location.href !== expectedUrl) throw new Error("page_changed");
     if (!Number.isFinite(deadline) || Date.now() >= deadline) throw new Error("command_timeout");
   };
-  const page = () => {
+  const routePage = () => {
     const url = new URL(location.href);
     if (url.origin !== origin || url.username || url.password) throw new Error("unsupported_page");
     if (url.search || url.hash) return "unsupported";
     if (url.pathname === "/identity/login") return "login";
     if (!entityPath.test(url.pathname)) return "unsupported";
-    if (document.querySelector("[aria-modal='true'], [role='dialog'], input[type='password']"))
-      return "unsupported";
     return "browse";
   };
-  const site = () => ({
-    provider: "disneyplus",
-    page: page(),
-    playback: "unavailable",
-  });
   const visible = (element) => {
     const rect = element.getBoundingClientRect();
     if (
@@ -77,6 +70,139 @@
     const hit = document.elementFromPoint(x, y);
     return Boolean(hit && element.contains(hit));
   };
+  const page = () => {
+    const route = routePage();
+    if (route !== "browse") return route;
+    const blockers = document.querySelectorAll(
+      "[aria-modal='true'],[role='dialog'],input[type='password']",
+    );
+    return blockers.length > 32 || [...blockers].some(visible) ? "unsupported" : "browse";
+  };
+  const boundedText = (value, maximum = 200) => {
+    const text = value?.replace(/\s+/g, " ").trim();
+    return text && !/[\p{C}]/u.test(text) && new TextEncoder().encode(text).length <= maximum
+      ? text
+      : undefined;
+  };
+  const geometry = (element) => {
+    const rect = element.getBoundingClientRect();
+    const values = [rect.left, rect.top, rect.width, rect.height];
+    return values.every(Number.isFinite) ? values : undefined;
+  };
+  // Playback is admitted only from an explicit semantic relationship. No provider CSS selector,
+  // URL pattern, or direct video.play()/pause() call can manufacture this handle.
+  const observedPlayer = () => {
+    if (page() !== "browse") return undefined;
+    const dialogs = [...document.querySelectorAll("[aria-modal='true'],[role='dialog']")];
+    if (dialogs.length > 32 || dialogs.some(visible)) return undefined;
+    const controls = [...document.querySelectorAll("button,[role='button']")];
+    if (controls.length > 256) return undefined;
+    if (
+      [...document.querySelectorAll("a,button,[role='button']")].some((control) => {
+        if (!visible(control)) return false;
+        const label = boundedText(control.getAttribute("aria-label") || control.textContent, 100);
+        return Boolean(
+          label &&
+          /^(?:subscribe|sign up|choose (?:a )?plan|buy|purchase|upgrade|renew)(?:\b|$)/i.test(
+            label,
+          ),
+        );
+      })
+    )
+      return undefined;
+    const headings = [...document.querySelectorAll("h1")]
+      .filter(visible)
+      .map((heading) => ({ heading, title: boundedText(heading.textContent) }))
+      .filter(({ title }) => title);
+    if (headings.length !== 1) return undefined;
+    const headingId = headings[0].heading.id;
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,99}$/.test(headingId)) return undefined;
+    const regions = [...document.querySelectorAll("[role='region'][aria-labelledby]")].filter(
+      (region) => region.getAttribute("aria-labelledby") === headingId && visible(region),
+    );
+    if (regions.length !== 1) return undefined;
+    const region = regions[0];
+    const videos = [...document.querySelectorAll("video")];
+    if (videos.length > 16) return undefined;
+    const rendered = videos.filter(visible);
+    if (rendered.length !== 1) return undefined;
+    const video = rendered[0];
+    const videoId = video.id;
+    const source = video.currentSrc;
+    const currentTime = video.currentTime;
+    const duration = video.duration;
+    if (
+      !/^[A-Za-z][A-Za-z0-9_-]{0,99}$/.test(videoId) ||
+      !region.contains(video) ||
+      typeof source !== "string" ||
+      source.length < 1 ||
+      new TextEncoder().encode(source).length > 2048 ||
+      video.error ||
+      video.readyState < 2 ||
+      video.muted ||
+      video.loop ||
+      video.autoplay ||
+      !Number.isFinite(currentTime) ||
+      currentTime < 0 ||
+      currentTime > 86_400 ||
+      !Number.isFinite(duration) ||
+      duration <= 0 ||
+      duration > 86_400
+    )
+      return undefined;
+    const playback = video.paused || video.ended ? "paused" : "playing";
+    const expectedAction = playback === "paused" ? "play" : "pause";
+    const matching = controls.filter((control) => {
+      const label = boundedText(control.getAttribute("aria-label") || control.textContent, 100);
+      if (
+        control.getAttribute("aria-controls") !== videoId ||
+        label?.toLowerCase() !== expectedAction ||
+        !visible(control)
+      )
+        return false;
+      for (let node = control; node; node = node.parentElement) {
+        if (
+          node.hasAttribute("inert") ||
+          node.hasAttribute("disabled") ||
+          node.getAttribute("aria-disabled")?.trim().toLowerCase() === "true" ||
+          node.getAttribute("aria-hidden")?.trim().toLowerCase() === "true"
+        )
+          return false;
+      }
+      return true;
+    });
+    if (matching.length !== 1) return undefined;
+    if (!region.contains(matching[0])) return undefined;
+    const regionGeometry = geometry(region);
+    const videoGeometry = geometry(video);
+    const controlGeometry = geometry(matching[0]);
+    if (!regionGeometry || !videoGeometry || !controlGeometry) return undefined;
+    return {
+      title: headings[0].title,
+      heading: headings[0].heading,
+      region,
+      video,
+      videoId,
+      source,
+      currentTime,
+      duration,
+      playback,
+      control: matching[0],
+      action: expectedAction,
+      regionGeometry,
+      videoGeometry,
+      controlGeometry,
+    };
+  };
+  const site = (player = observedPlayer()) =>
+    player
+      ? {
+          provider: "disneyplus",
+          page: "watch",
+          playback: player.playback,
+          currentTimeSeconds: Math.round(player.currentTime * 10) / 10,
+        }
+      : { provider: "disneyplus", page: page(), playback: "unavailable" };
   const title = (anchor) => {
     for (const value of [
       anchor.getAttribute("aria-label"),
@@ -281,6 +407,8 @@
         actionId(command.rowId) &&
         ["left", "right"].includes(command.direction)
       );
+    if (command.type === "play" || command.type === "pause")
+      return exact(command, ["type", "actionId", "snapshotId"]) && actionId(command.snapshotId);
     return false;
   };
 
@@ -302,7 +430,8 @@
     }
     if (command.type === "observe") return site();
     if (command.type === "inspect") {
-      const observation = site();
+      const player = observedPlayer();
+      const observation = site(player);
       const entries = observation.page === "browse" ? observed() : [];
       const rows = observation.page === "browse" ? observedRows(entries) : [];
       const scroll = observation.page === "browse" ? viewportScroll() : undefined;
@@ -314,6 +443,7 @@
         entries: entries.length <= 40 ? entries : [],
         rows,
         scroll,
+        player,
         id: snapshotId,
       };
       return {
@@ -322,7 +452,15 @@
           id,
           title: label,
         })),
-        playback: { available: false },
+        playback: player
+          ? {
+              available: true,
+              paused: player.playback === "paused",
+              currentTime: Math.round(player.currentTime * 10) / 10,
+              seekable: false,
+            }
+          : { available: false },
+        ...(player ? { title: player.title } : {}),
         site: {
           ...observation,
           ...(observation.page === "browse"
@@ -350,6 +488,37 @@
         Date.now() - snapshot.created >= 30_000
       )
         throw new Error("stale_snapshot");
+      if (command.type === "play" || command.type === "pause") {
+        const chosen = snapshot.player;
+        const current = observedPlayer();
+        if (
+          !chosen ||
+          !current ||
+          command.type !== chosen.action ||
+          current.action !== chosen.action ||
+          current.title !== chosen.title ||
+          current.heading !== chosen.heading ||
+          current.region !== chosen.region ||
+          current.video !== chosen.video ||
+          current.control !== chosen.control ||
+          current.videoId !== chosen.videoId ||
+          current.source !== chosen.source ||
+          (chosen.playback === "paused"
+            ? current.currentTime !== chosen.currentTime
+            : current.currentTime < chosen.currentTime ||
+              current.currentTime - chosen.currentTime > 30) ||
+          current.duration !== chosen.duration ||
+          current.playback !== chosen.playback ||
+          current.regionGeometry.some((value, index) => value !== chosen.regionGeometry[index]) ||
+          current.videoGeometry.some((value, index) => value !== chosen.videoGeometry[index]) ||
+          current.controlGeometry.some((value, index) => value !== chosen.controlGeometry[index])
+        )
+          throw new Error("stale_player");
+        snapshot = undefined;
+        active(command, expectedUrl, deadline);
+        chosen.control.click();
+        return { outcome: "playback_unverified" };
+      }
       if (command.type === "scrollViewport") {
         const current = viewportScroll();
         if (snapshot.scroll?.state !== "available" || current.state !== "available")
