@@ -4,14 +4,26 @@ import SwiftUI
 
 private actor IOSQuietFixtureClient: IOSQuietClient {
     private var revoked = false
+    private let appearance: Bool
+    init(appearance: Bool = false) { self.appearance = appearance }
+
+    private func title(_ id: String) -> String {
+        if id == "trip_session" {
+            return appearance
+                ? "Plan a quiet family trip along the coast for the long weekend"
+                : "Plan the family trip"
+        }
+        return id == "photo_session" ? "Sort family photos" : "Find a birthday gift"
+    }
+
     func sessions(_ credential: NativeEnrollmentCredential, limit: Int, cursor: String?) async throws -> IOSQuietPage {
         if revoked { throw IOSQuietFailure.revoked }
         let at = Date(timeIntervalSince1970: 1_800_000_000)
         return IOSQuietPage(sessions: [
-            IOSQuietSession(id: "trip_session", title: "Plan the family trip", updatedAt: at,
+            IOSQuietSession(id: "trip_session", title: title("trip_session"), updatedAt: at,
                 turnCount: 1, pending: false),
             IOSQuietSession(id: "photo_session", title: "Sort family photos", updatedAt: at,
-                turnCount: 1, pending: false),
+                turnCount: 1, pending: appearance),
             IOSQuietSession(id: "gift_session", title: "Find a birthday gift", updatedAt: at,
                 turnCount: 1, pending: false),
         ], hasMore: false, nextCursor: nil)
@@ -19,13 +31,14 @@ private actor IOSQuietFixtureClient: IOSQuietClient {
     func detail(_ credential: NativeEnrollmentCredential, id: String) async throws -> IOSQuietDetail {
         if revoked { throw IOSQuietFailure.revoked }
         let at = Date(timeIntervalSince1970: 1_800_000_000)
-        let title = id == "trip_session" ? "Plan the family trip" :
-            id == "photo_session" ? "Sort family photos" : "Find a birthday gift"
+        let title = title(id)
+        let pending = appearance && id == "photo_session"
         return IOSQuietDetail(session: IOSQuietSession(id: id, title: title, updatedAt: at,
-                turnCount: 1, pending: false),
+                turnCount: 1, pending: pending),
             originalRequest: "Review \(title)",
             turns: [IOSQuietTurn(id: "turn_\(id)", request: "Review \(title)",
-                reply: "Here is the current review.", status: "completed", updatedAt: at)],
+                reply: pending ? nil : "Here is the current review.",
+                status: pending ? "pending" : "completed", updatedAt: at)],
             activity: [IOSQuietActivity(id: "task_\(id)", state: id == "trip_session" ? "running" : "succeeded",
                 updatedAt: at, progress: ["Checked current details"],
                 finding: id == "trip_session" ? nil : IOSQuietFinding(
@@ -41,9 +54,15 @@ struct IOSQuietSessionsUITestFixtureView: View {
     @StateObject private var voice: IOSQuietVoiceStore
     private let client: IOSQuietFixtureClient
     private let credential: NativeEnrollmentCredential
+    private let appearance: Bool
+    private let accessibility: Bool
 
     init() {
-        let client = IOSQuietFixtureClient()
+        let arguments = ProcessInfo.processInfo.arguments
+        let appearance = arguments.contains("--ellie-ui-quiet-list-appearance")
+        self.appearance = appearance
+        accessibility = arguments.contains("--ellie-ui-quiet-list-accessibility")
+        let client = IOSQuietFixtureClient(appearance: appearance)
         let credential = NativeEnrollmentCredential(
             origin: URL(string: "https://127.0.0.1:8444")!,
             certificateSha256: String(repeating: "b", count: 64),
@@ -73,6 +92,8 @@ struct IOSQuietSessionsUITestFixtureView: View {
             }
             .ellieScreen()
         }
+        .frame(width: appearance ? 320 : nil)
+        .environment(\.dynamicTypeSize, accessibility ? .accessibility5 : .large)
     }
 }
 
