@@ -627,6 +627,13 @@ export function browserWebMCPOperationResult(value: unknown): BrowserWebMCPOpera
     if (site?.provider === "youtube" && site.searchControl && browser.source !== "companion")
       throw new Error("Invalid browser operation result.");
     if (
+      site?.provider === "youtube_tv" &&
+      (browser.source !== "companion" ||
+        (view.title !== undefined &&
+          (site.page !== "watch" || !["playing", "paused"].includes(site.playback))))
+    )
+      throw new Error("Invalid browser operation result.");
+    if (
       site?.provider === "disneyplus" &&
       site.page === "watch" &&
       (browser.source !== "companion" || typeof view.title !== "string")

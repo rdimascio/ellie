@@ -25,16 +25,16 @@ const binding = (suffix: string, url = "https://www.netflix.com/browse"): Browse
   availability: "companion",
 });
 
-test("YouTube TV companion permits only observed vertical browsing and unique-player playback", async () => {
-  const siteResult = (site: Record<string, unknown>) => ({
+test("YouTube TV companion permits only observed vertical browsing and titled semantic playback", async () => {
+  const siteResult = (site: Record<string, unknown>, title?: string, source = "companion") => ({
     ok: true,
     message: "Observed.",
     browser: {
-      source: "companion",
+      source,
       operation: "read",
       status: "completed",
       revision: "a".repeat(64),
-      view: { items: [], site },
+      view: { ...(title === undefined ? {} : { title }), items: [], site },
     },
   });
   assert.equal(
@@ -42,6 +42,30 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
       siteResult({ provider: "youtube_tv", page: "watch", playback: "paused" }),
     ).browser.operation,
     "read",
+  );
+  const titledResult = browserWebMCPOperationResult(
+    siteResult({ provider: "youtube_tv", page: "watch", playback: "paused" }, "Observed program"),
+  ).browser;
+  assert.equal(titledResult.operation, "read");
+  if (titledResult.operation !== "read") throw new Error("expected read");
+  assert.equal(titledResult.view.title, "Observed program");
+  for (const source of ["accessibility", "webmcp"])
+    assert.throws(() =>
+      browserWebMCPOperationResult(
+        siteResult(
+          { provider: "youtube_tv", page: "watch", playback: "paused" },
+          "Observed program",
+          source,
+        ),
+      ),
+    );
+  assert.throws(() =>
+    browserWebMCPOperationResult(
+      siteResult(
+        { provider: "youtube_tv", page: "browse", playback: "unavailable" },
+        "Observed program",
+      ),
+    ),
   );
   assert.deepEqual(
     browserWebMCPOperationResult(
@@ -142,6 +166,7 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
   const revision = browserBindingRevision(current);
   const commands: string[] = [];
   let page: "browse" | "watch" | "login" = "browse";
+  let title: string | undefined;
   let scrollDirections: ("down" | "up")[] | undefined;
   let lastSnapshot: string | undefined;
   let webmcp = 0;
@@ -156,6 +181,12 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
           lastSnapshot,
           "scroll binds the exact read snapshot",
         );
+      if (request.command.type === "play" || request.command.type === "pause")
+        assert.equal(
+          request.command.snapshotId,
+          lastSnapshot,
+          "playback binds the exact titled read snapshot",
+        );
       if (request.command.type === "inspect") lastSnapshot = randomUUID();
       return browserWebMCPResultFor(request.id, "ok", {
         bindingId: current.bindingId,
@@ -167,6 +198,7 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
                 snapshotId: lastSnapshot,
                 candidates: [],
                 playback: { available: page === "watch", paused: page === "watch" },
+                ...(title === undefined ? {} : { title }),
                 site: {
                   provider: "youtube_tv",
                   page,
@@ -229,6 +261,17 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
   );
   page = "watch";
   await read();
+  await assert.rejects(
+    () => selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
+    /playback state is unavailable/,
+  );
+  assert.deepEqual(
+    commands,
+    ["inspect", "inspect", "scrollViewport", "inspect"],
+    "a legacy title-less read remains readable but grants zero playback dispatch",
+  );
+  title = "Observed program";
+  await read();
   const play = browserWebMCPOperationResult(
     await selector.execute({ tool: "browser.playback", action: "play", revision }, signal),
   );
@@ -239,6 +282,7 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
     /Read the YouTube TV page/,
   );
   page = "login";
+  title = undefined;
   await read();
   await assert.rejects(
     () => selector.execute({ tool: "browser.scroll", direction: "down", revision }, signal),
@@ -248,6 +292,7 @@ test("YouTube TV companion permits only observed vertical browsing and unique-pl
     "inspect",
     "inspect",
     "scrollViewport",
+    "inspect",
     "inspect",
     "play",
     "inspect",

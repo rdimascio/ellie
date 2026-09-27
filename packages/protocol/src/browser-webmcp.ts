@@ -139,7 +139,11 @@ function companionCommand(value: unknown): BrowserCompanionCommand {
   const body = record(value);
   const actionId = identifier(body.actionId);
   if (!uuidPattern.test(actionId)) throw new Error("Invalid message.");
-  if (body.type === "inspect" || body.type === "play" || body.type === "pause") {
+  if (body.type === "inspect") {
+    exactKeys(body, ["type", "actionId"]);
+    return { type: body.type, actionId };
+  }
+  if (body.type === "play" || body.type === "pause") {
     const hasSnapshot = Object.hasOwn(body, "snapshotId");
     exactKeys(body, ["type", "actionId", ...(hasSnapshot ? ["snapshotId"] : [])]);
     if (!hasSnapshot) return { type: body.type, actionId };

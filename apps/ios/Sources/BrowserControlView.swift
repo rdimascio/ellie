@@ -34,10 +34,13 @@ struct BrowserControlView: View {
                 Text("Observed media position: \(Int(seconds)) seconds")
                   .font(.caption).foregroundStyle(.secondary)
               }
-              Text(site.provider == .disneyplus
-                ? "The observed title and player control belong only to this read."
-                : "Visible media state does not confirm which video is playing.")
-                .font(.footnote).foregroundStyle(.secondary)
+              Text(
+                (site.provider == .youtubeTV && page.title != nil)
+                  || site.provider == .disneyplus
+                  ? "The observed title and player control belong only to this read."
+                  : "Visible media state does not confirm which video is playing."
+              )
+              .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .netflix && site.searchControl == nil {
               Text("No unambiguous accessible Netflix search field was observed. Search is unavailable on this page.")
@@ -53,7 +56,7 @@ struct BrowserControlView: View {
                 .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .youtubeTV {
-              Text("YouTube TV search, title selection, and horizontal rows are unavailable until their controls can be safely observed. Browsing and player controls require a fresh read.")
+              Text("YouTube TV search, title selection, and horizontal rows are unavailable until their controls can be safely observed. Playback appears only with an observed title and linked semantic player control. Browsing and player controls require a fresh read.")
                 .font(.footnote).foregroundStyle(.secondary)
             }
             if site.provider == .disneyplus {
@@ -212,7 +215,7 @@ struct BrowserControlView: View {
     if site.provider == .youtubeTV {
       switch site.page {
       case .browse: return "Observed YouTube TV page; program identity unavailable"
-      case .watch: return "Observed YouTube TV player; program identity unavailable"
+      case .watch: return "Observed YouTube TV title player"
       case .login: return "Observed YouTube TV sign-in or welcome page"
       default: return "Observed YouTube TV page is unsupported"
       }

@@ -25,6 +25,7 @@ type Observation = {
   url: string;
   revision: string;
   snapshotId: string;
+  title?: string;
   items: Map<string, string>;
   rowCandidateId?: string;
   rows: Map<string, { label: string; directions?: ("left" | "right")[] }>;
@@ -226,6 +227,14 @@ export class BrowserCompanionOperations {
       if (binding.origin !== "https://www.youtube.com" && topSearch)
         throw new Error("Browser companion observation is invalid.");
       if (
+        topTitle &&
+        binding.origin === "https://tv.youtube.com" &&
+        (checked.browser.view.site.page !== "watch" ||
+          !["playing", "paused"].includes(checked.browser.view.site.playback) ||
+          checked.browser.view.title !== value.title)
+      )
+        throw new Error("Browser companion observation is invalid.");
+      if (
         checked.browser.view.site.provider === "disneyplus" &&
         checked.browser.view.site.page === "watch" &&
         (!topTitle || !checked.browser.view.title)
@@ -237,6 +246,7 @@ export class BrowserCompanionOperations {
         url: binding.url,
         revision,
         snapshotId: value.snapshotId,
+        ...(topTitle ? { title: checked.browser.view.title } : {}),
         items,
         ...(value.rowCandidateId === undefined ? {} : { rowCandidateId: value.rowCandidateId }),
         rows: new Map(
@@ -381,17 +391,18 @@ export class BrowserCompanionOperations {
     } else if (action.tool === "browser.playback") {
       if (
         observed.site.page !== "watch" ||
-        observed.site.playback !== (action.action === "play" ? "paused" : "playing")
+        observed.site.playback !== (action.action === "play" ? "paused" : "playing") ||
+        (youtubeTV && !observed.title)
       )
         throw new Error(
           disneyplus
             ? "Disney+ observed playback state is unavailable; read the title again."
-            : "Netflix playback state is unavailable.",
+            : `${youtubeTV ? "YouTube TV" : "Netflix"} playback state is unavailable.`,
         );
       command = {
         type: action.action,
         actionId: randomUUID(),
-        ...(disneyplus ? { snapshotId: observed.snapshotId } : {}),
+        ...(youtubeTV || disneyplus ? { snapshotId: observed.snapshotId } : {}),
       };
     } else throw new Error("Browser operation is unsupported.");
     // Once admitted, the mutation consumes the observation even if its result is lost.
