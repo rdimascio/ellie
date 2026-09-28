@@ -1,6 +1,6 @@
 # Agent workstation (design)
 
-Status: proposed, 2026-09-28. Nothing here is implemented.
+Status: proposed, 2026-09-28, revised after a two-seat review. Nothing here is implemented.
 
 ## Problem
 
@@ -8,32 +8,38 @@ The household runs coding agents (Claude Code, Codex) on two Macs: a MacBook tha
 
 Today that setup is moved and kept in step by hand:
 
-- `~/.claude` is a git repository pushed to a private GitHub repository. An allowlist `.gitignore` tracks configuration only; transcripts, history, caches and credentials stay local. `.jsonl` files and memory indexes merge with `merge=union`.
-- `~/.claude/sync/sync.mjs` commits, rebases and pushes. A hand-written LaunchAgent runs it every 15 minutes on each Mac.
-- Four singleton jobs (an artifact web server, its Cloudflare tunnel, a factory watchdog, a nightly benchmark) were moved to the mini by unloading LaunchAgents on one Mac and loading them on the other.
-- Secrets (`~/.cloudflared`, provider keys) and tools (Homebrew formulae, `node_modules`) were copied or installed by hand.
+- `~/.claude` is a git repository pushed to a private GitHub repository on branch `config`. An allowlist `.gitignore` tracks configuration only; transcripts, history, caches and credentials stay local. `.jsonl` files merge with `merge=union`.
+- `~/.claude/sync/sync.mjs` commits, rebases and pushes. A hand-written LaunchAgent runs it every 15 minutes on each Mac. It has no secret scan; the first commit was scanned once by hand.
+- Four singleton jobs run only on the mini, moved there by unloading LaunchAgents on one Mac and loading them on the other: the artifact web server, its Cloudflare tunnel, the factory watchdog, and the nightly router benchmark.
+- Secrets (`~/.cloudflared`), tools (Homebrew formulae, `node_modules`) and repositories outside `~/.claude` (`~/.agents`, the factory evidence repository, the adversarial-review skill repository) were copied or installed by hand.
 
-This works, but nothing checks it. A job loaded on both Macs double-fires (two tunnel connectors split traffic between two servers with different content). A job on a Mac that is asleep silently stops. A new Mac needs an hour of manual steps. Ellie already owns paired Mac identities, LaunchAgent installation, liveness heartbeats and redacted service logs, so it is the natural owner.
+Nothing checks any of it. A job loaded on both Macs double-fires; two tunnel connectors split traffic between two servers with different content. A new Mac needs an hour of manual steps. Ellie already pairs these Macs, installs LaunchAgents and writes redacted service logs, so it is the natural owner.
+
+## Topology
+
+The mini runs the Ellie coordinator and a node. The MacBook runs a node only. Today both Macs hold a `server.json` and a `node.json`; the MacBook's coordinator config is retired as the first migration step. Everything below assumes one coordinator, on the mini.
 
 ## Goals
 
-1. **One command to set up a Mac.** `ellie agents bootstrap` turns a paired Mac into an agent workstation: config repositories in place, tools installed, sync running, doctor green.
-2. **Config stays in step.** Every paired workstation syncs each agent's config repository on a schedule, with the same allowlist and merge rules as today. Two agents in v1: Claude Code (`~/.claude`) and Codex (`~/.codex`).
-3. **Each singleton job runs on exactly one Mac.** The coordinator decides where. Moving a job is one command, and never leaves it running on two Macs.
-4. **Honest status.** `ellie agents status` shows the last sync per Mac, each job's host, and its health, without printing secrets or paths with usernames.
+1. **Config stays in step.** Every Ellie Mac syncs each agent's config repository on a schedule. Two agents in v1: Claude Code (`~/.claude`) and Codex (`~/.codex`).
+2. **Each singleton job runs on exactly one Mac, and never on two.** The coordinator records where. Moving a job is one command.
+3. **A new Mac is one command plus a printed checklist.** `ellie agents bootstrap` puts the repositories in place and starts sync; `ellie agents doctor` lists what is still missing.
+4. **Honest status** per Mac and per job, with the existing redaction rules.
 
 ## Non-goals (v1)
 
-- Automatic failover. When the mini is down, the coordinator is usually down with it, and the MacBook cannot tell "mini is off" from "network is split". A split-brain tunnel is worse than a stopped one. Moving a job stays an explicit command.
-- Moving secrets. Ellie reports a missing secret; the operator copies it. Secret transfer over the pinned channel is future work.
-- Syncing transcripts, history or caches.
+- Automatic failover. The coordinator is on the mini, so a dead mini means no coordinator to decide anything, and the MacBook cannot tell "mini is off" from "network is split".
+- Installing tools or copying secrets. Doctor reports what is missing by absolute path; the operator installs or copies it.
+- Syncing transcripts, history, caches, or any per-machine config.
 - Managing the agents themselves (logins, model settings, MCP connector auth).
 
 ## Design
 
-### Repositories
+### 1. Config sync
 
-The node's private config `~/.ellie/agents.json` lists the agent repositories this Mac syncs:
+**Runner.** Sync is its own small managed LaunchAgent, `org.ellie.assistant.agents-sync`, running `ellie agents sync` every 15 minutes (`StartInterval`). It does not live in the node or coordinator process, so it works on any Ellie Mac regardless of role and keeps running when the node service pauses on a Keychain failure.
+
+**Repositories.** `~/.ellie/agents.json` (private, `0600`) lists what this Mac syncs:
 
 ```json
 {
@@ -41,124 +47,115 @@ The node's private config `~/.ellie/agents.json` lists the agent repositories th
   "repositories": [
     { "name": "claude", "path": "~/.claude", "remote": "https://github.com/<owner>/claude-config.git", "branch": "config" },
     { "name": "codex", "path": "~/.codex", "remote": "https://github.com/<owner>/codex-config.git", "branch": "config" }
+  ],
+  "external": [
+    { "path": "~/.claude/factory", "remote": "https://github.com/<owner>/every-factory-evidence.git" },
+    { "path": "~/.claude/skills/adversarial-review", "remote": "https://github.com/<owner>/adversarial-review-skill.git" }
   ]
 }
 ```
 
-Each repository carries its own allowlist `.gitignore` and `.gitattributes`. For Codex the allowlist covers `config.toml`, `AGENTS.md`, `skills/`, `rules/` and `prompts/`; it excludes `auth.json`, every `*.sqlite*` file (history, logs, state, thread history), `sessions/`, `cache/`, `log/`, `tmp/` and generated images. `config.toml` holds machine-specific values (MCP server commands with absolute paths, local tool settings). Today the two Macs have different `config.toml` files; they must be reconciled by hand once before Codex sync is enabled. Whether Codex can load a local override file is not verified (open question 1).
+Each repository owns its allowlist `.gitignore` and `.gitattributes`. The Codex allowlist is `AGENTS.md`, `skills/` and `rules/` only. `config.toml` is excluded: it holds per-machine project trust entries keyed by absolute path and MCP `env` blocks, and it commonly holds tokens. `auth.json`, every `*.sqlite*` file, `sessions/`, `cache/`, `log/` and `tmp/` stay local.
 
-### Workstation manifest
+`external` lists repositories that live inside a synced path but are excluded from it and have their own remote. Sync never touches them; doctor checks that they are cloned.
 
-A repository may carry one `sync/workstation.json`. Only the `claude` repository does in v1. It is the contract between the repository and Ellie. It is data only; Ellie never runs a string from it through a shell.
+`merge=union` applies to `*.jsonl` only. Markdown memory files are edited in place, and a union merge of an in-place edit silently keeps both versions; they conflict normally instead.
+
+**One run, per repository, under a per-repository lock (`~/.ellie/agents-sync-<name>.lock`):**
+
+1. `git add --all` (the allowlist decides what is staged); commit if anything is staged.
+2. `git pull --rebase --autostash`. On conflict: `git rebase --abort`, keep local commits, record `sync_conflict`, skip the push.
+3. Scan every outgoing commit, `origin/<branch>..HEAD`, each commit's diff, not only the final tree. A hit anywhere in the range blocks the push and records `sync_secret_blocked` with the repository-relative path. Pull still happens on every run, so inbound sync never stops because of a local hit.
+4. `git push`.
+
+**Secret scanner.** New code; nothing scans today. It checks added lines in every text file under 5 MB for: Anthropic, OpenAI, GitHub, Slack, Linear, PostHog, Stripe and AWS key shapes; PEM private-key headers; JWTs; `Bearer` tokens over 40 characters; and quoted assignments to names containing `key`, `secret`, `token` or `password` with a value of 24 or more characters. It has no entropy heuristic in v1. An allowlist file in the repository (`sync/scan-allow.txt`, one `path:pattern-name` per line) silences reviewed test fixtures. Each pattern has a unit test that fails on a planted value.
+
+**Reporting.** Events go to `~/.ellie/logs/agents-sync.jsonl` with the existing redaction rules: `sync_ok`, `sync_no_changes`, `sync_conflict`, `sync_secret_blocked`, `sync_push_failed`. `ellie agents doctor` on that Mac shows the latest event per repository; the coordinator shows it too when the Mac's node is online.
+
+### 2. Singleton jobs
+
+**Names.** Ellie nodes have opaque ids today. The coordinator's `server.json` gains an operator-set map `nodeNames: { "<node id>": "mac-mini" }`, shown by `ellie nodes`. Job hosts refer to these names. A node cannot name itself.
+
+**Definitions live on the coordinator, not in the synced repository.** The synced repository is written continuously by agent sessions and hooks on both Macs. If job definitions were read from it, any agent turn or injected tool call that edited them would run a new program on the mini within 15 minutes. So:
+
+- The operator keeps a draft at `~/.claude/sync/jobs.json`. It is only a draft.
+- `ellie agents jobs apply --from ~/.claude/sync/jobs.json`, run on the coordinator Mac in an interactive terminal, prints the full diff of every `program`, `environment` and schedule against the last applied set, and requires typing `apply`. The coordinator stores the applied definitions in its SQLite store.
+- Nodes receive definitions only from the coordinator. They never read `jobs.json`.
+- `apply` never changes a job's host. Host changes happen only through `move`.
+
+Security states the remaining truth plainly: whoever can edit a script that an applied job runs (`nightly.sh`, `server.mjs`) can run code on the host. Applying pins the program and arguments, not the script contents.
+
+**Definition shape.**
 
 ```json
-{
-  "version": 1,
-  "sync": { "intervalMinutes": 15 },
-  "tools": { "brew": ["node", "cloudflared", "gh"], "npmInstall": ["skills/every-watch", "skills/panel"] },
-  "jobs": [
-    {
-      "id": "artifact-server",
-      "kind": "keepalive",
-      "program": ["/opt/homebrew/bin/node", "~/.claude/skills/artifact-publish/server.mjs"],
-      "environment": { "ARTIFACT_PORT": "8787", "ARTIFACT_ROOT": "~/.claude/artifacts" },
-      "placement": ["mac-mini"],
-      "requires": { "files": [], "binaries": ["/opt/homebrew/bin/node"] },
-      "group": "artifacts"
-    },
-    {
-      "id": "artifact-tunnel",
-      "kind": "keepalive",
-      "program": ["/opt/homebrew/bin/cloudflared", "tunnel", "--no-autoupdate", "run", "--url", "http://127.0.0.1:8787", "claude-artifacts"],
-      "placement": ["mac-mini"],
-      "requires": { "files": ["~/.cloudflared/cert.pem"], "binaries": ["/opt/homebrew/bin/cloudflared"] },
-      "group": "artifacts"
-    },
-    { "id": "router-benchmark", "kind": "daily", "at": "03:00", "timeZone": "America/Los_Angeles", "program": ["/bin/bash", "~/.claude/tools/router-benchmark/nightly.sh"], "placement": ["mac-mini"] }
-  ]
-}
+[
+  { "id": "artifact-server", "host": "mac-mini", "kind": "keepalive",
+    "program": ["/opt/homebrew/bin/node", "/Users/ryan/.claude/skills/artifact-publish/server.mjs"],
+    "environment": { "ARTIFACT_PORT": "8787", "ARTIFACT_ROOT": "/Users/ryan/.claude/artifacts" },
+    "requires": ["/opt/homebrew/bin/node"] },
+  { "id": "artifact-tunnel", "host": "mac-mini", "kind": "keepalive",
+    "program": ["/opt/homebrew/bin/cloudflared", "tunnel", "--no-autoupdate", "run", "--credentials-file", "/Users/ryan/.cloudflared/<tunnel-uuid>.json", "--url", "http://127.0.0.1:8787", "<tunnel-uuid>"],
+    "requires": ["/opt/homebrew/bin/cloudflared", "/Users/ryan/.cloudflared/<tunnel-uuid>.json"] },
+  { "id": "factory-watchdog", "host": "mac-mini", "kind": "keepalive",
+    "program": ["/opt/homebrew/bin/node", "/Users/ryan/.claude/tools/factory-watchdog/watchdog.mjs"],
+    "requires": ["/opt/homebrew/bin/node"] },
+  { "id": "router-benchmark", "host": "mac-mini", "kind": "daily", "hour": 3, "minute": 20,
+    "program": ["/bin/bash", "/Users/ryan/.claude/tools/router-benchmark/nightly.sh"],
+    "requires": ["/Users/ryan/every-io/every"] }
+]
 ```
 
-- `kind` is `keepalive`, `interval` (with `minutes`) or `daily`/`weekly` (wall clock, IANA zone). These map directly to launchd keys.
-- `placement` is an ordered list of Mac names. The first live, eligible Mac wins at assignment time.
-- `group` pins jobs to the same Mac (the tunnel must sit next to its server).
-- `requires` is checked on the target before a job is placed; a missing file or binary blocks placement and appears in status.
-- `~` expands to the target user's home. Absolute paths only after expansion; no `PATH` lookup.
+- `kind` is `keepalive`, `interval` (`minutes`) or `daily` (`hour`, `minute`). Daily times are the host's local time; launchd has no per-job time zone.
+- Paths are absolute. No `~`, no `PATH` lookup, no shell. Arrays are passed to launchd as `ProgramArguments`.
+- `requires` is a list of absolute paths that must exist on the host. The tunnel runs by UUID with an explicit credentials file, so the account-level `cert.pem` is not needed on the host.
+- No placement lists, no groups. The artifact server and tunnel share a host because both say `mac-mini`.
 
-### Roles and where work runs
+**Delivery: desired state in the heartbeat.** The node's `/v1/heartbeat` response already carries `cancelJobIds`. It gains `agentJobs`: the full applied definitions assigned to this node. The node's heartbeat request gains `installedAgentJobs`: the ids it currently has installed. The node reconciles on every heartbeat (about every 10 seconds): install what is desired and missing, remove what is installed and not desired. Job delivery does not touch the `/v1/poll` path, the job store or the one-in-flight slot.
 
-| Part | Runs on | Why |
-| --- | --- | --- |
-| Config sync | Every workstation, inside the node service | Must keep working when the coordinator is offline. |
-| Job placement and assignment | Coordinator | One owner of truth for "which Mac runs job X". |
-| Job execution | The assigned node, as a managed LaunchAgent | Survives node restarts; launchd owns relaunch and throttling. |
-| Doctor checks | Each node, reported to the coordinator | Only the target can check its own files and binaries. |
+**Never on two Macs.** The coordinator adds a job to a node's desired state only when no other node's latest heartbeat lists it as installed. `ellie agents jobs move <id> --to <name>` changes the job's host; the old node's next heartbeat removes it, and only after that heartbeat reports it gone does the new node receive it. If the old node is offline, the move waits. `--force-orphan` skips the wait after printing that the old Mac will run the job again until its first heartbeat after waking, and records the override. A node that wakes reconciles removals before installs.
 
-A Mac that is not paired as a node cannot hold jobs. A coordinator-only Mac can sync config but holds no jobs.
+**Job LaunchAgents.** A new generic plist generator, next to the role-bound one in `apps/cli/src/services.ts`, not a reuse of it. Label `org.ellie.assistant.job.<id>`, `gui/<uid>`, Aqua session, `EnvironmentVariables` with `HOME` and a fixed `PATH` (`/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`) plus the job's `environment`, `ThrottleInterval` 30, stdout and stderr to `~/.ellie/logs/jobs/<id>.log` rotated at 1 MiB with one backup. The node only touches plists that carry Ellie's managed marker. An existing unmanaged plist with the same program is reported, never replaced.
 
-### Config sync
+**Status.** `ellie agents status` on the coordinator prints, per job: host, installed-on (from heartbeats), launchd state, last exit code, and whether any `requires` path is missing.
 
-The node service runs sync as a node-local timer, not as a coordinator task, so a sleeping or absent coordinator does not stop it.
+### 3. Bootstrap
 
-Each run: `git add --all` under the allowlist, commit when there are staged changes, `pull --rebase --autostash`, `push`. Before commit, a secret scanner runs over the staged diff (the same patterns as today's pre-push scan: provider keys, private keys, JWTs, generic `key = "<long>"` assignments). A hit aborts the run, leaves the change staged, and reports `needs_attention` with the file path relative to the repository. A rebase conflict aborts the rebase, keeps local commits, and reports `needs_attention`; Ellie never resolves a conflict itself.
+`ellie agents bootstrap` on an Ellie Mac, per repository in `agents.json`:
 
-Sync events go to the existing redacted node log: `sync_ok`, `sync_no_changes`, `sync_conflict`, `sync_secret_blocked`, `sync_push_failed`. No file contents or commit messages are logged.
+1. Check that git can reach the remote. Stop with guidance if not.
+2. Path missing: clone. Path exists and is already this repository: nothing to do.
+3. Path exists and is not a repository: `git init`, commit the whole local tree (under the allowlist) on a temporary branch `bootstrap/<hostname>`, fetch, and rebase that branch onto `origin/<branch>`. `.jsonl` files union; any other file that differs stops the rebase with `needs_attention` and the list of paths, and the operator resolves them. On success, check out the branch. Nothing local is overwritten silently, and memory written on the new Mac reaches the other Mac on the next sync.
+4. Install and start the sync LaunchAgent.
+5. Run `ellie agents doctor`.
 
-### Job assignment
+Bootstrap installs no tools, runs no package manager, copies no secrets and assigns no jobs.
 
-The coordinator keeps one assignment per job in its SQLite store: `jobId`, `nodeId`, `generation`, `state` (`assigned`, `blocked`, `moving`, `unassigned`).
-
-- **Assign.** On manifest change or `ellie agents jobs apply`, the coordinator walks `placement`, skips nodes that are offline or report unmet `requires`, and assigns the first eligible node. Group members are assigned together or not at all.
-- **Deliver.** The assignment rides the existing long poll as a typed `agents.jobs` message listing the jobs this node must run, with their generation. The node installs or removes managed LaunchAgents (label `io.ellie.job.<id>`) to match, then acknowledges the generation.
-- **Move.** `ellie agents jobs move <id> --to <mac>` sets `moving`, tells the old node to remove the job, waits for its acknowledgement, then assigns the new node. If the old node is offline, the move stops at `moving` and needs `--force-orphan`, which prints the risk (the old Mac may still run the job when it wakes) and records it. There is no silent takeover.
-- **Stale node.** A node that wakes with a generation older than the coordinator's removes jobs it no longer holds before it installs anything new.
-
-Managed LaunchAgents follow the rules in [services.md](services.md): `gui/<uid>` domain, Aqua session, absolute runtime paths, no `sudo`, and unmanaged plists are never touched.
-
-### Bootstrap
-
-`ellie agents bootstrap` on a paired Mac:
-
-1. Checks `gh auth status` and git access to the remote. Stops with guidance if either fails.
-2. If `~/.claude` exists and is not the repository: copies each file that the checkout would overwrite into `~/.claude/backups/pre-bootstrap-<timestamp>/`, then `git init`, adds the remote, fetches, and checks out the branch. Untracked local files that the allowlist covers are committed on the next sync, so memory written on the new Mac is kept.
-3. Installs `tools.brew` formulae that are missing, and runs `npm ci` in each `tools.npmInstall` directory.
-4. Enables config sync in the node service.
-5. Runs `ellie agents doctor` and prints what is still missing: secrets named in `requires.files`, logins (`claude`, `codex`, `gh`).
-
-Bootstrap never copies secrets, never logs in, and never assigns jobs. Assignment stays explicit.
-
-### Status and doctor
-
-`ellie agents status` (coordinator) prints, per workstation: last successful sync time, `needs_attention` reason if any, and per job: assigned Mac, launchd state, last exit code. `ellie agents doctor` (any Mac) checks repository health, remote reachability, sync timer, tools, and each assigned job's `requires`. Output follows the existing doctor redaction rules.
+**Doctor checklist** (read-only, each item a pass or a named gap): each repository is present, on its branch, and reached its remote within the last hour; the sync agent is loaded; each symlink under `~/.claude/skills` and `~/.codex/skills` resolves (catches a missing `~/.agents`); the separate repositories listed in `agents.json` under `external` (factory evidence, adversarial-review skill) are cloned; every `requires` path of jobs assigned to this Mac exists; `claude`, `codex` and `gh` are logged in.
 
 ## Security
 
-- The config repository is private, and its allowlist `.gitignore` is the first line of defense. The pre-commit secret scan is the second. Neither replaces the other.
-- The manifest is data. Programs are argument arrays run by launchd, never shell strings. Environment values are literal.
-- A job runs as the logged-in user with no Ellie capability grants. Ellie's desktop and Life permissions do not extend to jobs.
-- Assignments travel only over the pinned, authenticated coordinator channel. A node rejects `agents.jobs` from anything else, like any other job.
+- The synced repositories are private. The allowlist is the first guard, the outgoing-range secret scan the second.
+- Synced files are code: skills, hooks and job scripts run on both Macs. Write access to the repository, including every agent session on either Mac, is the real trust boundary. Ellie does not widen it: job definitions are applied by hand on the coordinator, and nodes take them only from the coordinator over the pinned, authenticated channel.
+- Jobs run as the logged-in user with no Ellie capability grants.
 
 ## Testing
 
-Automated coverage target: 80% or more of new lines in the new packages.
+Coverage target: 80% or more of new lines.
 
-- **Unit:** manifest validation (bad kinds, relative paths, shell strings, unknown fields), placement with synthetic node lists and telemetry, group assignment, move and orphan paths, stale-generation cleanup, secret scanner patterns (each one fails on a planted key), sync conflict handling with a temporary bare repository.
-- **Smoke (`bun run smoke:agents`):** an inert temporary job LaunchAgent is installed, runs once, is moved to "another node" in a synthetic two-node coordinator, and is removed; the same approach as `smoke:services`, never touching real labels, `~/.claude` or Keychain.
+- **Unit:** job-definition validation (relative paths, `~`, shell strings, unknown kinds and fields); reconcile (install missing, remove extra, removals before installs); the never-on-two rule under every interleaving of move, heartbeat and offline node, including `--force-orphan`; apply never changing a host; the scanner (each pattern fails on a planted value; a secret added then deleted in a later commit is still caught; the allowlist file silences only its listed path); sync against a temporary bare repository: conflict aborts the rebase and skips push, a scan hit still pulls, and the lock serializes two concurrent runs; bootstrap rebase with an identical file, a differing Markdown file (stops) and differing `.jsonl` (unions).
+- **Smoke (`bun run smoke:agents`):** a synthetic coordinator and two synthetic nodes move an inert temporary job LaunchAgent from one to the other; the job is never installed on both. Same approach as `smoke:services`: real launchd, no real labels, no `~/.claude`, no Keychain.
 - **Two-Mac acceptance (recorded under `docs/validation/`):**
-  1. Bootstrap a Mac from an existing `~/.claude`; confirm backups exist and memory written before bootstrap reaches the other Mac.
-  2. Edit a todo on each Mac within the same interval; confirm both lines survive.
-  3. Plant a fake key in a tracked file; confirm the sync blocks and reports it.
-  4. Move `artifacts` from the mini to the MacBook and back; confirm the tunnel is never connected from both Macs (Cloudflare dashboard connector count).
-  5. Put the mini to sleep during a move; confirm the move stops at `moving` and nothing starts twice.
+  1. Bootstrap the MacBook from an existing `~/.claude` that has a memory file the remote also has, with different content; confirm the stop and the path list.
+  2. Append a todo on each Mac in the same interval; confirm both lines survive.
+  3. Commit a fake key, then delete it in a second commit; confirm the push is blocked and pull still works.
+  4. Move the artifact server and tunnel to the MacBook and back; confirm the Cloudflare connector count never exceeds one.
+  5. Sleep the mini during a move; confirm the move waits and nothing runs twice.
 
 ## Migration from today
 
-1. Create the private `codex-config` repository with the Codex allowlist, and write `sync/workstation.json` in the Claude repository describing the four jobs and the tools already installed.
-2. Build and ship the feature behind the node config flag `agents.enabled` (off by default).
-3. On the mini: enable, run `ellie agents jobs apply`. Ellie finds the existing hand-written plists (`com.rdimascio.*`) as unmanaged and refuses to install duplicates; the operator unloads each one, then applies again.
-4. Remove `~/.claude/sync/sync.mjs` and its LaunchAgent on both Macs once Ellie sync has run cleanly for a week.
-
-## Open questions
-
-1. Can Codex load a machine-local override next to a shared `config.toml`? If not, `config.toml` stays out of the Codex allowlist and only skills, rules, prompts and `AGENTS.md` sync.
-2. Is a manual `move` enough, or do we want a "prefer the mini, fall back to the MacBook only when the mini has been offline for 24 hours and the operator confirms from the phone" flow?
+1. Retire the MacBook's coordinator config; the mini is the only coordinator. Add `nodeNames`.
+2. Create the private `codex-config` repository with the Codex allowlist. Change `~/.claude/.gitattributes` to union `*.jsonl` only.
+3. Ship behind the node config flag `agents.enabled`, off by default.
+4. On both Macs: unload the legacy `com.rdimascio.claude-config-sync` LaunchAgent (keep the file for rollback), then run `ellie agents bootstrap`. Only one runner ever touches a repository.
+5. On the mini: unload the four hand-written job plists, then `ellie agents jobs apply`. The node refuses to install a job while an unmanaged plist with the same program is loaded.
+6. Delete the legacy files after a week of clean sync.
