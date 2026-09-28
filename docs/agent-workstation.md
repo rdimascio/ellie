@@ -17,8 +17,8 @@ This works, but nothing checks it. A job loaded on both Macs double-fires (two t
 
 ## Goals
 
-1. **One command to set up a Mac.** `ellie agents bootstrap` turns a paired Mac into an agent workstation: config repository in place, tools installed, sync running, doctor green.
-2. **Config stays in step.** Every paired workstation syncs the agent config repository on a schedule, with the same allowlist and merge rules as today.
+1. **One command to set up a Mac.** `ellie agents bootstrap` turns a paired Mac into an agent workstation: config repositories in place, tools installed, sync running, doctor green.
+2. **Config stays in step.** Every paired workstation syncs each agent's config repository on a schedule, with the same allowlist and merge rules as today. Two agents in v1: Claude Code (`~/.claude`) and Codex (`~/.codex`).
 3. **Each singleton job runs on exactly one Mac.** The coordinator decides where. Moving a job is one command, and never leaves it running on two Macs.
 4. **Honest status.** `ellie agents status` shows the last sync per Mac, each job's host, and its health, without printing secrets or paths with usernames.
 
@@ -31,14 +31,29 @@ This works, but nothing checks it. A job loaded on both Macs double-fires (two t
 
 ## Design
 
-### Workstation manifest
+### Repositories
 
-The synced repository carries one file, `sync/workstation.json`. It is the contract between the repository and Ellie. It is data only; Ellie never runs a string from it through a shell.
+The node's private config `~/.ellie/agents.json` lists the agent repositories this Mac syncs:
 
 ```json
 {
   "version": 1,
-  "repository": { "path": "~/.claude", "remote": "https://github.com/<owner>/claude-config.git", "branch": "config" },
+  "repositories": [
+    { "name": "claude", "path": "~/.claude", "remote": "https://github.com/<owner>/claude-config.git", "branch": "config" },
+    { "name": "codex", "path": "~/.codex", "remote": "https://github.com/<owner>/codex-config.git", "branch": "config" }
+  ]
+}
+```
+
+Each repository carries its own allowlist `.gitignore` and `.gitattributes`. For Codex the allowlist covers `config.toml`, `AGENTS.md`, `skills/`, `rules/` and `prompts/`; it excludes `auth.json`, every `*.sqlite*` file (history, logs, state, thread history), `sessions/`, `cache/`, `log/`, `tmp/` and generated images. `config.toml` holds machine-specific values (MCP server commands with absolute paths, local tool settings). Today the two Macs have different `config.toml` files; they must be reconciled by hand once before Codex sync is enabled. Whether Codex can load a local override file is not verified (open question 1).
+
+### Workstation manifest
+
+A repository may carry one `sync/workstation.json`. Only the `claude` repository does in v1. It is the contract between the repository and Ellie. It is data only; Ellie never runs a string from it through a shell.
+
+```json
+{
+  "version": 1,
   "sync": { "intervalMinutes": 15 },
   "tools": { "brew": ["node", "cloudflared", "gh"], "npmInstall": ["skills/every-watch", "skills/panel"] },
   "jobs": [
@@ -138,13 +153,12 @@ Automated coverage target: 80% or more of new lines in the new packages.
 
 ## Migration from today
 
-1. Write `sync/workstation.json` describing the four jobs and the tools already installed.
+1. Create the private `codex-config` repository with the Codex allowlist, and write `sync/workstation.json` in the Claude repository describing the four jobs and the tools already installed.
 2. Build and ship the feature behind the node config flag `agents.enabled` (off by default).
 3. On the mini: enable, run `ellie agents jobs apply`. Ellie finds the existing hand-written plists (`com.rdimascio.*`) as unmanaged and refuses to install duplicates; the operator unloads each one, then applies again.
 4. Remove `~/.claude/sync/sync.mjs` and its LaunchAgent on both Macs once Ellie sync has run cleanly for a week.
 
 ## Open questions
 
-1. Should the config repository path and remote live in the manifest (as above) or in the node's private config, so one Ellie install can manage more than one agent's repository (`~/.codex` too)?
+1. Can Codex load a machine-local override next to a shared `config.toml`? If not, `config.toml` stays out of the Codex allowlist and only skills, rules, prompts and `AGENTS.md` sync.
 2. Is a manual `move` enough, or do we want a "prefer the mini, fall back to the MacBook only when the mini has been offline for 24 hours and the operator confirms from the phone" flow?
-3. Codex's setup (`~/.codex/config.toml`, skills, rules) is not in a repository yet. Same mechanism, second manifest, or out of scope?
