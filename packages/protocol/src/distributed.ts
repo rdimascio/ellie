@@ -12,7 +12,7 @@ export interface DistributedMlxPlan {
 }
 export interface DistributedMlxGroup extends DistributedMlxPlan {
   timeoutMs: number;
-  qualification: {
+  qualification?: {
     measuredAt: number;
     expiresAt: number;
     bandwidthBytesPerSecond: number; // Slowest measured member-to-member link.
@@ -62,15 +62,14 @@ export function distributedMlxPlan(value: unknown): DistributedMlxPlan {
 }
 export function distributedMlxGroup(value: unknown): DistributedMlxGroup {
   const v = record(value);
-  const q = record(v.qualification);
-  const measuredAt = computeNumber(q.measuredAt, 1, Number.MAX_SAFE_INTEGER);
-  const expiresAt = computeNumber(q.expiresAt, measuredAt + 1, measuredAt + 86_400_000);
   const timeoutMs = computeNumber(v.timeoutMs, 1000, 120_000);
   if (!Number.isInteger(timeoutMs)) throw new Error("Invalid distributed deadline.");
-  return {
-    ...distributedMlxPlan(v),
-    timeoutMs,
-    qualification: {
+  let qualification: DistributedMlxGroup["qualification"];
+  if (v.qualification !== undefined) {
+    const q = record(v.qualification);
+    const measuredAt = computeNumber(q.measuredAt, 1, Number.MAX_SAFE_INTEGER);
+    const expiresAt = computeNumber(q.expiresAt, measuredAt + 1, measuredAt + 86_400_000);
+    qualification = {
       measuredAt,
       expiresAt,
       bandwidthBytesPerSecond: computeNumber(q.bandwidthBytesPerSecond, 1, Number.MAX_SAFE_INTEGER),
@@ -81,7 +80,12 @@ export function distributedMlxGroup(value: unknown): DistributedMlxGroup {
         Number.MAX_SAFE_INTEGER,
       ),
       maxLatencyMs: computeNumber(q.maxLatencyMs, 0.001, 60_000),
-    },
+    };
+  }
+  return {
+    ...distributedMlxPlan(v),
+    timeoutMs,
+    ...(qualification ? { qualification } : {}),
   };
 }
 export function distributedMlxGroups(value: unknown): DistributedMlxGroup[] {
