@@ -48,12 +48,28 @@ Coordinator commands (`ellie agents jobs ...`, `ellie agents status`, `ellie nod
 {
   "version": 1,
   "repositories": [
-    { "name": "claude", "path": "~/.claude", "remote": "https://github.com/<owner>/claude-config.git", "branch": "config" },
-    { "name": "codex", "path": "~/.codex", "remote": "https://github.com/<owner>/codex-config.git", "branch": "config" }
+    {
+      "name": "claude",
+      "path": "~/.claude",
+      "remote": "https://github.com/<owner>/claude-config.git",
+      "branch": "config"
+    },
+    {
+      "name": "codex",
+      "path": "~/.codex",
+      "remote": "https://github.com/<owner>/codex-config.git",
+      "branch": "config"
+    }
   ],
   "external": [
-    { "path": "~/.claude/factory", "remote": "https://github.com/<owner>/every-factory-evidence.git" },
-    { "path": "~/.claude/skills/adversarial-review", "remote": "https://github.com/<owner>/adversarial-review-skill.git" }
+    {
+      "path": "~/.claude/factory",
+      "remote": "https://github.com/<owner>/every-factory-evidence.git"
+    },
+    {
+      "path": "~/.claude/skills/adversarial-review",
+      "remote": "https://github.com/<owner>/adversarial-review-skill.git"
+    }
   ]
 }
 ```
@@ -95,19 +111,51 @@ Security states the remaining truth plainly: whoever can edit a script that an a
 
 ```json
 [
-  { "id": "artifact-server", "host": "mac-mini", "kind": "keepalive",
+  {
+    "id": "artifact-server",
+    "host": "mac-mini",
+    "kind": "keepalive",
     "program": ["/opt/homebrew/bin/node", "/Users/ryan/.claude/skills/artifact-publish/server.mjs"],
     "environment": { "ARTIFACT_PORT": "8787", "ARTIFACT_ROOT": "/Users/ryan/.claude/artifacts" },
-    "requires": ["/opt/homebrew/bin/node"] },
-  { "id": "artifact-tunnel", "host": "mac-mini", "kind": "keepalive",
-    "program": ["/opt/homebrew/bin/cloudflared", "tunnel", "--no-autoupdate", "run", "--credentials-file", "/Users/ryan/.cloudflared/<tunnel-uuid>.json", "--url", "http://127.0.0.1:8787", "<tunnel-uuid>"],
-    "requires": ["/opt/homebrew/bin/cloudflared", "/Users/ryan/.cloudflared/<tunnel-uuid>.json"] },
-  { "id": "factory-watchdog", "host": "mac-mini", "kind": "interval", "minutes": 5,
-    "program": ["/opt/homebrew/bin/node", "/Users/ryan/.claude/tools/factory-watchdog/watchdog.mjs"],
-    "requires": ["/opt/homebrew/bin/node"] },
-  { "id": "router-benchmark", "host": "mac-mini", "kind": "daily", "hour": 3, "minute": 20,
+    "requires": ["/opt/homebrew/bin/node"]
+  },
+  {
+    "id": "artifact-tunnel",
+    "host": "mac-mini",
+    "kind": "keepalive",
+    "program": [
+      "/opt/homebrew/bin/cloudflared",
+      "tunnel",
+      "--no-autoupdate",
+      "run",
+      "--credentials-file",
+      "/Users/ryan/.cloudflared/<tunnel-uuid>.json",
+      "--url",
+      "http://127.0.0.1:8787",
+      "<tunnel-uuid>"
+    ],
+    "requires": ["/opt/homebrew/bin/cloudflared", "/Users/ryan/.cloudflared/<tunnel-uuid>.json"]
+  },
+  {
+    "id": "factory-watchdog",
+    "host": "mac-mini",
+    "kind": "interval",
+    "minutes": 5,
+    "program": [
+      "/opt/homebrew/bin/node",
+      "/Users/ryan/.claude/tools/factory-watchdog/watchdog.mjs"
+    ],
+    "requires": ["/opt/homebrew/bin/node"]
+  },
+  {
+    "id": "router-benchmark",
+    "host": "mac-mini",
+    "kind": "daily",
+    "hour": 3,
+    "minute": 20,
     "program": ["/bin/bash", "/Users/ryan/.claude/tools/router-benchmark/nightly.sh"],
-    "requires": ["/Users/ryan/every-io/every"] }
+    "requires": ["/Users/ryan/every-io/every"]
+  }
 ]
 ```
 
