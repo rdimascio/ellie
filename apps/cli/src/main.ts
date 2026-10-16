@@ -25,6 +25,7 @@ import { createEllieServer } from "../../server/src/index.ts";
 import { JobStore } from "../../server/src/jobs.ts";
 import { loadBrowserAssets } from "../../server/src/browser-assets.ts";
 import { LocalInferenceWorker } from "../../node/src/inference.ts";
+import { LocalDistributedWorker } from "../../node/src/distributed.ts";
 import { runNode } from "../../node/src/index.ts";
 import { BrowserNodeExecutor } from "../../node/src/browser-executor.ts";
 import { BrowserWebMCPOperations } from "../../node/src/browser-operations.ts";
@@ -77,6 +78,11 @@ import {
   serviceTestOptions,
 } from "./self-test.ts";
 import { cliErrorMessage, coordinatorResult, privateConfig } from "./errors.ts";
+import {
+  configureDistributedMlx,
+  distributedSetupOptions,
+  parseDistributedMembers,
+} from "./distributed-setup.ts";
 import { createLifeActivationGate, lifeConfigPath, loadLifeHostConfig } from "./life-config.ts";
 import { parseLifeAccessCommand, runLifeAccessCommand } from "./life-access.ts";
 import { EmbeddedLifeLifecycle } from "./life-lifecycle.ts";
@@ -812,6 +818,9 @@ async function main(): Promise<void> {
         worker: config.inferenceWorker
           ? new LocalInferenceWorker(config.inferenceWorker)
           : undefined,
+        distributedWorker: config.distributedWorker
+          ? new LocalDistributedWorker(config.distributedWorker, config.id)
+          : undefined,
         health: () => native.health(),
         preferences: config.preferences,
         signal: abort.signal,
@@ -846,6 +855,26 @@ async function main(): Promise<void> {
     });
     return;
   }
+  if (args[0] === "distributed" && args[1] === "setup") {
+    const parsed = distributedSetupOptions(args.slice(2));
+    const modelPath = parsed.modelPath ?? (await ask("MLX model folder on this Mac: "));
+    const members =
+      parsed.members ??
+      parseDistributedMembers(await ask("Macs in rank order (NODE_ID@IP:PORT, NODE_ID@IP:PORT): "));
+    const result = await configureDistributedMlx({ ...parsed, modelPath, members });
+    console.log(
+      `Distributed MLX group ${result.group.id} is configured on this Mac.${
+        result.coordinatorUpdated ? " The coordinator group was updated too." : ""
+      } Restart the Ellie node${result.coordinatorUpdated ? " and coordinator" : ""} services.`,
+    );
+    return;
+  }
+  if (args[0] === "groups") {
+    await withController(async (client) => {
+      console.log(JSON.stringify(await client.call("GET", "/v1/groups"), null, 2));
+    });
+    return;
+  }
   if (args[0] === "jobs") {
     await withController(async (client) => {
       console.log(JSON.stringify(await client.call("GET", "/v1/jobs"), null, 2));
@@ -869,14 +898,21 @@ async function main(): Promise<void> {
     return;
   }
   if (args[0] === "infer") {
-    const model = string(args[1], 200);
-    const prompt = string(args.slice(2).join(" "), 4000);
+    const grouped = args[1] === "--group";
+    const groupId = grouped ? identifier(args[2]) : undefined;
+    const model = string(args[grouped ? 3 : 1], 200);
+    const prompt = string(args.slice(grouped ? 4 : 2).join(" "), 4000);
     await withController(async (client) => {
       const interrupt = interruptSignal();
       try {
         commandOutcomeMayBeUnknown = true;
         const response = coordinatorResult(
-          await client.call("POST", "/v1/inference", { model, prompt }, interrupt),
+          await client.call(
+            "POST",
+            "/v1/inference",
+            grouped ? { mode: "distributed-mlx", groupId, model, prompt } : { model, prompt },
+            interrupt,
+          ),
         );
         commandOutcomeMayBeUnknown = false;
         console.log(response.message);
@@ -930,7 +966,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  life google-client check PATH  Validate a private Google OAuth client without consent\n  server init [--lan]   Generate private config and Keychain identity\n  server configure --lan | --local  Change the listening address, preserving identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  browser pursue --max-steps N --allow-page-content "goal" [--node ID]  Bounded AX click loop\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  agent [--set-role R]  Run this Mac's configured role, or record it\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up direct Jev in shadow mode\n  routing gateway --allow-cloud   Set up Jev through AI Gateway in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
+    `Ellie — local-first personal assistant\n\n  life [OPTIONS]        Start the local life assistant and chat client\n  life settings         Open installed Life account settings on this Mac\n  life google-client check PATH  Validate a private Google OAuth client without consent\n  server init [--lan]   Generate private config and Keychain identity\n  server configure --lan | --local  Change the listening address, preserving identity\n  server start [--life-config PATH]  Start HTTPS coordinator with optional Life account\n  life-access grants    List explicit native Life account grants\n  life-access grant CLIENT ACTOR     Grant explicit Life account access\n  life-access revoke CLIENT          Revoke explicit Life account access\n  server pair           Issue a single-use pairing invitation\n  server revoke ID      Revoke a paired node\n  native invite ...     Issue scoped native app enrollment\n  native clients        List active native app credentials\n  native revoke ID      Revoke a native app credential\n  household grants      List explicit native data grants\n  household grant ...   Grant scoped native household data access\n  household revoke ...  Revoke scoped native household data access\n  browser init          Prepare a separate local browser TLS identity\n  browser status        Inspect browser identity readiness without printing keys\n  browser export-ca P   Export only the public browser CA; --force replaces P\n  browser connection    Inspect the running browser listener\n  browser invite ROLE   phone|tv --label NAME; phone also needs --node ID --allow CAPS\n  browser clients       List paired browser identities\n  browser revoke ID     Revoke a paired browser identity\n  browser pursue --max-steps N --allow-page-content "goal" [--node ID]  Bounded AX click loop\n  node pair             Pair this Mac interactively\n  node start            Run enabled execution and inference roles\n  distributed setup     Configure bundled MLX on this paired Mac\n  groups                Show distributed MLX group readiness (server Mac)\n  agent [--set-role R]  Run this Mac's configured role, or record it\n  service ACTION ROLE   install|start|stop|status|uninstall|logs; coordinator|node\n  service test [FLAGS]  Read-only readiness; --desktop --app NAME opts into app opening\n  doctor [ROLE]         Check native tools or role-specific service health\n  nodes                 List capabilities and worker telemetry (server Mac)\n  infer MODEL "..."     Run inference on an eligible Mac (server Mac)\n  infer --group ID MODEL "..."  Run one request across an MLX group\n  routing status|off    Inspect or disable optional semantic routing\n  routing typesafe --allow-cloud  Set up direct Jev in shadow mode\n  routing gateway --allow-cloud   Set up Jev through AI Gateway in shadow mode\n  routing local MODEL --endpoint URL  Use a local decision model\n  routing mode MODE    Select shadow or execute, then restart\n  jobs                   List recent payload-free job metadata\n  job ID                 Inspect payload-free job metadata\n  cancel ID              Request job cancellation\n  say "open Arc"        Send to this Mac, or the only online execution node\n  say --node ID "..."   Target a paired Mac from the server`,
   );
   console.log(
     "  transcribe --audio WAV --model PATH --executable PATH\n" +

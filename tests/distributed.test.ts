@@ -139,7 +139,7 @@ test("distributed configuration requires matching local consent, bounded plans a
   assert.match(distributedGroupProblem(g, available, new Set(["b"]))!, /busy/);
   assert.match(
     distributedGroupProblem(
-      { ...g, qualification: { ...g.qualification, bandwidthBytesPerSecond: 1 } },
+      { ...g, qualification: { ...g.qualification!, bandwidthBytesPerSecond: 1 } },
       available,
       new Set(),
     )!,

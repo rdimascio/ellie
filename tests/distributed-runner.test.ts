@@ -50,8 +50,47 @@ async function runtime(body: string) {
     },
     assignment: { plan, rank: 0, leaseId: "lease" },
   });
-  return { dir, worker, task, close: () => rm(dir, { recursive: true, force: true }) };
+  return {
+    dir,
+    worker,
+    task,
+    python,
+    plan,
+    modelPath,
+    communicationFile,
+    close: () => rm(dir, { recursive: true, force: true }),
+  };
 }
+
+test("installed runner executes directly without a user-managed Python path", async () => {
+  const f = await runtime(
+    "process.stdout.write(JSON.stringify({ok:true,message:request.prompt ?? 'ready'}));",
+  );
+  try {
+    const worker = new LocalDistributedWorker(
+      {
+        groups: [
+          {
+            plan: f.plan,
+            modelPath: f.modelPath,
+            communicationFile: f.communicationFile,
+            requiredFreeMemoryBytes: 1,
+          },
+        ],
+      },
+      "a",
+      join(f.dir, "bundled-locks"),
+      f.python,
+    );
+    await worker.prepare(f.task, AbortSignal.timeout(2000));
+    assert.equal(
+      (await worker.execute(f.task, AbortSignal.timeout(2000))).message,
+      f.task.request.prompt,
+    );
+  } finally {
+    await f.close();
+  }
+});
 
 test("rank adapter validates consent and passes the prompt only through stdin with a bounded JSON result", async () => {
   const f = await runtime(

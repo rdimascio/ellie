@@ -11,7 +11,7 @@ export interface LocalMlxGroup {
   requiredFreeMemoryBytes: number;
 }
 export interface DistributedWorkerConfig {
-  python: string;
+  python?: string;
   groups: LocalMlxGroup[];
 }
 function absolute(value: unknown): string {
@@ -45,5 +45,5 @@ export function distributedWorkerConfig(value: unknown, nodeId: string): Distrib
   });
   if (new Set(groups.map((g) => g.plan.id)).size !== groups.length)
     throw new Error("Duplicate local MLX group.");
-  return { python: absolute(v.python), groups };
+  return { ...(v.python === undefined ? {} : { python: absolute(v.python) }), groups };
 }
