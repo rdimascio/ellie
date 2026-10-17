@@ -4,7 +4,6 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import {
-  access,
   chmod,
   cp,
   lstat,
@@ -850,28 +849,6 @@ export async function stageApplication(source, destination, metadata = {}) {
   return components;
 }
 
-export async function stageMlxRuntime(source, payload, architecture) {
-  if (architecture !== "arm64")
-    throw new Error("The distributed MLX runtime is supported only in Apple silicon releases.");
-  if (!isAbsolute(source)) throw new Error("Use an absolute MLX runtime directory.");
-  const sourceInfo = await lstat(source);
-  if (!sourceInfo.isDirectory() || sourceInfo.isSymbolicLink())
-    throw new Error("The MLX runtime must be a self-contained directory.");
-  const destination = join(payload, "mlx-runtime");
-  await copyTree(source, destination);
-  const executable = join(destination, "bin/ellie-mlx-rank");
-  const executableInfo = await lstat(executable);
-  if (!executableInfo.isFile() || !(executableInfo.mode & 0o111))
-    throw new Error("The MLX runtime is missing bin/ellie-mlx-rank.");
-  await access(join(destination, "LICENSES"), constants.R_OK);
-  command("/usr/bin/codesign", ["--verify", "--deep", "--strict", executable], {
-    stdio: "ignore",
-  });
-  if (!command("/usr/bin/lipo", ["-archs", executable]).trim().split(/\s+/).includes("arm64"))
-    throw new Error("The MLX runner does not contain Apple silicon code.");
-  return { bundled: true, architecture: "arm64", executable: "mlx-runtime/bin/ellie-mlx-rank" };
-}
-
 async function entries(root, current = root, budget = { entries: 0, files: 0, bytes: 0 }) {
   const result = [];
   for (const name of (await readdir(current)).sort()) {
@@ -1148,7 +1125,6 @@ export async function buildServicePayload(options) {
     "architecture",
     "bun",
     "bunCache",
-    "mlxRuntime",
   ]);
   const source = resolve(options.source ?? scriptRoot);
   const output = resolve(options.output);
@@ -1227,9 +1203,6 @@ export async function buildServicePayload(options) {
     await stageReviewedBrowserRegistry(buildSource, payload);
     await verifyStagedLifeRuntime(payload, join(scratch, "runtime-check"));
     await mkdir(join(payload, "helpers"), { mode: 0o755 });
-    const mlx = options.mlxRuntime
-      ? await stageMlxRuntime(resolve(options.mlxRuntime), payload, architecture)
-      : { bundled: false };
     command(
       "/usr/bin/xcrun",
       [
@@ -1437,7 +1410,6 @@ export async function buildServicePayload(options) {
         architecture,
         minimumOS: MINIMUM_MACOS,
       },
-      mlx,
       launchers,
       components,
       files: payloadFiles,
@@ -1536,7 +1508,6 @@ function parse(argv) {
     else if (key === "--node-sha256") options.nodeSha256 = value;
     else if (key === "--bun-cache") options.bunCache = value;
     else if (key === "--output") options.output = value;
-    else if (key === "--mlx-runtime") options.mlxRuntime = value;
     else throw new Error("Unknown payload builder option.");
   }
   if (!options.nodeArchive || !options.nodeSha256 || !options.bunCache || !options.output)
