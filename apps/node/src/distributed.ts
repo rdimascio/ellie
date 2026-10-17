@@ -8,6 +8,7 @@ import { distributedWorkerConfig, stateDir } from "@ellie/config";
 import type { DistributedWorkerConfig, LocalMlxGroup } from "@ellie/config";
 import { record, result, sameMlxPlan } from "@ellie/protocol";
 import type { DistributedMlxCapability, InferenceJob, Result } from "@ellie/protocol";
+import { packagedMlxRunner } from "./distributed-runtime.ts";
 
 export interface DistributedWorker {
   advertise(signal: AbortSignal): Promise<DistributedMlxCapability[]>;
@@ -21,18 +22,24 @@ export class LocalDistributedWorker implements DistributedWorker {
   private config: DistributedWorkerConfig;
   private nodeId: string;
   private lockDirectory: string;
+  private runner: string | undefined;
   constructor(
     config: DistributedWorkerConfig,
     nodeId: string,
     lockDirectory = join(stateDir, "mlx-locks"),
+    runner = packagedMlxRunner(),
   ) {
     this.config = distributedWorkerConfig(config, nodeId);
     this.nodeId = nodeId;
     this.lockDirectory = lockDirectory;
+    this.runner = runner;
   }
   private async installed(group: LocalMlxGroup, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
-    await access(this.config.python, constants.X_OK);
+    const executable = this.runner ?? this.config.python;
+    if (!executable)
+      throw new Error("This Ellie installation does not include the distributed MLX runtime.");
+    await access(executable, constants.X_OK);
     if (!(await stat(group.modelPath)).isDirectory())
       throw new Error("Model must be installed locally.");
     await access(join(group.modelPath, "config.json"), constants.R_OK);
@@ -94,11 +101,16 @@ export class LocalDistributedWorker implements DistributedWorker {
     ]);
     deadline.throwIfAborted();
     return new Promise((resolve, reject) => {
-      const child = spawn(this.config.python, ["-I", helper], {
+      const executable = this.runner ?? this.config.python;
+      if (!executable) {
+        reject(new Error("This Ellie installation does not include the distributed MLX runtime."));
+        return;
+      }
+      const child = spawn(executable, this.runner ? [] : ["-I", helper], {
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],
         env: {
-          PATH: `${dirname(this.config.python)}:/usr/bin:/bin`,
+          PATH: `${dirname(executable)}:/usr/bin:/bin`,
           HOME: homedir(),
           LANG: "en_US.UTF-8",
           HF_HUB_OFFLINE: "1",

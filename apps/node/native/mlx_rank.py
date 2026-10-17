@@ -68,9 +68,6 @@ def main():
     descriptor = os.open(request["lockPath"], os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     with os.fdopen(descriptor, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        if request.get("checkOnly"):
-            print(json.dumps({"ok": True}))
-            return
         # Reserve stdout for a single bounded result, regardless of library diagnostics.
         with contextlib.redirect_stdout(sys.stderr):
             import mlx.core as mx
@@ -81,6 +78,10 @@ def main():
             world = mx.distributed.init(strict=True, backend=backend)
             if world.rank() != rank or world.size() != size:
                 raise RuntimeError("MLX world does not match the reserved group")
+            mx.eval(mx.distributed.all_sum(mx.array(1), stream=mx.cpu))
+            if request.get("checkOnly"):
+                sys.__stdout__.write(json.dumps({"ok": True}) + "\n")
+                return
             mx.random.seed(0)
             model, tokenizer = sharded_load(
                 str(model_path),

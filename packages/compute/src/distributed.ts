@@ -30,7 +30,6 @@ export function distributedMemberEligible(
     t.network.roundTripMs <= 500,
   );
 }
-/** Qualification comes from explicit interconnect measurements, never heartbeat RTT. */
 export function distributedGroupProblem(
   group: DistributedMlxGroup,
   nodes: NodeInfo[],
@@ -39,12 +38,13 @@ export function distributedGroupProblem(
 ): string | undefined {
   const q = group.qualification;
   if (
-    q.measuredAt > now ||
-    q.expiresAt < now + group.timeoutMs ||
-    q.bandwidthBytesPerSecond < q.minBandwidthBytesPerSecond ||
-    q.latencyMs > q.maxLatencyMs
+    q &&
+    (q.measuredAt > now ||
+      q.expiresAt < now + group.timeoutMs ||
+      q.bandwidthBytesPerSecond < q.minBandwidthBytesPerSecond ||
+      q.latencyMs > q.maxLatencyMs)
   )
-    return "The group's interconnect qualification is missing, expired, or below its measured thresholds.";
+    return "The group's optional interconnect qualification is expired or below its measured thresholds.";
   for (const id of group.nodeIds) {
     if (busy.has(id)) return `Distributed member ${id} is busy or awaiting teardown.`;
     const node = nodes.find((n) => n.id === id);
